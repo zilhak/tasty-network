@@ -707,7 +707,7 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
         st_expect "access-valid-$n" 0 "$?"
     done
     # 허용 목록 밖의 access 값은 치환하지 않고 access-invalid로 끝나며, 원래 값을 출력하지 않는다.
-    # 1~5: iroh-relay가 기동을 거절하는 값. 6~: 오타 키 3종, 배열, 키 두 개, 위치 기반 http 표기, http의 다른 키·url 없음, everyone에 값.
+    # 1~5: iroh-relay가 기동을 거절하는 값(1·2는 환경 변수 IROH_RELAY_ACCESS_TOKEN이 없을 때). 6~: 오타 키 3종, 배열, 키 두 개, 위치 기반 http 표기, http의 다른 키·url 없음, everyone에 값.
     local bad
     n=0
     for bad in 'access.shared_token = []' 'access.shared_token = [""]' 'access.shared_token = [4242]' \

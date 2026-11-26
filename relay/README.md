@@ -86,6 +86,7 @@ access.http.bearer_token = "<token>"   # 또는 환경 변수 IROH_RELAY_HTTP_BE
 한 설정에는 하나만 쓴다.
 
 `relay/check-config.sh` 검사는 위의 표 표기만 받는다(`access.everyone = {}`도 된다). 위치 기반 배열 표기(`access.http = ["<url>", "<token>"]`)는 iroh-relay가 받더라도 검사가 `reason=access-invalid`로 거절하고, 키 이름이 틀렸거나 키가 둘 이상이거나 `access.http`에 `url`·`bearer_token` 밖의 키가 있어도 같다.
+토큰을 환경 변수 `IROH_RELAY_ACCESS_TOKEN`으로만 주는 설정(`shared_token = []`)은 검사가 거절한다. 검사는 환경 변수를 컨테이너에 넘기지 않으므로, 검사할 때는 목록에 자리표시 토큰 하나를 넣는다.
 
 `access.http.url` 규약:
 
