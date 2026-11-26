@@ -302,6 +302,12 @@ pub(crate) mod test_helper {
             }
         }
 
+        /// Where the PID goes. A shell fake can write a background job's PID here too.
+        #[cfg(unix)]
+        pub(crate) fn pid_file(&self) -> &std::path::Path {
+            &self.pid_file
+        }
+
         /// The helper command: a grandchild sleeping `secs` seconds, the child exiting `code`.
         pub(crate) fn command(&self, secs: u64, code: i32) -> Command {
             helper_command(&format!("orphan:{secs}:{code}:{}", self.pid_file.display()))

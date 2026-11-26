@@ -458,15 +458,14 @@ impl ChildOwner {
     }
 }
 
-/// `true` if the child ended within `budget`, `false` if it ran past it (the caller kills it).
+/// `true` if the child ended by `deadline`, `false` if it ran past it (the caller kills it).
 /// A child taken by cancellation also gives `true`: there is nothing left to wait for, and
 /// [`ChildOwner::finish`] settles the reason as [`PortDiscoveryFailureKind::Cancelled`].
 ///
 /// The crate has no async runtime, so it polls `try_wait`. The interval starts at 5 ms and
 /// doubles up to 50 ms: little delay on the normal path (hundreds of ms), few wakeups on long
 /// waits.
-fn wait_with_timeout(owner: &mut ChildOwner, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
+fn wait_with_timeout(owner: &mut ChildOwner, deadline: Instant) -> bool {
     let mut nap = Duration::from_millis(5);
     loop {
         if owner.is_cancelled() {
@@ -554,7 +553,12 @@ fn start_readers(child: &mut Child) -> std::io::Result<Readers> {
     Ok((stdout, stderr))
 }
 
-/// Waits for a reader's result until `deadline`, stopping early on cancellation.
+/// How long a failed command's stderr is waited for after the command exited. stderr only
+/// feeds the diagnostic detail, so a descendant holding it open does not keep the lookup.
+const STDERR_GRACE: Duration = Duration::from_millis(500);
+
+/// Waits for a reader's result until `deadline`, stopping early on cancellation. A result that
+/// already arrived is taken even at the deadline.
 fn collect(
     rx: &mpsc::Receiver<Captured>,
     deadline: Instant,
@@ -565,16 +569,16 @@ fn collect(
             return Err(cancelled_error(what));
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(PortDiscoveryError::new(
-                PortDiscoveryFailureKind::TimedOut,
-                format!("{what}: the output stayed open after the command exited"),
-            ));
-        }
         match rx.recv_timeout(left.min(Duration::from_millis(50))) {
             Ok(captured) => return Ok(captured),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Captured::default()),
+            Err(mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
+                return Err(PortDiscoveryError::new(
+                    PortDiscoveryFailureKind::TimedOut,
+                    format!("{what}: the output stayed open after the command exited"),
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -585,8 +589,14 @@ fn collect(
 /// stdout and stderr are read while the child runs, so a large output cannot block it. stdout
 /// over [`OUTPUT_LIMIT`] is refused as [`PortDiscoveryFailureKind::PortParseFailed`]. The
 /// bound and cancellation also cover the wait for the pipes to close after the child exits (a
-/// descendant can hold them). Spawning and reaping after a kill have no bound of their own.
-/// When cancellation and the bound meet, the result is `Cancelled`.
+/// descendant can hold them). One deadline, taken before the spawn, covers the spawn hook, the
+/// wait for the child, and output collection; only spawning itself and reaping after a kill
+/// have no bound of their own. When cancellation and the bound meet, the result is
+/// `Cancelled`.
+///
+/// A failed command keeps the class and exit code its exit gives. Its stderr is only waited for
+/// up to [`STDERR_GRACE`] (within the deadline); if it does not arrive, or cancellation comes,
+/// the detail goes without it.
 fn run_capture_with_budget(
     mut cmd: Command,
     budget: Duration,
@@ -605,6 +615,7 @@ fn run_capture_with_budget(
         ));
     }
     let started = Instant::now();
+    let deadline = started + budget;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -627,7 +638,7 @@ fn run_capture_with_budget(
     // Hand the child to the cancel scope, so the bound watch and an outside cancel share it
     // and whichever comes first can cut it off.
     let mut owner = ChildOwner::adopt(child, what)?;
-    if !wait_with_timeout(&mut owner, budget) {
+    if !wait_with_timeout(&mut owner, deadline) {
         let cancelled = owner.is_cancelled();
         owner.kill_and_reap_now();
         return Err(if cancelled {
@@ -646,27 +657,26 @@ fn run_capture_with_budget(
             format!("{what}: reaping the command failed: {e}"),
         )
     })?;
-    let deadline = started + budget;
-    let wait_for = |rx: Option<mpsc::Receiver<Captured>>| match rx {
-        Some(rx) => collect(&rx, deadline, what),
+    let wait_for = |rx: Option<mpsc::Receiver<Captured>>, until: Instant| match rx {
+        Some(rx) => collect(&rx, until, what),
         None => Ok(Captured::default()),
     };
     if !status.success() {
-        let stderr = wait_for(stderr_rx)?;
-        let stderr = String::from_utf8_lossy(&stderr.bytes);
+        // The exit settles the class; stderr is only a diagnostic and cannot override it.
         let code = status.code();
         let elapsed = started.elapsed();
+        let stderr = match wait_for(stderr_rx, deadline.min(Instant::now() + STDERR_GRACE)) {
+            Ok(stderr) => sanitize_stderr(&String::from_utf8_lossy(&stderr.bytes)),
+            Err(e) => format!("(stderr not collected: {})", e.kind()),
+        };
         let mut error = PortDiscoveryError::new(
             refine_with_elapsed(classify_by_exit_code(code), elapsed),
-            format!(
-                "{what}: code={code:?} elapsed={elapsed:?}: {}",
-                sanitize_stderr(&stderr)
-            ),
+            format!("{what}: code={code:?} elapsed={elapsed:?}: {stderr}"),
         );
         error.exit_code = code;
         return Err(error);
     }
-    let stdout = wait_for(stdout_rx)?;
+    let stdout = wait_for(stdout_rx, deadline)?;
     if stdout.overflowed {
         return Err(PortDiscoveryError::new(
             PortDiscoveryFailureKind::PortParseFailed,
@@ -1647,6 +1657,76 @@ mod tests {
         assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
     }
 
+    /// A command that exits 3 while a descendant holds its stderr keeps its exit code and class:
+    /// the diagnostic stderr does not turn it into a timeout.
+    #[test]
+    fn a_held_stderr_does_not_override_the_exit_code() {
+        let mut orphan = Orphan::new("held-stderr");
+        let started = Instant::now();
+        let err = capture(
+            orphan.command(30, 3),
+            Duration::from_secs(10),
+            "exit 3 held",
+        )
+        .expect_err("exit 3");
+        let elapsed = started.elapsed();
+        assert!(orphan.end(), "the grandchild is left running");
+        assert_eq!(err.exit_code(), Some(3), "{}", err.detail());
+        assert!(
+            err.detail().contains("stderr not collected"),
+            "{}",
+            err.detail()
+        );
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert_eq!(
+            refine_port_command_failure(err).kind(),
+            PortDiscoveryFailureKind::RemoteInstanceExited
+        );
+    }
+
+    /// A result already on the channel is taken even when the deadline has passed.
+    #[test]
+    fn collect_takes_an_arrived_result_at_the_deadline() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Captured {
+            bytes: b"45123".to_vec(),
+            overflowed: false,
+        })
+        .expect("send");
+        let past = Instant::now() - Duration::from_millis(1);
+        let got = collect(&rx, past, "late").expect("an arrived result");
+        assert_eq!(got.bytes, b"45123");
+        let (_tx, empty) = mpsc::channel::<Captured>();
+        assert_eq!(
+            collect(&empty, past, "late")
+                .map(|_| ())
+                .unwrap_err()
+                .kind(),
+            PortDiscoveryFailureKind::TimedOut
+        );
+    }
+
+    /// The spawn hook's time comes out of the budget: the child is not given a fresh one.
+    #[test]
+    fn the_spawn_hook_time_counts_against_the_budget() {
+        let hook = SpawnHook::new(|mut cmd: Command| {
+            std::thread::sleep(Duration::from_millis(600));
+            cmd.spawn()
+        });
+        let started = Instant::now();
+        let err = run_capture_with_budget(
+            never_returns_command(),
+            Duration::from_millis(700),
+            "slow hook",
+            &hook,
+        )
+        .expect_err("past the budget");
+        let elapsed = started.elapsed();
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::TimedOut);
+        // A fresh budget after the hook would end near 1300 ms.
+        assert!(elapsed < Duration::from_millis(1200), "{elapsed:?}");
+    }
+
     /// Cancellation also stops the wait for an output held open by a descendant.
     #[test]
     fn cancel_stops_the_wait_for_a_held_output() {
@@ -1739,7 +1819,10 @@ mod tests {
             .expect("spawn");
         let mut owner = ChildOwner::adopt(child, "cancel vs timeout").expect("adopt");
         handle.cancel();
-        assert!(wait_with_timeout(&mut owner, Duration::from_secs(5)));
+        assert!(wait_with_timeout(
+            &mut owner,
+            Instant::now() + Duration::from_secs(5)
+        ));
         let err = owner
             .finish("cancel vs timeout")
             .expect_err("cancelled child");
@@ -1811,6 +1894,37 @@ mod tests {
 
         fn target() -> SshTarget {
             SshTarget::parse("fake-host")
+        }
+
+        /// An exit 3 whose stderr a descendant holds still stops Auto at the subcommand.
+        #[test]
+        fn auto_stops_at_an_exited_instance_whose_stderr_stays_open() {
+            let mut orphan = crate::test_helper::Orphan::new("auto-held-stderr");
+            let on_port = format!(
+                "sleep 30 & echo $! > '{}'; exit 3",
+                orphan.pid_file().display()
+            );
+            let exited = FakeSsh::new("exited-held", &on_port, "echo 45123");
+            let started = Instant::now();
+            let err = discover_remote_port(
+                &exited.launcher(),
+                &target(),
+                PortMode::Auto,
+                &config(),
+                decode_port,
+            )
+            .expect_err("exited instance");
+            let elapsed = started.elapsed();
+            assert!(orphan.end(), "the background sleep is left running");
+            assert_eq!(
+                err.kind(),
+                PortDiscoveryFailureKind::RemoteInstanceExited,
+                "{}",
+                err.detail()
+            );
+            assert_eq!(err.exit_code(), Some(3));
+            assert_eq!(exited.calls(), ["netprog port"]);
+            assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         }
 
         /// An exited instance stops Auto: the file modes would return the record it left.
