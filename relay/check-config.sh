@@ -218,16 +218,16 @@ rc_start_relay() {
     fi
 
     # 시작 로그(debug의 ServerConfig {:#?} 출력)에 설정 파일의 수신 상한이 그대로 있어야 한다.
-    # 여러 줄로 찍히므로 공백과 줄바꿈을 지운 뒤 비교한다.
+    # 여러 줄로 찍히고 닫는 괄호 앞에 쉼표가 붙으므로, 공백·줄바꿈과 그 쉼표를 지운 뒤 비교한다.
     bps=$(rc_toml_rx_value "$cfg" bytes_per_second)
     burst=$(rc_toml_rx_value "$cfg" max_burst_bytes)
     logs=$(docker logs "$cid" 2>&1)
-    flat=$(tr -d ' \t\n' <<<"$logs")
+    flat=$(tr -d ' \t\n' <<<"$logs" | sed 's/,)/)/g; s/,}/}/g')
     if [[ -n "$bps" ]]; then
         if [[ -n "$burst" ]]; then
-            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:Some($burst),"
+            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:Some($burst)}"
         else
-            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:None,"
+            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:None}"
         fi
     else
         want="client_rx:None,"
