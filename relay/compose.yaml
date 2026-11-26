@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     command: ["--config-path", "/config/relay.toml"]
     environment:
-      # 로그 수준. 문제를 볼 때는 iroh_relay=debug.
+      # 로그 수준. debug로 올리면 시작 로그에 shared_token·bearer_token 값이 원문으로 찍히므로 운영에서는 쓰지 않는다.
       RUST_LOG: "info"
       # access.http.bearer_token 대신 쓸 수 있다(설정 파일보다 우선). shared_token은 IROH_RELAY_ACCESS_TOKEN.
       # IROH_RELAY_HTTP_BEARER_TOKEN: "..."

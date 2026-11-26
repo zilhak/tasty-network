@@ -346,9 +346,13 @@ rc_start_relay() {
     return 0
 }
 
+# 로그에서 큰따옴표 문자열을 모두 가린다. debug 시작 로그의 ServerConfig는 access의 shared_token 목록과
+# http.bearer_token을 따옴표 문자열로 그대로 찍는다(iroh-relay v1.5.0 main.rs, Debug 구현).
+rc_mask() { sed -E 's/"([^"\\]|\\.)*"/"<masked>"/g'; }
+
 rc_dump_logs() {
-    rc_log "컨테이너 로그(끝 40줄):"
-    docker logs "$1" 2>&1 | tail -40 | sed 's/^/    /' >&2
+    rc_log "컨테이너 로그(끝 40줄, 따옴표 문자열은 가림):"
+    docker logs "$1" 2>&1 | tail -40 | rc_mask | sed 's/^/    /' >&2
 }
 
 # rc_start_relay가 띄운 컨테이너를 끝내고 지운다. 없어진 것이 확인될 때만 정리 목록에서 뺀다.
@@ -394,6 +398,8 @@ rc_self_test() {
     st_expect rx-typo-table "- -" "$(rc_toml_rx "$t/typo.toml")"
     printf 'limits.client.rx = { bytes_per_second = 7 }\n' > "$t/inline.toml"
     st_expect rx-inline "7 -" "$(rc_toml_rx "$t/inline.toml")"
+    got=$(printf '%s\n' 'access: SharedTokenAccess(' '    "tok\"en-a",' 'bearer_token: Some("b-1"),' | rc_mask | tr '\n' ' ')
+    st_expect mask-tokens 'access: SharedTokenAccess(     "<masked>", bearer_token: Some("<masked>"), ' "$got"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
