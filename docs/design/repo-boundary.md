@@ -35,7 +35,7 @@
 
 | tasty 파일 | 이 레포로 | tasty에 남김 |
 |---|---|---|
-| `tasty:crates/tasty-ipc/src/stream.rs` | 프레임 헤더·상한·heartbeat 상수, `StreamTag`, `StreamFrame`, `write_frame`·`read_frame`, mux·bulk 청크 → frame. `STREAM_OPEN_METHOD`·`STREAM_PROTO`·`StreamOpenParams`·`StreamAck` → transport handshake v2가 대신함 | `StreamControl`, `StructuralOp`, `ForceDetachNotice`, `*_CAPABILITY`, descriptor 형식 |
+| `tasty:crates/tasty-ipc/src/stream.rs` | 프레임 헤더·상한·heartbeat 상수, `StreamTag`, `StreamFrame`, `write_frame`·`read_frame`, mux·bulk 청크 → frame. `STREAM_OPEN_METHOD`·`STREAM_PROTO`·`StreamOpenParams`·`StreamAck` → transport handshake v2가 대신함 | `StreamControl`, `StructuralOp`, `ForceDetachNotice`, `*_CAPABILITY`, descriptor 형식, `SharedHeartbeatTimeout`(heartbeat 시간 설정 값을 새 연결에 나눠 주는 저장소. 이 레포는 그 값을 연결마다 `LinkTimeouts`로 받는다, [전송 추상화](transport.md) "heartbeat와 읽기 시간 제한") |
 | `tasty:crates/tasty-ipc/src/stream/read_failure.rs` | 전부 → frame | — |
 | `tasty:crates/tasty-ipc/src/stream/inherit_cwd.rs` | — | 전부 |
 | `tasty:crates/tasty-ipc/src/mesh_stream.rs` | 전부 → frame | — |
