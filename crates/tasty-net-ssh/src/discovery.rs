@@ -664,9 +664,20 @@ fn cut_off(owner: ChildOwner, what: &str, budget: Duration) -> PortDiscoveryErro
 /// writing to the pipe just closed) before it is killed.
 const OVERFLOW_EXIT_GRACE: Duration = Duration::from_millis(100);
 
+/// The exit code `Child::kill` leaves: none on Unix (the child dies by SIGKILL), 1 on Windows
+/// (`TerminateProcess` with exit code 1).
+const KILLED_EXIT_CODE: Option<i32> = if cfg!(windows) { Some(1) } else { None };
+
+/// Whether a child reaped after our kill ended on its own exit code rather than by the kill.
+/// A child that exited just before the kill landed keeps its code (3: the instance exited); an
+/// exit that looks like the kill's own (`killed_code`) is taken as the kill.
+fn exited_on_its_own(code: Option<i32>, killed_code: Option<i32>) -> bool {
+    code.is_some() && code != killed_code
+}
+
 /// After stdout passed the limit: the child's own exit status if it has ended (or ends within
-/// [`OVERFLOW_EXIT_GRACE`], within the deadline), so an exit code such as 3 still decides the
-/// class. `None` means it still ran and was killed and reaped.
+/// [`OVERFLOW_EXIT_GRACE`], within the deadline, or just before the kill), so an exit code such
+/// as 3 still decides the class. `None` means the kill ended it.
 fn exit_after_overflow(
     owner: ChildOwner,
     deadline: Instant,
@@ -683,11 +694,21 @@ fn exit_after_overflow(
             _ => break,
         }
     }
-    kill_and_reap(&mut child);
+    if let Err(e) = child.kill() {
+        tracing::debug!("ssh child kill failed (the child may already have exited): {e}");
+    }
+    let reaped = child.wait();
     if cancel_requested() {
         return Err(cancelled_error(what));
     }
-    Ok(None)
+    match reaped {
+        Ok(status) if exited_on_its_own(status.code(), KILLED_EXIT_CODE) => Ok(Some(status)),
+        Ok(_) => Ok(None),
+        Err(e) => {
+            tracing::debug!("ssh child reaping failed: {e}");
+            Ok(None)
+        }
+    }
 }
 
 /// The refusal of an output past [`OUTPUT_LIMIT`].
@@ -1973,6 +1994,20 @@ mod tests {
         );
         assert!(err.detail().contains("longer than"), "{}", err.detail());
         assert!(started.elapsed() < Duration::from_secs(15));
+    }
+
+    /// A child reaped after the kill keeps an exit code of its own; a death by the kill (a signal
+    /// on Unix, the kill's exit code 1 on Windows) does not count as one.
+    #[test]
+    fn an_exit_just_before_the_kill_keeps_its_code() {
+        // Unix: SIGKILL leaves no code.
+        assert!(exited_on_its_own(Some(3), None));
+        assert!(exited_on_its_own(Some(0), None));
+        assert!(!exited_on_its_own(None, None));
+        // Windows: TerminateProcess leaves 1.
+        assert!(exited_on_its_own(Some(3), Some(1)));
+        assert!(!exited_on_its_own(Some(1), Some(1)));
+        assert!(!exited_on_its_own(None, Some(1)));
     }
 
     /// A command that writes past the limit and then exits 3 keeps its exit code: the overflow
