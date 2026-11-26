@@ -141,9 +141,16 @@ rc_host_addr() {
     docker port "$1" "$2/tcp" 2>/dev/null | grep -m1 '^127\.0\.0\.1:' || true
 }
 
-# HTTP 상태 코드만 출력한다. 닿지 않으면 000.
+# HTTP 상태 코드를 출력한다. curl 전송이 실패하면(닿지 않음, 본문이 중간에 끊김 등) 상태 대신 curl<종료 코드>.
 rc_http_code() {
-    curl -s -o /dev/null -m 5 -w '%{http_code}' "$1" 2>/dev/null || true
+    local code rc
+    code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$1" 2>/dev/null)
+    rc=$?
+    if [[ $rc != 0 ]]; then
+        echo "curl$rc"
+    else
+        echo "$code"
+    fi
 }
 
 # 설정 하나를 띄우고 판정한다. 인자: 이름, 운영 예시 경로.
@@ -155,7 +162,7 @@ RC_LAST_METRICS=""
 RC_LAST_FAIL=""
 RC_LAST_LIMIT=""
 rc_start_relay() {
-    local name="$1" src="$2" dir cfg cid http_port metrics_port http metrics waited body code_root code_204 code_metrics
+    local name="$1" src="$2" dir cfg cid http_port metrics_port http metrics waited body code_root code_204 mbody
     local bps burst logs flat want
     RC_LAST_CONTAINER="" RC_LAST_HTTP="" RC_LAST_METRICS="" RC_LAST_FAIL="" RC_LAST_LIMIT=""
     dir="$RC_TMP/$name"
@@ -227,9 +234,14 @@ rc_start_relay() {
         return 1
     fi
 
-    code_metrics=$(rc_http_code "http://$metrics/metrics")
-    if [[ "$code_metrics" != 200 ]] || ! curl -fsS -m 5 "http://$metrics/metrics" 2>/dev/null | grep -q '^relayserver_accepts_total '; then
-        RC_LAST_FAIL="stage=metrics code=$code_metrics"
+    # 본문을 변수로 다 받은 뒤 본다(curl 종료 코드를 잃지 않게).
+    if ! mbody=$(curl -fsS -m 5 "http://$metrics/metrics" 2>/dev/null); then
+        RC_LAST_FAIL="stage=metrics code=$(rc_http_code "http://$metrics/metrics")"
+        rc_dump_logs "$cid"
+        return 1
+    fi
+    if ! grep -q '^relayserver_accepts_total ' <<<"$mbody"; then
+        RC_LAST_FAIL="stage=metrics reason=no-accepts-counter"
         rc_dump_logs "$cid"
         return 1
     fi
