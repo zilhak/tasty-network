@@ -9,7 +9,7 @@
 | `tasty-net-frame` | `crates/tasty-net-frame` | 가안 그대로 | 프레임 코덱(`write_frame`·`read_frame`), `StreamTag`, 프레임 상한, heartbeat 상수, 읽기 실패 분류(`ReadFailure`), mesh 청크 분할·재조립, bulk 청크·mux 바이트 형식 | 없음 |
 | `tasty-net-ssh` | `crates/tasty-net-ssh` | 가안 그대로 | 시스템 `ssh` 실행, `-L` 터널, 원격 포트 발견, 셸 감지, 취소, backoff, 리스너 판정, 자식 생성 훅 | 없음 |
 | `tasty-net-identity` | `crates/tasty-net-identity` | 가안 그대로 | 기기 키·기기 ID, 서명·검증, 연결 토큰, 권한 걸린 비밀 파일, TOFU 판정 | 없음 |
-| `tasty-net-transport` | `crates/tasty-net-transport` | 가안 그대로 | 전송 trait, 논리 채널, handshake v2, 역할, bulk 자격, 요청 채널, heartbeat 송수신, SSH 정방향·역할 반전 전송, 메모리 전송 | frame, ssh, identity |
+| `tasty-net-transport` | `crates/tasty-net-transport` | 가안 그대로 | 전송 trait, 논리 채널, handshake v2, 역할, bulk 자격, 요청 채널, heartbeat 송수신, SSH 정방향·역할 반전 전송, 메모리 전송, P2P 종료 사유 enum `P2pCloseReason`(p2p가 쓰지만 정의는 여기) | frame, ssh, identity |
 | `tasty-net-p2p` | `crates/tasty-net-p2p` | 가안 그대로 | iroh endpoint, QUIC 스트림 ↔ 논리 채널, 경로 감시와 직접 경로 정책, 페어링 | frame, identity, transport |
 | `tasty-net-topology` | `crates/tasty-net-topology` | 가안 그대로 | 노드·엣지 모델, 질의·결과 메시지, 탐색 상태 기계 | frame, identity |
 | `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 두 프로세스 통합 시험, 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, ssh, identity, frame |
@@ -71,6 +71,7 @@ demo ─> (transport, p2p, ssh, identity, frame)
 |---|---|
 | 크레이트 단위 시험 | 각 크레이트의 `src/` 안 `mod tests`와 `tests/` |
 | 소켓 없이 도는 handshake·heartbeat·취소 시험 | `tasty-net-transport`의 메모리 전송 위 |
+| 실제 iroh endpoint로 도는 P2P 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달) | `tasty-net-p2p`의 `tests/`. transport는 p2p를 dev-dependency로도 두지 않는다 |
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
 | relay 설정 기동 검사 | `relay/check-config.sh`(CI workflow `relay.yml`) |

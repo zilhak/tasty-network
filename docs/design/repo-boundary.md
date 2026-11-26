@@ -48,7 +48,7 @@
 | `tasty:crates/tasty-remote/src/transport.rs` | handshake, 읽기·쓰기 스레드의 소켓 부분, heartbeat 송신, half-close·강제 종료·워커 회수 → transport | 도메인 프레임 해석, mirror 이벤트, 재연결 판단 |
 | `tasty:crates/tasty-remote/src/transport_end.rs` | "끝 사유는 올라가기만 하고 한 곳에서 한 번 확정" 계약 → transport `LinkCloser` | 도메인 끝 사유 |
 | `tasty:crates/tasty-remote/src/outbound.rs` | 시도 취소(`register_socket`) → transport `AttemptCancel` | 앱 소유 연결 수명 |
-| `tasty:crates/tasty-remote/src/client_session.rs` | 터널 소유 → transport `Link`가 터널 수명을 가짐 | mirror 세션 소유 |
+| `tasty:crates/tasty-remote/src/client_session.rs` | 터널 소유 → transport의 공유 터널 핸들 `SshTunnel`(링크·bulk·요청 채널이 참조를 나눠 가짐, [전송 추상화](transport.md) "터널 수명과 재연결") | mirror 세션 소유 |
 | `tasty:crates/tasty-remote/src/connection.rs` | — | 전부 |
 | `tasty:crates/tasty-remote/src/pending_connection.rs` | — | 전부 |
 | `tasty:crates/tasty-remote/src/browse.rs` | — (요청 채널을 씀) | 원격 목록 조회와 합치기 |

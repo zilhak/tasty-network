@@ -28,7 +28,7 @@
 | `open_bulk(ext)` | 부모 링크의 bulk 자격으로 bulk 채널을 연다([handshake v2](handshake.md) "bulk 자격") |
 | `peer()` | handshake가 확인한 상대 정보: 기기 ID, 인스턴스 ID, 역할, capability 목록, 전송 종류 |
 | `closer()` | 복제 가능한 `LinkCloser`. 강제 종료와 끝 사유 확정 |
-| `Drop` | 남은 채널을 닫고, 내부 워커 스레드를 join하고, SSH 터널 자식을 끝내고 회수한다 |
+| `Drop` | 남은 채널을 닫고, 내부 워커 스레드를 join하고, SSH 터널 참조를 놓는다. 그 터널의 마지막 참조였으면 터널 자식을 끝내고 회수한다(아래 "터널 수명과 재연결") |
 
 `ChannelReader::read_frame`은 `tasty-net-frame`의 `read_frame`을 쓰고 실패를 `ReadFailure`로 분류해 돌려준다. `ChannelWriter::write_frame`은 헤더와 payload를 한 버퍼로 모아 `write_all`을 한 번 부르고 `flush`한다(`tasty:crates/tasty-ipc/src/stream.rs` `write_frame`). `write_all`이 안에서 부분 쓰기를 다시 시도하므로 시스템 호출 하나를 보장하지는 않는다.
 
@@ -61,6 +61,7 @@ bulk 채널은 전송 구조상 언제나 부모 링크의 dialer가 열고 acce
   - `HeartbeatPolicy::WhenIdle`: 송신이 `HEARTBEAT_INTERVAL` 동안 조용할 때만 Ping을 보낸다. tasty 서버 write 스레드의 동작이다.
   - `HeartbeatPolicy::Periodic`: 트래픽과 관계없이 `HEARTBEAT_INTERVAL`마다 보낸다. tasty GUI·CLI 클라이언트의 동작이다.
 - 채널마다 따로 돈다. bulk 채널도 자기 Ping과 시간 제한을 가진다.
+- Ping 송신과 읽기 시간 제한은 성공 ACK 직후부터 양쪽 모두 시작한다. 첫 도메인 프레임(descriptor, 첫 요청 등)이 heartbeat 주기보다 늦어도 연결이 끊기지 않게 하기 위해서다. `ChannelReader`는 Ping을 받아 시간 제한만 갱신하고 소비자에게 넘기지 않는다(지금 tasty client reader도 Ping을 건너뛴다, `tasty:crates/tasty-remote/src/transport.rs`). 그래서 Ping은 O2(첫 Control은 descriptor)나 상태 표의 "첫 도메인 프레임" 규칙에 들어가지 않는다.
 - 시간 제한은 소켓 읽기 시간 제한이라 프레임 일부를 읽은 뒤에도 만료될 수 있다(`tasty:crates/tasty-ipc/src/stream/read_failure.rs` 주석). 시간 초과뿐 아니라 어떤 읽기 실패든 헤더나 payload 일부를 이미 소비했을 수 있다(`tasty:crates/tasty-ipc/src/stream.rs` `read_frame` 주석). 그래서 한 번 읽기 실패가 난 `ChannelReader`는 종류와 관계없이 이후 읽기도 같은 실패를 돌려준다. 같은 채널에서 다시 읽어 프레임 경계를 잃는 일을 막는다.
 
 ## 읽기 실패 분류
@@ -84,7 +85,7 @@ P2P 구현은 QUIC 오류를 이 `ErrorKind`로 바꿔 돌려준다. 상대가 �
 | 쓰기 반쪽 닫기 `ChannelWriter::half_close` | 상대가 남은 프레임을 끝까지 읽은 뒤 EOF를 본다. TCP는 `shutdown(Write)`, QUIC는 송신 스트림 `finish` | `tasty:crates/tasty-remote/src/transport.rs` `Shutdown::Write` |
 | 강제 종료 `LinkCloser::force_close(reason)` | 그 링크의 모든 채널을 닫고 막혀 있는 읽기를 깨운다. TCP는 `shutdown(Both)` 뒤 Windows에서 진행 중 I/O 취소까지 한다. P2P는 그 링크의 스트림만 닫는다(아래 "P2P의 닫기 범위") | `tasty:crates/tasty-utils/src/socket_wake.rs` `shutdown_both_and_wake` |
 | 끝 사유 | 사유는 올라가기만 하고 한 번만 확정된다. 먼저 확정한 쪽의 사유가 최종이다. 깨우기는 두 가지로 나눈다. 소켓 I/O 깨우기(`shutdown_and_wake`)는 확정 결과와 관계없이 한다. 소비자에게 끝을 알리는 콜백은 확정에 이긴 쪽만 부른다 | `tasty:crates/tasty-remote/src/transport_end.rs` |
-| 회수 | `Link`를 drop하면 내부 워커를 join하고 SSH 터널 자식을 끝내고 회수한다. 시험이 끝난 뒤 자식 프로세스와 스레드가 남지 않는다 | `tasty:crates/tasty-remote/src/transport.rs` 워커 묶음의 깨우기·join·터널 회수 |
+| 회수 | `Link`를 drop하면 내부 워커를 join하고 SSH 터널 참조를 놓는다. 마지막 참조를 놓은 쪽(링크든 요청 채널이든)이 터널 자식을 끝내고 회수한다. 시험이 끝난 뒤 자식 프로세스와 스레드가 남지 않는다 | `tasty:crates/tasty-remote/src/transport.rs` 워커 묶음의 깨우기·join·터널 회수 |
 
 ### 종료 순서
 
@@ -112,14 +113,18 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | 페어링 거절, 직접 경로 정책 종료(`DirectPathTimeout`·`DirectPathLost`) | QUIC 연결 전체와 그 위 모든 링크·채널. 종료 코드는 [handshake v2](handshake.md) "QUIC 종료 코드" | `Connection::close` | 없음 |
 | 연결 위 마지막 링크·채널이 닫힘, endpoint 종료 | QUIC 연결(코드 0 `closed`) | 아래 "연결을 닫는 때" | 없음 |
 
-- 정상 종료는 마지막 프레임을 상대가 읽게 하는 종료다. 송신 스트림을 `finish`하고 상대가 받았다고 확인할 때까지(송신 스트림의 완료 확인) `drain_cap` 안에서 기다린다. 거절 ACK와 요청 채널의 마지막 응답은 이 방식으로 보낸다.
+- 정상 종료는 마지막 프레임을 상대가 읽게 하는 종료다. 송신 스트림을 `finish`한다. 거절 ACK와 요청 채널의 마지막 응답은 이 방식으로 보낸다. 송신 스트림의 완료 확인(`SendStream::stopped`)은 상대 QUIC 스택이 받았다는 뜻일 뿐 상대 앱이 읽었다는 뜻이 아니므로, 그것을 근거로 연결을 닫지 않는다(아래).
 - 강제 종료는 남은 바이트를 버린다. 송신 쪽 `reset`과 수신 쪽 `stop`을 쓴다. `force_close`, 시도 취소, 진행 중 bulk를 부모와 함께 끊을 때만 쓴다.
-- 연결을 닫는 때: 마지막 채널이 정상 종료로 끝났다는 이유만으로 바로 `Connection::close`를 부르지 않는다. 그 채널들의 정상 종료가 끝난 뒤(상대 확인 또는 `drain_cap`) 코드 0으로 닫는다. `Connection::close`는 진행 중 작업을 모두 실패시키고 상대가 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(iroh `src/endpoint/connection.rs` `close` 설명).
+- 연결을 닫는 때: 코드 0 종료는 마지막 데이터를 받는 쪽이 한다. `Connection::close`는 진행 중 작업을 모두 실패시키고, 상대 QUIC 스택에 도착했어도 상대 앱이 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(iroh `src/endpoint/connection.rs` `close` 설명).
+  - 그 QUIC 연결을 연 dialer가 닫는다. dialer는 연결 위 마지막 채널의 reader가 상대의 `finish`(EOF)까지 읽은 뒤 코드 0으로 닫는다. 거절 ACK와 요청 채널의 마지막 응답은 dialer가 받는 쪽이므로, dialer가 그것을 읽은 뒤에 연결이 닫힌다.
+  - acceptor는 마지막 채널이 끝나도 코드 0으로 닫지 않고 상대의 종료를 기다린다. `drain_cap` 안에 오지 않으면 그때 코드 0으로 닫는다. 그 경우 dialer가 아직 읽지 않은 프레임은 잃을 수 있고, dialer는 `ReadFailure::PeerClosed`로 본다.
+  - 첫 스트림이 거절돼 공유 링크가 하나도 없는 연결도 같다. 시험은 `tasty-net-p2p`의 `rejected_first_stream_ack_is_read`(거절 ACK의 `reason`을 dialer가 읽음)다.
 - 연결 공유의 시작: 새 QUIC 연결은 그 연결을 만든 시도의 첫 채널 handshake가 성공할 때까지 그 시도의 `AttemptCancel`이 소유한다. 그동안 다른 채널은 그 연결을 쓰지 않는다(공개를 기다리거나 시도가 끝나면 새 연결을 연다). handshake가 성공하면 연결을 공유 목록에 공개하고 `AttemptCancel`에서 뺀다. 그 뒤의 연결 수명은 공유 목록이 갖고, 시도 취소는 그 시도의 스트림만 닫는다.
 
 ### 터널 수명과 재연결
 
-- SSH 전송의 `Link`가 그 터널의 수명을 가진다. 링크를 닫으면 터널도 끝난다. bulk·요청 채널은 같은 터널을 쓴다. 그래서 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널도 끝난다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
+- SSH 터널은 공유 핸들 `SshTunnel`이 소유한다. `SshTransport`는 대상마다 살아 있는 터널을 하나 두고, `connect`·`connect_more`로 연 채널(attach 링크, bulk, 요청 채널)이 각각 그 핸들의 참조를 가진다. 마지막 참조가 사라지면 터널 자식을 끝내고 회수한다. 그래서 attach 없이 연 요청 채널은 자기가 만든 터널을 혼자 소유하고, attach와 터널을 함께 쓰던 요청 채널은 attach가 먼저 닫혀도 계속 쓸 수 있다. 터널 자체가 죽으면 그 위 모든 채널이 `PeerClosed`로 끝난다.
+- 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널은 이 레포가 닫는다. 터널은 다른 채널이 쓰고 있으면 남는다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
 - 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum만 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
 - 다시 걸 때는 포트 발견과 터널 열기부터 새로 한다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
 
@@ -144,18 +149,18 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | O5 | `Resize` 확정 echo는 출력과 같은 순서로 온다. client는 Data와 Resize를 도착 순서대로 적용한다 | attach-behavior "리사이즈 전파"·"크기 요청의 응답과 재시도" | 순서 |
 | O6 | client→server의 Data·MeshContext·MeshInput·입력 확인 지점(`InputCheckpoint`)은 받은 순서대로 처리한다. 서버는 앞선 입력을 다 전달한 뒤 같은 sequence의 `InputProcessed`를 server→client로 보낸다. client reader는 구조 Delta의 ID 예약으로 다른 이벤트 적용이 보류돼도 유효한 확인을 바로 소비한다(소비자가 적용 큐를 나눌 때 지켜야 할 경계). 끝난 연결의 입력은 새 연결에 재생하지 않는다 | attach-behavior "입력 처리 확인과 View의 선행 배치" | 순서(양방향 각각) |
 | O7 | 구조 변경은 result → delta → 새 surface snapshot/tap 순서다. ID 대응보다 raw 출력이 먼저 오지 않는다 | attach-behavior "mirror 구조 변경 forward" | 순서 |
-| O8 | `Loss`는 마지막으로 보존된 데이터 뒤에 온다(알려진 경합은 tasty 문서에 적힌 대로 남는다) | attach-behavior "client 에게 공백을 알린다" | 순서 |
+| O8 | `Loss`는 마지막으로 보존된 데이터 뒤에 온다(알려진 경합은 tasty 문서에 적힌 대로 남는다) | attach-behavior "client 에게 공백을 알린다" | 그 손실이 난 채널. 순서 채널의 손실은 순서 채널로, bulk 전송의 손실은 그 bulk 채널로(O12) |
 | O9 | 재attach는 Detach를 보내고 이전 연결의 reader 종료(위 "종료 순서" 2)를 확인한 뒤 새로 연결한다. 지금 tasty 서버는 소켓을 닫은 뒤 `Disconnected`를 메인 루프에 넣으므로, 이전 점유의 해제가 새 연결의 점유 요청보다 먼저라는 것은 전송이 보장하지 않는다. 그 선후가 필요하면 받는 쪽 소비자가 점유 처리(tasty 메인 루프)에서 같은 holder의 이전 연결 정리를 먼저 처리한다 | attach-behavior "통지를 받은 client 가 하는 일" | 순서(쓰기 반쪽 닫기 뒤 reader 종료) + 링크 경계. 점유 해제 선후는 소비자 |
 | O10 | `MeshData` 청크는 한 프레임을 이루는 청크끼리 재조립된다. 손실 뒤에는 full texture부터 다시 구독한다 | attach-behavior "mesh mirror 채널" | 순서 |
 | O11 | `MeshFullResendRequest`·`MeshError`는 같은 surface의 mesh 흐름과 함께 처리된다 | attach-behavior "mesh mirror 채널" | 순서 |
-| O12 | bulk 전송은 한 bulk 채널 안에서 `BulkBegin` → Data 청크(`(transfer_id, seq)`) → `BulkCommit` 순서로 쓰인다. 손실이면 결과 불명으로 끝내고 자동 재시도하지 않는다 | attach-behavior "통지를 받은 client 가 하는 일" 표, remote-attach "화면 동기화" | bulk |
+| O12 | bulk 전송은 한 bulk 채널 안에서 양방향으로 끝난다. 보내는 쪽은 손실 통지 선언(`ClientLossNotify`) → `BulkBegin` → Data 청크(`(transfer_id, seq)`) → `BulkCommit` 순서로 쓰고, 받는 쪽은 그 전송의 `BulkResult` 또는 `Loss`를 같은 bulk 채널로 돌려준다. 보내는 쪽은 같은 채널에서 그 응답을 읽어 결과를 정한다(`tasty:src/app/attach_client/bulk.rs`). 손실이면 결과 불명으로 끝내고 자동 재시도하지 않는다 | attach-behavior "통지를 받은 client 가 하는 일" 표, remote-attach "화면 동기화" | bulk |
 | O13 | 프레임 하나는 한 버퍼로 모아 `write_all` 한 번 + `flush`로 보내고 TCP는 `TCP_NODELAY`를 켠다 | attach-behavior "프레임 전송 지연 (Nagle 금지)" | 모든 채널 |
 | O14 | heartbeat Ping과 읽기 시간 제한 | attach-behavior "연결 생존 확인 (read timeout + heartbeat)" | 모든 채널(채널마다 따로) |
 | O15 | HTML entry 전송은 같은 attach registration에 묶인 요청 → metadata → read credit → chunk → complete 순서다. 끊긴 registration의 응답은 새 registration에 넘기지 않고, 손실이 난 본문을 완료로 처리하지 않는다 | attach-behavior "HTML entry 전송", `tasty:docs/dev-guide/html-transfer.md` | 순서. bulk 채널이나 요청 채널로 옮기지 않는다. metadata·credit·완료의 도메인 규칙은 tasty |
 
 - mesh는 지금처럼 순서 채널에 둔다. O6이 MeshInput을 Data·확인 지점과 한 순서로 묶기 때문이다. 나중에 대역폭 때문에 나눈다면 서버→client `MeshData`만 옮길 수 있고, MeshContext·MeshInput은 순서 채널에 남아야 하며, 손실 통지가 채널마다 따로 필요하다. 그때 이 표를 먼저 고친다.
-- bulk는 지금도 별도 소켓이다(O12). bulk 채널과 순서 채널 사이에 순서 계약은 없다. 지금 tasty에서는 `StreamHub`가 연결과 `bulk_workspace` 결속을 기록하고(`register_bulk`), 시작(`BulkBegin`)과 완료(`BulkCommit`) 인가는 도메인이 한다(`tasty:src/remote/server.rs`). 이 레포의 bulk 자격은 그 앞에 새로 더하는 검사이고, 도메인의 시작·완료 인가는 그대로 남는다.
-- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`(메모리·루프백 TCP·P2P 각 전송)다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
+- bulk는 지금도 별도 소켓이다(O12). bulk 채널과 순서 채널 사이에 순서 계약은 없다. bulk의 시작 선언·데이터·완료와 그 결과·손실 통지는 모두 그 bulk 채널 안에서 오간다. 지금 tasty에서는 `StreamHub`가 연결과 `bulk_workspace` 결속을 기록하고(`register_bulk`), 시작(`BulkBegin`)과 완료(`BulkCommit`) 인가는 도메인이 한다(`tasty:src/remote/server.rs`). 이 레포의 bulk 자격은 그 앞에 새로 더하는 검사이고, 도메인의 시작·완료 인가는 그대로 남는다.
+- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 전송마다 그 전송을 가진 크레이트에 둔다. 메모리·루프백 TCP는 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`, P2P는 `tasty-net-p2p`의 `tests/`에 있는 `ordered_stream_preserves_mixed_tag_order`(실제 iroh endpoint 두 개와 시험 안 relay)다. transport는 p2p에 의존하지 않으므로(dev-dependency로도 두지 않는다) iroh 시험을 transport에 두지 않는다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
 
 ## 역할
 

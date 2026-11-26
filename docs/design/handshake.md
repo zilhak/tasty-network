@@ -52,7 +52,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 
   그래서 두 기기 ID, 역할, capability 제안, 도메인 요청이 이 채널 하나에 묶인다. 이 인코딩을 바꾸면 `proto`를 올린다.
 - 받는 쪽은 토큰 검사를 통과하기 전에는 challenge를 보내지 않는다. 토큰 없는 상대는 기기 ID조차 받지 못한다.
-- 4번 ACK가 `ok:true`이면 양쪽이 일반 프레임 흐름으로 넘어간다. 그 뒤 첫 프레임은 목적마다 다르다(아래 "상태 표"의 "성공 ACK 뒤 첫 프레임").
+- 4번 ACK가 `ok:true`이면 양쪽이 일반 프레임 흐름으로 넘어간다. 그 뒤 첫 도메인 프레임은 목적마다 다르다(아래 "상태 표"의 "성공 ACK 뒤 첫 도메인 프레임"). heartbeat Ping은 이 규칙에 세지 않는다. 양쪽은 성공 ACK 직후부터 Ping을 보낼 수 있다([전송 추상화](transport.md) "heartbeat와 읽기 시간 제한").
 
 ## 흐름 (P2P 경로)
 
@@ -65,16 +65,16 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 
 ## 상태 표
 
-| 경로 × 목적 | 메시지 1 필수 필드 | 이어지는 메시지 | 거절이 나는 단계와 형식 | 성공 ACK 뒤 첫 프레임 |
+| 경로 × 목적 | 메시지 1 필수 필드 | 이어지는 메시지 | 거절이 나는 단계와 형식 | 성공 ACK 뒤 첫 도메인 프레임(Ping 제외) |
 |---|---|---|---|---|
 | SSH · attach | `proto, purpose, token, device_id, instance_id, nonce, holder, caps` (+`ext`) | challenge → proof → ACK | 검사 1~3(아래): challenge 없이 바로 거절 ACK. 검사 4 이후: proof를 받은 뒤 거절 ACK. dialer 쪽 검사 실패: proof를 보내지 않고 닫음(로컬 오류) | workspace 제공 쪽이 보내는 도메인 descriptor(O2). 정방향은 acceptor, 역할 반전은 dialer([전송 추상화](transport.md) "역할") |
 | SSH · request | `proto, purpose, token, device_id, instance_id, nonce, caps` | challenge → proof → ACK | attach와 같음. 역할 검사 없음 | dialer의 첫 요청 `{id, method, params}`. acceptor는 요청을 받기 전에 보내지 않는다 |
-| SSH · bulk | `proto, purpose, token, instance_id, bulk_credential` (+`ext`) | ACK | 검사 1~3과 8~9 실패: 거절 ACK. 서명 없음(자격이 부모 링크의 인증을 잇는다) | 도메인이 정한다(tasty는 보내는 쪽의 `BulkBegin`). 이 레포는 정하지 않는다 |
+| SSH · bulk | `proto, purpose, token, instance_id, bulk_credential` (+`ext`) | ACK | 검사 1~3과 8~9 실패: 거절 ACK. 서명 없음(자격이 부모 링크의 인증을 잇는다) | 도메인이 정한다(tasty는 보내는 쪽의 `ClientLossNotify` 선언, 이어서 `BulkBegin`. [전송 추상화](transport.md) O12). 이 레포는 정하지 않는다 |
 | P2P · attach | `proto, purpose, device_id, instance_id, holder, caps` (+`ext`) | hello → ACK | 페어링 실패: QUIC 연결 종료(`not_paired`). 검사 실패: hello 없이 거절 ACK | SSH · attach와 같음 |
 | P2P · request | `proto, purpose, device_id, instance_id, caps` | hello → ACK | P2P · attach와 같음. 역할 검사 없음 | SSH · request와 같음 |
 | P2P · bulk | `proto, purpose, instance_id, bulk_credential` (+`ext`) | ACK | 자격이 이 스트림과 같은 QUIC 연결 위 attach 링크의 것인지 본다. 그래서 상대 기기 ID는 메시지 1의 필드가 아니라 연결의 `remote_id()`가 부모 링크의 상대와 같은 것으로 확인된다. 실패: 거절 ACK | SSH · bulk와 같음 |
 
-거절 ACK를 보낸 쪽은 그 채널을 정상 종료로 닫는다. 상대가 ACK를 읽을 수 있게 송신을 끝낸 뒤 닫는다는 뜻이다(TCP는 `shutdown(Write)`, P2P는 `finish`). 성공 ACK 뒤에만 일반 프레임 흐름이 시작된다. P2P에서 채널을 닫는 것은 그 스트림만이고 QUIC 연결은 닫지 않는다([전송 추상화](transport.md) "P2P의 닫기 범위").
+거절 ACK를 보낸 쪽은 그 채널을 정상 종료로 닫는다. 상대가 ACK를 읽을 수 있게 송신을 끝낸 뒤 닫는다는 뜻이다(TCP는 `shutdown(Write)`, P2P는 `finish`). 성공 ACK 뒤에만 일반 프레임 흐름이 시작된다. P2P에서 채널을 닫는 것은 그 스트림만이고 QUIC 연결은 닫지 않는다. 그 연결이 거절로 비게 되면 거절 ACK를 읽은 dialer가 연결을 닫는다([전송 추상화](transport.md) "P2P의 닫기 범위"의 "연결을 닫는 때").
 
 ## 검사 순서
 
@@ -151,6 +151,7 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
 | 3 | `direct_path_lost` | `DirectPathLost` | 아니오 |
 | 그 밖 | — | `Unknown(u64)` | 아니오 |
 
+- `P2pCloseReason`은 `tasty-net-transport`가 정의한다. 이 값을 담는 `HandshakeError`와 `Link`가 transport 타입이고, 의존 방향이 p2p → transport이기 때문이다([크레이트 구성](crates.md) "의존 방향"). `tasty-net-p2p`는 위 표대로 숫자 코드와 이 enum을 서로 바꾸기만 한다.
 - handshake 중에 받으면 `HandshakeError::Closed(P2pCloseReason)`이다.
 - 링크가 선 뒤에 받으면 읽기·쓰기는 `ReadFailure::PeerClosed`로 끝나고, 사유는 `Link::close_reason() -> Option<P2pCloseReason>`으로 읽는다. 이 쪽이 닫았으면 이 쪽이 보낸 사유가 들어 있다.
 - 상대가 종료 프레임(CONNECTION_CLOSE)을 받은 경우에만 같은 사유를 얻는다. 받지 못하면 QUIC idle timeout으로 끝나고 `ReadFailure::HeartbeatTimeout`, `close_reason()`은 `None`이다(iroh `src/endpoint/connection.rs` `close` 설명).
@@ -169,12 +170,18 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
 - `purpose = attach` 성공 ACK에 `bulk_credential`(32바이트 난수의 hex)을 싣는다. acceptor 라이브러리는 자격 → (부모 링크, grant)를 기억한다. grant는 acceptor 소비자의 도메인 콜백이 attach 수락 때 돌려준 불투명 바이트다(tasty 정방향은 workspace ID와 점유 세대, 역할 반전은 holder 쪽 mirror 세션 표지).
 - bulk 채널의 메시지 1은 `purpose = bulk`, 토큰(SSH), `bulk_credential`을 싣는다. SSH 경로에서도 서명은 다시 하지 않는다. 자격이 인증된 부모 링크에서 나왔기 때문이다.
 - 부모 링크가 끝나면 그 자격은 폐기된다. 폐기된 자격의 bulk 요청은 `bulk_credential_invalid`.
+- 등록과 종료의 순서는 acceptor의 부모 링크 상태 잠금 하나로 정한다.
+  1. attach 수락: 자격을 만들어 표에 넣은 뒤 성공 ACK를 쓴다. ACK 쓰기가 실패하거나 기한·취소가 먼저 이기면 같은 잠금 아래에서 자격을 빼고 링크를 세우지 않는다.
+  2. bulk 수락: 잠금 아래에서 자격을 찾고, 부모가 살아 있으면 그 bulk 채널을 부모의 자식으로 등록한 뒤 잠금을 풀고 도메인 콜백과 성공 ACK로 간다. 부모가 이미 끝났으면 `bulk_credential_invalid`로 거절한다.
+  3. 부모 종료: 잠금 아래에서 부모를 끝남으로 표시하고 자격을 빼고 자식 목록을 가져온 뒤, 잠금 밖에서 자식들을 강제 종료로 닫는다.
+
+  그래서 종료와 경쟁한 bulk는 2에서 거절되거나, 자식으로 등록돼 3에서 닫힌다. 자식으로 등록된 뒤 성공 ACK를 쓰기 전에 부모가 끝나면 ACK 대신 채널이 닫히고, dialer는 `HandshakeError`로 받는다.
 - 자격은 링크 수명 동안 바뀌지 않는다. 그래서 자격을 갱신하는 메시지가 없다. grant가 지금도 유효한지는 bulk handshake마다 acceptor의 도메인 콜백이 (부모 링크, grant)를 받아 판단한다. grant가 바뀌었으면 `domain` 사유로 거절한다.
 - 이미 열린 bulk 채널의 수명:
 
   | 일어난 일 | 열린 bulk 채널 | 완료 인가 |
   |---|---|---|
-  | 부모 링크의 정상 종료 | 이 레포가 강제 종료로 닫는다. SSH는 터널이 끝나서, P2P는 부모와 함께 스트림을 닫아서 같은 결과다 | 전송이 끝까지 가지 못하므로 결과 불명(O12) |
+  | 부모 링크의 정상 종료 | 이 레포가 강제 종료로 닫는다. SSH는 그 bulk 소켓을 닫고(터널은 다른 채널이 쓰면 남는다), P2P는 부모와 함께 그 스트림을 닫는다 | 전송이 끝까지 가지 못하므로 결과 불명(O12) |
   | 부모 링크의 강제 종료 | 위와 같다 | 위와 같다 |
   | grant 변경(부모는 살아 있음) | 이 레포는 끊지 않는다 | tasty가 commit 시점에 확인한다. 지금도 활성 holder와 registration이 바뀌었으면 완료를 거절한다(`tasty:src/remote/server.rs` `finalize_bulk_transfer`) |
 
