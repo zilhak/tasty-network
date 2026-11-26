@@ -29,7 +29,7 @@ OS별 성립 근거와 대체:
 
 | OS | 성립 근거(확인할 것) | 성립하지 않을 때 |
 |---|---|---|
-| Linux(`ubuntu-latest`) | 준비 단계가 `sshd -t -f <설정>`으로 설정을 검사하고, 시험 도우미가 준비 확인 뒤 `ssh -o BatchMode=yes` 로그인과 `-L` 포워딩 한 번을 확인한다 | `sshd`가 없거나, 설정 검사·준비 확인이 실패하면 아래 Windows 2의 시험 전용 Rust SSH 서버로 돈다(`sshd=russh`) |
+| Linux(`ubuntu-latest`) | 준비 단계(`scripts/prepare-test-sshd.sh`)가 `sshd -t -f <설정>`으로 설정을 검사해 로그에 남긴다. 시험 도우미도 띄우기 전에 같은 검사를 하고, 준비 확인 뒤 `ssh -o BatchMode=yes` 로그인과 `-L` 포워딩 한 번을 확인한다 | `sshd`가 없거나, 설정 검사·기동·준비 확인·로그인·포워딩 확인 중 하나가 실패하면 아래 Windows 2의 시험 전용 Rust SSH 서버로 돈다(`sshd=russh`) |
 | macOS(`macos-latest`) | Linux와 같다. 시스템 sshd를 사용자 권한으로 전경 실행한다 | Linux와 같다 |
 
 CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절에 적는다. OpenSSH도 대체 서버도 돌지 못한 OS의 SSH 통합 시험은 실패로 끝나며(로그 `sshd=none`) 미실행·통과로 바꾸지 않는다. 세 OS 모두 같다. 그 OS의 D2·D3는 실행 상태 "실패", 판정 "미충족"으로 기록한다.
@@ -38,10 +38,10 @@ CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절�
 
 - 호스트 키: `ssh-keygen -t ed25519 -N ''`
 - 사용자 키와 `authorized_keys`
-- 설정: 빈 포트, `ListenAddress 127.0.0.1`, `HostKey`, `AuthorizedKeysFile`, `PidFile`, `StrictModes no`, `UsePAM no`, `AllowTcpForwarding yes`
-- 클라이언트: `SshTarget.identity_file`과 `extra_options`로 `-o UserKnownHostsFile=<임시>`·`-o StrictHostKeyChecking=accept-new`
+- 설정: 빈 포트, `ListenAddress 127.0.0.1`, `HostKey`, `AuthorizedKeysFile`, `PidFile`, `StrictModes no`, `UsePAM no`, `AllowTcpForwarding yes`, `PubkeyAuthentication yes`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`. Windows에서는 `PidFile`·`UsePAM`을 넣지 않는다. sshd가 `PerSourcePenalties`를 알면(OpenSSH 9.8 이후) `PerSourcePenalties no`를 더한다. 같은 주소에서 연결을 자주 다시 여는 시험이 벌점으로 거절되지 않게 하려는 것이다. sshd가 이 줄을 모르면 `sshd -t`가 실패하므로 그 줄을 빼고 다시 검사한다.
+- 클라이언트: `SshTarget.identity_file`과 `extra_options`로 `-o UserKnownHostsFile=<임시>`·`-o GlobalKnownHostsFile=<임시>`·`-o StrictHostKeyChecking=accept-new`·`-o IdentitiesOnly=yes`·`-o PreferredAuthentications=publickey`·`-o PasswordAuthentication=no`·`-o KbdInteractiveAuthentication=no`. 비밀번호 질문으로 시험이 멈추지 않게 한다.
 
-시험은 준비 확인(포트가 열렸는지) 뒤 시작하고, 끝나면 sshd를 PID로 끝내고 임시 디렉터리를 지운 뒤 자식 프로세스가 남지 않았는지 확인한다. sshd가 없거나(`sshd` 경로를 못 찾음) 준비 확인이 실패하면 시험 도우미는 대체 서버로 넘어간다(위 표). 대체 서버도 시작하지 못하면 시험은 통과가 아니라 실패로 끝난다. CI는 준비 단계에서 sshd가 있는지 확인하고 결과를 로그에 남긴다.
+준비 확인은 sshd가 stderr에 `Server listening on`을 남겼는지로 한다. 포트에 TCP로 붙어 보는 방식은 인증 없이 끊는 연결이 되어 `PerSourcePenalties`의 벌점 대상이 되므로 쓰지 않는다. 시험은 준비 확인 뒤 시작하고, 끝나면 클라이언트가 모두 끝난 뒤 sshd에 세션 자식 프로세스가 남지 않았는지 보고 sshd를 PID로 끝내며, 임시 디렉터리를 지운 뒤 자식 프로세스가 남지 않았는지 확인한다. sshd가 없거나(`sshd` 경로를 못 찾음) 준비 확인이 실패하면 시험 도우미는 대체 서버로 넘어간다(위 표). 대체 서버도 시작하지 못하면 시험은 통과가 아니라 실패로 끝난다. CI는 준비 단계에서 sshd가 있는지 확인하고 결과를 로그에 남긴다. 서버 선택은 `TASTY_NET_TEST_SSHD`(`auto` 기본, `openssh`, `russh`)로 고정할 수 있다. 도우미는 `tests/support/sshd.rs`(OpenSSH와 선택), `tests/support/russh_server.rs`(대체 서버)다.
 
 ### Windows
 
