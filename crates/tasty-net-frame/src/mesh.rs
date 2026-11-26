@@ -175,6 +175,12 @@ impl MeshFrameAssembler {
     /// A [`MeshAssembleError`] for a corrupt or hostile header. The caller drops the
     /// chunk; when the error comes from a mismatch with earlier chunks, the progress of
     /// that frame is dropped too.
+    ///
+    /// The received data length of a frame is checked on every chunk. If resending a
+    /// chunk index makes the sum exceed `total_len` even once, the frame is dropped with
+    /// [`MeshAssembleError::LengthMismatch`]. tasty checks the sum only after every index
+    /// has arrived; this crate checks earlier so that the memory one frame holds stays
+    /// bounded by `total_len` plus one chunk.
     pub fn push_chunk(
         &mut self,
         buf: &[u8],
