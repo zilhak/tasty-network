@@ -14,6 +14,8 @@
 - 엣지는 연결 방향(dialer → acceptor)과 holder를 따로 담는다. 역할 반전과 P2P에서 둘이 다르기 때문이다([전송 추상화](transport.md) "역할").
 - 같은 두 기기 사이 attach가 여럿이면 엣지도 여럿이다. 같은 `(dialer, acceptor, holder, transport, workspace)`는 하나로 합친다.
 - P2P 엣지의 `transport`와 `rtt_ms`는 선택 경로(`Path::is_ip`·`is_relay`·`rtt`)에서 온다.
+- SSH 엣지의 `transport`는 링크의 holder에서 온다. transport `peer()`의 전송 종류가 `Ssh`·`Tcp`이고 holder가 dialer면 `ssh_forward`, acceptor면 `ssh_role_reversed`다(위 "역할" 표). 메모리 전송 링크는 시험용이라 엣지가 아니다. 대응표는 `tasty_net_topology::TransportKind` 문서 주석에 있다.
+- 기기가 자기 자신에 대해 답한 노드는 `reported_by`가 없다. 다른 기기에 대해 보고한 노드(실패 관측, `no_capability`, 경로 중단의 `origin`)에는 보고한 기기가 들어 있다.
 
 ## 엣지 목록 입력
 
@@ -30,7 +32,7 @@
 - `kind`는 `auth_rejected`(`PeerTooOld`, `legacy_protocol`, 토큰·서명·TOFU 거절처럼 인증 단계의 거절), `timed_out`(연결·handshake 시간 초과)이다. 받는 쪽에서 거절한 접속은 상대 이름을 알 수 없으므로 넣지 않는다.
 - `device_id`는 아는 경우만 싣는다(TOFU 기록의 기대값). `peer_hint`는 소비자가 정한 표시 이름(tasty는 프로필 이름)이다.
 - 같은 상대에 대해 엣지와 실패가 둘 다 있으면 엣지(살아 있는 연결)가 이긴다.
-- `local_view`·`remote_answer`는 엣지와 실패를 함께 받는다. 실패는 `reported_by` = 자기 기기로 노드가 된다.
+- `local_view(me, links, failures, now)`·`remote_answer(me, links, failures, sharing, now)`는 엣지와 실패를 함께 받는다(`me`는 자기 기기 ID와 표시 이름, `now`는 노드에 찍는 Unix ms). 실패는 `reported_by` = 자기 기기로 노드가 된다.
 
 ## 질의와 결과 메시지
 
@@ -49,20 +51,22 @@
 ## 탐색 규칙
 
 - 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달한다. 전달하지 못하면 기다리지 않고 바로 요청자에게 `origin` 노드 상태 `timed_out`과 사유를 담은 결과를 돌려주고, 이어서 `done`(`final: true`)을 보낸다. 사유는 `route_broken`(다음 hop과 링크가 없음), `route_no_capability`(다음 hop과 링크는 있지만 그 상대 `caps`에 `net.topology`가 없음), `route_sharing_off`(이 hop의 공개가 꺼져 있음, 아래 "공개 범위"), `route_invalid`(아래 "전달 hop 상한") 중 하나다. 이때 결과의 `return_path`는 `route`에서 자기 앞의 hop들을 거꾸로 놓고 끝에 `requester`를 붙인 목록이다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달하지 못했는지(위 세 사유)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
-- 전달 hop 상한: `route` 길이는 `MAX_ROUTE_HOPS`(`tasty-net-topology` 상수, 16) 이하이고, 같은 기기 ID가 두 번 나오지 않고, 요청자와 `origin`을 담지 않아야 한다. 요청자는 질의를 만들 때 검사해 어기면 보내지 않고 로컬 오류 `TopologyError::InvalidRoute`를 돌려준다. 각 `route` hop도 받을 때 질의의 `requester`·`origin`으로 같은 검사를 하고, 어기면 전달하지 않고 사유 `route_invalid`로 위처럼 끝낸다. 첫 hop은 더해서 `requester`가 질의를 받은 링크의 상대와 같은지 본다. 시험은 `tasty-net-topology`의 `route_over_hop_limit_is_rejected`, `route_with_repeated_device_is_rejected`다.
-- 마감은 각 기기의 단조 시계로 판정한다. 질의를 받은 기기는 받은 때의 단조 시각 + `min(remaining_ms, MAX_QUERY_MS)`를 자기 마감으로 두고, 전달할 때 그때의 남은 시간을 `remaining_ms`에 넣는다. 요청자는 자기 단조 시계로 전체 상한을 지킨다. 기기 사이의 벽시계 차이는 판정에 들어가지 않는다.
+- 전달 hop 상한: `route` 길이는 `MAX_ROUTE_HOPS`(`tasty-net-topology` 상수, 16) 이하이고, 같은 기기 ID가 두 번 나오지 않고, 요청자와 `origin`을 담지 않아야 한다. 요청자가 기준 머신이면 `route`는 비어 있어야 한다. 요청자는 질의를 만들 때 검사해 어기면 보내지 않고 로컬 오류 `TopologyError::InvalidRoute`를 돌려준다. 각 `route` hop도 받을 때 질의의 `requester`·`origin`으로 같은 검사를 하고, 어기면 전달하지 않고 사유 `route_invalid`로 위처럼 끝낸다. 첫 hop은 더해서 `requester`가 질의를 받은 링크의 상대와 같은지 본다. 시험은 `tasty-net-topology`의 `route_over_hop_limit_is_rejected`, `route_with_repeated_device_is_rejected`다.
+- 마감은 각 기기의 단조 시계로 판정한다. 질의를 받은 기기는 받은 때의 단조 시각 + `min(remaining_ms, MAX_QUERY_MS)`를 자기 마감으로 두고, 전달할 때 그때의 남은 시간을 `remaining_ms`에 넣는다. 전달할 때는 자기 남은 시간에서 여유분(`AgentConfig::hop_reserve`)을 빼고 넣어, 다음 기기가 자기보다 먼저 끝나 `done`이 제때 돌아오게 한다. `MAX_QUERY_MS`는 30,000이다. 요청자는 자기 단조 시계로 전체 상한을 지킨다. 기기 사이의 벽시계 차이는 판정에 들어가지 않는다.
 - 결과는 질의가 온 길을 거꾸로 돌아간다. 기준 머신부터의 결과는 `path`를 거꾸로, 그다음 `route`를 거꾸로, 마지막에 `requester`로 간다. 중간 기기는 결과를 합치지 않고 그대로 넘긴다. 합치기(같은 노드의 중복 제거, 상태 고르기)는 요청자 한 곳에서만 한다.
 - 기준 머신부터는 hop마다 depth를 1 줄인다. depth 0인 노드는 자기 엣지만 답하고 더 전달하지 않는다.
 - 들어오는 링크와 나가는 링크를 모두 따라간다.
 - 순환 차단은 경로별이다. 질의를 받은 기기는 `path`에 이미 있는 기기에는 다시 보내지 않는다. 그래서 A↔B 순환이 끝난다. 질의 전체가 공유하는 방문 집합은 두지 않는다(그러면 아래 "더 짧은 경로로 같은 노드에 다시 닿아 남은 depth가 더 크면" 항목의 이어 탐색을 막는다).
 - 중복 응답 억제는 기기별 기록으로 한다. 각 기기는 `request_id`마다 지금까지 답한 가장 큰 남은 depth를 잠시(자기 마감까지) 기억한다. 같은 `request_id`가 더 작거나 같은 남은 depth로 다시 오면 노드·엣지를 다시 싣지 않고 `net.topology.suppressed`만 보낸다. 전달한 쪽은 이것을 정상 응답으로 보고 그 이웃을 `timed_out`으로 두지 않는다. 더 큰 남은 depth로 오면 다시 답하고 그 depth로 전달한다.
 - 더 짧은 경로로 같은 노드에 다시 닿아 남은 depth가 더 크면, 위 기록 규칙에 따라 그 남은 depth로 그 노드부터 이어 탐색한다(다이아몬드에서 긴 경로가 먼저 닿은 경우).
-- 이웃마다 응답 시간 제한을 둔다. 넘으면 그 노드를 `timed_out`으로 두고 탐색은 계속한다.
+- 이웃마다 응답 시간 제한을 둔다(`AgentConfig::hop_timeout`, 전달한 뒤 그 이웃의 첫 결과 조각이나 `suppressed`가 올 때까지). 넘으면 그 노드를 `timed_out`으로 두고 탐색은 계속한다. 첫 조각이 온 이웃은 자기 마감까지 `done`을 기다리고, 마감이 지나면 `timed_out` 목록에 넣지 않고 놓는다(직접 응답이 이미 있다).
+- `route` hop은 질의를 전달하고 돌아오는 결과를 그대로 넘길 뿐 자기 `done`을 보내지 않는다. 기준 머신의 `done`(`final: true`)이 요청자에게 간다. 남은 시간에서 여유분을 빼면 0인 `route` hop은 전달하지 않고 사유 없는 `origin` `timed_out`과 `done`(`final: true`)으로 끝낸다.
 - 분기 완료: 각 기기는 자기 조각을 다 보내고, 전달한 모든 이웃에게서 `done` 또는 `suppressed`를 받았거나 그 이웃을 시간 제한으로 포기했을 때 `net.topology.done`을 보낸다. 포기한 이웃은 `timed_out` 목록에 싣는다. 전체 완료는 요청자가 `final: true`인 `done`(기준 머신의 분기 완료, 또는 `route`를 중간에서 멈춘 hop의 종료)을 받았을 때, 또는 요청자 자신의 마감이 지났을 때다.
 - 같은 노드에 대한 합치기(요청자): 그 노드가 직접 만든(`from` = 그 노드) 조각이 하나라도 있으면 그 조각의 자기 노드 상태(`online` 또는 `sharing_off`)를 쓴다. 직접 응답은 다른 경로의 실패 관측보다 우선한다. 다른 경로의 전달자가 그 노드를 `timed_out`으로 보고했어도 상태를 바꾸지 않는다. 그 경로로는 응답을 못 받았다는 뜻일 뿐이다. 어느 경로로도 직접 조각이 없을 때만 보고된 상태(`timed_out`·`auth_rejected`·`no_capability`)를 쓴다.
 - 원격 ID를 확인할 수 없는 상태의 노드: `auth_rejected`·`timed_out`·`no_capability` 노드는 그 상대와 연결을 시도한 이웃이 만든다(`auth_rejected`는 위 "엣지 목록 입력"의 연결 실패 관측에서 나온다). 노드 식별자는 그 이웃이 아는 상대 기기 ID(링크의 `peer()`, 또는 TOFU 기록에 있는 기대값)다. 기기 ID를 모르면(인증 전에 거절돼 ID를 받지 못함) `device_id`가 비고 `reported_by`와 `peer_hint`로 구분한다. 요청자는 `device_id`가 있으면 그것으로, 없으면 `(reported_by, peer_hint)`로 합친다. `offline`은 정의 파일 방식에서 tasty만 만든다.
 - 결과는 도착하는 대로 점진적으로 낸다. 노드에는 응답 시각을 붙인다.
-- 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 상태 기계다. 그래서 전송 없이 가짜 이웃으로 시험한다.
+- 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 상태 기계다. 그래서 전송 없이 가짜 이웃으로 시험한다. 크레이트에서는 기기마다 `Agent` 하나이고, 주입하는 함수는 `Outbox::send`다. `send`는 링크가 없으면 `SendError::NoLink`, 상대 `caps`에 `net.topology`가 없으면 보내지 않고 `SendError::NoCapability`를 돌려준다. 소비자는 받은 토폴로지 메시지를 `Agent::on_message`에 넘기고 `Agent::next_deadline` 때 `Agent::poll`을 부른다. 시험은 `crates/tasty-net-topology/tests/explore.rs`다.
+- 요청자가 탐색 중 이웃으로서 질의를 받으면(기준 머신이 다른 기기일 때) 자기 부분은 `local_view`로 답한다. 결과가 자기 화면으로 오기 때문이다.
 
 ## 공개 범위
 
@@ -70,5 +74,5 @@
 
 - 원격 질의 응답: 공개 꺼짐이면 자기 노드 하나(`sharing_off`)만 답하고 전달하지 않는다. `route`의 중간 hop이어도 같다. 공개 꺼짐이 중계보다 우선하므로, 자기 노드를 답한 뒤 사유 `route_sharing_off`로 위 "탐색 규칙"처럼 끝낸다(`done`, `final: true`). 공개 켜짐이어도 `workspace` 메타데이터는 소비자가 정한 범위(이름·ID 중 무엇을 내보내는가)만 싣는다.
 - 로컬 조회(자기 화면): 공개 설정과 관계없이 자기 엣지를 모두 보여 준다.
-- 두 범위를 함수로 나눈다: `local_view(links)`와 `remote_answer(links, sharing)`. 설정을 저장하는 일은 tasty 몫이다.
-- 응답 측 공통 함수 `answer_query`가 질의를 받아 자기 엣지를 답하고 다음 hop으로 전달한다. GUI·headless 배선은 tasty가 한다.
+- 두 범위를 함수로 나눈다: `local_view`와 `remote_answer`(인자는 위 "엣지 목록 입력"). `Sharing`이 없으면(`Sharing::default()`) 공개 켜짐이고 workspace 필드는 하나도 싣지 않는다. 무엇을 실을지(`WorkspaceExposure`)는 tasty가 정한다([설계 목차](index.md) "남은 결정"). 설정을 저장하는 일은 tasty 몫이다.
+- 응답 측 공통 함수 `answer_query`(`Agent::answer_query`)가 질의를 받아 자기 엣지를 답하고 다음 hop으로 전달한다. GUI·headless 배선은 tasty가 한다.
