@@ -179,15 +179,28 @@ rc_limit_matches() {
     esac
 }
 
-# 설정 값 $2(키 이름)의 포트. 없으면 기본 $3.
+# TOML 파일 $1의 최상위 주소 키 $2(http_bind_addr 등)의 포트. 키가 없으면 기본 $3.
+# tomllib로 읽으므로 작은따옴표 리터럴 문자열('[::]:8080')도 같게 읽는다. 포트를 못 읽으면 rc 1.
 rc_toml_port() {
-    local v
-    v=$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\\(.*\\)\".*/\\1/p" "$1" | head -1)
-    if [[ -n "$v" ]]; then
-        echo "${v##*:}"
-    else
-        echo "$3"
-    fi
+    python3 -I - "$1" "$2" "$3" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    v = tomllib.load(f).get(sys.argv[2])
+if v is None:
+    print(sys.argv[3])
+    sys.exit(0)
+port = str(v).rsplit(":", 1)[-1] if isinstance(v, str) and ":" in v else ""
+if not port.isdigit():
+    sys.exit(1)
+print(port)
+PY
+}
+
+# 로그 $1에 --dev 평문 리스너 줄 "[HTTP/WS] relay: serving on <주소>:<포트 $2>"가 있으면 0.
+# 주소는 설정의 http_bind_addr를 iroh-relay가 실제로 바인딩한 값이라(IPv4 0.0.0.0, IPv6 [::] 등) 보지 않는다
+# (iroh-relay v1.5.0 server/http_server.rs:464-468, main.rs:597-599).
+rc_listener_line_ok() {
+    grep -Eq "\[HTTP/WS\] relay: serving on [^[:space:]]+:$2\$" <<<"$1"
 }
 
 # 컨테이너 $1의 내부 TCP 포트 $2가 게시된 호스트 주소(127.0.0.1:N).
@@ -238,8 +251,8 @@ rc_start_relay() {
         return 1
     fi
     chmod 0644 "$cfg"
-    http_port=$(rc_toml_port "$cfg" http_bind_addr 3340)
-    metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090)
+    http_port=$(rc_toml_port "$cfg" http_bind_addr 3340) || { RC_LAST_FAIL="stage=config reason=http_bind_addr"; return 1; }
+    metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090) || { RC_LAST_FAIL="stage=config reason=metrics_bind_addr"; return 1; }
 
     # 이름을 먼저 정리 목록에 넣는다. create가 컨테이너를 만든 뒤 실패해도, start가 실패해도 EXIT 정리가 지운다.
     cid="relay-check-$name-$$"
@@ -328,7 +341,7 @@ rc_start_relay() {
         return 1
     fi
     # TLS 없는 --dev 기동은 relay 리스너를 평문으로 연다(iroh-relay v1.5.0 server/http_server.rs:467-468).
-    if ! grep -Fq "[HTTP/WS] relay: serving on [::]:$http_port" <<<"$logs"; then
+    if ! rc_listener_line_ok "$logs" "$http_port"; then
         RC_LAST_FAIL="stage=log reason=no-http-listener-line"
         rc_dump_logs "$cid"
         return 1
@@ -400,6 +413,17 @@ rc_self_test() {
     st_expect rx-inline "7 -" "$(rc_toml_rx "$t/inline.toml")"
     got=$(printf '%s\n' 'access: SharedTokenAccess(' '    "tok\"en-a",' 'bearer_token: Some("b-1"),' | rc_mask | tr '\n' ' ')
     st_expect mask-tokens 'access: SharedTokenAccess(     "<masked>", bearer_token: Some("<masked>"), ' "$got"
+    rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:3340' 3340
+    st_expect listener-ipv4 0 "$?"
+    rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on [::]:3340' 3340
+    st_expect listener-ipv6 0 "$?"
+    rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:8080' 3340
+    st_expect listener-other-port-rejected 1 "$?"
+    rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:33400' 3340
+    st_expect listener-longer-port-rejected 1 "$?"
+    printf "http_bind_addr = '[::]:8080'\n" > "$t/literal.toml"
+    st_expect port-literal-string 8080 "$(rc_toml_port "$t/literal.toml" http_bind_addr 3340)"
+    st_expect port-default 9090 "$(rc_toml_port "$t/literal.toml" metrics_bind_addr 9090)"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
