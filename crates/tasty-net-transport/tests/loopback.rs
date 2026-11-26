@@ -272,9 +272,9 @@ fn a_refused_bulk_attempt_does_not_hold_the_acceptor_for_the_drain_cap() {
     drop(link);
 }
 
-/// One TCP socket handle shared by a test channel's halves and its [`CodedControl`]. The
-/// timeouts the control sets must be on the handle the halves read and write: on Windows a
-/// `try_clone` copy does not share them.
+/// One TCP socket handle shared by a test channel's halves and its [`CodedControl`]: the
+/// timeouts the control sets are on the handle the halves read and write, as in
+/// `RawChannel::from_tcp`.
 #[derive(Clone)]
 struct SharedTcp(Arc<TcpStream>);
 

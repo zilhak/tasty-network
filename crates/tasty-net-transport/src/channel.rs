@@ -26,8 +26,7 @@ use crate::transport::TransportKind;
 /// Control of one channel, shared by its reader, its writer and whoever closes it.
 ///
 /// A transport implements it for its channel type. Timeouts apply to every half of the
-/// channel, so they are set on the handle the halves read and write: on Windows a socket
-/// copy made with `try_clone` does not share them. A read that times out returns `WouldBlock` or `TimedOut`, the kinds
+/// channel. A read that times out returns `WouldBlock` or `TimedOut`, the kinds
 /// [`ReadFailure::HeartbeatTimeout`] stands for.
 pub trait ChannelControl: Send + Sync {
     /// Sets the timeout of every later read on this channel. `None` blocks without a limit.
@@ -95,9 +94,11 @@ impl RawChannel {
         Self::from_tcp_as(stream, TransportKind::Tcp)
     }
 
-    /// The reader, the writer and the control share one socket handle. A `try_clone` copy
-    /// would not do: on Windows the timeouts set on one handle do not reach a read or write
-    /// on another, so a read waited past the timeout the control set.
+    /// The reader, the writer and the control share one socket handle: the timeouts the
+    /// control sets are on the handle every read and write goes through. A Windows CI run
+    /// once saw a refusal's linger read wait 120 s past its drain cap when each part had its
+    /// own `try_clone` copy; that the copies did not share the timeout is a hypothesis, not a
+    /// confirmed cause.
     pub(crate) fn from_tcp_as(stream: TcpStream, kind: TransportKind) -> io::Result<Self> {
         stream.set_nodelay(true)?;
         let stream = Arc::new(stream);
