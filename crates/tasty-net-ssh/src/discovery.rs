@@ -1170,7 +1170,8 @@ pub fn detect_port_mode<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helper::{Orphan, helper_command};
+    use crate::test_helper::{Orphan, helper_command, process_runs};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A command that fails if it is ever started. Tells an early return from a spawn.
     fn unspawnable_command() -> Command {
@@ -1180,6 +1181,18 @@ mod tests {
     /// A child that runs for 60 s and has no descendants (on every OS).
     fn never_returns_command() -> Command {
         helper_command("sleep")
+    }
+
+    /// A spawn hook that records the PID of the child it starts.
+    fn recording_hook() -> (SpawnHook, std::sync::Arc<AtomicU32>) {
+        let pid = std::sync::Arc::new(AtomicU32::new(0));
+        let seen = std::sync::Arc::clone(&pid);
+        let hook = SpawnHook::new(move |mut cmd: Command| {
+            let child = cmd.spawn()?;
+            seen.store(child.id(), Ordering::Release);
+            Ok(child)
+        });
+        (hook, pid)
     }
 
     fn capture(cmd: Command, budget: Duration, what: &str) -> Result<String, PortDiscoveryError> {
@@ -2183,17 +2196,30 @@ mod tests {
     fn cancel_stops_the_wait_for_a_held_output() {
         let handle = SshCancel::new();
         let _scope = handle.scope();
+        let mut orphan = Orphan::new("cancel-held");
+        let (hook, child_pid) = recording_hook();
         let killer = handle.clone();
+        let pid_file = orphan.pid_file().to_path_buf();
+        // Cancel only once the grandchild's PID is out and the direct child has ended, so the
+        // cancel meets the wait for the held output, not the helper itself.
         let t = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(700));
+            let limit = Instant::now() + Duration::from_secs(10);
+            loop {
+                let pid = child_pid.load(Ordering::Acquire);
+                if pid != 0 && pid_file.exists() && !process_runs(pid) {
+                    break;
+                }
+                assert!(Instant::now() < limit, "the helper did not settle");
+                std::thread::sleep(Duration::from_millis(10));
+            }
             killer.cancel();
         });
-        let mut orphan = Orphan::new("cancel-held");
         let started = Instant::now();
-        let err = capture(
+        let err = run_capture_with_budget(
             orphan.command(30, 0),
             Duration::from_secs(20),
             "orphan cancel",
+            &hook,
         )
         .expect_err("cancelled");
         let elapsed = started.elapsed();

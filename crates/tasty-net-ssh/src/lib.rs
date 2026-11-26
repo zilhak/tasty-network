@@ -322,7 +322,6 @@ pub(crate) mod test_helper {
         }
 
         /// Where the PID goes. A shell fake can write a background job's PID here too.
-        #[cfg(unix)]
         pub(crate) fn pid_file(&self) -> &std::path::Path {
             &self.pid_file
         }
@@ -366,20 +365,30 @@ pub(crate) mod test_helper {
         }
     }
 
+    /// Whether process `pid` runs (a zombie does not).
+    pub(crate) fn process_runs(pid: u32) -> bool {
+        pid_runs(&pid.to_string())
+    }
+
     #[cfg(unix)]
     fn kill_pid(pid: &str) {
         let _status = Command::new("kill").args(["-KILL", pid]).status();
     }
 
+    /// The `ps` state of `pid`: empty when there is no such process, `None` when `ps` fails.
+    #[cfg(unix)]
+    fn pid_stat(pid: &str) -> Option<String> {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     /// Whether `pid` still runs. A zombie waiting for its new parent to reap it does not run.
     #[cfg(unix)]
     fn pid_runs(pid: &str) -> bool {
-        let Ok(out) = Command::new("ps").args(["-o", "stat=", "-p", pid]).output() else {
-            return true;
-        };
-        let stat = String::from_utf8_lossy(&out.stdout);
-        let stat = stat.trim();
-        !stat.is_empty() && !stat.starts_with('Z')
+        pid_stat(pid).is_none_or(|stat| !stat.is_empty() && !stat.starts_with('Z'))
     }
 
     /// `taskkill /F` ends the process with TerminateProcess.
@@ -392,16 +401,26 @@ pub(crate) mod test_helper {
             .status();
     }
 
+    /// The `tasklist` row of `pid`: empty when there is no such process, `None` when it fails.
+    /// Windows has no zombies; an exited process whose handle is still open is not listed.
     #[cfg(windows)]
-    fn pid_runs(pid: &str) -> bool {
+    fn pid_stat(pid: &str) -> Option<String> {
         let filter = format!("PID eq {pid}");
-        let Ok(out) = Command::new("tasklist")
+        let out = Command::new("tasklist")
             .args(["/FI", &filter, "/NH", "/FO", "CSV"])
             .output()
-        else {
-            return true;
-        };
-        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+            .ok()?;
+        let rows = String::from_utf8_lossy(&out.stdout).into_owned();
+        Some(if rows.contains(&format!("\"{pid}\"")) {
+            rows
+        } else {
+            String::new()
+        })
+    }
+
+    #[cfg(windows)]
+    fn pid_runs(pid: &str) -> bool {
+        pid_stat(pid).is_none_or(|row| !row.is_empty())
     }
 }
 
