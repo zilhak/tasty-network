@@ -11,15 +11,18 @@
 | D1 | 세 OS CI | `.github/workflows/ci.yml`의 실행 하나: fmt 잡, clippy·test 잡 × `ubuntu-latest`·`macos-latest`·`windows-latest` | workspace 전체 fmt·clippy(`-D warnings`)·test 통과 | CI 실행 ID, 잡별 결론 |
 | D2 | SSH 정방향 attach | `crates/tasty-net-demo/tests/ssh_attach.rs`의 `connect_and_echo`, `reconnect_after_tunnel_kill`, `reconnect_after_server_restart`, `wrong_token_is_rejected_without_retry` (세 OS) | 별도 OS 프로세스 두 개가 실제 `ssh` 터널로 연결·끊기·재연결하고, 틀린 토큰은 재시도 없이 끝남 | D1 실행의 잡 로그에서 시험마다 `test <이름> ... ok` 줄과 `sshd=` 줄 |
 | D3 | SSH 역할 반전 attach | `crates/tasty-net-demo/tests/ssh_reverse_attach.rs`의 `reversed_holder_echo`, `reconnect_after_tunnel_kill`, `refused_proposal_stops_without_retry`, `self_attach_is_rejected` (세 OS) | SSH를 띄운 쪽이 아닌 쪽이 holder가 되고, 터널이 끊기면 SSH를 띄운 쪽이 복구함 | D2와 같음 |
-| D4 | P2P(iroh) 직접 연결 | `crates/tasty-net-demo/tests/p2p_attach.rs`의 `direct_path_on_loopback`, `required_direct_path_times_out`, `direct_path_lost_closes_link`, `relay_allowed_keeps_relayed_link`, `unpaired_peer_is_closed_before_handshake`, `different_relays_connect_with_pairing_address`, `bulk_transfer_matches_bytes` (세 OS) | 별도 OS 프로세스 두 개가 relay를 거쳐 직접 경로로 바뀌고, 1안 정책과 페어링 거절이 동작함 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
-| D5 | relay 서버 동작 | (a) `.github/workflows/relay.yml`의 `relay-config-check` 잡. (b) 원격 빌드 환경에서 `relay/container-check.sh` 실행(relay 작업이 만든다): `n0computer/iroh-relay:v1.5.0` 컨테이너를 CI와 같은 설정 두 개(TLS·QUIC 주소 확인 제외)로 각각 띄우고 `p2p-peer` 두 개를 붙임 | (a) 두 설정으로 relay가 뜨고 HTTP·metrics가 응답함. (b) 실제 relay 프로세스를 거쳐 연결되고 선택 경로가 직접으로 바뀜 | (a) CI 실행 ID. (b) 스크립트 종료 코드, 설정마다의 `relay-check config=<이름> result=ok` 줄, `p2p-peer` 로그의 경로 바뀜 줄, 실행 sha. TLS와 QUIC 주소 확인은 D5에서 판정하지 않는다([relay](relay.md) "배포 형태") |
+| D4 | P2P(quinn) 연결 | (a) `tasty-net-p2p`의 `tests/punch.rs`·`tests/lifecycle.rs`·`tests/two_process.rs`와 `tasty-net-rendezvous`의 `tests/server.rs`([CI와 시험 환경](testing.md#시험-목록-요약-정확한-조건은-시험-파일이-정본)) (세 OS). (b) `tasty-net-transport`의 `tests/p2p_adapter.rs` (세 OS). (c) `crates/tasty-net-demo/tests/p2p_attach.rs`의 `p2p_attach_echo`, `unpaired_peer_is_refused`, `bulk_transfer_matches_bytes` (세 OS) | (a) 프로세스 안 서버와 모의 NAT에서 NAT 조합별 펀칭·실패 사유, 정책(꺼짐, 다른 서버, 페어링 거절, 자기 연결), 재연결·keepalive·상태 기계, 서버의 중계 없음, 예제 두 프로세스 연결. (b) 어댑터 위 채널 계약. (c) 별도 OS 프로세스 두 개의 transport 위 P2P 링크 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
+| D5 | rendezvous 서버 동작 | (a) `.github/workflows/rendezvous.yml`의 `rendezvous-check` 잡(지금의 `relay.yml`·`relay-config-check`를 바꾼다, 후속 작업이 만든다). (b) 원격 빌드 환경에서 `rendezvous/container-check.sh` 실행: 이 레포가 빌드한 서버 이미지를 띄우고 같은 망의 두 기기(또는 같은 머신의 두 프로세스)가 `p2p_peer` 예제로 붙음 | (a) 예시 설정으로 서버가 뜨고 주·보조 포트가 STUN에 응답하며 설정값 조회가 동작함. (b) 실제 서버 프로세스로 소개받아 직접 연결되고 서버가 기기 사이 패킷을 받지 않음 | (a) CI 실행 ID. (b) 스크립트 종료 코드, `rendezvous-check result=ok` 줄, 예제의 연결 정보 출력(경로·주소쌍·서버), 실행 sha. 다른 망 확인은 D5에 넣지 않는다(P1) |
 | D6 | 원격 빌드 환경 전체 시험 | 같은 sha에서 `cargo test --workspace --locked` | CI와 다른 환경에서도 전체 시험 통과 | 종료 코드, 로그 위치(판정 기록에) |
 | D7 | tasty 의존 없음 | CI 단계 `no-tasty-deps`(`scripts/check-no-tasty-deps.sh`, 레포 기반 작업이 만든다) | `cargo metadata`에서 tasty 레포를 가리키는 git 의존과, `manifest_path`가 이 workspace 루트 밖인 path 의존이 모두 0개(이 workspace 안의 path 의존은 제외) | D1 실행의 단계 결론 |
+| D8 | P2P 크레이트 격리·단독 실행 | CI 단계 `p2p-isolation`(후속 작업이 `scripts/check.sh`에 만든다)과 `cargo test -p tasty-net-p2p --locked`·`cargo test -p tasty-net-rendezvous --locked` 단독 실행 (세 OS) | 두 크레이트의 workspace 안 의존이 identity(와 p2p → rendezvous)뿐이고, 각 크레이트가 단독으로 시험을 통과함([크레이트 구성](crates.md#p2p-크레이트-격리)) | D1 실행의 단계 결론과 단독 실행 잡 로그 |
+| D9 | 연결 목록 | [CI와 시험 환경](testing.md#연결-목록-시험)의 `connection_table_reports_ssh_forward`, `connection_table_reports_ssh_role_reversed`, `connection_table_reports_p2p`, `history_is_capped`, `closed_entries_are_capped` (세 OS) | 연결 목록이 세 경로 각각에서 기기·경로·주소쌍·서버·상태·전이 원인을 맞게 보고함([전송 추상화](transport.md#연결-목록)) | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
+| D10 | 설정값 노출 | `settings_list_matches_query`(p2p, rendezvous), `connection_reports_applied_settings`(p2p), CI 단계 `no-hidden-constants`(후속 작업이 만든다) | 설정 항목 전체와 조회 결과가 같고 출처가 맞으며, 설정 모듈 밖에 숨은 시간·횟수 리터럴이 없음([CI와 시험 환경](testing.md#설정값-시험)). 대상은 P2P·rendezvous 크레이트이고, 기존 크레이트는 규칙을 맞추는 후속 작업 때 더한다 | D1 실행의 잡 로그와 단계 결론 |
 
 기준에 넣지 않은 것과 이유:
 
 - 토폴로지: 지금 tasty에 없는 새 기능이고 전송 API에 영향을 주지 않는다. 단위 시험은 D1에 포함되어 돈다.
-- 펀칭 실험: [P2P](p2p.md) "동작 수준 기준과의 관계"에 근거를 적었다. 아래 P1로 둔다.
+- 다른 망 사이의 펀칭 실험: [P2P](p2p.md#동작-수준-기준과의-관계)에 근거를 적었다. 아래 P1로 둔다.
 
 ## 판정 규칙
 
@@ -42,11 +45,14 @@
 | D5 | | | | |
 | D6 | | | | |
 | D7 | | | | |
+| D8 | | | | |
+| D9 | | | | |
+| D10 | | | | |
 
 ## P2P를 사용자에게 내놓기 전 기준
 
-이 절은 tasty 전환 시작 판단에 쓰지 않는다. hub relay 배포와 P2P 사용자 공개의 선행 조건이다.
+이 절은 tasty 전환 시작 판단에 쓰지 않는다. hub rendezvous 배포와 P2P 사용자 공개의 선행 조건이다.
 
 | # | 항목 | 증거 형태 |
 |---|---|---|
-| P1 | 펀칭 실험으로 `direct_wait` 기본값과 `punch-only` 수신 상한을 확정하고 `relay/punch-only.toml`·P2P 기본값에 반영 | [P2P](p2p.md) "결과" 표, 반영 커밋 sha |
+| P1 | hub rendezvous 배포 때 다른 망 사이 펀칭 실험으로 `punch.window`·`quic.handshake_timeout` 기본값을 확정하고 P2P 설정 기본값에 반영. 망 조합별 성공률을 기록 | [P2P](p2p.md#결과-실험-뒤-채운다) 표, 반영 커밋 sha |
