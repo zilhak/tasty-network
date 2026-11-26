@@ -300,7 +300,7 @@ impl Scene {
     fn finish(mut self) {
         let sshd_pids = self.sshd.take().expect("sshd").stop();
         self.tracked.extend(sshd_pids);
-        let (left, errors) = check_all_gone(&self.tracked, Duration::from_secs(15));
+        let GoneCheck { left, errors } = check_all_gone(&self.tracked, Duration::from_secs(15));
         log(&format!(
             "processes left after the test: {} of {} tracked ({}){}",
             left.len(),
@@ -334,13 +334,16 @@ impl Scene {
     }
 }
 
-/// Waits up to `timeout` until none of `pids` runs, checking each PID every round even when
-/// the query of another fails. Returns the PIDs that still ran, and the PIDs whose last query
+/// What [`check_all_gone`] found: the PIDs that still ran, and the PIDs whose last query
 /// failed with its error (they may run).
-fn check_all_gone(
-    pids: &[(String, u32)],
-    timeout: Duration,
-) -> (Vec<(String, u32)>, Vec<(u32, String)>) {
+struct GoneCheck {
+    left: Vec<(String, u32)>,
+    errors: Vec<(u32, String)>,
+}
+
+/// Waits up to `timeout` until none of `pids` runs, checking each PID every round even when
+/// the query of another fails.
+fn check_all_gone(pids: &[(String, u32)], timeout: Duration) -> GoneCheck {
     let deadline = Instant::now() + timeout;
     loop {
         let mut left = Vec::new();
@@ -353,7 +356,7 @@ fn check_all_gone(
             }
         }
         if (left.is_empty() && errors.is_empty()) || Instant::now() >= deadline {
-            return (left, errors);
+            return GoneCheck { left, errors };
         }
         std::thread::sleep(Duration::from_millis(200));
     }
