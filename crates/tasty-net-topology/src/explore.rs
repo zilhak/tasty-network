@@ -409,6 +409,7 @@ impl Agent {
         now: Now,
     ) {
         let me = self.me.device_id;
+        self.answered.retain(|_, seen| seen.expires > now.mono);
         let deadline = now.mono + Duration::from_millis(query.remaining_ms.min(MAX_QUERY_MS));
         if query.path.is_empty() && query.origin != me {
             self.relay_route(from, query, local, out, now, deadline);
@@ -965,7 +966,12 @@ impl Agent {
             .filter(|e| e.state == ExplorationState::Running)
             .map(|e| e.deadline);
         let routes = self.routes.values().map(|r| r.expires);
-        waits.chain(explorations).chain(routes).min()
+        let answered = self.answered.values().map(|seen| seen.expires);
+        waits
+            .chain(explorations)
+            .chain(routes)
+            .chain(answered)
+            .min()
     }
 }
 
@@ -1030,5 +1036,82 @@ fn branch_and_from(reply: &Message) -> (String, DeviceId) {
         Message::Suppressed(m) => (m.branch.clone(), m.from),
         Message::Done(m) => (m.branch.clone(), m.from),
         Message::Query(m) => (m.branch.clone(), m.requester),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Side, TransportKind};
+    use tasty_net_identity::DeviceKey;
+
+    fn id(n: u8) -> DeviceId {
+        DeviceKey::from_seed([n; 32]).id()
+    }
+
+    struct Sink;
+
+    impl Outbox for Sink {
+        fn send(&mut self, _: &DeviceId, _: &Message) -> Result<(), SendError> {
+            Ok(())
+        }
+    }
+
+    fn query(request_id: &str) -> Query {
+        Query {
+            request_id: request_id.into(),
+            requester: id(1),
+            origin: id(1),
+            route: Vec::new(),
+            path: vec![id(1)],
+            depth: 0,
+            remaining_ms: 1_000,
+            branch: "b".into(),
+        }
+    }
+
+    #[test]
+    fn answer_records_of_a_device_that_does_not_forward_expire_on_its_timer() {
+        let me = SelfInfo {
+            device_id: id(2),
+            display_name: None,
+        };
+        let mut agent = Agent::new(me, AgentConfig::default());
+        let links = [LocalLink {
+            peer: id(1),
+            local_side: Side::Acceptor,
+            holder: Side::Dialer,
+            transport: TransportKind::SshForward,
+            rtt: None,
+            connected_at: 0,
+            workspace: None,
+            kind: LinkKind::Attach,
+        }];
+        let local = Local {
+            links: &links,
+            failures: &[],
+            sharing: Sharing::default(),
+        };
+        let start = Instant::now();
+        let at = |ms: u64| Now {
+            mono: start + Duration::from_millis(ms),
+            unix_ms: ms,
+        };
+        // Depth 0: nothing to wait for, only the answer record.
+        agent.on_message(&id(1), Message::Query(query("r1")), local, &mut Sink, at(0));
+        assert!(agent.waits.is_empty());
+        assert_eq!(agent.answered.len(), 1);
+        let due = agent.next_deadline().expect("the record has a timer");
+        assert_eq!(due, start + Duration::from_millis(1_000));
+
+        agent.poll(&mut Sink, at(1_000));
+        assert_eq!(agent.answered.len(), 0);
+        assert_eq!(agent.next_deadline(), None);
+
+        // A new query past an old record's expiry clears it too, without a poll.
+        agent.answer_query(Some(&id(1)), query("r2"), local, &mut Sink, at(2_000));
+        agent.answer_query(Some(&id(1)), query("r3"), local, &mut Sink, at(3_500));
+        assert_eq!(agent.answered.len(), 1);
+        assert!(agent.answered.contains_key("r3"));
     }
 }
