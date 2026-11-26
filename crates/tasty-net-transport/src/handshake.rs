@@ -478,7 +478,10 @@ impl Io<'_> {
             .control()
             .set_write_timeout(Some(left))
             .map_err(HandshakeError::Io)?;
-        write_frame(&mut *self.ch, StreamTag::Control, payload).map_err(|e| self.fail(e))
+        write_frame(&mut *self.ch, StreamTag::Control, payload).map_err(|e| self.fail(e))?;
+        // A frame whose partial writes ran past the deadline is not taken as sent in time: the
+        // handshake ends with `TimedOut` (an accepting attach then revokes its credential).
+        self.left().map(drop)
     }
 
     fn write_line(&mut self, line: &[u8]) -> Result<(), HandshakeError> {

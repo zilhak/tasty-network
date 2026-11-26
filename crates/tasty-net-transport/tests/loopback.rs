@@ -549,3 +549,90 @@ fn a_cancel_during_the_approval_wait_is_cancelled_over_tcp() {
     assert!(dialer.join().expect("dialer").is_err());
     assert_eq!(policy.links.load(Ordering::SeqCst), 0);
 }
+
+/// A writer whose `slow_at`-th write call (counted from 1) waits `delay` first.
+struct SlowWriter {
+    inner: TcpStream,
+    calls: usize,
+    slow_at: usize,
+    delay: Duration,
+}
+
+impl io::Write for SlowWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.calls += 1;
+        if self.calls == self.slow_at {
+            std::thread::sleep(self.delay);
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// An ACK whose write completes only after the handshake deadline does not make a link: the
+/// accepting attach ends with `TimedOut` and revokes the credential it issued.
+#[test]
+fn an_ack_written_past_the_deadline_times_out_and_revokes_its_credential() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let policy = Arc::new(common::EchoPolicy::default());
+    let config = AcceptConfig::new(key(2), "acceptor-1", Some(token('a')), policy.clone())
+        .with_timeouts(LinkTimeouts {
+            handshake_timeout: Duration::from_millis(800),
+            ..timeouts()
+        });
+    let registry = config.clone();
+    let acceptor = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let control = Arc::new(CodedControl {
+            stream: stream.try_clone().expect("clone"),
+            reason: std::sync::Mutex::new(None),
+        });
+        let mut channel = RawChannel::new(
+            Box::new(stream.try_clone().expect("clone")),
+            // Write 1 is the challenge, write 2 the success ACK.
+            Box::new(SlowWriter {
+                inner: stream,
+                calls: 0,
+                slow_at: 2,
+                delay: Duration::from_millis(1200),
+            }),
+            control,
+            TransportKind::Tcp,
+        );
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(channel, &line, Vec::new(), &config, &AttemptCancel::new())
+    });
+    let transport = Loopback {
+        addr,
+        token: token('a'),
+    };
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let dialer = dial_handshake(conn, &client(), Holder::Dialer, None, &AttemptCancel::new());
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::TimedOut)),
+        "{result:?}"
+    );
+    assert_eq!(
+        policy.links.load(Ordering::SeqCst),
+        1,
+        "the domain accepted"
+    );
+    assert_eq!(
+        registry.bulk_registry().live(),
+        0,
+        "the credential was revoked"
+    );
+    drop(dialer);
+}
