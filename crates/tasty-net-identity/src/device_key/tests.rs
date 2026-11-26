@@ -278,6 +278,36 @@ fn a_directory_at_the_key_path_is_refused() {
     );
 }
 
+#[test]
+fn a_file_in_place_of_the_directory_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("keys");
+    fs::write(&dir, "not a directory").unwrap();
+    let error = DeviceKey::load_or_create(&dir).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            IdentityError::UnsafeFile {
+                reason: UnsafeReason::NotRegular,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(fs::read_to_string(&dir).unwrap(), "not a directory");
+}
+
+#[test]
+fn a_trailing_separator_names_the_same_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("keys");
+    let key = DeviceKey::load_or_create(&dir).unwrap();
+    let mut with_separator = dir.into_os_string();
+    with_separator.push(std::path::MAIN_SEPARATOR_STR);
+    let again = DeviceKey::load_or_create(Path::new(&with_separator)).unwrap();
+    assert_eq!(again.id(), key.id());
+}
+
 #[cfg(unix)]
 mod unix {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -370,6 +400,46 @@ mod unix {
             ),
             "{error:?}"
         );
+    }
+
+    fn assert_symlink_refused(dir: &Path) {
+        let error = DeviceKey::load_or_create(dir).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::UnsafeFile {
+                    reason: UnsafeReason::Symlink,
+                    ..
+                }
+            ),
+            "{}: {error:?}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn a_dangling_directory_link_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join("link");
+        symlink(root.path().join("missing"), &link).unwrap();
+        assert_symlink_refused(&link);
+        assert!(
+            !root.path().join("missing").exists(),
+            "nothing was created through the link"
+        );
+    }
+
+    #[test]
+    fn a_directory_link_with_a_trailing_slash_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = root.path().join("link");
+        symlink(&real, &link).unwrap();
+        let mut with_slash = link.into_os_string();
+        with_slash.push("/");
+        assert_symlink_refused(Path::new(&with_slash));
+        assert!(!real.join(DEVICE_KEY_FILE).exists());
     }
 
     #[test]

@@ -51,19 +51,33 @@ pub(crate) struct PrivateFile {
     pub(crate) contents: Vec<u8>,
 }
 
-/// Create `dir` if needed and make sure it is a private directory (Unix 0700). A wider
-/// existing directory is narrowed. A link in place of the directory is refused.
-pub(crate) fn prepare_dir(dir: &Path) -> Result<(), IdentityError> {
-    os::create_dir(dir).map_err(|e| IdentityError::io(FileOp::CreateDir, dir, e))?;
-    let meta =
-        std::fs::symlink_metadata(dir).map_err(|e| IdentityError::io(FileOp::CreateDir, dir, e))?;
-    if meta.file_type().is_symlink() {
-        return Err(IdentityError::unsafe_file(dir, UnsafeReason::Symlink));
+/// Make sure `dir` is a private directory (Unix 0700) and return it without trailing
+/// separators. The last path element is checked before anything is created: a link (also a
+/// dangling one) or a non-directory there is [`IdentityError::UnsafeFile`]. A missing directory
+/// is created; a wider existing one is narrowed.
+pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
+    // `a/link/` would let lstat follow the link; the components drop the trailing separator.
+    let dir: PathBuf = match dir.components().collect::<PathBuf>() {
+        p if p.as_os_str().is_empty() => PathBuf::from("."),
+        p => p,
+    };
+    let lstat = || std::fs::symlink_metadata(&dir);
+    let meta = match lstat() {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            os::create_dir(&dir).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+            lstat().map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?
+        }
+        Err(e) => return Err(IdentityError::io(FileOp::CreateDir, &dir, e)),
+    };
+    if os::is_link(&meta) {
+        return Err(IdentityError::unsafe_file(&dir, UnsafeReason::Symlink));
     }
     if !meta.is_dir() {
-        return Err(IdentityError::unsafe_file(dir, UnsafeReason::NotRegular));
+        return Err(IdentityError::unsafe_file(&dir, UnsafeReason::NotRegular));
     }
-    os::narrow_dir(dir, &meta).map_err(|e| IdentityError::io(FileOp::CreateDir, dir, e))
+    os::narrow_dir(&dir, &meta).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+    Ok(dir)
 }
 
 /// A written private temporary file and the file ID read from its handle before it was closed.

@@ -198,7 +198,7 @@ impl ConnectionRecord {
     pub fn publish(&self, path: &Path) -> Result<RecordPublication, IdentityError> {
         let name = record_name(path)?;
         let dir = parent_of(path);
-        secret_file::prepare_dir(dir)?;
+        let dir = &secret_file::prepare_dir(dir)?;
         let target = target_of(path)?;
         let _lock = secret_file::lock(&target)?;
         refuse_non_regular(&target)?;

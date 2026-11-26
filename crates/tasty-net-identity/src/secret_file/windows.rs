@@ -49,6 +49,11 @@ pub(super) fn create_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+/// A symbolic link, junction or any other reparse point.
+pub(super) fn is_link(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
 /// Windows has no directory mode bits; the contract is on the files.
 pub(super) fn narrow_dir(_dir: &Path, _meta: &std::fs::Metadata) -> io::Result<()> {
     Ok(())

@@ -20,6 +20,10 @@ pub(super) fn create_dir(dir: &Path) -> io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
+pub(super) fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
 pub(super) fn narrow_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let mode = meta.mode() & 0o7777;
     if mode & 0o077 == 0 {

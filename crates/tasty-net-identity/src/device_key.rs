@@ -34,7 +34,7 @@ impl DeviceKey {
     ///
     /// When the OS random source fails.
     pub fn load_or_create(dir: &Path) -> Result<Self, IdentityError> {
-        secret_file::prepare_dir(dir)?;
+        let dir = &secret_file::prepare_dir(dir)?;
         let path = dir.join(DEVICE_KEY_FILE);
         if let Some(key) = read(&path)? {
             return Ok(key);
