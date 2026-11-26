@@ -968,6 +968,32 @@ impl Agent {
             return;
         }
         let (branch, from) = branch_and_from(&reply);
+        // A reply of a branch this device forwarded must be from that branch's neighbor,
+        // on that neighbor's link, for the same request.
+        if let Some(parent) = self.children.get(&branch) {
+            let request_id = reply.request_id();
+            let matches = self.waits.get(parent).is_some_and(|wait| {
+                wait.request_id == request_id
+                    && wait.pending.get(&branch).is_some_and(|child| {
+                        child.peer == from && link.is_none_or(|l| *l == child.peer)
+                    })
+            });
+            if !matches {
+                tracing::debug!("topology reply that does not match its branch dropped");
+                return;
+            }
+        }
+        // A final done for this device's own exploration counts only from the link the
+        // end can come on: the first hop, or this device itself when it is the origin.
+        if return_path(&reply).len() == 1
+            && let Message::Done(done) = &reply
+            && done.is_final
+            && let Some(exploration) = self.explorations.get(&done.request_id)
+            && link != exploration.first_hop.as_ref()
+        {
+            tracing::debug!("topology final done from a link that cannot end it dropped");
+            return;
+        }
         let relay_key = (reply.request_id().to_owned(), branch.clone(), from);
         if self.failed_relays.contains_key(&relay_key) {
             tracing::debug!("topology reply of a branch whose relay failed dropped");
@@ -1007,6 +1033,9 @@ impl Agent {
         let Some(wait) = self.waits.get_mut(&parent) else {
             return;
         };
+        if wait.request_id != reply.request_id() {
+            return;
+        }
         let Some(child) = wait.pending.get_mut(&branch) else {
             return;
         };

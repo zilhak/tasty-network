@@ -1293,3 +1293,74 @@ fn a_hop_timeout_of_duration_max_does_not_panic() {
     assert_eq!(x.state(), ExplorationState::Finished);
     assert_eq!(status(x, C), NodeStatus::TimedOut);
 }
+
+/// The branch of the query `from` sent to `to`, still in flight.
+fn queued_branch(net: &Net, from: u8, to: u8) -> String {
+    net.queue
+        .iter()
+        .find_map(|m| match &m.message {
+            Message::Query(q) if m.from == id(from) && m.to == id(to) => Some(q.branch.clone()),
+            _ => None,
+        })
+        .expect("query in flight")
+}
+
+#[test]
+fn a_reply_on_a_waited_link_but_for_another_branch_is_dropped() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C);
+    // Both queries are still in flight, so A waits on both B and C.
+    net.delay.push(Box::new(|from, _, m| {
+        (from == id(A) && matches!(m, Message::Query(_))).then_some(1_000)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    let c_branch = queued_branch(&net, A, C);
+
+    // From B's link, a result claiming to be C's answer to C's branch.
+    let forged = tasty_net_topology::ResultPart {
+        request_id: rid.clone(),
+        branch: c_branch,
+        from: id(C),
+        return_path: vec![id(A)],
+        part: 0,
+        last: true,
+        nodes: vec![tasty_net_topology::Node {
+            device_id: Some(id(D)),
+            display_name: None,
+            status: NodeStatus::Online,
+            reason: None,
+            reported_by: Some(id(C)),
+            peer_hint: None,
+            explored_at: 0,
+        }],
+        edges: Vec::new(),
+    };
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(B), Message::Result(forged), local, out, now)
+    });
+    assert!(net.result(A, &rid).node(&id(D)).is_none());
+
+    // From B's link, a final done in the origin's name: A is the origin, so no link can
+    // end its exploration.
+    let forged_final = tasty_net_topology::Done {
+        request_id: rid.clone(),
+        branch: "x".into(),
+        from: id(A),
+        return_path: vec![id(A)],
+        timed_out: vec![id(D)],
+        is_final: true,
+        more: false,
+    };
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(B), Message::Done(forged_final), local, out, now)
+    });
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Running);
+    assert!(x.node(&id(D)).is_none());
+
+    // The control: the real answers still finish it.
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+}
