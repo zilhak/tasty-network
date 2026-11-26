@@ -1663,10 +1663,11 @@ fn a_route_hop_relays_only_the_final_done_of_the_branch_it_forwarded() {
     net.with_agent(id(B), |agent, local, out, now| {
         agent.on_message(&id(C), wrong, local, out, now)
     });
+    // B relayed nothing of it to A (C's real done is still on its way to B).
     assert!(
         net.queue
             .iter()
-            .all(|m| !matches!(&m.message, Message::Done(_)))
+            .all(|m| m.from != id(B) || !matches!(&m.message, Message::Done(_)))
     );
     net.run();
     let x = net.result(A, &rid);
