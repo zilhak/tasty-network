@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 이 clone의 Git 훅 경로를 .githooks로 정하고 ShellCheck와 Cargo 의존을 준비한다.
-# 사용: bash scripts/dev-setup.sh. ShellCheck 설치와 의존 받기의 실패는 안내만 하고 계속한다.
+# 사용: bash scripts/dev-setup.sh. 모든 단계를 돌린 뒤, ShellCheck가 PATH에 없으면 종료 코드 1로 끝난다
+# (그 상태로는 셸 파일 커밋을 pre-commit이 막는다). Cargo 의존 받기의 실패는 안내만 한다.
 # core.hooksPath는 clone의 공용 설정이라 그 clone의 모든 worktree가 함께 쓴다.
 
 set -e
@@ -38,11 +39,15 @@ chmod +x .githooks/* 2>/dev/null || true
 
 echo
 yellow "[2/3] 셸 정적 검사기 (shellcheck)"
-if bash scripts/install-shellcheck.sh; then
-    green "  준비됨"
+SHELLCHECK_READY=0
+bash scripts/install-shellcheck.sh || true
+if command -v shellcheck >/dev/null 2>&1; then
+    SHELLCHECK_READY=1
+    green "  준비됨: $(command -v shellcheck)"
 else
-    yellow "  ▸ 받지 못했습니다. 배포판 패키지(apt·brew·pacman의 shellcheck)로 받아도 됩니다."
-    yellow "    그때까지 셸 파일을 커밋하면 pre-commit의 A.3이 판정 불가로 커밋을 막습니다."
+    red "  ✘ shellcheck를 PATH에서 찾지 못했습니다."
+    red "    위 안내대로 설치 위치를 PATH에 더하거나 배포판 패키지(apt·brew·pacman·scoop의 shellcheck)로 설치한 뒤"
+    red "    이 스크립트를 다시 실행해 주세요. 그때까지 pre-commit의 A.3이 커밋을 막습니다."
 fi
 
 echo
@@ -56,5 +61,9 @@ else
 fi
 
 echo
+if [ "$SHELLCHECK_READY" -ne 1 ]; then
+    red "✘ 준비가 끝나지 않았습니다: shellcheck가 없습니다. 훅 경로는 설정됐습니다."
+    exit 1
+fi
 green "✓ 준비 완료"
 echo "이제 git commit·git merge·git push 때 검사가 돕니다. 검사 범위: docs/dev-guide/git-hooks.md"

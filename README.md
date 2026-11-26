@@ -18,7 +18,7 @@ After cloning, run once:
 bash scripts/dev-setup.sh
 ```
 
-It points `core.hooksPath` at `.githooks`, so commits, merges, and pushes run the checks, and prepares shellcheck and the cargo dependencies. All checks go through one entry point:
+It points `core.hooksPath` at `.githooks`, so commits, merges, and pushes run the checks, and prepares shellcheck and the cargo dependencies. On Linux it installs a pinned shellcheck into `~/.local/bin`; elsewhere install shellcheck with your package manager (for example `brew install shellcheck` or `scoop install shellcheck`). If shellcheck is still not on `PATH`, the script ends with exit code 1, because the pre-commit hook would block commits without it; fix `PATH` and run it again. All checks go through one entry point:
 
 ```bash
 bash scripts/check.sh          # fmt, shellcheck, no-tasty-deps, clippy, test
