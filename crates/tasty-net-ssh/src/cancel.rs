@@ -55,10 +55,16 @@ impl SshCancel {
     }
 
     /// Marks the handle cancelled, then kills and reaps every registered child. Later discovery
-    /// steps under this handle do not start a child. Calling it more than once is safe.
+    /// steps under this handle do not start a child. Calling it more than once is safe. When it
+    /// returns, every child registered under this handle is killed and reaped.
     pub fn cancel(&self) {
-        self.request_cancel();
-        let children = std::mem::take(&mut *lock_slot(&self.inner.children));
+        // The flag is set while the list is locked, and `register` reads it under the same
+        // lock: a child is either in the list taken here or refused.
+        let children = {
+            let mut slot = lock_slot(&self.inner.children);
+            self.request_cancel();
+            std::mem::take(&mut *slot)
+        };
         for (_, mut child) in children {
             kill_and_reap(&mut child);
         }
@@ -69,15 +75,22 @@ impl SshCancel {
     }
 
     /// Registers a running child and returns its id. After cancellation the child is refused
-    /// and handed back so the caller kills it at once. A child registered while `cancel` runs
-    /// is caught by its owner, which sees the flag and kills it.
+    /// and handed back so the caller kills it at once. The flag is read under the list lock that
+    /// `cancel` sets it under, so `cancel` never misses a child registered alongside it.
     pub(crate) fn register(&self, child: Child) -> Result<u64, Child> {
+        let mut slot = lock_slot(&self.inner.children);
         if self.is_cancelled() {
             return Err(child);
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        lock_slot(&self.inner.children).push((id, child));
+        slot.push((id, child));
         Ok(id)
+    }
+
+    /// How many children are registered now.
+    #[cfg(test)]
+    pub(crate) fn registered(&self) -> usize {
+        lock_slot(&self.inner.children).len()
     }
 
     /// Takes child `id` back. `None` means [`SshCancel::cancel`] already took and killed it.
@@ -262,5 +275,36 @@ mod tests {
             .expect("sleep spawn");
         let mut rejected = handle.register(child).expect_err("refused after cancel");
         kill_and_reap(&mut rejected);
+        assert_eq!(handle.registered(), 0);
+    }
+
+    /// Registrations racing a cancel either land in the list `cancel` takes or are refused:
+    /// none is left registered after `cancel` returns.
+    #[test]
+    fn no_child_stays_registered_past_a_racing_cancel() {
+        use std::process::Stdio;
+        let handle = SshCancel::new();
+        let registrars: Vec<_> = (0..4)
+            .map(|_| {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let child = crate::test_helper::helper_command("sleep")
+                        .stdin(Stdio::null())
+                        .spawn()
+                        .expect("sleep spawn");
+                    if let Err(mut rejected) = h.register(child) {
+                        kill_and_reap(&mut rejected);
+                    }
+                })
+            })
+            .collect();
+        handle.cancel();
+        let left = handle.registered();
+        for r in registrars {
+            r.join().expect("registrar");
+        }
+        // Children registered before cancel were taken by it; later ones were refused.
+        assert_eq!(left, 0);
+        assert_eq!(handle.registered(), 0);
     }
 }

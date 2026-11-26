@@ -1977,7 +1977,12 @@ mod tests {
                 })
             })
             .collect();
-        std::thread::sleep(Duration::from_millis(500));
+        // Cancel only once both children are registered, so the test covers taking them.
+        let limit = Instant::now() + Duration::from_secs(10);
+        while handle.registered() < 2 {
+            assert!(Instant::now() < limit, "the children did not register");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let started = Instant::now();
         handle.cancel();
         for sleeper in sleepers {
