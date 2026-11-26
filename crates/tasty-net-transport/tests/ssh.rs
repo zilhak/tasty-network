@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tasty_net_frame::StreamTag;
@@ -58,6 +58,21 @@ struct FakeSsh {
     pids: Arc<Mutex<Vec<u32>>>,
     /// The preparing and go files of a gated fake.
     gate: Option<(PathBuf, PathBuf)>,
+    /// Held for the life of the fake (a test), declared last so it is released after the
+    /// fake's files are gone. A new tunnel's local port is reserved and released before ssh
+    /// binds it, so two tests starting tunnels at once can meet on one port: one test's
+    /// readiness probe then reaches the other's forwarder, which that test later reaps. The
+    /// tests that start tunnels run one at a time.
+    _one_at_a_time: MutexGuard<'static, ()>,
+}
+
+/// The lock that keeps tunnel-starting tests apart. A test that failed while holding it
+/// leaves it poisoned; the next test takes it all the same.
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    static TUNNEL_TESTS: Mutex<()> = Mutex::new(());
+    TUNNEL_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl FakeSsh {
@@ -72,6 +87,7 @@ impl FakeSsh {
     }
 
     fn build(name: &str, gated: bool) -> Self {
+        let one_at_a_time = one_at_a_time();
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
@@ -108,6 +124,7 @@ impl FakeSsh {
             tunnels,
             pids: Arc::new(Mutex::new(Vec::new())),
             gate,
+            _one_at_a_time: one_at_a_time,
         }
     }
 
