@@ -28,8 +28,18 @@ const LISTEN_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum Running {
-    OpenSsh { child: Child, path: PathBuf },
+    OpenSsh { child: Reaped, path: PathBuf },
     Russh(RusshServer),
+}
+
+/// The sshd child, killed and reaped on drop, so a test that panics leaves no sshd behind.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _killed = self.0.kill().is_ok();
+        let _reaped = self.0.wait().is_ok();
+    }
 }
 
 /// A running test SSH server and what a client needs to log in.
@@ -56,7 +66,7 @@ impl SshServer {
                         log(&format!(
                             "sshd=openssh path={} pid={} port={}",
                             path.display(),
-                            child.id(),
+                            child.0.id(),
                             server.port
                         ));
                     }
@@ -126,7 +136,7 @@ impl SshServer {
         let mut pids = Vec::new();
         match self.running {
             Running::OpenSsh { mut child, .. } => {
-                let pid = child.id();
+                let pid = child.0.id();
                 pids.push(("sshd".to_string(), pid));
                 let deadline = Instant::now() + Duration::from_secs(15);
                 let mut sessions = children_of(pid);
@@ -139,8 +149,8 @@ impl SshServer {
                     std::thread::sleep(Duration::from_millis(200));
                     sessions = children_of(pid);
                 }
-                let _killed = child.kill().is_ok();
-                let status = child.wait();
+                let _killed = child.0.kill().is_ok();
+                let status = child.0.wait();
                 log(&format!("sshd pid={pid} ended ({status:?})"));
                 assert!(
                     sessions.is_empty(),
@@ -341,7 +351,7 @@ fn start_openssh() -> Result<SshServer, String> {
             Ok(()) => {
                 let server = SshServer {
                     running: Running::OpenSsh {
-                        child,
+                        child: Reaped(child),
                         path: sshd.clone(),
                     },
                     port,
@@ -441,10 +451,8 @@ fn start_russh() -> Result<SshServer, String> {
 /// Ends a server that failed its checks; its PIDs are not tracked by a test.
 fn stop_quietly(server: SshServer) -> Vec<(String, u32)> {
     match server.running {
-        Running::OpenSsh { mut child, .. } => {
-            let _killed = child.kill().is_ok();
-            let _reaped = child.wait().is_ok();
-        }
+        // Dropping it kills and reaps sshd.
+        Running::OpenSsh { child, .. } => drop(child),
         Running::Russh(s) => s.stop(),
     }
     Vec::new()

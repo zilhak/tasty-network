@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use support::process::{Proc, log, terminate, wait_all_gone};
+use support::process::{Proc, is_running, log, terminate, wait_all_gone};
 use support::sshd::SshServer;
 use support::{TempDir, ssh_path};
 use tasty_net_demo::field;
@@ -51,12 +51,29 @@ fn number<T: std::str::FromStr>(line: &str, key: &str) -> T {
         .unwrap_or_else(|| panic!("no {key}= in {line:?}"))
 }
 
-/// One test's processes. Every PID it learns is checked at the end.
+/// One test's processes. Every PID it learns is checked at the end. When a test fails
+/// before [`Scene::finish`], dropping it ends the tracked processes that still run (the
+/// dialer's ssh children outlive a killed dialer) and the SSH server.
 struct Scene {
-    sshd: SshServer,
-    dir: TempDir,
+    sshd: Option<SshServer>,
+    dir: Option<TempDir>,
     record: PathBuf,
     tracked: Vec<(String, u32)>,
+    finished: bool,
+}
+
+impl Drop for Scene {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        for (what, pid) in &self.tracked {
+            if is_running(*pid) {
+                log(&format!("ending {what} {pid} left by a failed test"));
+                terminate(*pid);
+            }
+        }
+    }
 }
 
 impl Scene {
@@ -65,11 +82,16 @@ impl Scene {
         let dir = TempDir::new("scene");
         let record = dir.path().join("record.json");
         Self {
-            sshd,
-            dir,
+            sshd: Some(sshd),
+            dir: Some(dir),
             record,
             tracked: Vec::new(),
+            finished: false,
         }
+    }
+
+    fn sshd(&self) -> &SshServer {
+        self.sshd.as_ref().expect("the SSH server runs")
     }
 
     fn track(&mut self, what: &str, pid: u32) {
@@ -97,20 +119,21 @@ impl Scene {
     }
 
     fn start_dialer(&mut self, record: &Path) -> Proc {
+        let sshd = self.sshd();
         let mut command = Command::new(env!("CARGO_BIN_EXE_demo-dialer"));
         command
             .arg("--destination")
-            .arg(self.sshd.destination())
+            .arg(sshd.destination())
             .arg("--ssh-port")
-            .arg(self.sshd.port.to_string())
+            .arg(sshd.port.to_string())
             .arg("--identity")
-            .arg(ssh_path(&self.sshd.identity))
+            .arg(ssh_path(&sshd.identity))
             // The path goes into the remote shell command (`cat`, then `type`), so it keeps
             // the OS's own form; cmd's `type` needs backslashes.
             .arg("--record")
             .arg(record)
             .args(["--read-timeout-ms", READ_TIMEOUT_MS]);
-        for option in self.sshd.client_options() {
+        for option in sshd.client_options() {
             command.arg("--option").arg(option);
         }
         let mut dialer = Proc::spawn("demo-dialer", command);
@@ -162,7 +185,8 @@ impl Scene {
 
     /// Stops the SSH server and checks that no process of the test is left.
     fn finish(mut self) {
-        let sshd_pids = self.sshd.stop();
+        let sshd_pids = self.sshd.take().expect("sshd").stop();
+        self.finished = true;
         self.tracked.extend(sshd_pids);
         let left = wait_all_gone(&self.tracked, Duration::from_secs(15));
         log(&format!(
@@ -179,7 +203,9 @@ impl Scene {
             terminate(*pid);
         }
         assert!(left.is_empty(), "processes left after the test: {left:?}");
-        self.dir.remove();
+        if let Some(dir) = self.dir.take() {
+            dir.remove();
+        }
     }
 }
 
@@ -204,7 +230,7 @@ fn connect_and_check(
         "pids server={} dialer={} tunnel_ssh={tunnel} (sshd={})",
         server.pid(),
         dialer.pid(),
-        scene.sshd.kind()
+        scene.sshd().kind()
     ));
     assert_ne!(server.pid(), dialer.pid(), "two separate processes");
     assert_ne!(tunnel, 0, "the dialer reported its tunnel ssh");
@@ -347,7 +373,12 @@ fn wrong_token_is_rejected_without_retry() {
         token: ConnectionToken::issue().expect("token"),
         instance_id: ready.instance.clone(),
     };
-    let bad_record = scene.dir.path().join("wrong-token.json");
+    let bad_record = scene
+        .dir
+        .as_ref()
+        .expect("dir")
+        .path()
+        .join("wrong-token.json");
     std::fs::write(&bad_record, wrong.to_line()).expect("write the wrong record");
     let mut dialer = scene.start_dialer(&bad_record);
 
