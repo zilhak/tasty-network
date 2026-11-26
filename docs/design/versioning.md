@@ -29,12 +29,13 @@
 | 상대 | 결과 |
 |---|---|
 | 같은 `proto`(2)의 다른 크레이트 버전 | 연결된다. 모르는 `caps`는 무시한다 |
-| `proto` 1(지금 tasty) | 연결되지 않는다. 사유 `legacy_protocol` / `PeerTooOld` |
-| `proto` 3 이상 | 연결되지 않는다. 사유 `unsupported_protocol` |
+| `proto` 1(지금 tasty), SSH | 연결되지 않는다. 받는 쪽이 v2면 거절 ACK `legacy_protocol`, dialer가 v2면 로컬 오류 `PeerTooOld`([handshake v2](handshake.md) "구버전 처리") |
+| `proto` 3 이상, SSH | 연결되지 않는다. 거절 ACK `unsupported_protocol`(ACK에 자기 `proto`를 싣는다) |
+| `proto`가 다른 P2P | ALPN이 달라 QUIC/TLS 협상에서 실패한다. 앱 스트림이 열리지 않으므로 ACK도 사유도 없다. dialer는 로컬 오류 `P2pConnectError::AlpnMismatch`로 받고 다시 걸지 않는다. 받는 쪽은 소비자에게 알리지 않는다(로그만). 소비자는 이 오류를 "상대와 프로토콜 판이 다르다, 양쪽을 업데이트하라"는 안내로 바꾼다. 지금 P2P는 tasty에 없으므로 이 경우는 `proto` 3 이후에만 생긴다 |
 
 ## 의존 고정
 
-- P2P의 QUIC ALPN(`tasty-net/2`)은 `proto`와 같은 숫자를 쓴다. `proto`를 올리면 ALPN도 바꾼다.
+- P2P의 QUIC ALPN(`tasty-net/2`)은 `proto`와 같은 숫자를 쓴다. `proto`를 올리면 ALPN도 바꾼다. ALPN이 다르면 와이어 버전을 읽을 길이 없으므로 P2P 쪽 호환 판정은 위 표의 ALPN 행이다.
 - Rust 최소 판: iroh·iroh-relay·iroh-base 1.5.0은 `rust-version = "1.91"`을 선언한다. workspace의 `rust-version`은 의존 그래프 전체의 최솟값보다 낮게 적지 않는다. 고정 툴체인(`rust-toolchain.toml`)은 레포 기반 작업이 정한다.
 - iroh는 `=1.5.0`처럼 정확히 고정한다. relay 이미지(`n0computer/iroh-relay:v1.5.0`)와 클라이언트 판을 함께 옮긴다. 올릴 때는 [P2P](p2p.md)의 API 표와 [relay](relay.md)의 사실을 새 판 소스로 다시 확인하고 같은 커밋에서 고친다.
 - `Cargo.lock`을 커밋하고 검사는 `--locked`로 한다.

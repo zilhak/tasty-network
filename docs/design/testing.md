@@ -23,7 +23,16 @@ CI 밖에서 돌리는 시험(컨테이너 relay, 무거운 반복 측정)은 �
 
 ### 기본: 비특권 OpenSSH sshd (Linux·macOS)
 
-전제: root가 아닌 sshd는 privilege separation과 다른 사용자로의 전환을 하지 못하므로, sshd를 띄운 사용자 자신으로만 로그인할 수 있다. 시험은 그 사용자의 키로 같은 사용자에게 로그인하고 `-L` 포워딩만 쓴다. 러너 이미지에 sshd가 없으면 준비 단계에서 설치한다(Linux 패키지, macOS는 기본 `/usr/sbin/sshd`). 이 전제가 성립하지 않는 이미지에서는 시험이 실패로 끝나며 미실행·통과로 바꾸지 않는다. 성립 여부는 CI 첫 실행으로 확인하고 결과를 이 절에 적는다.
+전제: root가 아닌 sshd도 사전 인증 모니터와 자식 분리는 그대로 한다. 건너뛰는 것은 root가 있어야 하는 chroot와 UID 변경이다(OpenSSH Portable `sshd-session.c`의 privilege separation 자식 처리). 그래서 다른 사용자로 전환하지 못하고, sshd를 띄운 사용자 자신으로만 로그인할 수 있다. 시험은 그 사용자의 키로 같은 사용자에게 로그인하고 `-L` 포워딩만 쓴다. 러너 이미지에 sshd가 없으면 준비 단계에서 설치한다(Linux 패키지, macOS는 기본 `/usr/sbin/sshd`).
+
+OS별 성립 근거와 대체:
+
+| OS | 성립 근거(확인할 것) | 성립하지 않을 때 |
+|---|---|---|
+| Linux(`ubuntu-latest`) | 준비 단계가 `sshd -t -f <설정>`으로 설정을 검사하고, 시험 도우미가 준비 확인 뒤 `ssh -o BatchMode=yes` 로그인과 `-L` 포워딩 한 번을 확인한다 | 아래 Windows 2의 시험 전용 Rust SSH 서버로 돈다(`sshd=russh`) |
+| macOS(`macos-latest`) | Linux와 같다. 시스템 sshd를 사용자 권한으로 전경 실행한다 | Linux와 같다 |
+
+CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절에 적는다. OpenSSH도 대체 서버도 돌지 못한 OS의 SSH 통합 시험은 실패로 끝나며 미실행·통과로 바꾸지 않는다.
 
 시험 도우미(`crates/tasty-net-demo/tests/support/`)가 임시 디렉터리에 아래를 만들고 `sshd -D -e -f <설정>`을 띄운다.
 

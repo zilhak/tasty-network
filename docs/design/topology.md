@@ -6,8 +6,8 @@
 
 | 타입 | 필드 |
 |---|---|
-| `Node` | `device_id`(모르면 빈 값), `display_name`(선택), `status: NodeStatus`, `reason`(선택, 예: `route_broken`), `reported_by`(이 노드 상태를 만든 기기, 선택), `peer_hint`(소비자가 준 표시 이름, 선택), `explored_at`(응답 받은 시각, Unix ms) |
-| `NodeStatus` | `online` · `offline`(정의 파일 방식에서만) · `auth_rejected`(인증 필수라 연결이 거절된 구버전) · `no_capability`(연결은 되지만 상대 `caps`에 `net.topology`가 없음) · `timed_out` · `sharing_off`(공개 꺼짐) |
+| `Node` | `device_id`(모르면 빈 값), `display_name`(선택), `status: NodeStatus`, `reason`(선택, 예: `route_broken`), `reported_by`(이 노드 상태를 만든 기기, 선택), `peer_hint`(소비자가 준 표시 이름, 선택), `explored_at`(응답 받은 시각, Unix ms, 표시용. 마감 판정에 쓰지 않는다) |
+| `NodeStatus` | `online` · `offline`(정의 파일 방식에서만) · `auth_rejected`(인증 단계에서 연결이 거절됨. 인증을 못 하는 구버전 포함) · `no_capability`(연결은 되지만 상대 `caps`에 `net.topology`가 없음) · `timed_out` · `sharing_off`(공개 꺼짐) |
 | `Edge` | `dialer: DeviceId`, `acceptor: DeviceId`, `holder: dialer \| acceptor`, `transport: TransportKind`, `rtt_ms`(선택), `connected_at`(Unix ms), `workspace`(선택, `WorkspaceRef{id, name}` — 공개 범위에 따라 빠짐) |
 | `TransportKind` | `ssh_forward` · `ssh_role_reversed` · `p2p_direct` · `p2p_relay` |
 
@@ -24,29 +24,42 @@
 - surface 단위 attach도 엣지다(`workspace`에는 그 surface가 속한 workspace).
 - 재연결로 링크가 바뀌면 소비자가 이전 링크를 입력에서 뺀다. 집계는 입력 스냅샷만 본다.
 
+연결 실패 관측은 엣지와 별개 입력이다: `ConnectFailure{peer_hint, device_id, kind, observed_at}`. 거절된 접속은 인증된 링크가 아니라 `LocalLink`에 들어가지 않기 때문이다.
+
+- 만드는 쪽은 그 상대에게 연결을 시도한 기기의 소비자다. tasty는 dialer로서 받은 실패(handshake 거절 사유, `PeerTooOld`, 시간 초과)를 원격 프로필마다 마지막 하나만 넣는다.
+- `kind`는 `auth_rejected`(`PeerTooOld`, `legacy_protocol`, 토큰·서명·TOFU 거절처럼 인증 단계의 거절), `timed_out`(연결·handshake 시간 초과)이다. 받는 쪽에서 거절한 접속은 상대 이름을 알 수 없으므로 넣지 않는다.
+- `device_id`는 아는 경우만 싣는다(TOFU 기록의 기대값). `peer_hint`는 소비자가 정한 표시 이름(tasty는 프로필 이름)이다.
+- 같은 상대에 대해 엣지와 실패가 둘 다 있으면 엣지(살아 있는 연결)가 이긴다.
+- `local_view`·`remote_answer`는 엣지와 실패를 함께 받는다. 실패는 `reported_by` = 자기 기기로 노드가 된다.
+
 ## 질의와 결과 메시지
 
 질의는 인증된 attach 링크의 순서 채널로만 오간다. tasty Control 밖 raw JSON `event` 태그 확장(`tasty:docs/dev-guide/attach-behavior.md` "커스텀 이벤트 확장") 자리에 싣는다.
 
 | 메시지 | `event` 값 | 필드 |
 |---|---|---|
-| 질의 | `net.topology.query` | `request_id`, `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `deadline_ms`(전달 구간을 포함한 전체 마감, Unix ms) |
-| 결과 | `net.topology.result` | `request_id`, `return_path`(결과를 되돌려 보낼 기기 ID 목록), `part`, `last`(bool), `nodes`, `edges` |
+| 질의 | `net.topology.query` | `request_id`, `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`) |
+| 결과 | `net.topology.result` | `request_id`, `from`(이 조각을 만든 기기), `return_path`(결과를 되돌려 보낼 기기 ID 목록), `part`, `last`(bool, `from`의 자기 조각이 끝남), `nodes`, `edges` |
+| 억제 | `net.topology.suppressed` | `request_id`, `from`, `return_path`. 같은 질의를 이미 같거나 큰 남은 depth로 답했다는 뜻 |
+| 분기 완료 | `net.topology.done` | `request_id`, `from`, `return_path`, `timed_out`(`from`이 기다리다 포기한 이웃 기기 ID 목록) |
 
 - 상대가 `caps`에 `net.topology`를 알리지 않았으면 질의를 보내지 않고 그 노드를 `no_capability`로 둔다. tasty는 모르는 event를 조용히 버리므로(`tasty:crates/tasty-ipc/src/stream_hub.rs` `collect_other_control`) 보내 봐야 답이 오지 않는다.
-- 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`.
+- 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`. 조각은 `(from, part)`로 구별하므로 여러 기기가 같은 `request_id`로 보내도 섞이지 않는다.
 
 ## 탐색 규칙
 
-- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달하고, 없으면 `timed_out`이 아니라 요청자에게 그 hop이 끊겼다는 결과(`origin` 노드 상태 `timed_out`, 사유 `route_broken`)를 돌려준다. 전달 hop은 depth에 세지 않는다. `deadline_ms`가 지나면 남은 hop은 전달하지 않는다.
+- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달하고, 없으면 기다리지 않고 바로 요청자에게 그 hop이 끊겼다는 결과(`origin` 노드 상태 `timed_out`, 사유 `route_broken`)를 돌려준다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달할 링크가 없어 보내지 못했는지(`route_broken`)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
+- 마감은 각 기기의 단조 시계로 판정한다. 질의를 받은 기기는 받은 때의 단조 시각 + `min(remaining_ms, MAX_QUERY_MS)`를 자기 마감으로 두고, 전달할 때 그때의 남은 시간을 `remaining_ms`에 넣는다. 요청자는 자기 단조 시계로 전체 상한을 지킨다. 기기 사이의 벽시계 차이는 판정에 들어가지 않는다.
 - 결과는 질의가 온 길을 거꾸로 돌아간다. 기준 머신부터의 결과는 `path`를 거꾸로, 그다음 `route`를 거꾸로 따라 요청자에게 간다. 중간 기기는 결과를 합치지 않고 그대로 넘긴다. 합치기(같은 노드의 중복 제거, 상태 고르기)는 요청자 한 곳에서만 한다.
 - 기준 머신부터는 hop마다 depth를 1 줄인다. depth 0인 노드는 자기 엣지만 답하고 더 전달하지 않는다.
 - 들어오는 링크와 나가는 링크를 모두 따라간다.
 - 순환 차단은 경로별이다. 질의를 받은 기기는 `path`에 이미 있는 기기에는 다시 보내지 않는다. 그래서 A↔B 순환이 끝난다. 질의 전체가 공유하는 방문 집합은 두지 않는다(그러면 아래 "더 큰 남은 depth로 다시 닿기"를 막는다).
-- 중복 응답 억제는 기기별 기록으로 한다. 각 기기는 `request_id`마다 지금까지 답한 가장 큰 남은 depth를 잠시(질의 마감까지) 기억한다. 같은 `request_id`가 더 작거나 같은 남은 depth로 다시 오면 답하지 않고, 더 큰 남은 depth로 오면 다시 답하고 그 depth로 전달한다.
+- 중복 응답 억제는 기기별 기록으로 한다. 각 기기는 `request_id`마다 지금까지 답한 가장 큰 남은 depth를 잠시(자기 마감까지) 기억한다. 같은 `request_id`가 더 작거나 같은 남은 depth로 다시 오면 노드·엣지를 다시 싣지 않고 `net.topology.suppressed`만 보낸다. 전달한 쪽은 이것을 정상 응답으로 보고 그 이웃을 `timed_out`으로 두지 않는다. 더 큰 남은 depth로 오면 다시 답하고 그 depth로 전달한다.
 - 더 짧은 경로로 같은 노드에 다시 닿아 남은 depth가 더 크면, 위 기록 규칙에 따라 그 남은 depth로 그 노드부터 이어 탐색한다(다이아몬드에서 긴 경로가 먼저 닿은 경우).
 - 이웃마다 응답 시간 제한을 둔다. 넘으면 그 노드를 `timed_out`으로 두고 탐색은 계속한다.
-- 원격 ID를 확인할 수 없는 상태의 노드: `auth_rejected`·`timed_out`·`no_capability` 노드는 그 상대와 연결을 시도한 이웃이 만든다. 노드 식별자는 그 이웃이 아는 상대 기기 ID(링크의 `peer()`, 또는 TOFU 기록에 있는 기대값)다. 기기 ID를 모르면(인증 전에 거절돼 ID를 받지 못함) `device_id`가 비고 `reported_by`와 `peer_hint`로 구분한다. `offline`은 정의 파일 방식에서 tasty만 만든다.
+- 분기 완료: 각 기기는 자기 조각을 다 보내고, 전달한 모든 이웃에게서 `done` 또는 `suppressed`를 받았거나 그 이웃을 시간 제한으로 포기했을 때 `net.topology.done`을 보낸다. 포기한 이웃은 `timed_out` 목록에 싣는다. 전체 완료는 요청자가 기준 머신의 `done`을 받았을 때, 또는 요청자 자신의 마감이 지났을 때다.
+- 같은 노드에 대한 합치기(요청자): 그 노드가 만든(`from`) 조각이 하나라도 있으면 `online`이다. 다른 경로의 전달자가 그 노드를 `timed_out`으로 보고했어도 상태를 바꾸지 않는다. 그 경로로는 응답을 못 받았다는 뜻일 뿐이다. 어느 경로로도 그 노드의 조각이 없을 때만 보고된 상태(`timed_out`·`auth_rejected`·`no_capability`)를 쓴다.
+- 원격 ID를 확인할 수 없는 상태의 노드: `auth_rejected`·`timed_out`·`no_capability` 노드는 그 상대와 연결을 시도한 이웃이 만든다(`auth_rejected`는 위 "엣지 목록 입력"의 연결 실패 관측에서 나온다). 노드 식별자는 그 이웃이 아는 상대 기기 ID(링크의 `peer()`, 또는 TOFU 기록에 있는 기대값)다. 기기 ID를 모르면(인증 전에 거절돼 ID를 받지 못함) `device_id`가 비고 `reported_by`와 `peer_hint`로 구분한다. 요청자는 `device_id`가 있으면 그것으로, 없으면 `(reported_by, peer_hint)`로 합친다. `offline`은 정의 파일 방식에서 tasty만 만든다.
 - 결과는 도착하는 대로 점진적으로 낸다. 노드에는 응답 시각을 붙인다.
 - 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 상태 기계다. 그래서 전송 없이 가짜 이웃으로 시험한다.
 

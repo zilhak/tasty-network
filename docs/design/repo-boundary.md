@@ -43,7 +43,7 @@
 | `tasty:crates/tasty-ipc/src/stream_hub.rs` | — (bulk 자격 검사는 transport에 새로 생기는 검사다. 지금 hub에는 없다) | 연결 등록, `bulk_workspace` 결속 기록(`register_bulk`), push sink, 입력 분류, Loss 통지. bulk 시작·완료 인가는 도메인(`tasty:src/remote/server.rs`)에 그대로 남는다 |
 | `tasty:crates/tasty-ipc/src/instance.rs` | — (handshake가 값을 실어 나름) | 인스턴스 ID 생성 |
 | `tasty:crates/tasty-ipc/src/caller.rs` | 토큰 생성 방식(32바이트 OS 난수 → 64자 hex)을 참고해 identity에 새로 씀 | 요청 라벨 `SessionToken` |
-| `tasty:crates/tasty-ipc/src/port_file.rs` | 포트·토큰·인스턴스 ID를 묶은 연결 레코드 형식과 권한 걸린 게시 함수 → identity([기기 키·토큰](identity.md) "파일 형식") | 레코드 게시 시점·위치와 회수 |
+| `tasty:crates/tasty-ipc/src/port_file.rs` | 포트·토큰·인스턴스 ID를 묶은 연결 레코드 형식과 권한 걸린 게시 함수 → identity([기기 키·토큰](identity.md) "파일 형식") | 레코드 게시 시점·위치, 인스턴스가 끝날 때 게시 핸들로 정리를 부르는 일 |
 | `tasty:src/adapters/production/tcp_ipc_server.rs` | `handle_stream_connection`의 handshake 파싱·검증·거절 ACK(`validate_stream_proto`, `parse_stream_handshake`) → transport 받는 쪽 함수 | listener, 첫 줄 분기, 요청·응답 루프, attach dispatch |
 | `tasty:crates/tasty-remote/src/transport.rs` | handshake, 읽기·쓰기 스레드의 소켓 부분, heartbeat 송신, half-close·강제 종료·워커 회수 → transport | 도메인 프레임 해석, mirror 이벤트, 재연결 판단 |
 | `tasty:crates/tasty-remote/src/transport_end.rs` | "끝 사유는 올라가기만 하고 한 곳에서 한 번 확정" 계약 → transport `LinkCloser` | 도메인 끝 사유 |
@@ -117,5 +117,5 @@
 - 새 연결 레코드(포트·토큰·인스턴스 ID, [기기 키·토큰](identity.md) "토큰 전달")도 같은 우선순위·체인·종료 분류로 읽는다. 레코드 하나를 읽으므로 포트와 토큰을 따로 찾는 단계가 없다.
 
 - 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227` `run_ssh_connect`, :1105 `detect_for_profile`, `tasty:crates/tasty-remote/src/browse.rs`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 인자로 받고, 환경 변수를 이 값으로 바꾸는 일은 tasty에 남는다.
-- ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode=no`·`ServerAliveInterval`·`ServerAliveCountMax`는 언제나, `StrictHostKeyChecking=accept-new`는 `verify = true`일 때만 사용자 `extra_options`보다 먼저 넣는다(ssh는 같은 옵션의 첫 값을 쓰므로 이 값들이 이긴다). `verify = false`이면 이 레포는 `StrictHostKeyChecking`을 넣지 않고, 사용자 `extra_options`나 ssh 설정 파일·기본값이 정한다. `ConnectTimeout`은 맨 뒤에 기본값(`SSH_CONNECT_TIMEOUT` 10초)을 넣으므로 사용자가 `extra_options`나 ssh 설정에 준 값이 있으면 그 값이 이기고, 없을 때만 기본값이 쓰인다.
+- ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode=no`·`ServerAliveInterval`·`ServerAliveCountMax`는 언제나, `StrictHostKeyChecking=accept-new`는 `verify = true`일 때만 사용자 `extra_options`보다 먼저 넣는다(ssh는 같은 옵션의 첫 값을 쓰므로 이 값들이 이긴다). `verify = false`이면 이 레포는 `StrictHostKeyChecking`을 넣지 않고, 사용자 `extra_options`나 ssh 설정 파일·기본값이 정한다. `ConnectTimeout`은 맨 뒤에 기본값(`SSH_CONNECT_TIMEOUT` 10초)을 넣는다. ssh는 명령행 `-o`를 설정 파일보다 먼저 적용하므로, 이 기본값을 이기는 것은 그보다 앞에 들어간 사용자 `extra_options`의 `ConnectTimeout`뿐이다. ssh 설정 파일의 `ConnectTimeout`은 이 기본값에 진다.
 - 한국어 `anyhow!` 문자열(예: `PortMode::parse` :289)은 [오류 규칙](crates.md#오류-규칙)대로 enum + 영어 `Display`로 바꾼다.
