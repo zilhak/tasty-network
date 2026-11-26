@@ -1,6 +1,7 @@
 //! Cancellation of port discovery children, and the lock recovery the child slot needs.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
@@ -37,7 +38,10 @@ impl SshCancel {
     /// returned guard restores the previous installation when it is dropped (nesting is safe).
     pub fn scope(&self) -> SshCancelScope {
         let prev = CURRENT_CANCEL.with(|c| c.borrow_mut().replace(self.clone()));
-        SshCancelScope { prev }
+        SshCancelScope {
+            prev,
+            _thread_bound: PhantomData,
+        }
     }
 
     /// Marks the handle cancelled without waiting for the child. The discovery that owns the
@@ -89,9 +93,18 @@ impl SshCancel {
 /// The RAII guard of [`SshCancel::scope`].
 ///
 /// It has no use of its own, but it is public because it is the return type of
-/// `SshCancel::scope()`.
+/// `SshCancel::scope()`. It restores the installation of the thread that created it, so it is
+/// neither `Send` nor `Sync`: it cannot be dropped on another thread.
+///
+/// ```compile_fail
+/// fn send<T: Send>(_: T) {}
+/// let handle = tasty_net_ssh::SshCancel::new();
+/// send(handle.scope());
+/// ```
 pub struct SshCancelScope {
     prev: Option<SshCancel>,
+    /// A raw pointer is neither `Send` nor `Sync`, which binds the guard to its thread.
+    _thread_bound: PhantomData<*const ()>,
 }
 
 impl Drop for SshCancelScope {
