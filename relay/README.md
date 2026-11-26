@@ -58,7 +58,7 @@ docker compose logs -f iroh-relay
 
 - `enable_relay = false`는 쓰지 않는다. 펀칭 조정까지 relay를 지나지 못한다.
 - `punch-only.toml`의 상한 값(`bytes_per_second = 16384`, `max_burst_bytes = 65536`)은 임시다. 펀칭이 그 상한에서 되는지는 아직 재지 않았다. 확정 값은 [P2P 설계](../docs/design/p2p.md) "펀칭 실험" 뒤에 이 파일에 반영한다.
-- 상한은 연결마다의 유입 속도만 묶는다. 연결 수나 서버 전체 대역폭은 묶지 않는다. 새 연결 속도는 `[limits]`의 `accept_conn_limit`(초당)·`accept_conn_burst`로 따로 묶을 수 있다.
+- 상한은 연결마다의 유입 속도만 묶는다. 연결 수나 서버 전체 대역폭은 묶지 않는다. `[limits]`의 `accept_conn_limit`·`accept_conn_burst`는 1.5.0에서 설정 키는 있으나 구현되지 않아 효과가 없다(iroh-relay v1.5.0 `server.rs` `Limits`의 "Not currently implemented"). 새 연결 속도를 묶으려면 호스트 방화벽 등 relay 밖에서 한다.
 - 클라이언트 쪽 정책과 함께 봐야 한다. tasty-network 클라이언트는 relay마다 `DirectRequired`(직접 경로가 시간 안에 안 서면 끊는다) 또는 `RelayAllowed`(relay로도 유지)를 고른다. `punch-only` relay를 `RelayAllowed`로 쓰면 연결은 유지되지만 아주 느리다.
 
 ## 접속 허용
