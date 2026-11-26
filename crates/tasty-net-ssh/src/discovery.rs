@@ -146,7 +146,7 @@ impl PortDiscoveryConfig {
         let program = if program_plain(&self.remote_program) {
             self.remote_program.clone()
         } else {
-            sh_quote(&self.remote_program)
+            sh_single_quote(&self.remote_program)
         };
         std::iter::once(program)
             .chain(self.remote_args.iter().map(|w| sh_quote(w)))
@@ -194,8 +194,13 @@ fn sh_quote(s: &str) -> String {
     if sh_plain(s) {
         s.to_string()
     } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
+        sh_single_quote(s)
     }
+}
+
+/// `s` in sh single quotes, always: `'` is written as `'\''`.
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// [`sh_quote`] for a record path, keeping a leading `~/` outside the quotes so the remote shell
@@ -1839,7 +1844,16 @@ mod tests {
             c.subcommand_words().join(" "),
             "'C:\\Program Files\\netprog.exe' port"
         );
-        for program in ["~/bin/netprog", "net,prog", "a=b", "@net"] {
+        // Every character outside the program set quotes it, `+` and `%` too, though an argument
+        // would keep them plain.
+        for program in [
+            "~/bin/netprog",
+            "net,prog",
+            "a=b",
+            "@net",
+            "net+prog",
+            "net%prog",
+        ] {
             c.remote_program = program.into();
             assert_eq!(c.subcommand_words()[0], format!("'{program}'"), "{program}");
         }
