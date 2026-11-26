@@ -212,63 +212,99 @@ pub fn terminate(pid: u32) {
     }
 }
 
+/// Runs a process query command. Returns its stdout when it ran and its exit code is one of
+/// `ok_codes`; anything else (no start, another code, stderr output) is an error, so a failed
+/// query is never read as "no such process".
+fn query(mut command: Command, ok_codes: &[i32]) -> Result<(i32, String), String> {
+    let what = format!("{command:?}");
+    let out = command
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{what} did not start: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match out.status.code() {
+        Some(code) if ok_codes.contains(&code) && stderr.trim().is_empty() => {
+            Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
+        }
+        _ => Err(format!("{what} failed ({}): {}", out.status, stderr.trim())),
+    }
+}
+
 /// Whether a process with `pid` runs. A Unix zombie does not count: it has ended and only
-/// waits for its parent (or init) to reap it.
-pub fn is_running(pid: u32) -> bool {
+/// waits for its parent (or init) to reap it. A query that fails is an error.
+pub fn is_running(pid: u32) -> Result<bool, String> {
     #[cfg(unix)]
     {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .expect("ps");
-        let stat = String::from_utf8_lossy(&out.stdout);
-        let stat = stat.trim();
-        !stat.is_empty() && !stat.starts_with('Z')
+        let mut ps = Command::new("ps");
+        ps.args(["-o", "stat=", "-p", &pid.to_string()]);
+        // ps exits 1 with no output when no process has the PID.
+        let (code, stdout) = query(ps, &[0, 1])?;
+        let stat = stdout.trim();
+        if code == 1 && !stat.is_empty() {
+            return Err(format!("ps -p {pid} exited 1 with output {stat:?}"));
+        }
+        Ok(!stat.is_empty() && !stat.starts_with('Z'))
     }
     #[cfg(windows)]
     {
-        let out = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output()
-            .expect("tasklist");
-        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+        let mut tasklist = Command::new("tasklist");
+        tasklist.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
+        let (_, stdout) = query(tasklist, &[0])?;
+        Ok(stdout.contains(&format!("\"{pid}\"")))
     }
 }
 
-/// The PIDs of the running children of `pid`.
-pub fn children_of(pid: u32) -> Vec<u32> {
+/// The PIDs of the running children of `pid`. A query that fails is an error; `pgrep`'s
+/// "no match" (exit 1) is an empty list.
+pub fn children_of(pid: u32) -> Result<Vec<u32>, String> {
     #[cfg(unix)]
-    let out = Command::new("pgrep")
-        .args(["-P", &pid.to_string()])
-        .output()
-        .expect("pgrep");
+    let (_, stdout) = {
+        let mut pgrep = Command::new("pgrep");
+        pgrep.args(["-P", &pid.to_string()]);
+        query(pgrep, &[0, 1])?
+    };
     #[cfg(windows)]
-    let out = Command::new("powershell")
-        .args([
+    let (_, stdout) = {
+        let mut ps = Command::new("powershell");
+        ps.args([
             "-NoProfile",
+            "-NonInteractive",
             "-Command",
-            &format!("(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"),
-        ])
-        .output()
-        .expect("powershell");
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .filter_map(|w| w.parse().ok())
-        .filter(|&child| is_running(child))
-        .collect()
+            &format!(
+                "$ErrorActionPreference = 'Stop'; \
+                 (Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"
+            ),
+        ]);
+        query(ps, &[0])?
+    };
+    let mut children = Vec::new();
+    for word in stdout.split_whitespace() {
+        let child: u32 = word
+            .parse()
+            .map_err(|_| format!("unexpected child PID {word:?} of {pid}"))?;
+        if is_running(child)? {
+            children.push(child);
+        }
+    }
+    Ok(children)
 }
 
-/// Waits up to `timeout` until none of `pids` runs. Returns the ones still running.
-pub fn wait_all_gone(pids: &[(String, u32)], timeout: Duration) -> Vec<(String, u32)> {
+/// Waits up to `timeout` until none of `pids` runs. Returns the ones still running, or the
+/// error of a query that failed.
+pub fn wait_all_gone(
+    pids: &[(String, u32)],
+    timeout: Duration,
+) -> Result<Vec<(String, u32)>, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        let left: Vec<_> = pids
-            .iter()
-            .filter(|(_, pid)| is_running(*pid))
-            .cloned()
-            .collect();
+        let mut left = Vec::new();
+        for (what, pid) in pids {
+            if is_running(*pid)? {
+                left.push((what.clone(), *pid));
+            }
+        }
         if left.is_empty() || Instant::now() >= deadline {
-            return left;
+            return Ok(left);
         }
         std::thread::sleep(Duration::from_millis(200));
     }

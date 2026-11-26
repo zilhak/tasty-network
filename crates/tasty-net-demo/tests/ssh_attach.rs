@@ -68,7 +68,8 @@ impl Drop for Scene {
             return;
         }
         for (what, pid) in &self.tracked {
-            if is_running(*pid) {
+            // A failed query counts as running: ending a process that is gone is harmless.
+            if is_running(*pid).unwrap_or(true) {
                 log(&format!("ending {what} {pid} left by a failed test"));
                 terminate(*pid);
             }
@@ -188,7 +189,8 @@ impl Scene {
         let sshd_pids = self.sshd.take().expect("sshd").stop();
         self.finished = true;
         self.tracked.extend(sshd_pids);
-        let left = wait_all_gone(&self.tracked, Duration::from_secs(15));
+        let left = wait_all_gone(&self.tracked, Duration::from_secs(15))
+            .unwrap_or_else(|e| panic!("checking the processes of the test: {e}"));
         log(&format!(
             "processes left after the test: {} of {} tracked ({})",
             left.len(),

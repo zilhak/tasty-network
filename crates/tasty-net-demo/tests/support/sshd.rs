@@ -139,7 +139,11 @@ impl SshServer {
                 let pid = child.0.id();
                 pids.push(("sshd".to_string(), pid));
                 let deadline = Instant::now() + Duration::from_secs(15);
-                let mut sessions = children_of(pid);
+                let sessions_now = || {
+                    children_of(pid)
+                        .unwrap_or_else(|e| panic!("listing the sessions of sshd {pid}: {e}"))
+                };
+                let mut sessions = sessions_now();
                 while !sessions.is_empty() && Instant::now() < deadline {
                     for s in &sessions {
                         if !pids.iter().any(|(_, p)| p == s) {
@@ -147,7 +151,7 @@ impl SshServer {
                         }
                     }
                     std::thread::sleep(Duration::from_millis(200));
-                    sessions = children_of(pid);
+                    sessions = sessions_now();
                 }
                 let _killed = child.0.kill().is_ok();
                 let status = child.0.wait();
