@@ -29,6 +29,7 @@
 //! | [`RejectReason`] · [`HandshakeError`] · [`TooOldEvidence`] · [`P2pCloseReason`] | consumers that branch on why a handshake ended (`is_retryable`) |
 //! | [`Holder`] · [`Side`] · [`Roles`] · [`roles`] | consumers that act on the roles of a link |
 //! | [`Purpose`] · [`PROTO`] · [`STREAM_OPEN_METHOD`] · [`MAX_HANDSHAKE_LINE`] · [`LEGACY_PROTOCOL_ERROR`] · [`is_valid_capability`] · [`InvalidCapabilities`] | the wire constants |
+//! | [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels) |
 //! | [`memory_channel_pair`] · [`memory_transport`] · [`MemoryTransport`] · [`MemoryListener`] | tests that run channels without sockets |
 #![deny(unsafe_code)]
 
@@ -46,6 +47,7 @@ mod memory;
 mod reject;
 mod request;
 mod role;
+mod ssh;
 mod transport;
 mod wake;
 mod wire;
@@ -71,6 +73,7 @@ pub use memory::{MemoryListener, MemoryTransport, memory_channel_pair, memory_tr
 pub use reject::{HandshakeError, P2pCloseReason, RejectReason, TooOldEvidence};
 pub use request::{RequestClient, RequestError, RequestHandler, RequestServer};
 pub use role::{Holder, Roles, Side, roles};
+pub use ssh::{LOCAL_CONNECT_TIMEOUT, SshTransport};
 pub use transport::{
     AcceptError, ConnectError, Connection, DialAuth, Endpoint, EndpointHandle, Listener, Transport,
     TransportKind,

@@ -511,6 +511,25 @@ fn linger_close(ch: &mut RawChannel, limit: Duration) {
     }
 }
 
+/// A channel that closed during the handshake is explained by its SSH listener verdict.
+fn explain(ch: &RawChannel, error: HandshakeError) -> HandshakeError {
+    match error {
+        HandshakeError::PeerClosed => {
+            let dropped =
+                tasty_net_ssh::connection_closed_error("the channel closed during the handshake");
+            ch.listener_absent(&dropped).map_or(
+                HandshakeError::PeerClosed,
+                HandshakeError::RemoteListenerAbsent,
+            )
+        }
+        HandshakeError::Io(e) => match ch.listener_absent(&e) {
+            Some(absent) => HandshakeError::RemoteListenerAbsent(absent),
+            None => HandshakeError::Io(e),
+        },
+        other => other,
+    }
+}
+
 /// The dialer's view after message 1.
 struct Dialed {
     peer: PeerInfo,
@@ -681,7 +700,8 @@ pub fn dial_handshake(
         Some(holder),
         ext,
         cancel,
-    )?;
+    )
+    .map_err(|e| explain(&channel, e))?;
     let credential = dialed.ack.bulk_credential.ok_or(HandshakeError::Protocol(
         "an attach ACK without a bulk credential",
     ))?;
@@ -729,7 +749,8 @@ pub fn dial_request(
         None,
         None,
         cancel,
-    )?;
+    )
+    .map_err(|e| explain(&channel, e))?;
     endpoint.publish();
     let framed = channel
         .framed(&config.timeouts.channel(config.heartbeat))
@@ -775,8 +796,9 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         ext,
         bulk_credential: Some(bulk.credential),
     };
-    io.write_line(&open.line())?;
-    let ack = read_ack(&mut io)?;
+    let ack = io.write_line(&open.line()).and_then(|()| read_ack(&mut io));
+    drop(io);
+    let ack = ack.map_err(|e| explain(&ch, e))?;
     let framed = ch
         .framed(&config.timeouts.channel(config.heartbeat))
         .map_err(HandshakeError::Io)?;

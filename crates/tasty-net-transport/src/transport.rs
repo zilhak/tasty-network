@@ -8,9 +8,11 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use tasty_net_identity::{ConnectionToken, DeviceId};
+use tasty_net_ssh::{PortDiscoveryError, TunnelError};
 
 use crate::cancel::AttemptCancel;
 use crate::channel::RawChannel;
+use crate::reject::TooOldEvidence;
 
 /// Which transport a channel came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -130,6 +132,15 @@ pub enum ConnectError {
     Cancelled,
     /// The socket or stream could not be opened.
     Io(io::Error),
+    /// Port discovery over SSH failed; its kind tells why.
+    Discovery(PortDiscoveryError),
+    /// The SSH tunnel did not come up.
+    Tunnel(TunnelError),
+    /// The peer is too old for handshake v2 (its record has no token). Do not connect again.
+    PeerTooOld {
+        /// How it was found out.
+        evidence: TooOldEvidence,
+    },
 }
 
 impl fmt::Display for ConnectError {
@@ -137,6 +148,11 @@ impl fmt::Display for ConnectError {
         match self {
             Self::Cancelled => f.write_str("the connection attempt was cancelled"),
             Self::Io(_) => f.write_str("the channel could not be opened"),
+            Self::Discovery(_) => f.write_str("the peer's connection record could not be read"),
+            Self::Tunnel(_) => f.write_str("the SSH tunnel did not come up"),
+            Self::PeerTooOld { .. } => f.write_str(
+                "the peer publishes no connection token; it runs a version without handshake v2",
+            ),
         }
     }
 }
@@ -145,7 +161,9 @@ impl Error for ConnectError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Cancelled => None,
+            Self::Discovery(e) => Some(e),
+            Self::Tunnel(e) => Some(e),
+            Self::Cancelled | Self::PeerTooOld { .. } => None,
         }
     }
 }

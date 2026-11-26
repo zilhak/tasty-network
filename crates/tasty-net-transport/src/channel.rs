@@ -15,6 +15,8 @@ use tasty_net_frame::{
     write_frame,
 };
 
+use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
+
 use crate::end::{EndReason, LinkCloser};
 use crate::heartbeat::{Heartbeat, HeartbeatPolicy};
 use crate::lock::lock;
@@ -56,6 +58,8 @@ pub struct RawChannel {
     control: Arc<dyn ChannelControl>,
     kind: TransportKind,
     keep: Vec<Arc<dyn Any + Send + Sync>>,
+    /// The absent-listener verdict of a channel through an SSH tunnel.
+    verdict: Option<ListenerVerdict>,
 }
 
 impl fmt::Debug for RawChannel {
@@ -80,6 +84,7 @@ impl RawChannel {
             control,
             kind,
             keep: Vec::new(),
+            verdict: None,
         }
     }
 
@@ -115,6 +120,20 @@ impl RawChannel {
     pub fn keep_alive(mut self, resource: Arc<dyn Any + Send + Sync>) -> Self {
         self.keep.push(resource);
         self
+    }
+
+    pub(crate) fn with_verdict(mut self, verdict: ListenerVerdict) -> Self {
+        self.verdict = Some(verdict);
+        self
+    }
+
+    /// Whether this channel failed with `failure` because nothing listens behind its SSH
+    /// tunnel. Waits up to half a second for ssh's report when the channel has a verdict.
+    pub(crate) fn listener_absent(
+        &self,
+        failure: &(dyn std::error::Error + 'static),
+    ) -> Option<RemoteListenerAbsent> {
+        self.verdict.as_ref()?.explain_failure(failure)
     }
 
     /// Puts `bytes` in front of the read half: they are read before anything from the

@@ -6,6 +6,7 @@ use std::fmt;
 use std::io;
 
 use tasty_net_identity::{DeviceId, StoreError};
+use tasty_net_ssh::RemoteListenerAbsent;
 
 use crate::transport::ConnectError;
 
@@ -220,6 +221,9 @@ pub enum HandshakeError {
     Cancelled,
     /// The peer closed the channel during the handshake.
     PeerClosed,
+    /// The channel through the SSH tunnel dropped and ssh reported that nothing listens on
+    /// the remote port (the remote instance is not running, or its record is stale).
+    RemoteListenerAbsent(RemoteListenerAbsent),
     /// The QUIC connection was closed with a code during the handshake.
     Closed(P2pCloseReason),
     /// The endpoint has no credential to dial with (no token and no remote ID).
@@ -243,9 +247,11 @@ impl HandshakeError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Rejected { reason, .. } => reason.is_retryable(),
-            Self::TimedOut | Self::PeerClosed | Self::Io(_) => true,
+            Self::TimedOut | Self::PeerClosed | Self::RemoteListenerAbsent(_) | Self::Io(_) => true,
             Self::Closed(reason) => reason.is_retryable(),
-            Self::Connect(e) => !matches!(e, ConnectError::Cancelled),
+            Self::Connect(e) => {
+                !matches!(e, ConnectError::Cancelled | ConnectError::PeerTooOld { .. })
+            }
             _ => false,
         }
     }
@@ -277,6 +283,9 @@ impl fmt::Display for HandshakeError {
             Self::TimedOut => f.write_str("the handshake timed out"),
             Self::Cancelled => f.write_str("the handshake was cancelled"),
             Self::PeerClosed => f.write_str("the peer closed the channel during the handshake"),
+            Self::RemoteListenerAbsent(_) => {
+                f.write_str("nothing listens on the remote port behind the SSH tunnel")
+            }
             Self::Closed(reason) => write!(f, "the P2P connection was closed ({reason:?})"),
             Self::NoCredential => f.write_str("the endpoint has no token or remote ID to dial with"),
             Self::NotBulkCapable => f.write_str("this link cannot open bulk channels"),
@@ -292,6 +301,7 @@ impl Error for HandshakeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(e) => Some(e),
+            Self::RemoteListenerAbsent(e) => Some(e),
             Self::Connect(e) => Some(e),
             Self::Io(e) => Some(e),
             _ => None,
