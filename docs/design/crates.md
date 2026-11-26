@@ -75,3 +75,4 @@ demo ─> (transport, p2p, ssh, identity, frame)
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
 | relay 설정 기동 검사 | `relay/check-config.sh`(CI workflow `relay.yml`) |
+| 실제 relay 컨테이너를 거치는 연결 확인 | `relay/container-check.sh`(원격 빌드 환경, D5 (b)) |

@@ -19,12 +19,12 @@ relay는 iroh-relay를 쓴다. 이 레포는 자체 relay 바이너리나 관리
 ## 배포 형태
 
 - 이미지: `n0computer/iroh-relay:v1.5.0`(Docker Hub). `latest`를 쓰지 않는다.
-- 이 레포에 둘 것: `relay/punch-only.toml`, `relay/relay-fallback.toml`, `relay/compose.yaml`, `relay/check-config.sh`, `relay/README.md`(자체 운영 안내).
+- 이 레포에 둘 것: `relay/punch-only.toml`, `relay/relay-fallback.toml`, `relay/compose.yaml`, `relay/check-config.sh`, `relay/container-check.sh`, `relay/README.md`(자체 운영 안내).
 - 기본 포트: HTTP 80, metrics 9090(`http_bind_addr`의 IP + 9090). HTTPS 443과 QUIC 주소 확인 UDP 7842(`DEFAULT_RELAY_QUIC_PORT`)는 `[tls]`를 설정할 때의 기본이다. 기본 설정은 `tls`가 없다. TLS가 없으면 80이 relay 자체를 평문으로 서비스하고, TLS가 있으면 80은 captive portal 확인만 평문으로 받는다(`iroh-relay/src/server.rs`).
 - 내장 Let's Encrypt(`cert_mode = LetsEncrypt`)는 TLS-ALPN-01로 인증한다. 인증 요청은 TCP 80이 아니라 HTTPS 리스너(443)로 온다(`iroh-relay/src/server/http_server.rs` `tls_serve_connection`). 그래서 외부 TCP 443이 relay 프로세스의 TLS 리스너에 그대로 닿아야 하고, 그 앞에서 TLS를 끝내는 프록시를 두면 발급이 안 된다.
 - `enable_quic_addr_discovery` 기본값은 false다. 7842/UDP는 그 기능을 켤 때만 쓰인다. compose에 포트만 게시해서는 열리지 않는다. 운영 예시는 기능을 켜고 TLS를 갖추고, CI 예시는 끈다. 클라이언트도 relay마다 이 기능의 사용 여부와 포트를 따로 받는다([P2P](p2p.md) `RelayChoice.quic_addr_discovery`).
 - `--dev`: HTTPS 리스너를 끄고 평문 HTTP로 띄운다(TLS 설정이 있어도 `dangerous_http_only`). 그래도 `[tls]` 절이 있으면 시작할 때 인증서 설정을 먼저 읽는다. `Manual`이면 인증서·키 파일을 읽고, `LetsEncrypt`면 hostname과 contact가 있어야 한다. 어긋나면 `--dev`여도 시작하지 못한다(`main.rs` `build_relay_config`). `http_bind_addr`를 주지 않았을 때만 `[::]:3340`이고, 주면 그 주소를 쓴다. QUIC 주소 확인을 켜면 TLS 설정을 쓰며 그때 `cert_mode = LetsEncrypt`를 거절한다. iroh 클라이언트는 HTTP relay URL에도 붙을 수 있다. 이 레포가 `--dev`를 CI 기동 검사와 로컬 확인에만 쓰는 것은 운영 정책이다(평문 relay는 접속 메타데이터와 접속 허용 토큰을 보호하지 못한다).
-- CI 기동 검사(`relay-config-check`)는 운영 예시 두 개(`punch-only.toml`·`relay-fallback.toml`)에서 `[tls]`와 QUIC 주소 확인만 뺀 CI용 설정을 스크립트로 만들어 띄운다. 그래서 확인하는 공통 부분은 `enable_relay`, `[limits]`(수신 상한의 값 조합), `access`, metrics 설정이다. TLS와 QUIC 주소 확인은 CI에서 확인하지 않고 원격 빌드 환경의 컨테이너 확인(D5 (b))과 운영 안내가 맡는다.
+- CI 기동 검사(`relay-config-check`)는 운영 예시 두 개(`punch-only.toml`·`relay-fallback.toml`)에서 `[tls]`와 QUIC 주소 확인만 뺀 CI용 설정을 스크립트로 만들어 띄운다. 그래서 확인하는 공통 부분은 `enable_relay`, `[limits]`(수신 상한의 값 조합), `access`, metrics 설정이다. TLS와 QUIC 주소 확인은 CI에서도 D5 (b)의 컨테이너 확인(`relay/container-check.sh`, 같은 CI용 설정을 쓴다)에서도 판정하지 않는다. 직접 경로 전환은 QUIC 주소 확인이 꺼져 있어도 일어나므로 그 로그가 두 기능의 증거가 되지 않기 때문이다. 두 기능은 relay를 실제로 배포할 때 운영 안내(`relay/README.md`)의 확인 절차로 본다.
 - 리버스 프록시가 TLS를 처리하는 구성은 공식 문서에 없다. `tls`를 끄면 `http_bind_addr`에서 평문 HTTP로 서비스한다는 설명만 있다. 운영 안내에 이 한계를 적는다.
 
 ## 접속 허용

@@ -29,10 +29,10 @@ OS별 성립 근거와 대체:
 
 | OS | 성립 근거(확인할 것) | 성립하지 않을 때 |
 |---|---|---|
-| Linux(`ubuntu-latest`) | 준비 단계가 `sshd -t -f <설정>`으로 설정을 검사하고, 시험 도우미가 준비 확인 뒤 `ssh -o BatchMode=yes` 로그인과 `-L` 포워딩 한 번을 확인한다 | 아래 Windows 2의 시험 전용 Rust SSH 서버로 돈다(`sshd=russh`) |
+| Linux(`ubuntu-latest`) | 준비 단계가 `sshd -t -f <설정>`으로 설정을 검사하고, 시험 도우미가 준비 확인 뒤 `ssh -o BatchMode=yes` 로그인과 `-L` 포워딩 한 번을 확인한다 | `sshd`가 없거나, 설정 검사·준비 확인이 실패하면 아래 Windows 2의 시험 전용 Rust SSH 서버로 돈다(`sshd=russh`) |
 | macOS(`macos-latest`) | Linux와 같다. 시스템 sshd를 사용자 권한으로 전경 실행한다 | Linux와 같다 |
 
-CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절에 적는다. OpenSSH도 대체 서버도 돌지 못한 OS의 SSH 통합 시험은 실패로 끝나며 미실행·통과로 바꾸지 않는다.
+CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절에 적는다. OpenSSH도 대체 서버도 돌지 못한 OS의 SSH 통합 시험은 실패로 끝나며(로그 `sshd=none`) 미실행·통과로 바꾸지 않는다. 세 OS 모두 같다. 그 OS의 D2·D3는 실행 상태 "실패", 판정 "미충족"으로 기록한다.
 
 시험 도우미(`crates/tasty-net-demo/tests/support/`)가 임시 디렉터리에 아래를 만들고 `sshd -D -e -f <설정>`을 띄운다.
 
@@ -41,19 +41,19 @@ CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절�
 - 설정: 빈 포트, `ListenAddress 127.0.0.1`, `HostKey`, `AuthorizedKeysFile`, `PidFile`, `StrictModes no`, `UsePAM no`, `AllowTcpForwarding yes`
 - 클라이언트: `SshTarget.identity_file`과 `extra_options`로 `-o UserKnownHostsFile=<임시>`·`-o StrictHostKeyChecking=accept-new`
 
-시험은 준비 확인(포트가 열렸는지) 뒤 시작하고, 끝나면 sshd를 PID로 끝내고 임시 디렉터리를 지운 뒤 자식 프로세스가 남지 않았는지 확인한다. sshd가 없으면(`sshd` 경로를 못 찾음) 시험은 통과가 아니라 실패로 끝난다. CI는 준비 단계에서 sshd가 있는지 확인한다.
+시험은 준비 확인(포트가 열렸는지) 뒤 시작하고, 끝나면 sshd를 PID로 끝내고 임시 디렉터리를 지운 뒤 자식 프로세스가 남지 않았는지 확인한다. sshd가 없거나(`sshd` 경로를 못 찾음) 준비 확인이 실패하면 시험 도우미는 대체 서버로 넘어간다(위 표). 대체 서버도 시작하지 못하면 시험은 통과가 아니라 실패로 끝난다. CI는 준비 단계에서 sshd가 있는지 확인하고 결과를 로그에 남긴다.
 
 ### Windows
 
 1. GitHub Windows 러너에서 OpenSSH 서버(`sshd.exe`)를 준비해 같은 방식으로 띄운다. 러너는 관리자 권한이라 설치 단계를 둘 수 있다. 사용자 계정 아래에서 서비스가 아닌 전경 실행이 되는지는 CI 첫 실행으로 판정한다.
-2. 1이 안 되면 대체: 시험 전용 Rust SSH 서버(`russh` 크레이트, dev-dependency)를 시험 도우미에 둔다. 받아야 하는 요청은 두 가지다. `direct-tcpip`(로컬 포워딩)과 `exec`(포트 발견 명령. 받은 명령을 시험 사용자 권한으로 OS 셸에서 실행하고 stdout·종료 코드를 돌려준다). 서버 재시작 뒤 새 인스턴스의 연결 레코드를 다시 발견해 연결하는 경로(D2 `reconnect_after_server_restart`)가 `exec`에 기대기 때문이다. 클라이언트는 여전히 시스템 `ssh`다. 역할 반전도 `-L`만 쓰므로 포워딩은 `direct-tcpip`로 충분하다. 다른 OS에서 같은 대체를 쓸 때도 이 두 요청을 같게 받는다.
-3. 어느 쪽을 썼는지 시험 로그에 한 줄로 남긴다(`sshd=openssh` 또는 `sshd=russh`).
+2. 1이 안 되면 대체: 시험 전용 Rust SSH 서버(`russh` 크레이트, dev-dependency)를 시험 도우미에 둔다. 받아야 하는 요청은 두 가지다. `direct-tcpip`(로컬 포워딩)과 `exec`(포트 발견 명령. 받은 명령을 시험 사용자 권한으로 OS 셸에서 실행하고 stdout·종료 코드를 돌려준다). 서버 재시작 뒤 새 인스턴스의 연결 레코드를 다시 발견해 연결하는 경로(D2 `reconnect_after_server_restart`)가 `exec`에 기대기 때문이다. 그 시험은 재연결이 새로 발견한 레코드(재시작 전과 다른 `instance_id`)로 이뤄졌는지 확인하고, 아니면 실패한다. 그래서 `exec`를 못 하는 서버에서는 그 시험이 통과로 나오지 않는다. 클라이언트는 여전히 시스템 `ssh`다. 역할 반전도 `-L`만 쓰므로 포워딩은 `direct-tcpip`로 충분하다. 다른 OS에서 같은 대체를 쓸 때도 이 두 요청을 같게 받는다.
+3. 어느 쪽을 썼는지 시험 로그에 한 줄로 남긴다(`sshd=openssh`, `sshd=russh`, 둘 다 안 되면 `sshd=none`).
 
-1과 2가 모두 안 되면 Windows의 SSH 통합 시험은 "미실행"이고, 미실행은 통과로 세지 않는다([동작 수준 기준](done-criteria.md) "판정 규칙").
+1과 2가 모두 안 되면 Windows의 SSH 통합 시험도 다른 OS와 같이 실패(`sshd=none`)로 끝나고 기준은 미충족이다([동작 수준 기준](done-criteria.md) "판정 규칙").
 
 ## P2P 통합 시험의 relay
 
-CI의 P2P 시험은 iroh `test-utils`의 프로세스 안 relay(`run_relay_server`)를 시험 프로세스에서 띄우고, 별도 OS 프로세스로 띄운 `p2p-peer` 두 개가 그 relay에 붙는다. 외부 네트워크가 필요 없다. 실제 relay 프로세스(컨테이너)에 붙는 확인은 원격 빌드 환경에서 한다.
+CI의 P2P 시험은 iroh `test-utils`의 프로세스 안 relay(`run_relay_server`)를 시험 프로세스에서 띄우고, 별도 OS 프로세스로 띄운 `p2p-peer` 두 개가 그 relay에 붙는다. 외부 네트워크가 필요 없다. 실제 relay 프로세스(컨테이너)에 붙는 확인은 원격 빌드 환경에서 `relay/container-check.sh`로 한다(D5 (b)).
 
 ## 공통 규칙
 
