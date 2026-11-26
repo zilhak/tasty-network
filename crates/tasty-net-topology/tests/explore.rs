@@ -49,6 +49,7 @@ struct Net {
     silent: HashSet<DeviceId>,
     queue: Vec<InFlight>,
     delay: Vec<DelayRule>,
+    max_part: u32,
 }
 
 struct Sends<'a> {
@@ -99,6 +100,7 @@ impl Net {
             silent: HashSet::new(),
             queue: Vec::new(),
             delay: Vec::new(),
+            max_part: 0,
         };
         for &n in devices {
             let me = SelfInfo {
@@ -198,6 +200,11 @@ impl Net {
 
     /// Delivers messages and applies deadlines until nothing is left.
     fn run(&mut self) {
+        self.run_until(u64::MAX);
+    }
+
+    /// Like `run`, but stops before the first event later than `until_ms`.
+    fn run_until(&mut self, until_ms: u64) {
         for _ in 0..100_000 {
             let next_message = self
                 .queue
@@ -219,10 +226,21 @@ impl Net {
                 (Some(_), None) => true,
                 (None, _) => false,
             };
+            let next_at = match (next_message, next_deadline) {
+                (Some((_, at)), _) if message_first => at,
+                (_, Some(deadline)) => deadline,
+                (_, None) => 0,
+            };
+            if next_at > until_ms {
+                return;
+            }
             match (next_message, next_deadline) {
                 (Some((i, _)), _) if message_first => {
                     let m = self.queue.remove(i);
                     self.clock_ms = self.clock_ms.max(m.at_ms);
+                    if let Message::Result(part) = &m.message {
+                        self.max_part = self.max_part.max(part.part);
+                    }
                     if self.silent.contains(&m.to) {
                         continue;
                     }
@@ -715,4 +733,57 @@ fn a_route_whose_first_hop_did_not_get_it_from_the_requester_is_invalid() {
             .iter()
             .any(|m| matches!(&m.message, Message::Done(d) if d.is_final))
     );
+}
+
+#[test]
+fn a_large_answer_crosses_in_parts_and_merges_whole() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B has thousands of other attaches; at depth 0 it only reports them.
+    let peers = 5_000u32;
+    for n in 0..peers {
+        let mut seed = [0xEEu8; 32];
+        seed[..4].copy_from_slice(&n.to_be_bytes());
+        let peer = DeviceKey::from_seed(seed).id();
+        net.links.get_mut(&id(B)).unwrap().push(LocalLink {
+            peer,
+            local_side: Side::Acceptor,
+            holder: Side::Dialer,
+            transport: TransportKind::P2pRelay,
+            rtt: None,
+            connected_at: u64::from(n),
+            workspace: None,
+            kind: LinkKind::Attach,
+        });
+    }
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert!(net.max_part > 0, "the answer of B took more than one part");
+    assert_eq!(x.edges().len(), 1 + peers as usize);
+    assert_eq!(node_ids(x), sorted(&[A, B]));
+}
+
+#[test]
+fn results_show_up_before_the_exploration_ends() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(A, C);
+    // C answers late.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(A) && to == id(C) && matches!(m, Message::Query(_))).then_some(1_000)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run_until(500);
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Running);
+    assert_eq!(node_ids(x), sorted(&[A, B]));
+    let b_seen = x.node(&id(B)).unwrap().explored_at;
+
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+    // Each node carries the time its answer arrived.
+    assert!(x.node(&id(C)).unwrap().explored_at > b_seen);
 }
