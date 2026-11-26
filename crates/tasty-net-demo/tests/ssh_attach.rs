@@ -17,7 +17,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use support::process::{
     ChildList, Proc, Transcript, children_of, is_running, log, terminate, wait_all_gone,
@@ -293,30 +293,69 @@ impl Scene {
         );
     }
 
-    /// Stops the SSH server and checks that no process of the test is left.
+    /// Stops the SSH server and checks that no process of the test is left. A failed query
+    /// does not cut the check short: every tracked PID is still checked, and what may still
+    /// run is ended, before the test fails. The scene counts as finished only after that, so
+    /// a panic before it (in the SSH server's stop) leaves the cleanup to the drop.
     fn finish(mut self) {
         let sshd_pids = self.sshd.take().expect("sshd").stop();
-        self.finished = true;
         self.tracked.extend(sshd_pids);
-        let left = wait_all_gone(&self.tracked, Duration::from_secs(15))
-            .unwrap_or_else(|e| panic!("checking the processes of the test: {e}"));
+        let (left, errors) = check_all_gone(&self.tracked, Duration::from_secs(15));
         log(&format!(
-            "processes left after the test: {} of {} tracked ({})",
+            "processes left after the test: {} of {} tracked ({}){}",
             left.len(),
             self.tracked.len(),
             self.tracked
                 .iter()
                 .map(|(what, pid)| format!("{what} {pid}"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            if errors.is_empty() {
+                String::new()
+            } else {
+                format!("; failed checks: {errors:?}")
+            }
         ));
         for (_, pid) in &left {
             terminate(*pid);
         }
+        for (pid, _) in &errors {
+            terminate(*pid);
+        }
+        self.finished = true;
+        assert!(
+            errors.is_empty(),
+            "checking the processes of the test failed: {errors:?}"
+        );
         assert!(left.is_empty(), "processes left after the test: {left:?}");
         if let Some(dir) = self.dir.take() {
             dir.remove();
         }
+    }
+}
+
+/// Waits up to `timeout` until none of `pids` runs, checking each PID every round even when
+/// the query of another fails. Returns the PIDs that still ran, and the PIDs whose last query
+/// failed with its error (they may run).
+fn check_all_gone(
+    pids: &[(String, u32)],
+    timeout: Duration,
+) -> (Vec<(String, u32)>, Vec<(u32, String)>) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut left = Vec::new();
+        let mut errors = Vec::new();
+        for (what, pid) in pids {
+            match is_running(*pid) {
+                Ok(true) => left.push((what.clone(), *pid)),
+                Ok(false) => {}
+                Err(e) => errors.push((*pid, e)),
+            }
+        }
+        if (left.is_empty() && errors.is_empty()) || Instant::now() >= deadline {
+            return (left, errors);
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
