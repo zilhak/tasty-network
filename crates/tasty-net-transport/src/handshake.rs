@@ -315,8 +315,8 @@ impl AcceptConfig {
 /// What an accepted channel became.
 #[derive(Debug)]
 pub enum Accepted {
-    /// An attach link.
-    Link(Link),
+    /// An attach link (boxed: it is much larger than the other variants).
+    Link(Box<Link>),
     /// A bulk channel under an attach link this end accepted.
     Bulk(BulkChannel),
     /// A request channel.
@@ -797,7 +797,6 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         bulk_credential: Some(bulk.credential),
     };
     let ack = io.write_line(&open.line()).and_then(|()| read_ack(&mut io));
-    drop(io);
     let ack = ack.map_err(|e| explain(&ch, e))?;
     let framed = ch
         .framed(&config.timeouts.channel(config.heartbeat))
@@ -918,7 +917,6 @@ fn accept_on(
     };
     if open.purpose == Purpose::Bulk {
         let (parent, accept, ext) = accept_bulk(&mut io, open, path, config)?;
-        drop(io);
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(HandshakeError::Io)?;
@@ -986,7 +984,6 @@ fn accept_on(
             ..Ack::default()
         };
         io.write_control(&ack.encode())?;
-        drop(io);
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(HandshakeError::Io)?;
@@ -1061,7 +1058,6 @@ fn accept_on(
         config.bulk.revoke(&credential);
         return Err(e);
     }
-    drop(io);
     let registry = config.bulk.clone();
     closer.on_end(Box::new(move || registry.revoke(&credential)));
     let framed = ch
@@ -1069,7 +1065,7 @@ fn accept_on(
         .map_err(HandshakeError::Io)?;
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
-    Ok(Accepted::Link(Link {
+    Ok(Accepted::Link(Box::new(Link {
         ordered: Some((framed.reader, framed.writer)),
         closer,
         control,
@@ -1078,7 +1074,7 @@ fn accept_on(
         ext: open.ext,
         bulk: None,
         _guard: accept.guard,
-    }))
+    })))
 }
 
 /// Sends the challenge and checks the proof. `Ok(None)` means the signature did not verify.

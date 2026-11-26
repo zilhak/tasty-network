@@ -168,7 +168,7 @@ fn pair(token_for_dialer: Option<ConnectionToken>) -> (MemoryTransport, Arc<Memo
 
 fn link_of(accepted: Result<Accepted, HandshakeError>) -> Link {
     match accepted {
-        Ok(Accepted::Link(link)) => link,
+        Ok(Accepted::Link(link)) => *link,
         other => panic!("expected a link: {other:?}"),
     }
 }
