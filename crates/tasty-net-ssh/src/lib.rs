@@ -182,6 +182,72 @@ pub(crate) fn write_test_script(path: &std::path::Path, script: &str) {
     );
 }
 
+/// A test helper: this test binary run again in one mode, so the fakes behave the same on every
+/// OS and leave no descendants (the killed child is the helper itself).
+#[cfg(test)]
+pub(crate) mod test_helper {
+    use std::io::Write;
+    use std::process::Command;
+    use std::time::Duration;
+
+    const ENV: &str = "TASTY_NET_SSH_TEST_HELPER";
+    const ENTRY: &str = "test_helper::helper_entry";
+
+    /// The helper in `mode`:
+    /// - `sleep`: runs for 60 s.
+    /// - `echo:<text>`: prints `<text>` on its own line and exits 0. The test harness prints its
+    ///   own lines before it, so read the last line.
+    /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
+    /// - `flood:<bytes>`: writes `<bytes>` bytes to stdout and exits 0.
+    pub(crate) fn helper_command(mode: &str) -> Command {
+        let mut c = Command::new(std::env::current_exe().expect("test binary path"));
+        c.args([ENTRY, "--exact", "--nocapture", "--test-threads=1"])
+            .env(ENV, mode);
+        c
+    }
+
+    /// In helper mode (the env var is set) this acts as the mode and exits. In a normal test
+    /// run it returns at once.
+    #[test]
+    fn helper_entry() {
+        let Ok(mode) = std::env::var(ENV) else {
+            return;
+        };
+        let (name, arg) = mode.split_once(':').unwrap_or((mode.as_str(), ""));
+        match name {
+            "sleep" => {
+                std::thread::sleep(Duration::from_secs(60));
+                std::process::exit(0);
+            }
+            "echo" => {
+                println!("\n{arg}");
+                std::process::exit(0);
+            }
+            "fail" => {
+                let (code, text) = arg.split_once(':').unwrap_or((arg, ""));
+                eprint!("{text}");
+                std::process::exit(code.parse().expect("exit code"));
+            }
+            "flood" => {
+                let n: usize = arg.parse().expect("byte count");
+                let chunk = [b'x'; 4096];
+                let mut out = std::io::stdout().lock();
+                let mut left = n;
+                while left > 0 {
+                    let k = left.min(chunk.len());
+                    if out.write_all(&chunk[..k]).is_err() {
+                        break;
+                    }
+                    left -= k;
+                }
+                let _flushed = out.flush();
+                std::process::exit(0);
+            }
+            other => panic!("unknown helper mode {other}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

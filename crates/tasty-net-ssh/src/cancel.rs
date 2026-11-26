@@ -208,14 +208,12 @@ mod tests {
 
     /// A registered child is killed and reaped by `cancel()`. `cancel()` also waits, so the
     /// test ending well before the child's 60 seconds shows that the kill worked.
-    #[cfg(unix)]
     #[test]
     fn cancel_kills_and_reaps_registered_child() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         use std::time::{Duration, Instant};
         let handle = SshCancel::new();
-        let child = Command::new("sleep")
-            .arg("60")
+        let child = crate::test_helper::helper_command("sleep")
             .stdin(Stdio::null())
             .spawn()
             .expect("sleep spawn");
@@ -234,14 +232,12 @@ mod tests {
     }
 
     /// A child registered after cancellation is refused and handed back.
-    #[cfg(unix)]
     #[test]
     fn register_after_cancel_is_rejected() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let handle = SshCancel::new();
         handle.cancel();
-        let child = Command::new("sleep")
-            .arg("60")
+        let child = crate::test_helper::helper_command("sleep")
             .stdin(Stdio::null())
             .spawn()
             .expect("sleep spawn");

@@ -598,10 +598,20 @@ mod tests {
             conn.set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buf = [0u8; 1];
-            // EOF or a reset: either way the connection ended without an answer.
-            let read = conn.read(&mut buf);
-            assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
-            let failure = connection_closed();
+            // EOF or a reset: either way the connection ended without an answer. A read
+            // timeout would be a different failure and must not pass here.
+            let failure = match conn.read(&mut buf) {
+                Ok(0) => connection_closed(),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    e
+                }
+                other => panic!("expected EOF or a reset, got {other:?}"),
+            };
             assert!(tunnel.remote_listener_absent(&failure));
             assert_eq!(
                 tunnel.explain_failure(&failure),

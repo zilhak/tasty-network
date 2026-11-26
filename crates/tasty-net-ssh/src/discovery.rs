@@ -732,25 +732,16 @@ pub fn detect_port_mode<T, E: fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helper::helper_command;
 
     /// A command that fails if it is ever started. Tells an early return from a spawn.
     fn unspawnable_command() -> Command {
         Command::new("/tasty-net-ssh-test/this-path-must-not-exist")
     }
 
+    /// A child that runs for 60 s and has no descendants (on every OS).
     fn never_returns_command() -> Command {
-        #[cfg(windows)]
-        {
-            let mut c = Command::new("cmd");
-            c.args(["/c", "ping -n 60 127.0.0.1 > nul"]);
-            c
-        }
-        #[cfg(not(windows))]
-        {
-            let mut c = Command::new("sleep");
-            c.arg("60");
-            c
-        }
+        helper_command("sleep")
     }
 
     fn capture(cmd: Command, budget: Duration, what: &str) -> Result<String, PortDiscoveryError> {
@@ -804,37 +795,19 @@ mod tests {
 
     #[test]
     fn capture_returns_stdout_within_budget() {
-        #[cfg(windows)]
-        let cmd = {
-            let mut c = Command::new("cmd");
-            c.args(["/c", "echo 45123"]);
-            c
-        };
-        #[cfg(not(windows))]
-        let cmd = {
-            let mut c = Command::new("echo");
-            c.arg("45123");
-            c
-        };
-        let out = capture(cmd, Duration::from_secs(10), "echo").unwrap();
+        let out = capture(
+            helper_command("echo:45123"),
+            Duration::from_secs(10),
+            "echo",
+        )
+        .unwrap();
         assert_eq!(decode_port(&out).unwrap(), 45123);
     }
 
     #[test]
     fn a_failing_command_keeps_its_exit_code() {
-        #[cfg(windows)]
-        let cmd = {
-            let mut c = Command::new("cmd");
-            c.args(["/c", "exit 3"]);
-            c
-        };
-        #[cfg(not(windows))]
-        let cmd = {
-            let mut c = Command::new("sh");
-            c.args(["-c", "exit 3"]);
-            c
-        };
-        let err = capture(cmd, Duration::from_secs(10), "exit 3").expect_err("exit 3");
+        let err = capture(helper_command("fail:3:"), Duration::from_secs(10), "exit 3")
+            .expect_err("exit 3");
         assert_eq!(err.exit_code(), Some(3));
         assert_eq!(
             err.kind(),
@@ -1222,7 +1195,6 @@ mod tests {
     }
 
     /// An outside cancel cuts a running child before the bound.
-    #[cfg(unix)]
     #[test]
     fn external_cancel_cuts_child_before_budget() {
         let handle = SshCancel::new();
@@ -1247,7 +1219,6 @@ mod tests {
     }
 
     /// A child killed by cancellation is not reported as a timeout.
-    #[cfg(unix)]
     #[test]
     fn cancelled_child_is_not_reported_as_timeout() {
         let handle = SshCancel::new();
@@ -1267,8 +1238,8 @@ mod tests {
         assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
     }
 
-    /// Tests with a fake `ssh`: a shell script that logs the remote command (its last argument)
-    /// and acts by it.
+    /// Tests with a fake `ssh`: a shell script that logs the remote command (every argument after
+    /// the destination `fake-host`, joined by spaces) and acts by it.
     #[cfg(unix)]
     mod fake_ssh {
         use super::*;
@@ -1282,8 +1253,9 @@ mod tests {
         }
 
         impl FakeSsh {
-            /// `on_port` runs for the subcommand (last argument `port`) and the script exits after it; `on_file` runs for any
-            /// other remote command.
+            /// `on_port` runs for the subcommand `netprog port` (the configured program and
+            /// arguments) and the script exits after it; `on_file` runs for any other remote
+            /// command. Both can read the remote command as `$tail`.
             fn new(name: &str, on_port: &str, on_file: &str) -> Self {
                 static SEQ: AtomicUsize = AtomicUsize::new(0);
                 let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -1293,9 +1265,10 @@ mod tests {
                 ));
                 let log = base.with_extension("log");
                 let script = format!(
-                    "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\n\
-                     printf '%s\\n' \"$last\" >> '{}'\n\
-                     if [ \"$last\" = port ]; then {on_port}\nexit; fi\n{on_file}\n",
+                    "#!/bin/sh\nwhile [ $# -gt 0 ]; do a=\"$1\"; shift; [ \"$a\" = fake-host ] && break; done\n\
+                     tail=\"$*\"\n\
+                     printf '%s\\n' \"$tail\" >> '{}'\n\
+                     if [ \"$tail\" = 'netprog port' ]; then {on_port}\nexit; fi\n{on_file}\n",
                     log.display()
                 );
                 crate::write_test_script(&base, &script);
@@ -1346,7 +1319,7 @@ mod tests {
             )
             .expect_err("exited instance");
             assert_eq!(err.kind(), PortDiscoveryFailureKind::RemoteInstanceExited);
-            assert_eq!(exited.calls(), ["port"]);
+            assert_eq!(exited.calls(), ["netprog port"]);
 
             let old = FakeSsh::new("old", "exit 1", "echo 45123");
             let port = discover_remote_port(
@@ -1358,7 +1331,10 @@ mod tests {
             )
             .expect("an old remote falls back to the file");
             assert_eq!(port, 45123);
-            assert_eq!(old.calls(), ["port", "cat ~/.netprog-data/net.port"]);
+            assert_eq!(
+                old.calls(),
+                ["netprog port", "cat ~/.netprog-data/net.port"]
+            );
         }
 
         /// A cancelled lookup does not move on to the next mode.
@@ -1384,7 +1360,11 @@ mod tests {
             t.join().expect("killer thread");
             assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
             assert!(started.elapsed() < Duration::from_secs(10));
-            assert_eq!(slow.calls(), ["port"], "no file mode after the cancel");
+            assert_eq!(
+                slow.calls(),
+                ["netprog port"],
+                "no file mode after the cancel"
+            );
         }
 
         /// Detection counts the mode whose subcommand reports an exited instance as reached.
@@ -1394,12 +1374,12 @@ mod tests {
             let mode = detect_port_mode(&exited.launcher(), &target(), &config(), decode_port)
                 .expect("reached");
             assert_eq!(mode, PortMode::Subcommand);
-            assert_eq!(exited.calls(), ["port"]);
+            assert_eq!(exited.calls(), ["netprog port"]);
 
             let windows_only = FakeSsh::new(
                 "detect-windows",
                 "exit 1",
-                "case \"$last\" in type*) echo 45123;; *) exit 1;; esac",
+                "case \"$tail\" in type*) echo 45123;; *) exit 1;; esac",
             );
             let mode =
                 detect_port_mode(&windows_only.launcher(), &target(), &config(), decode_port)
@@ -1414,7 +1394,7 @@ mod tests {
             let fake = FakeSsh::new(
                 "explicit",
                 "echo 1",
-                "case \"$last\" in type*) echo 45124;; *) exit 1;; esac",
+                "case \"$tail\" in type*) echo 45124;; *) exit 1;; esac",
             );
             let mut c = config();
             c.explicit_port_file = Some("/srv/rec/net.port".into());
@@ -1428,19 +1408,29 @@ mod tests {
             );
         }
 
-        /// The subcommand runs the configured program and arguments.
+        /// The subcommand runs `remote_program` with `remote_args`, right after the destination.
         #[test]
         fn the_subcommand_uses_the_configured_program_and_arguments() {
             let fake = FakeSsh::new("argv", "echo 45125", "exit 1");
-            let launcher = fake.launcher();
-            let cmd = launcher.command(&target(), &[], &["netprog", "port"]);
-            let args: Vec<String> = cmd
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
-            assert_eq!(&args[args.len() - 3..], ["fake-host", "netprog", "port"]);
+            let mut c = config();
+            c.remote_program = "/opt/net/bin/netprog".into();
+            c.remote_args = vec!["record".into(), "--json".into()];
+            let err = discover_remote_port(
+                &fake.launcher(),
+                &target(),
+                PortMode::Subcommand,
+                &c,
+                decode_port,
+            )
+            .expect_err("only `netprog port` answers");
+            assert_eq!(
+                err.kind(),
+                PortDiscoveryFailureKind::RemoteInstanceNotRunning
+            );
+            assert_eq!(fake.calls(), ["/opt/net/bin/netprog record --json"]);
+
             let port = discover_remote_port(
-                &launcher,
+                &fake.launcher(),
                 &target(),
                 PortMode::Subcommand,
                 &config(),
@@ -1448,6 +1438,10 @@ mod tests {
             )
             .expect("subcommand");
             assert_eq!(port, 45125);
+            assert_eq!(
+                fake.calls().last().map(String::as_str),
+                Some("netprog port")
+            );
         }
 
         /// The output the decoder refuses is not copied into the error.
