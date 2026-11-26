@@ -81,11 +81,11 @@ impl ReadFailure {
 /// Writes `d` without losing precision, in the largest unit that divides it.
 fn exact_duration(d: Duration) -> String {
     let nanos = d.as_nanos();
-    if nanos % 1_000_000_000 == 0 {
+    if nanos.is_multiple_of(1_000_000_000) {
         format!("{} s", nanos / 1_000_000_000)
-    } else if nanos % 1_000_000 == 0 {
+    } else if nanos.is_multiple_of(1_000_000) {
         format!("{} ms", nanos / 1_000_000)
-    } else if nanos % 1_000 == 0 {
+    } else if nanos.is_multiple_of(1_000) {
         format!("{} us", nanos / 1_000)
     } else {
         format!("{nanos} ns")
