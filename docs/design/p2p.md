@@ -196,7 +196,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `Registered` → `Registered` | `nat_changed`(반사 주소나 `NatMapping`이 바뀜. 상태는 같고 값만 바뀐다) |
 | `Registered` → `Backoff` | `idle_timeout`, `server_closed`, `io` |
 | `Backoff` → `Connecting` | `backoff_elapsed` |
-| `Connecting`·`Registered`·`Backoff` → `Stopped` | `superseded`, `access_denied`, `reconnect_exhausted` |
+| `Connecting`·`Registered`·`Backoff` → `Stopped` | `superseded`, `access_denied`, `unsupported_proto`(서버 종료 코드 1·2·3, [rendezvous](rendezvous.md#메시지)), `reconnect_exhausted` |
 | 어느 상태든 → `Off` | `disabled` |
 
 ### 연결 시도와 연결
