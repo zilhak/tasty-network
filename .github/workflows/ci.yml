@@ -1,0 +1,106 @@
+name: CI
+
+# fmt, clippy, and tests of the workspace on Linux, macOS, and Windows, plus the
+# repository checks. Every check goes through scripts/check.sh, so CI, the git
+# hooks, and local runs use the same commands. Jobs are listed in
+# docs/dev-guide/ci.md.
+
+on:
+  push:
+    branches: [develop, release, main]
+  pull_request:
+    branches: [develop, release, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A push does not cancel the run of an earlier push on the same branch; a pull
+# request only needs its latest commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Use only the toolchain the job installs from rust-toolchain.toml.
+  RUSTUP_AUTO_INSTALL: "0"
+
+defaults:
+  run:
+    # Git Bash on the Windows runners.
+    shell: bash
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: fmt
+        run: scripts/check.sh fmt
+
+  clippy-test:
+    name: clippy, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: clippy
+        run: scripts/check.sh lint
+      - name: test
+        run: scripts/check.sh test --no-fail-fast
+
+  repo-checks:
+    name: shellcheck, no-tasty-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      # Uses the shellcheck already on the runner, or installs the version pinned in
+      # scripts/install-shellcheck.sh into the job's temporary folder.
+      - name: Install shellcheck
+        run: |
+          PREFIX="$RUNNER_TEMP/bin" bash scripts/install-shellcheck.sh
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: shellcheck
+        run: scripts/check.sh shell
+      # Criterion D7 of docs/design/done-criteria.md.
+      - name: no-tasty-deps
+        run: scripts/check.sh no-tasty-deps
+
+  deny:
+    name: cargo deny (licenses, bans, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+      # The sum published next to the release archive (<file>.sha256).
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: Install cargo-deny
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          dir="$RUNNER_TEMP/cargo-deny"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $dir/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name" >> "$GITHUB_PATH"
+      - name: cargo deny
+        run: scripts/check.sh deny
