@@ -235,7 +235,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 | `history` | 전이와 주소 변화 이력 | 상태 전이 | 상태 전이 | 상태 전이, `remote_address_observed_change`(관측된 원격 주소 변화, [P2P](p2p.md#주소-바뀜-quic-경로-이동)) |
 | `links` | 그 위의 링크·채널 | attach 링크(링크마다 holder), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
 | `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
-| `applied` | 이 연결에 적용된 설정값과 진행 값 | 재연결 시도 번호, 다음 시도까지 남은 시간, 적용된 시간 값 | 적용된 시간 값 | P2P 연결의 `applied`·`attempt`를 그대로 |
+| `applied` | 이 연결에 적용된 설정값과 진행 값. 항목마다 `{key, value, source}` | 재연결 시도 번호, 다음 시도까지 남은 시간, 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`) | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로 |
 
 - 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
 

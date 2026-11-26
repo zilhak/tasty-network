@@ -186,7 +186,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
 
-quinn·rustls의 값(QUIC 손실 복구, 스트림 상한, 세션 재개 끔 등)은 기기 쪽과 같은 항목을 서버 설정에도 둔다. 항목과 기본값은 [P2P](p2p.md#설정값)의 "의존성 값" 표를 따른다.
+quinn·rustls의 값(QUIC 손실 복구, 스트림 상한 등)은 기기 쪽과 같은 항목을 서버 설정에도 둔다. 항목과 기본값, 고정값(세션 재개·0-RTT·티켓 끔, grease 끔 등)과 잘못된 설정의 거절 규칙은 [P2P](p2p.md#설정값)의 "의존성이 노출하는 값"·"고정값" 표를 따른다. 서버가 기기에게 알리는 값(`welcome.limits`, `punch_go`)은 기기 쪽 연결 정보에 출처 `server`로 보인다.
 
 ## 클라이언트 설정
 

@@ -32,7 +32,7 @@
 | `serde`·`serde_json` | rendezvous | 조정 메시지 |
 
 - 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다, `rust-version = "1.85"`), rustls 0.23.46(`rust-version = "1.71"`)이다. raw public key resolver가 0.23.16부터 있으므로 rustls는 그 이상이어야 한다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
-- crypto provider를 `ring`으로 고르는 근거: rustls 0.23의 기본 provider는 `aws_lc_rs`라 기본 feature를 그대로 두면 두 provider가 함께 들어온다. 하나만 두려면 고르고 기본 feature를 꺼야 한다. 둘 다 C 컴파일러가 필요하다. `aws-lc-rs`는 비 FIPS 빌드에 CMake가 필요 없지만, Windows x86·x86-64에서는 NASM이 필요하고 없으면 미리 빌드한 객체(`prebuilt-nasm`)에 기대야 한다([aws-lc-rs 빌드 안내](https://github.com/aws/aws-lc-rs/blob/main/aws-lc-rs/README.md#build)). quinn의 기본 TLS feature도 `rustls-ring`이다. 그래서 OS마다 조건이 갈리지 않는 ring으로 고른다. TLS 1.2는 QUIC에 쓰이지 않으므로 `tls12`를 뺀다.
+- crypto provider를 `ring`으로 고르는 근거: rustls 0.23의 기본 provider는 `aws_lc_rs`라 기본 feature를 그대로 두면 두 provider가 함께 들어온다. 하나만 두려면 고르고 기본 feature를 꺼야 한다. 둘 다 C 컴파일러가 필요하다. `aws-lc-rs`는 비 FIPS 빌드에 CMake가 필요 없지만, Windows x86·x86-64에서는 NASM이 필요하다. NASM이 없을 때 쓸 수 있는 미리 빌드한 객체(`prebuilt-nasm`)는 Windows x86-64에만 있고, Windows x86에서는 NASM 없이 빌드되지 않는다([aws-lc-rs 빌드 안내](https://github.com/aws/aws-lc-rs/blob/main/aws-lc-rs/README.md#build)). quinn의 기본 TLS feature도 `rustls-ring`이다. 그래서 OS마다 조건이 갈리지 않는 ring으로 고른다. TLS 1.2는 QUIC에 쓰이지 않으므로 `tls12`를 뺀다.
 
 ## 소켓 하나와 패킷 나누기
 
@@ -163,7 +163,8 @@ A                         서버                          B
 | 펀칭된 경로의 QUIC 연결 | `quic.keepalive_interval` 15 s | `quic.idle_timeout` 45 s |
 
 - 주기 15 s의 근거: NAT의 UDP 매핑 만료 시간에 대해 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3 REQ-5는 2분 미만으로 만료하지 말라고(권장 5분 이상) 하고, NAT마다 쓰는 값의 차이가 크다고 적는다. [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1.2는 "experience shows that sending packets every 30 seconds is necessary to prevent the majority of middleboxes from losing state for UDP flows"라고 한다. ICE는 keepalive 기본을 15 s로 둔다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11, 15 s 미만 금지). 30 s보다 짧은 ICE 값을 그대로 빌린다.
-- idle timeout 45 s는 keepalive의 세 배다. 협상된 값은 양쪽 값 중 작은 쪽이다(RFC 9000 §10.1). keepalive PING은 확인 응답을 요구하는 패킷이라 잃으면 손실 복구(PTO)로 다시 보낸다. 그래서 보통은 PING 두 번을 잃어도 연결이 남지만, 실제 여유는 손실 양상과 PTO에 달렸고 보장은 아니다.
+- idle timeout 45 s는 keepalive의 세 배다. keepalive PING은 확인 응답을 요구하는 패킷이라 잃으면 손실 복구(PTO)로 다시 보낸다. 그래서 보통은 PING 두 번을 잃어도 연결이 남지만, 실제 여유는 손실 양상과 PTO에 달렸고 보장은 아니다.
+- `quic.idle_timeout`은 설정값이고, 연결이 실제로 끝나는 시각은 [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1의 규칙으로 정해진다. 협상값은 양쪽 값 중 작은 쪽이고, 한쪽이 0(끔)이면 다른 쪽 값이다. 타이머 길이는 협상값과 현재 PTO의 세 배 중 큰 쪽이다. 타이머는 상대 패킷을 받을 때와, 마지막 수신 뒤 처음 보내는 ack-eliciting 패킷 때 다시 시작한다(quinn-proto `reset_idle_timeout`). 그래서 두 끝의 종료 시각은 서로 다를 수 있고, 설정값 45 s가 양쪽의 종료 시각인 것은 아니다. 시험은 종료 원인이 `idle_timeout`인지와 상한 시간(마지막 수신 + max(협상값, 3 × PTO) + 여유) 안에 끝나는지만 본다.
 - EIM NAT에서는 서버 연결의 keepalive가 같은 매핑을 살리지만, 상대 주소에 대한 필터 상태는 상대와 주고받는 패킷만 살린다. 그래서 펀칭된 경로에도 따로 keepalive를 둔다.
 - 링크의 heartbeat와의 관계: attach 링크는 프레임 heartbeat(`HEARTBEAT_INTERVAL` 5 s, `read_timeout` 기본 30 s, [전송 추상화](transport.md#heartbeat와-읽기-시간-제한))를 그대로 쓴다. 링크가 살아 있는 동안은 heartbeat가 먼저 끊김을 본다(기본값에서 30 s < 45 s. 설정을 바꿔 이 순서가 뒤집혀도 동작은 맞고, 끊김을 먼저 보는 쪽만 바뀐다). QUIC keepalive는 링크가 없거나 조용한 연결(요청 채널만 있는 연결, 다음 채널을 기다리는 연결)의 매핑을 살린다. QUIC idle timeout으로 끝난 연결의 읽기는 `TimedOut`으로 분류된다([전송 추상화](transport.md#읽기-실패-분류)).
 
@@ -261,7 +262,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 
 - QUIC 연결은 언제나 A가 연다. 그래서 A가 QUIC 클라이언트, B가 서버다. QUIC의 연결 이동은 클라이언트 주소에만 허용된다. 클라이언트는 자기가 시작하지 않은 서버 주소 변화의 패킷을 버린다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9, §9.6).
 - A 쪽 NAT 재매핑: B가 새 주소에서 오는 A의 패킷을 받고, quinn이 경로 검증과 함께 그 주소로 옮긴다(B의 quinn `ServerConfig::migration`, 설정 `quic.allow_migration`, 기본 켬. 이 설정은 서버 쪽에서 클라이언트의 이동을 받을지만 정한다). B는 `Connection::remote_address()`의 변화를 `remote_address_observed_change{from, to}`로 기록한다.
-- B 쪽 NAT 재매핑: A는 새 주소에서 온 B의 패킷을 버린다. 연결은 `quic.idle_timeout` 뒤 `idle_timeout`으로 끊기고(양쪽 모두), transport가 새 펀칭으로 다시 맺는다. 이 경우를 따로 알아내지는 않는다. 끊긴 원인은 `idle_timeout`이다.
+- B 쪽 NAT 재매핑: A는 새 주소에서 온 B의 패킷을 버린다. 연결은 idle 타이머가 끝나면 `idle_timeout`으로 끊기고(양쪽 모두. 끝나는 시각은 위 "연결 유지"의 규칙으로 끝마다 다르다), transport가 새 펀칭으로 다시 맺는다. 이 경우를 따로 알아내지는 않는다. 끊긴 원인은 `idle_timeout`이다.
 - 이 기록은 "관측된 원격 주소 변화"다. 경로 검증이 끝났다는 뜻이 아니다. quinn은 이동을 시작할 때 현재 경로를 바꾸고, 검증이 실패하면 옛 경로로 되돌린다. 되돌림도 같은 사건으로 기록된다.
 - quinn에는 이 변화를 알리는 콜백이 없어 `path.poll_interval`(기본 1 s)마다 `remote_address()`를 읽어 비교한다. 한 간격 안에 바뀌었다 돌아온 변화와, 한 간격 안의 두 번째 이후 변화는 놓친다. 이력은 폴링 시점의 값만 담는다.
 
@@ -270,11 +271,13 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 모든 타이머·재시도 횟수·간격·타임아웃·keepalive 주기·상한은 설정값이다(사용자 결정 2026-11-27, 원문 "타이머, 재시도횟수 이런것은 전부 설정가능 및 보기 가능값이어야하지").
 
 - 바꾸기: `P2pConfig.settings`(`P2pSettings`)로 준다. 주지 않은 항목은 기본값이다. 값의 범위 검사(예: `idle_timeout > keepalive_interval`)는 `bind`가 하고 어긋나면 오류로 돌려준다.
-- 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default`(이 표의 기본), `configured`(설정으로 줌), `os_default`(OS가 정한 값을 읽어 보임) 중 하나다. 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
-- 세 가지를 구분한다.
+- 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default`(이 표의 기본), `configured`(설정으로 줌), `os_default`(OS가 정한 값을 읽어 보임), `fixed`(아래 "고정값"), `server`(rendezvous 서버가 정해 알린 값. 연결 정보의 `applied`에만 나온다) 중 하나다. 서버가 정한 값이 서버 안에서 기본인지 운영자가 준 값인지는 서버의 `settings()`와 시작 로그에서 본다(기기는 그 구분을 받지 않는다). 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
+- 네 가지를 구분한다.
   1. 설정 가능한 동작값: 아래 두 표(이 레포가 정하는 값, 의존성이 노출하는 값). 모두 설정·조회된다.
-  2. 의존성 내부 값: 의존성이 노출하지 않아 설정할 수 없는 값. 이름과 출처만 아래 표에 적는다.
-  3. 와이어 형식 상수: 프로토콜 형식의 정의라 동작값이 아니다(아래 표). 형식 모듈에 모은다.
+  2. 고정값: 의존성 setter가 있지만 와이어 형식이나 인증 전제를 깨므로 바꿀 수 없게 한 값. 조회에는 보인다.
+  3. 의존성 내부 값: 의존성이 노출하지 않아 설정할 수 없는 값. 이름과 출처만 아래 표에 적는다.
+  4. 와이어 형식 상수: 프로토콜 형식의 정의라 동작값이 아니다(아래 표). 형식 모듈에 모은다.
+- 기본값의 원천은 코드의 기본값 표 하나다(`settings::DEFAULTS`, 키·값·출처 종류를 담는다). `Default` 구현과 `settings()`가 이 표에서 나오고, 시험이 설계 문서의 표를 읽어 이 원천과 값까지 대조한다([CI와 시험 환경](testing.md#설정값-시험)).
 - 코드 안 상수로만 있는 동작값은 두지 않는다. 정적 검사와 기본값 대조 시험이 지킨다([CI와 시험 환경](testing.md#설정값-시험)).
 - 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh·identity의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖). transport에 이번에 새로 정한 연결 목록 값은 처음부터 따른다([전송 추상화](transport.md#연결-목록)).
 
@@ -318,7 +321,9 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 
 ### 의존성이 노출하는 값
 
-quinn·rustls가 설정 함수를 주는 시간·횟수·상한이다. 기본값은 quinn·rustls 기본을 그대로 두거나(근거는 그 표준) 이 설계가 바꾼다. 모두 `settings()`에 보인다. "quinn 0.11.12 기본"으로 적은 값은 구현이 고정한 판의 소스 값으로 이 표를 채우고, 기본값 대조 시험이 그 값을 지킨다.
+- 규칙: 고정한 판(quinn 0.11.12, 그 의존 quinn-proto 0.11.19(`Cargo.lock`으로 고정), rustls 0.23.46)에서 공개 setter나 공개 필드가 있는 값 가운데 시간·횟수·크기·상한을 받는 것은 모두 설정·조회 대상이다. 아래 "고정값"으로 뺀 것만 예외다. 표에 하나씩 적지만, 표가 빠뜨린 setter를 시험이 찾는다(`dependency_setters_are_covered`, [CI와 시험 환경](testing.md#설정값-시험)). 그 시험은 고정판의 공개 API 목록(rustdoc JSON에서 뽑아 시험 자료로 커밋한 목록)과 이 표의 "의존성 설정" 열을 대조한다. 판을 올리면 목록을 다시 뽑고 이 표를 같이 고친다.
+- 값이 켜고 끄는 기능에 딸린 경우(예: ACK frequency, datagram) 기능이 꺼져 있으면 딸린 값은 "적용 안 됨"으로 조회에 보인다. 값은 그대로 설정할 수 있고 기능을 켤 때 쓰인다.
+- 기본값은 quinn-proto 0.11.19와 rustls 0.23.46의 `Default`·생성 함수 소스에서 읽은 값이다. 이 설계가 바꾼 값은 근거에 적었다.
 
 | 키 | 의존성 설정 | 기본 | 근거 |
 |---|---|---|---|
@@ -326,22 +331,59 @@ quinn·rustls가 설정 함수를 주는 시간·횟수·상한이다. 기본값
 | `quic.packet_threshold` | `TransportConfig::packet_threshold` | 3 | RFC 9002 §6.1.1 kPacketThreshold |
 | `quic.time_threshold` | `TransportConfig::time_threshold` | 9/8 | RFC 9002 §6.1.2 kTimeThreshold |
 | `quic.persistent_congestion_threshold` | `TransportConfig::persistent_congestion_threshold` | 3 | RFC 9002 §7.6.1 kPersistentCongestionThreshold |
-| `quic.stream_receive_window`, `quic.receive_window`, `quic.send_window` | `TransportConfig`의 같은 이름 | quinn 0.11.12 기본 | 흐름 제어 상한. bulk 전송 속도를 실측(D4 `bulk_transfer_matches_bytes`)으로 보고 바꾼다 |
+| `quic.stream_receive_window` | `TransportConfig::stream_receive_window` | 1 250 000 B | quinn 기본(12.5 MB/s × 100 ms). bulk 실측(D4 `bulk_transfer_matches_bytes`)으로 다시 본다 |
+| `quic.receive_window` | `TransportConfig::receive_window` | 2^62 − 1 B(VarInt 최대, 사실상 연결 단위 상한 없음) | quinn 기본. 스트림 수 상한 64와 스트림 창이 메모리를 묶는다 |
+| `quic.send_window` | `TransportConfig::send_window` | 10 000 000 B | quinn 기본(스트림 창의 8배) |
 | `quic.initial_mtu`, `quic.min_mtu` | `TransportConfig::initial_mtu`·`min_mtu` | 1200 B | [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §14 최소 데이터그램 크기 |
-| `quic.mtu_discovery.interval`, `quic.mtu_discovery.upper_bound` | `MtuDiscoveryConfig` | quinn 0.11.12 기본 | 경로 MTU 탐색 주기·상한 |
-| `quic.crypto_buffer_size` | `TransportConfig::crypto_buffer_size` | quinn 0.11.12 기본 | handshake 메시지 버퍼 상한 |
-| `quic.datagrams` | `datagram_receive_buffer_size` | 끔(`None`) | QUIC datagram을 쓰지 않는다 |
-| `quic.max_udp_payload_size` | `EndpointConfig::max_udp_payload_size` | quinn 0.11.12 기본 | 받는 UDP 크기 상한 |
-| `quic.min_reset_interval` | `EndpointConfig::min_reset_interval` | quinn 0.11.12 기본 | stateless reset 송신 간격 하한 |
-| `quic.grease_quic_bit` | `EndpointConfig::grease_quic_bit` | 끔(quinn 기본 켬) | 위 "소켓 하나와 패킷 나누기" |
-| `quic.max_incoming`, `quic.incoming_buffer_size` | `ServerConfig::max_incoming`·`incoming_buffer_size` | quinn 0.11.12 기본 | 받는 쪽(B, 서버)의 handshake 대기 상한 |
-| `tls.resumption` | rustls `ClientConfig::resumption` | 끔(`Resumption::disabled()`) | 매 연결이 CertificateVerify를 거치게 한다(아래 "인증") |
-| `tls.early_data` | rustls `enable_early_data`, 서버 `max_early_data_size` | 끔(0) | 0-RTT를 쓰지 않는다 |
-| `tls.tickets` | rustls 서버 `send_tls13_tickets` | 0 | 세션 재개를 끄므로 티켓을 보내지 않는다 |
+| `quic.mtu_discovery.interval` | `MtuDiscoveryConfig::interval` | 600 s | quinn 기본 |
+| `quic.mtu_discovery.upper_bound` | `MtuDiscoveryConfig::upper_bound` | 1452 B | quinn 기본 |
+| `quic.mtu_discovery.black_hole_cooldown` | `MtuDiscoveryConfig::black_hole_cooldown` | 60 s | quinn 기본 |
+| `quic.mtu_discovery.minimum_change` | `MtuDiscoveryConfig::minimum_change` | 20 B | quinn 기본 |
+| `quic.crypto_buffer_size` | `TransportConfig::crypto_buffer_size` | 16 KiB | quinn 기본. handshake 메시지 버퍼 상한 |
+| `quic.ack_frequency` | `TransportConfig::ack_frequency_config` | 끔(`None`, quinn 기본) | 켜면 아래 세 값이 쓰인다 |
+| `quic.ack_frequency.ack_eliciting_threshold`, `quic.ack_frequency.max_ack_delay`, `quic.ack_frequency.reordering_threshold` | `AckFrequencyConfig`의 같은 이름 | 1, 없음(상대 값), 2 | quinn 기본. 위가 꺼져 있어 적용 안 됨 |
+| `quic.datagram_receive_buffer_size` | `TransportConfig::datagram_receive_buffer_size` | 끔(`None`, quinn 기본은 1 250 000 B) | QUIC datagram을 쓰지 않는다 |
+| `quic.datagram_send_buffer_size` | `TransportConfig::datagram_send_buffer_size` | 1 MiB | quinn 기본. datagram이 꺼져 있어 적용 안 됨 |
+| `quic.cubic.initial_window` | `CubicConfig::initial_window`(`congestion_controller_factory`로 넣는다) | 12 000 B | quinn 기본(14 720을 1200 B의 2~10배로 자름, [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002) §7.2). 혼잡 제어 알고리즘은 CUBIC으로 고정한다(아래 "고정값") |
+| `quic.max_udp_payload_size` | `EndpointConfig::max_udp_payload_size` | 1472 B | quinn 기본(이더넷 MTU − IP·UDP 머리) |
+| `quic.min_reset_interval` | `EndpointConfig::min_reset_interval` | 20 ms | quinn 기본. stateless reset 송신 간격 하한 |
+| `quic.retry_token_lifetime` | `ServerConfig::retry_token_lifetime` | 15 s | quinn 기본 |
+| `quic.validation_token.lifetime` | `ValidationTokenConfig::lifetime` | 14일 | quinn 기본 |
+| `quic.validation_token.sent` | `ValidationTokenConfig::sent` | 0 | quinn 기본(`bloom` feature를 끄면 0). 이 설계는 `bloom`을 켜지 않는다 |
+| `quic.max_incoming` | `ServerConfig::max_incoming` | 65 536 | quinn 기본. 받는 쪽(B, 서버)의 handshake 대기 상한 |
+| `quic.incoming_buffer_size` | `ServerConfig::incoming_buffer_size` | 10 MiB | quinn 기본 |
+| `quic.incoming_buffer_size_total` | `ServerConfig::incoming_buffer_size_total` | 100 MiB | quinn 기본 |
+| `tls.max_fragment_size` | rustls `ClientConfig`·`ServerConfig::max_fragment_size` | 없음(rustls 기본) | QUIC은 TLS 레코드를 쓰지 않아 적용 안 됨([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) §4) |
+
+`quic.max_bidi_streams`, `quic.max_uni_streams`, `quic.keepalive_interval`, `quic.idle_timeout`, `quic.allow_migration`도 의존성 setter(`max_concurrent_bidi_streams`·`max_concurrent_uni_streams`·`keep_alive_interval`·`max_idle_timeout`·`ServerConfig::migration`)로 들어가는 값이고 위 "이 레포가 정하는 값" 표에 있다.
+
+### 고정값 (설정 불가, 조회에는 보임)
+
+와이어 형식이나 인증 전제를 깨는 의존성 값이다. 설정 구조체와 설정 파일에 키가 없어 바꿀 수 없고, `settings()`에는 `source = fixed`와 이유로 보인다.
+
+| 키 | 고정값 | 이유 |
+|---|---|---|
+| `quic.grease_quic_bit` | 끔(`EndpointConfig::grease_quic_bit(false)`, quinn 기본 켬) | 켜면 상대가 QUIC 고정 비트를 0으로 보낼 수 있어 첫 바이트가 0–63에 들어온다. 첫 바이트 분류가 그 패킷을 STUN이나 버림으로 본다([RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §1, 위 "소켓 하나와 패킷 나누기") |
+| `quic.supported_versions` | QUIC v1 하나 | 첫 바이트 분류와 와이어 형식이 v1 기준이다 |
+| `quic.preferred_address` | 없음 | 서버가 다른 주소로 옮기라고 하면 펀칭한 경로를 벗어난다 |
+| `quic.congestion_controller` | CUBIC | 알고리즘 선택은 동작값이 아니라 구현 선택이다. 바꾸면 위 `quic.cubic.*`의 뜻이 바뀐다 |
+| `tls.versions` | TLS 1.3만 | QUIC은 TLS 1.3만 쓴다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)) |
+| `tls.provider` | ring | 위 "외부 의존과 고정" |
+| `tls.resumption` | 끔(`Resumption::disabled()`, rustls 기본은 켬) | 재개된 handshake는 CertificateVerify를 거치지 않는다([RFC 8446](https://www.rfc-editor.org/rfc/rfc8446) §2.2). 매 연결이 키 소유를 증명한다는 인증 전제(아래 "인증")가 깨진다 |
+| `tls.tickets` | 0(rustls 서버 `send_tls13_tickets`, rustls 기본 2) | 재개를 끄므로 티켓을 보내지 않는다 |
+| `tls.early_data` | 끔(클라이언트 `enable_early_data` false, 서버 `max_early_data_size` 0) | 0-RTT는 재개 위에서만 서고 재전송 공격에 열린다. quinn의 기본 생성 함수는 이것을 켜므로 이 설계는 rustls 설정을 직접 만든다 |
+| `tls.alpn` | `tasty-net/2`, `tasty-rendezvous/1` | 와이어 형식([버전·호환](versioning.md)) |
+
+잘못된 설정의 거절(`bind`와 서버 시작이 한다. 어긋나면 키와 값을 담은 오류로 돌려주고 소켓을 열지 않는다):
+
+1. 고정값 키를 주면 모르는 키로 거절한다(설정 파일 파서는 모르는 키를 받지 않는다).
+2. 의존성이 받지 않는 범위를 거절한다. 예: `quic.initial_mtu < 1200`, `quic.min_mtu > quic.initial_mtu`, `quic.mtu_discovery.upper_bound < quic.initial_mtu`, VarInt 범위(2^62)를 넘는 창·스트림 수, `quic.idle_timeout`이 VarInt 밀리초를 넘음.
+3. 관계를 거절한다. 예: `quic.idle_timeout ≤ quic.keepalive_interval`, `rendezvous.idle_timeout ≤ rendezvous.keepalive_interval`, `punch.max_candidates`가 1–64 밖, `history.limit = 0`.
+4. 단방향 스트림 상한처럼 와이어·인증 전제를 깨지 않는 동작값은 범위 안이면 받는다(예: `quic.max_uni_streams`를 0보다 크게 주면 상대가 연 단방향 스트림을 quinn이 받되 이 레포는 읽지 않고 닫는다).
 
 ### 의존성 내부 값 (설정 불가)
 
-quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 이름과 출처만 적는다. 구현이 고정한 판에서 이 중 설정 함수가 생긴 것이 있으면 위 표로 옮긴다.
+quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 이름과 출처만 적는다. 판을 올렸을 때 이 중 설정 함수가 생긴 것이 있으면 `dependency_setters_are_covered`가 찾고 위 표로 옮긴다.
 
 | 값 | 출처 |
 |---|---|
@@ -349,7 +391,8 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | PTO 지수 backoff(두 배씩) | RFC 9002 §6.2.1, quinn-proto 내부 |
 | closing·draining 기간(PTO의 세 배) | RFC 9000 §10.2, quinn-proto 내부 |
 | 경로 검증 기한(PTO의 세 배 이상) | RFC 9000 §8.2.4, quinn-proto 내부 |
-| 혼잡 제어 알고리즘의 내부 계수 | quinn 혼잡 제어기(기본 Cubic). 알고리즘 선택은 `TransportConfig::congestion_controller_factory`로 바꿀 수 있으나 이 설계는 기본을 쓴다 |
+| idle timeout 하한(PTO의 세 배) | RFC 9000 §10.1, quinn-proto 내부(아래 "연결 유지") |
+| CUBIC 계수 β(0.7)와 C(0.4) | quinn-proto `congestion/cubic.rs`의 상수. setter가 있는 값은 `initial_window` 하나다 |
 
 ### 와이어 형식 상수 (설정 아님)
 
@@ -377,8 +420,8 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | `side` | `dialer`(A) · `acceptor`(B) |
 | `state` | 위 상태 기계의 상태와 그 상태의 값 |
 | `local_bind` | 소켓이 바인딩한 주소(예: `[::]:54321`). wildcard일 수 있다 |
-| `local_ip` | 이 연결에 실제로 쓰인 로컬 IP. quinn `Connection::local_ip()`가 주는 경우만 있고, OS가 알려 주지 않으면 `unknown` |
-| `local_reflexive` | 펀칭 때 서버가 본 이 기기의 반사 주소 |
+| `local_ip` | 이 연결에 실제로 쓰인 로컬 IP. B(QUIC 서버)는 quinn `Connection::local_ip()`가 주는 경우에 채운다(`PacketIo`가 받은 패킷의 목적지 IP를 quinn에 넘길 때). A(QUIC 클라이언트)는 quinn 0.11.12에서 `local_ip()`가 언제나 `None`이므로 늘 `unknown`이다. A의 로컬 쪽은 `local_bind`(포트 포함)와 `local_reflexive`로 보인다 |
+| `local_reflexive` | 펀칭 때 서버가 본 이 기기의 반사 주소(서버가 `welcome.reflexive`·`reflexive_changed`로 알린 값). A·B 모두 채워진다 |
 | `remote_addr` | quinn이 지금 쓰는 상대 주소(`Connection::remote_address()`). 연결 전에는 비어 있다 |
 | `remote_candidate` | 성공한 후보 주소와 종류(`server_reflexive` · `reported_reflexive` · `host` · `peer_reflexive`). 위 주소 바뀜이 있으면 `remote_addr`와 달라질 수 있다 |
 | `rendezvous` | 소개해 준 서버 주소와 서버 공개키 |
@@ -387,7 +430,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | `rtt` | quinn RTT 추정 |
 | `last_cause` | 마지막 전이의 원인 |
 | `history` | 전이와 관측된 원격 주소 변화의 이력(최대 `history.limit`개, 버린 수 함께) |
-| `applied` | 이 연결에 적용된 설정값(위 표의 해당 항목과 서버에서 받은 창·기한, 값과 출처) |
+| `applied` | 이 연결에 적용된 설정값. 항목마다 값과 출처(`default`·`configured`·`os_default`·`fixed`, 서버에서 받은 창·기한·시작 지연·한계값은 `server`) |
 
 ## 인증
 
@@ -404,7 +447,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
   - 클라이언트 쪽 검증기(`rustls::client::danger::ServerCertVerifier` 구현): `requires_raw_public_keys`가 참, `verify_server_cert`가 SPKI 형식을 보고 그 연결의 기대 키와 비교, `verify_tls13_signature`가 `verify_tls13_signature_with_raw_key`로 CertificateVerify를 검증, `supported_verify_schemes`는 ED25519 하나, TLS 1.2 서명 검증은 항상 실패(TLS 1.2를 켜지 않는다).
   - 서버 쪽 검증기(`rustls::server::danger::ClientCertVerifier` 구현): `requires_raw_public_keys`와 `client_auth_mandatory`가 참, SPKI 형식 검사, 같은 서명 검증. 받을 기기를 여기서 고르지 않는다(아래).
   - 기대 키는 연결마다 다르다. dialer는 연결마다 그 기대 키(P2P는 상대 기기 ID, 서버 연결은 고정한 서버 공개키)를 담은 rustls 설정을 만들어 quinn `Endpoint::connect_with`로 건다.
-  - 세션 재개와 0-RTT는 끈다(위 "의존성이 노출하는 값"). 재개된 handshake는 CertificateVerify를 거치지 않기 때문이다.
+  - 세션 재개와 0-RTT는 끈다(위 "고정값"). 재개된 handshake는 CertificateVerify를 거치지 않기 때문이다.
   - handshake 뒤 quinn `Connection::peer_identity()`는 rustls의 인증서 목록(`Vec<CertificateDer>`)을 주고, raw public key일 때 그 하나가 SPKI다. 이것으로 `remote_device_id()`를 만든다.
 - dialer: 검증기가 상대 키가 요청한 기기 ID와 다르면 handshake를 실패시키고 `PeerIdentityMismatch`다. 서버 이름(SNI)은 고정값 `tasty-p2p`이고 검증에 쓰지 않는다.
 - acceptor: 검증기는 형식이 맞고 서명이 맞는 ed25519 raw public key면 받는다. 연결이 선 직후 그 기기 ID가 펀칭 세션의 상대인지([펀칭 절차](#펀칭-절차) 9, 다르면 `session_mismatch`)와 페어링 허용 목록에 있는지(없으면 `not_paired`)를 본다([handshake v2](handshake.md#quic-종료-코드)). `punch_offer` 확인이 이미 걸렀으므로 보통은 생기지 않는 경로다.
