@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{kill_and_reap, recover_mutex};
-use crate::listener::{ListenerVerdict, RemoteListenerAbsent, relay_stderr};
+use crate::listener::{ListenerVerdict, RemoteListenerAbsent, StderrMarks, relay_stderr};
 use crate::{SshLauncher, SshTarget};
 
 /// How long `establish` waits for the local end to accept connections.
@@ -81,8 +81,57 @@ pub struct SshTunnel {
     child: Mutex<Child>,
     local_port: u16,
     remote_port: u16,
-    /// ssh's stderr had a channel connect failure line ([`crate::ListenerVerdict`]).
-    channel_connect_failed: Arc<AtomicBool>,
+    /// What the stderr relay marked ([`crate::ListenerVerdict`]).
+    marks: Arc<StderrMarks>,
+}
+
+/// Options every tunnel forces. They go before the target's extra options, and ssh keeps the
+/// first value of an option, so the target's options and the ssh config cannot undo them.
+/// - `ExitOnForwardFailure=yes`: exit at once if the forward fails, so the ready probe sees the
+///   child die.
+/// - `ControlMaster=no`, `ControlPath=none`: no connection sharing. A multiplexed forward would
+///   belong to the master process, not to this child.
+const TUNNEL_FORCED_OPTIONS: [&str; 3] = [
+    "ExitOnForwardFailure=yes",
+    "ControlMaster=no",
+    "ControlPath=none",
+];
+
+/// Keeps ssh in the foreground, so the forward lives in the child this tunnel owns and reaps.
+/// OpenSSH before 8.7 does not know the option (and cannot fork without `-f`); when it refuses
+/// the option, the tunnel starts again without it.
+const NO_FORK_OPTION: &str = "ForkAfterAuthentication=no";
+
+/// The ssh command of a tunnel from `local_port` to `remote_port`.
+fn tunnel_command(
+    launcher: &SshLauncher,
+    target: &SshTarget,
+    local_port: u16,
+    remote_port: u16,
+    no_fork_option: bool,
+) -> std::process::Command {
+    let mut forced: Vec<&str> = TUNNEL_FORCED_OPTIONS.to_vec();
+    if no_fork_option {
+        forced.push(NO_FORK_OPTION);
+    }
+    // Bind only to loopback. That does not keep other users of the same host out.
+    let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
+    // No remote command, only the tunnel.
+    let flags = ["-N".to_string(), "-L".to_string(), forward];
+    launcher.command(target, &forced, &flags, &[])
+}
+
+/// Why one start attempt failed.
+enum AttemptError {
+    Failed(TunnelError),
+    /// ssh refused [`NO_FORK_OPTION`] and exited; start again without it.
+    ForkOptionRefused(TunnelError),
+}
+
+impl From<TunnelError> for AttemptError {
+    fn from(e: TunnelError) -> Self {
+        Self::Failed(e)
+    }
 }
 
 /// The tunnel child holds no invariant a panic could break; recover it so it is still reaped.
@@ -90,8 +139,10 @@ const TUNNEL_CHILD_WHAT: &str = "the ssh tunnel child";
 static TUNNEL_CHILD_POISON_REPORTED: AtomicBool = AtomicBool::new(false);
 
 impl SshTunnel {
-    /// Starts `ssh -o ExitOnForwardFailure=yes -N -L 127.0.0.1:<local>:127.0.0.1:<remote_port>`
-    /// for `target` in the background, then polls until the local end accepts connections.
+    /// Starts `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<remote_port>` for `target` in the
+    /// background, then polls until the local end accepts connections. The forced options
+    /// ([`TUNNEL_FORCED_OPTIONS`], `ForkAfterAuthentication=no` where ssh knows it) win over the
+    /// target's options and the ssh config.
     ///
     /// ssh's stderr goes on to this process's stderr (authentication messages stay visible;
     /// a first connection's host key and passphrase prompts go to the terminal directly). The
@@ -105,36 +156,55 @@ impl SshTunnel {
         Self::establish_relaying_to(launcher, target, remote_port, io::stderr)
     }
 
-    /// [`Self::establish`], passing ssh's stderr to what `sink` makes.
+    /// [`Self::establish`], passing ssh's stderr to what `sink` makes (a sink per attempt).
     fn establish_relaying_to<W: io::Write + 'static>(
         launcher: &SshLauncher,
         target: &SshTarget,
         remote_port: u16,
-        sink: impl FnOnce() -> W + Send + 'static,
+        sink: impl Fn() -> W + Send + Sync + 'static,
     ) -> Result<Self, TunnelError> {
+        let sink = Arc::new(sink);
+        let first = {
+            let sink = Arc::clone(&sink);
+            let no_fork_option = launcher.fork_option_supported();
+            Self::attempt(launcher, target, remote_port, no_fork_option, move || {
+                sink()
+            })
+        };
+        match first {
+            Ok(tunnel) => Ok(tunnel),
+            Err(AttemptError::Failed(e)) => Err(e),
+            Err(AttemptError::ForkOptionRefused(_)) => {
+                launcher.mark_fork_option_refused();
+                Self::attempt(launcher, target, remote_port, false, move || sink()).map_err(|e| {
+                    match e {
+                        AttemptError::Failed(e) | AttemptError::ForkOptionRefused(e) => e,
+                    }
+                })
+            }
+        }
+    }
+
+    /// Starts one ssh and waits until it is ready.
+    fn attempt<W: io::Write + 'static>(
+        launcher: &SshLauncher,
+        target: &SshTarget,
+        remote_port: u16,
+        no_fork_option: bool,
+        sink: impl FnOnce() -> W + Send + 'static,
+    ) -> Result<Self, AttemptError> {
         // Release the reservation so ssh can bind it. Another process can take it meanwhile.
         let (reservation, local_port) = reserve_local_port().map_err(TunnelError::LocalPort)?;
         drop(reservation);
-        // Bind only to loopback. That does not keep other users of the same host out.
-        let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
-        let before = [
-            "-o".to_string(),
-            // Exit at once if the forward fails, so the ready probe sees the child die.
-            "ExitOnForwardFailure=yes".to_string(),
-            // No remote command, only the tunnel.
-            "-N".to_string(),
-            "-L".to_string(),
-            forward,
-        ];
-        let mut cmd = launcher.command(target, &before, &[]);
+        let mut cmd = tunnel_command(launcher, target, local_port, remote_port, no_fork_option);
         cmd.stdin(Stdio::null()).stderr(Stdio::piped());
         let mut child = launcher
             .spawn_hook()
             .spawn(cmd)
             .map_err(TunnelError::Spawn)?;
-        let channel_connect_failed = Arc::new(AtomicBool::new(false));
+        let marks = Arc::new(StderrMarks::default());
         let mut stderr_relay = child.stderr.take().and_then(|stderr| {
-            let seen = Arc::clone(&channel_connect_failed);
+            let seen = Arc::clone(&marks);
             // The thread ends when ssh exits and stderr closes. Nobody waits for it after the
             // tunnel is ready.
             std::thread::Builder::new()
@@ -148,11 +218,19 @@ impl SshTunnel {
             child: Mutex::new(child),
             local_port,
             remote_port,
-            channel_connect_failed,
+            marks,
         };
         // On an error the tunnel drops here and the child is killed and reaped.
-        tunnel.wait_ready(&mut stderr_relay)?;
-        Ok(tunnel)
+        match tunnel.wait_ready(&mut stderr_relay) {
+            Ok(()) => Ok(tunnel),
+            Err(e @ TunnelError::ExitedBeforeReady { .. })
+                if no_fork_option && tunnel.marks.fork_option_refused.load(Ordering::Acquire) =>
+            {
+                tracing::debug!("ssh does not know ForkAfterAuthentication; starting without it");
+                Err(AttemptError::ForkOptionRefused(e))
+            }
+            Err(e) => Err(AttemptError::Failed(e)),
+        }
     }
 
     fn lock_child(&self) -> MutexGuard<'_, Child> {
@@ -214,7 +292,7 @@ impl SshTunnel {
     /// The absent-listener verdict of this tunnel. Use it to judge failures after the tunnel
     /// moved elsewhere.
     pub fn listener_verdict(&self) -> ListenerVerdict {
-        ListenerVerdict::new(self.remote_port, Arc::clone(&self.channel_connect_failed))
+        ListenerVerdict::new(self.remote_port, Arc::clone(&self.marks))
     }
 
     /// Whether a request through the tunnel failed with `failure` because nothing listens on the
@@ -396,6 +474,51 @@ mod tests {
         (hook, calls, pids)
     }
 
+    fn args_of(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The forced options come before the target's options, so ssh keeps them, and the tunnel
+    /// stays in the foreground without connection sharing.
+    #[test]
+    fn forced_tunnel_options_come_before_the_target_options() {
+        let mut target = SshTarget::parse("me@box");
+        target.extra_options = vec![
+            "ExitOnForwardFailure=no".into(),
+            "ControlMaster=auto".into(),
+            "ControlPath=~/.ssh/cm-%C".into(),
+            "ForkAfterAuthentication=yes".into(),
+        ];
+        let launcher = SshLauncher::new("ssh");
+        let args = args_of(&tunnel_command(&launcher, &target, 4001, 4002, true));
+        let at = |v: &str| {
+            args.iter()
+                .position(|a| a == v)
+                .unwrap_or_else(|| panic!("{v} missing from {args:?}"))
+        };
+        for (forced, user) in [
+            ("ExitOnForwardFailure=yes", "ExitOnForwardFailure=no"),
+            ("ControlMaster=no", "ControlMaster=auto"),
+            ("ControlPath=none", "ControlPath=~/.ssh/cm-%C"),
+            (NO_FORK_OPTION, "ForkAfterAuthentication=yes"),
+        ] {
+            assert!(
+                at(forced) < at(user),
+                "{forced} must win over {user}: {args:?}"
+            );
+            assert_eq!(args[at(forced) - 1], "-o");
+        }
+        assert_eq!(args[at("-L") + 1], "127.0.0.1:4001:127.0.0.1:4002");
+        assert!(at("-N") < at("me@box"));
+        assert_eq!(args.last().map(String::as_str), Some("me@box"));
+
+        let without = args_of(&tunnel_command(&launcher, &target, 4001, 4002, false));
+        assert!(!without.iter().any(|a| a == NO_FORK_OPTION), "{without:?}");
+        assert!(without.iter().any(|a| a == "ExitOnForwardFailure=yes"));
+    }
+
     /// `establish` creates its child through the hook, once.
     #[test]
     fn establish_spawns_through_the_hook_once() {
@@ -452,15 +575,63 @@ mod tests {
 
         /// The forwarding fake ssh: a script that runs this test binary in forwarder mode.
         fn forwarder() -> Script {
+            forwarder_after("forwarder", "")
+        }
+
+        /// The forwarding fake, running `prelude` (shell lines) first.
+        fn forwarder_after(name: &str, prelude: &str) -> Script {
             let exe = std::env::current_exe().expect("test binary path");
             Script::new(
-                "forwarder",
+                name,
                 &format!(
-                    "#!/bin/sh\n{FAKE_ARGS_ENV}=\"$*\"\nexport {FAKE_ARGS_ENV}\n\
+                    "#!/bin/sh\n{prelude}{FAKE_ARGS_ENV}=\"$*\"\nexport {FAKE_ARGS_ENV}\n\
                      exec '{}' {FORWARDER_TEST} --exact --nocapture --test-threads=1 >/dev/null\n",
                     exe.display()
                 ),
             )
+        }
+
+        /// An ssh before OpenSSH 8.7 refuses `ForkAfterAuthentication`. The tunnel starts again
+        /// without it, and the launcher (and its clones) leave it out from then on.
+        #[test]
+        fn an_ssh_without_the_fork_option_gets_a_tunnel_without_it() {
+            let old_ssh = forwarder_after(
+                "old-ssh",
+                "case \" $* \" in *\" ForkAfterAuthentication=no \"*)\n\
+                 echo 'command-line: line 0: Bad configuration option: forkafterauthentication' >&2\n\
+                 exit 255;;\nesac\n",
+            );
+            let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+            let seen = Arc::clone(&argvs);
+            let hook = SpawnHook::new(move |mut cmd| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(
+                        cmd.get_args()
+                            .map(|a| a.to_string_lossy().into_owned())
+                            .collect(),
+                    );
+                cmd.spawn()
+            });
+            let launcher = SshLauncher::new(old_ssh.path()).with_spawn_hook(hook);
+            let remote = echo_server();
+            let first = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote)
+                .expect("the second start works");
+            let again =
+                SshTunnel::establish(&launcher.clone(), &SshTarget::parse("fake-host"), remote)
+                    .expect("starts without the option at once");
+            let argvs = argvs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let has_option = |argv: &Vec<String>| argv.iter().any(|a| a == NO_FORK_OPTION);
+            assert_eq!(argvs.len(), 3, "{argvs:?}");
+            assert!(has_option(&argvs[0]));
+            assert!(
+                !has_option(&argvs[1]) && !has_option(&argvs[2]),
+                "{argvs:?}"
+            );
+            drop((first, again));
         }
 
         /// Whether no process (not even a zombie) has this pid.
@@ -656,12 +827,12 @@ mod tests {
             let (hook, calls, pids) = counting_hook();
             let launcher = SshLauncher::new(ssh.path()).with_spawn_hook(hook);
             let relayed = Arc::new(Mutex::new(Vec::new()));
-            let sink = SlowSink(Arc::clone(&relayed));
+            let into = Arc::clone(&relayed);
             let result = SshTunnel::establish_relaying_to(
                 &launcher,
                 &SshTarget::parse("fake-host"),
                 45123,
-                move || sink,
+                move || SlowSink(Arc::clone(&into)),
             );
             let error = result
                 .err()

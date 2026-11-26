@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{SshTarget, push_common_opts, resolve_ssh_path};
 
@@ -61,6 +62,9 @@ pub struct SshLauncher {
     program: PathBuf,
     verify: bool,
     spawn_hook: SpawnHook,
+    /// This ssh refused `ForkAfterAuthentication` (OpenSSH before 8.7). Shared by clones, so
+    /// later tunnels leave the option out at once.
+    fork_option_refused: Arc<AtomicBool>,
 }
 
 impl SshLauncher {
@@ -70,6 +74,7 @@ impl SshLauncher {
             program: program.into(),
             verify: false,
             spawn_hook: SpawnHook::default(),
+            fork_option_refused: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -104,11 +109,27 @@ impl SshLauncher {
         &self.spawn_hook
     }
 
-    /// The ssh command for `target`: common options, `before` (more options), the destination,
-    /// then `after` (the remote command).
-    pub(crate) fn command(&self, target: &SshTarget, before: &[String], after: &[&str]) -> Command {
+    /// Whether ssh accepted `ForkAfterAuthentication` so far.
+    pub(crate) fn fork_option_supported(&self) -> bool {
+        !self.fork_option_refused.load(Ordering::Relaxed)
+    }
+
+    /// Records that this ssh does not know `ForkAfterAuthentication`.
+    pub(crate) fn mark_fork_option_refused(&self) {
+        self.fork_option_refused.store(true, Ordering::Relaxed);
+    }
+
+    /// The ssh command for `target`: common options with `forced` before the target's extra
+    /// options, then `before` (flags), the destination, then `after` (the remote command).
+    pub(crate) fn command(
+        &self,
+        target: &SshTarget,
+        forced: &[&str],
+        before: &[String],
+        after: &[&str],
+    ) -> Command {
         let mut args: Vec<String> = Vec::new();
-        push_common_opts(&mut args, target, self.verify);
+        push_common_opts(&mut args, target, self.verify, forced);
         args.extend(before.iter().cloned());
         args.push(target.destination.clone());
         args.extend(after.iter().map(|a| (*a).to_string()));
@@ -189,7 +210,12 @@ mod tests {
         assert!(launcher.spawn_hook().is_default());
         let mut target = SshTarget::parse("me@box");
         target.extra_options = vec!["ProxyJump=bastion".into()];
-        let cmd = launcher.command(&target, &["-N".to_string()], &["prog", "port"]);
+        let cmd = launcher.command(
+            &target,
+            &["ExitOnForwardFailure=yes"],
+            &["-N".to_string()],
+            &["prog", "port"],
+        );
         assert_eq!(cmd.get_program(), "/opt/ssh");
         let args: Vec<String> = cmd
             .get_args()
@@ -204,7 +230,11 @@ mod tests {
             .iter()
             .position(|a| a == "ProxyJump=bastion")
             .expect("extra option");
-        assert!(jump < n && n < dest, "{args:?}");
+        let forced = args
+            .iter()
+            .position(|a| a == "ExitOnForwardFailure=yes")
+            .expect("forced option");
+        assert!(forced < jump && jump < n && n < dest, "{args:?}");
         assert_eq!(&args[dest + 1..], ["prog", "port"]);
     }
 }

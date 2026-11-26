@@ -731,7 +731,7 @@ impl Probe<'_> {
         remote_argv: &[&str],
         decode: &impl Fn(&str) -> Result<T, E>,
     ) -> Result<T, PortDiscoveryError> {
-        let cmd = self.launcher.command(self.target, &[], remote_argv);
+        let cmd = self.launcher.command(self.target, &[], &[], remote_argv);
         // `what` goes only into the detail (logs). `Display` does not show it.
         let what = format!("ssh({})", self.launcher.program().display());
         let out = run_capture_with_budget(

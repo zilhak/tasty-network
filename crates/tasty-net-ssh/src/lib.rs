@@ -111,13 +111,20 @@ impl SshTarget {
 ///   after the network drops.
 /// - `StrictHostKeyChecking=accept-new` only with `verify`. Without it no host key option is
 ///   passed, so the user's options, the ssh config, or the ssh default (`ask`) decide.
+/// - `forced`: options the caller requires (`Key=Value`, each after `-o`), such as the tunnel's
+///   `ExitOnForwardFailure=yes`.
 /// - `ConnectTimeout` ([`SSH_CONNECT_TIMEOUT`]).
 ///
 /// ssh uses the **first** value of an option. The options above `extra_options` therefore win
 /// over them, and `ConnectTimeout` goes last so that a user `ConnectTimeout` in
 /// `extra_options` wins over the default. Command line `-o` options also win over the ssh
 /// config file.
-pub(crate) fn push_common_opts(args: &mut Vec<String>, target: &SshTarget, verify: bool) {
+pub(crate) fn push_common_opts(
+    args: &mut Vec<String>,
+    target: &SshTarget,
+    verify: bool,
+    forced: &[&str],
+) {
     args.push("-o".into());
     args.push("BatchMode=no".into());
     args.push("-o".into());
@@ -127,6 +134,10 @@ pub(crate) fn push_common_opts(args: &mut Vec<String>, target: &SshTarget, verif
     if verify {
         args.push("-o".into());
         args.push("StrictHostKeyChecking=accept-new".into());
+    }
+    for opt in forced {
+        args.push("-o".into());
+        args.push((*opt).to_string());
     }
     if let Some(p) = target.ssh_port {
         args.push("-p".into());
@@ -275,7 +286,7 @@ mod tests {
 
     fn opts(target: &SshTarget, verify: bool) -> Vec<String> {
         let mut args = Vec::new();
-        push_common_opts(&mut args, target, verify);
+        push_common_opts(&mut args, target, verify, &[]);
         args
     }
 

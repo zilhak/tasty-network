@@ -30,6 +30,22 @@ pub(crate) fn is_channel_connect_failure(line: &str) -> bool {
     line.trim_start().starts_with("channel ") && line.contains("open failed: connect failed")
 }
 
+/// Whether an ssh stderr line says this ssh does not know the `ForkAfterAuthentication` option
+/// (OpenSSH before 8.7: `command-line: line 0: Bad configuration option: forkafterauthentication`).
+pub(crate) fn is_fork_option_refusal(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("bad configuration option") && line.contains("forkafterauthentication")
+}
+
+/// What the stderr relay of one tunnel marked.
+#[derive(Debug, Default)]
+pub(crate) struct StderrMarks {
+    /// A channel connect failure line ([`is_channel_connect_failure`]).
+    pub(crate) channel_connect_failed: AtomicBool,
+    /// ssh refused `ForkAfterAuthentication` ([`is_fork_option_refusal`]).
+    pub(crate) fork_option_refused: AtomicBool,
+}
+
 /// Whether an I/O error kind means the connection ended without an answer.
 fn is_dropped_kind(kind: io::ErrorKind) -> bool {
     use io::ErrorKind as K;
@@ -76,7 +92,7 @@ impl LineScanner {
     /// A line longer than this loses its tail. The lines to judge are short.
     const MAX_LINE: usize = 1024;
 
-    fn feed(&mut self, bytes: &[u8], seen: &AtomicBool) {
+    fn feed(&mut self, bytes: &[u8], seen: &StderrMarks) {
         for &b in bytes {
             if b == b'\n' {
                 self.finish_line(seen);
@@ -86,9 +102,13 @@ impl LineScanner {
         }
     }
 
-    fn finish_line(&mut self, seen: &AtomicBool) {
-        if is_channel_connect_failure(&String::from_utf8_lossy(&self.line)) {
-            seen.store(true, Ordering::Release);
+    fn finish_line(&mut self, seen: &StderrMarks) {
+        let line = String::from_utf8_lossy(&self.line);
+        if is_channel_connect_failure(&line) {
+            seen.channel_connect_failed.store(true, Ordering::Release);
+        }
+        if is_fork_option_refusal(&line) {
+            seen.fork_option_refused.store(true, Ordering::Release);
         }
         self.line.clear();
     }
@@ -97,7 +117,7 @@ impl LineScanner {
 /// Passes the tunnel ssh's stderr on unchanged and marks the channel connect failure line. It
 /// reads until stderr closes (ssh exits). Reading goes on even if passing on fails; if it
 /// stopped, ssh would block on the pipe.
-pub(crate) fn relay_stderr(mut from: impl Read, mut to: impl Write, seen: &AtomicBool) {
+pub(crate) fn relay_stderr(mut from: impl Read, mut to: impl Write, seen: &StderrMarks) {
     let mut buf = [0u8; 4096];
     let mut scanner = LineScanner::default();
     let mut relaying = true;
@@ -142,31 +162,29 @@ fn judge_after_failure(seen: &AtomicBool, failure: &(dyn Error + 'static)) -> bo
 #[derive(Clone, Debug)]
 pub struct ListenerVerdict {
     remote_port: u16,
-    channel_connect_failed: Arc<AtomicBool>,
+    marks: Arc<StderrMarks>,
 }
 
 impl ListenerVerdict {
-    pub(crate) fn new(remote_port: u16, channel_connect_failed: Arc<AtomicBool>) -> Self {
-        Self {
-            remote_port,
-            channel_connect_failed,
-        }
+    pub(crate) fn new(remote_port: u16, marks: Arc<StderrMarks>) -> Self {
+        Self { remote_port, marks }
     }
 
     /// A handle with a fixed observation of the ssh stderr. For testing code that uses the
     /// verdict without a tunnel.
     pub fn with_observation(remote_port: u16, channel_connect_failed: bool) -> Self {
-        Self::new(
-            remote_port,
-            Arc::new(AtomicBool::new(channel_connect_failed)),
-        )
+        let marks = StderrMarks::default();
+        marks
+            .channel_connect_failed
+            .store(channel_connect_failed, Ordering::Release);
+        Self::new(remote_port, Arc::new(marks))
     }
 
     /// Whether a request through the tunnel failed with `failure` because nothing listens on the
     /// remote port. The connection must have dropped without an answer and ssh must have
     /// reported a channel connect failure. It waits up to 0.5 s for that line.
     pub fn remote_listener_absent(&self, failure: &(dyn Error + 'static)) -> bool {
-        judge_after_failure(&self.channel_connect_failed, failure)
+        judge_after_failure(&self.marks.channel_connect_failed, failure)
     }
 
     /// [`RemoteListenerAbsent`] if the listener is absent ([`Self::remote_listener_absent`]).
@@ -297,20 +315,34 @@ mod tests {
             b"iled: connect failed: Connection refused\n",
         ];
         let expected: Vec<u8> = input.concat();
-        let seen = AtomicBool::new(false);
+        let seen = StderrMarks::default();
         let mut out = Vec::new();
         relay_stderr(Chunks(input), &mut out, &seen);
         assert_eq!(out, expected);
-        assert!(seen.load(Ordering::Acquire));
+        assert!(seen.channel_connect_failed.load(Ordering::Acquire));
+        assert!(!seen.fork_option_refused.load(Ordering::Acquire));
 
-        let seen = AtomicBool::new(false);
+        let seen = StderrMarks::default();
         let mut out = Vec::new();
         relay_stderr(
             Chunks(vec![b"Warning: added host\n" as &[u8]]),
             &mut out,
             &seen,
         );
-        assert!(!seen.load(Ordering::Acquire));
+        assert!(!seen.channel_connect_failed.load(Ordering::Acquire));
+
+        let seen = StderrMarks::default();
+        relay_stderr(
+            Chunks(vec![
+                b"command-line: line 0: Bad configuration option: forkafterauthentication\n"
+                    as &[u8],
+            ]),
+            &mut Vec::new(),
+            &seen,
+        );
+        assert!(seen.fork_option_refused.load(Ordering::Acquire));
+        assert!(!seen.channel_connect_failed.load(Ordering::Acquire));
+        assert!(!is_fork_option_refusal("Bad configuration option: foo"));
     }
 
     #[test]
