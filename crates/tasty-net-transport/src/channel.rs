@@ -834,22 +834,36 @@ mod tests {
     }
 
     /// A read on a TCP channel whose peer stays open and silent ends on the timeout set
-    /// through the channel's control alone: nothing wakes it.
+    /// through the channel's control alone: nothing wakes it. The peer stays silent for the
+    /// 3 s the check allows; after that another thread closes it, so a read that ignored the
+    /// timeout returns (EOF) and the test fails instead of hanging.
     #[test]
     fn a_tcp_read_ends_on_the_timeout_its_control_set() {
-        let (mut a, _b) = tcp_pair();
+        const ALLOWED: Duration = Duration::from_secs(3);
+        let (mut a, b) = tcp_pair();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let closer = std::thread::spawn(move || {
+            if done_rx.recv_timeout(ALLOWED).is_err() {
+                let _closed = b.control().shutdown_and_wake().is_ok();
+            }
+            drop(b);
+        });
         a.control()
             .set_read_timeout(Some(Duration::from_millis(300)))
             .expect("read timeout");
         let started = Instant::now();
         let mut byte = [0u8; 1];
-        let error = a.read(&mut byte).expect_err("the peer sends nothing");
-        assert_eq!(ReadFailure::of_io(&error), ReadFailure::HeartbeatTimeout);
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "{:?}",
-            started.elapsed()
-        );
+        let result = a.read(&mut byte);
+        let took = started.elapsed();
+        let _told = done_tx.send(()).is_ok();
+        closer.join().expect("closer");
+        match result {
+            Err(error) => {
+                assert_eq!(ReadFailure::of_io(&error), ReadFailure::HeartbeatTimeout);
+            }
+            Ok(n) => panic!("the read ignored its timeout: it returned {n} after {took:?}"),
+        }
+        assert!(took < ALLOWED, "{took:?}");
     }
 
     #[test]
