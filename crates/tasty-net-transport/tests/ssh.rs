@@ -25,8 +25,11 @@ use common::{client, echo_server, token};
 
 const FAKE_ARGS_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_ARGS";
 const FORWARDER_TEST: &str = "fake_ssh_forwarder_entry";
-/// How long the fake forwarder waits before it binds its local port (the tunnel's readiness).
-const FAKE_DELAY_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_BIND_DELAY_MS";
+/// A file the fake forwarder creates once it started and is about to prepare (empty: none).
+const FAKE_READY_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_PREPARING";
+/// A file the fake forwarder waits for before it binds its local port, the tunnel's
+/// readiness (empty: binds at once).
+const FAKE_GO_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_GO";
 
 /// Writes `body` through a child shell, so no descriptor of the file stays open in this
 /// multi-threaded process when another test executes it.
@@ -53,15 +56,22 @@ struct FakeSsh {
     record: PathBuf,
     tunnels: PathBuf,
     pids: Arc<Mutex<Vec<u32>>>,
+    /// The preparing and go files of a gated fake.
+    gate: Option<(PathBuf, PathBuf)>,
 }
 
 impl FakeSsh {
     fn new(name: &str) -> Self {
-        Self::with_bind_delay(name, Duration::ZERO)
+        Self::build(name, false)
     }
 
-    /// A fake whose tunnels become ready only `delay` after they start.
-    fn with_bind_delay(name: &str, delay: Duration) -> Self {
+    /// A fake whose tunnels say when they are preparing and become ready only after
+    /// [`FakeSsh::let_tunnels_bind`].
+    fn gated(name: &str) -> Self {
+        Self::build(name, true)
+    }
+
+    fn build(name: &str, gated: bool) -> Self {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
@@ -71,19 +81,24 @@ impl FakeSsh {
         let script = base.with_extension("sh");
         let record = base.with_extension("record");
         let tunnels = base.with_extension("tunnels");
+        let gate = gated.then(|| (base.with_extension("preparing"), base.with_extension("go")));
+        let (preparing, go) = match &gate {
+            Some((preparing, go)) => (preparing.display().to_string(), go.display().to_string()),
+            None => (String::new(), String::new()),
+        };
         let exe = std::env::current_exe().expect("test binary path");
         write_file(
             &script,
             &format!(
                 "#!/bin/sh\ncase \" $* \" in *\" -L \"*)\necho tunnel >> '{tunnels}'\n\
                  {FAKE_ARGS_ENV}=\"$*\"\nexport {FAKE_ARGS_ENV}\n\
-                 {FAKE_DELAY_ENV}={delay}\nexport {FAKE_DELAY_ENV}\n\
+                 {FAKE_READY_ENV}='{preparing}'\nexport {FAKE_READY_ENV}\n\
+                 {FAKE_GO_ENV}='{go}'\nexport {FAKE_GO_ENV}\n\
                  exec '{exe}' {FORWARDER_TEST} --exact --nocapture --test-threads=1 >/dev/null;;\n\
                  esac\ncat '{record}'\n",
                 tunnels = tunnels.display(),
                 record = record.display(),
                 exe = exe.display(),
-                delay = delay.as_millis(),
             ),
             "700",
         );
@@ -92,7 +107,21 @@ impl FakeSsh {
             record,
             tunnels,
             pids: Arc::new(Mutex::new(Vec::new())),
+            gate,
         }
+    }
+
+    /// Whether a gated tunnel said it is preparing.
+    fn a_tunnel_is_preparing(&self) -> bool {
+        self.gate
+            .as_ref()
+            .is_some_and(|(preparing, _)| preparing.exists())
+    }
+
+    /// Lets every gated tunnel, now and later, bind its port.
+    fn let_tunnels_bind(&self) {
+        let (_, go) = self.gate.as_ref().expect("a gated fake");
+        write_file(go, "go\n", "600");
     }
 
     fn publish(&self, text: &str) {
@@ -152,7 +181,11 @@ impl FakeSsh {
 
 impl Drop for FakeSsh {
     fn drop(&mut self) {
-        for path in [&self.script, &self.record, &self.tunnels] {
+        let gate = self.gate.iter().flat_map(|(a, b)| [a, b]);
+        for path in [&self.script, &self.record, &self.tunnels]
+            .into_iter()
+            .chain(gate)
+        {
             if let Err(e) = std::fs::remove_file(path)
                 && e.kind() != io::ErrorKind::NotFound
             {
@@ -205,11 +238,17 @@ fn fake_ssh_forwarder_entry() {
     let parts: Vec<&str> = spec.split(':').collect();
     let local: u16 = parts[1].parse().expect("local port");
     let remote: u16 = parts[3].parse().expect("remote port");
-    if let Some(ms) = std::env::var(FAKE_DELAY_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+    // A gated fake says it is preparing, then binds only once the test lets it (or after a
+    // long time, so a failed test does not leave it waiting for ever).
+    if let Ok(preparing) = std::env::var(FAKE_READY_ENV)
+        && !preparing.is_empty()
     {
-        std::thread::sleep(Duration::from_millis(ms));
+        std::fs::write(&preparing, b"preparing\n").expect("preparing file");
+        let go = std::env::var(FAKE_GO_ENV).expect("go file");
+        let until = Instant::now() + Duration::from_secs(30);
+        while !Path::new(&go).exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     let listener = match TcpListener::bind(("127.0.0.1", local)) {
         Ok(l) => l,
@@ -372,7 +411,7 @@ fn a_stale_record_is_reported_as_an_absent_remote_listener() {
 #[test]
 fn a_cancel_during_tunnel_preparation_reaps_it_and_returns_cancelled() {
     let server = echo_server(token('a'));
-    let fake = FakeSsh::with_bind_delay("prepare", Duration::from_millis(1500));
+    let fake = FakeSsh::gated("prepare");
     fake.publish_record(server.addr.port(), token('a'), "instance-1");
     let transport = Arc::new(fake.transport());
     let cancel = AttemptCancel::new();
@@ -381,9 +420,10 @@ fn a_cancel_during_tunnel_preparation_reaps_it_and_returns_cancelled() {
         let cancel = cancel.clone();
         std::thread::spawn(move || transport.connect(&target(), &cancel).map(drop))
     };
-    // The attempt is still inside the preparation when the cancel comes.
-    wait_until("the tunnel to start", || {
-        fake.tunnels_started() == 1 || attempt.is_finished()
+    // The tunnel says it is preparing, and it cannot finish before the test lets it: the
+    // cancel comes inside the preparation whatever the scheduling.
+    wait_until("the tunnel to prepare", || {
+        fake.a_tunnel_is_preparing() || attempt.is_finished()
     });
     assert!(
         !attempt.is_finished(),
@@ -391,6 +431,7 @@ fn a_cancel_during_tunnel_preparation_reaps_it_and_returns_cancelled() {
         attempt.join().expect("attempt")
     );
     cancel.cancel();
+    fake.let_tunnels_bind();
     let result = attempt.join().expect("attempt");
     assert!(matches!(result, Err(ConnectError::Cancelled)), "{result:?}");
     wait_until("the cancelled tunnel to be reaped", || {
