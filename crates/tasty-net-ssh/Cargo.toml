@@ -1,0 +1,15 @@
+[package]
+name = "tasty-net-ssh"
+description = "System ssh delegation of the Tasty network: -L tunnels, remote port discovery, cancellation, and backoff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tracing = "0.1"
+
+[lints]
+workspace = true
