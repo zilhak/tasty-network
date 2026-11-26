@@ -575,7 +575,10 @@ struct Dialed {
 }
 
 /// Runs the dialing side of an attach or request handshake on `conn` (message 1 to the
-/// ACK). The channel is registered with `cancel` until the handshake ends.
+/// ACK). The channel is registered with `cancel` until the handshake ends. A success hands
+/// the channel on by releasing that registration in one order with the cancel: a cancel that
+/// came first (and closed the socket) makes the handshake `Cancelled`, so a closed socket
+/// never comes back as a success, also on a shared tunnel that has nothing to publish.
 fn dial_open(
     ch: &mut RawChannel,
     auth: &DialAuth,
@@ -585,9 +588,25 @@ fn dial_open(
     ext: Option<&str>,
     cancel: &AttemptCancel,
 ) -> Result<Dialed, HandshakeError> {
-    let _registration = cancel
+    let registration = cancel
         .register_channel(ch.control())
         .map_err(|_| HandshakeError::Cancelled)?;
+    let dialed = dial_open_registered(ch, auth, config, purpose, holder, ext, cancel)?;
+    registration
+        .release()
+        .map_err(|_| HandshakeError::Cancelled)?;
+    Ok(dialed)
+}
+
+fn dial_open_registered(
+    ch: &mut RawChannel,
+    auth: &DialAuth,
+    config: &DialConfig,
+    purpose: Purpose,
+    holder: Option<Holder>,
+    ext: Option<&str>,
+    cancel: &AttemptCancel,
+) -> Result<Dialed, HandshakeError> {
     config.timeouts.check()?;
     let mut wait = config.timeouts.handshake_timeout;
     if holder == Some(Holder::Acceptor) {
