@@ -38,17 +38,18 @@
 
 | 메시지 | `event` 값 | 필드 |
 |---|---|---|
-| 질의 | `net.topology.query` | `request_id`, `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`), `branch`(이 전달 한 건의 식별자. 전달하는 기기가 전달마다 새로 만드는 128비트 난수의 hex. 요청자가 처음 보내는 질의에도 붙인다) |
+| 질의 | `net.topology.query` | `request_id`, `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록. 길이 상한 `MAX_ROUTE_HOPS`, 아래 "전달 hop 상한"), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`), `branch`(이 전달 한 건의 식별자. 전달하는 기기가 전달마다 새로 만드는 128비트 난수의 hex. 요청자가 처음 보내는 질의에도 붙인다) |
 | 결과 | `net.topology.result` | `request_id`, `branch`(이 응답을 부른 질의의 `branch`), `from`(이 조각을 만든 기기), `return_path`(결과를 되돌려 보낼 기기 ID 목록), `part`, `last`(bool, 이 `branch`에 대한 `from`의 자기 조각이 끝남), `nodes`, `edges` |
 | 억제 | `net.topology.suppressed` | `request_id`, `branch`, `from`, `return_path`. 같은 질의를 이미 같거나 큰 남은 depth로 답했다는 뜻 |
-| 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록) |
+| 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록), `final`(bool. 이 `done`으로 질의 전체가 끝남. 기준 머신, 또는 `route` 전달을 중간에서 멈춘 hop만 `true`로 보낸다) |
 
 - 상대가 `caps`에 `net.topology`를 알리지 않았으면 질의를 보내지 않고 그 노드를 `no_capability`로 둔다. tasty는 모르는 event를 조용히 버리므로(`tasty:crates/tasty-ipc/src/stream_hub.rs` `collect_other_control`) 보내 봐야 답이 오지 않는다.
 - 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`. 조각은 `(branch, from, part)`로 구별한다. 그래서 여러 기기가 같은 `request_id`로 보내도, 한 기기가 더 큰 남은 depth로 다시 방문돼 두 번 답해도 섞이지 않는다. 전달한 기기는 자기가 보낸 `branch`마다 `done`·`suppressed`를 기다리므로 같은 이웃에게 보낸 두 전달을 구별한다. `branch`는 전달 추적용이고, 노드 상태와 엣지의 합치기는 계속 요청자가 노드·엣지 기준으로 한다.
 
 ## 탐색 규칙
 
-- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달하고, 없으면 기다리지 않고 바로 요청자에게 그 hop이 끊겼다는 결과(`origin` 노드 상태 `timed_out`, 사유 `route_broken`)를 돌려준다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달할 링크가 없어 보내지 못했는지(`route_broken`)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
+- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달한다. 전달하지 못하면 기다리지 않고 바로 요청자에게 `origin` 노드 상태 `timed_out`과 사유를 담은 결과를 돌려주고, 이어서 `done`(`final: true`)을 보낸다. 사유는 `route_broken`(다음 hop과 링크가 없음), `route_sharing_off`(이 hop의 공개가 꺼져 있음, 아래 "공개 범위"), `route_invalid`(아래 "전달 hop 상한") 중 하나다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달하지 못했는지(위 세 사유)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
+- 전달 hop 상한: `route` 길이는 `MAX_ROUTE_HOPS`(`tasty-net-topology` 상수, 16) 이하이고, 같은 기기 ID가 두 번 나오지 않고, 요청자와 `origin`을 담지 않아야 한다. 요청자는 질의를 만들 때 검사해 어기면 보내지 않고 로컬 오류 `TopologyError::InvalidRoute`를 돌려준다. 각 `route` hop도 받을 때 같은 검사를 하고, 어기면 전달하지 않고 사유 `route_invalid`로 위처럼 끝낸다. 시험은 `tasty-net-topology`의 `route_over_hop_limit_is_rejected`, `route_with_repeated_device_is_rejected`다.
 - 마감은 각 기기의 단조 시계로 판정한다. 질의를 받은 기기는 받은 때의 단조 시각 + `min(remaining_ms, MAX_QUERY_MS)`를 자기 마감으로 두고, 전달할 때 그때의 남은 시간을 `remaining_ms`에 넣는다. 요청자는 자기 단조 시계로 전체 상한을 지킨다. 기기 사이의 벽시계 차이는 판정에 들어가지 않는다.
 - 결과는 질의가 온 길을 거꾸로 돌아간다. 기준 머신부터의 결과는 `path`를 거꾸로, 그다음 `route`를 거꾸로 따라 요청자에게 간다. 중간 기기는 결과를 합치지 않고 그대로 넘긴다. 합치기(같은 노드의 중복 제거, 상태 고르기)는 요청자 한 곳에서만 한다.
 - 기준 머신부터는 hop마다 depth를 1 줄인다. depth 0인 노드는 자기 엣지만 답하고 더 전달하지 않는다.
@@ -57,7 +58,7 @@
 - 중복 응답 억제는 기기별 기록으로 한다. 각 기기는 `request_id`마다 지금까지 답한 가장 큰 남은 depth를 잠시(자기 마감까지) 기억한다. 같은 `request_id`가 더 작거나 같은 남은 depth로 다시 오면 노드·엣지를 다시 싣지 않고 `net.topology.suppressed`만 보낸다. 전달한 쪽은 이것을 정상 응답으로 보고 그 이웃을 `timed_out`으로 두지 않는다. 더 큰 남은 depth로 오면 다시 답하고 그 depth로 전달한다.
 - 더 짧은 경로로 같은 노드에 다시 닿아 남은 depth가 더 크면, 위 기록 규칙에 따라 그 남은 depth로 그 노드부터 이어 탐색한다(다이아몬드에서 긴 경로가 먼저 닿은 경우).
 - 이웃마다 응답 시간 제한을 둔다. 넘으면 그 노드를 `timed_out`으로 두고 탐색은 계속한다.
-- 분기 완료: 각 기기는 자기 조각을 다 보내고, 전달한 모든 이웃에게서 `done` 또는 `suppressed`를 받았거나 그 이웃을 시간 제한으로 포기했을 때 `net.topology.done`을 보낸다. 포기한 이웃은 `timed_out` 목록에 싣는다. 전체 완료는 요청자가 기준 머신의 `done`을 받았을 때, 또는 요청자 자신의 마감이 지났을 때다.
+- 분기 완료: 각 기기는 자기 조각을 다 보내고, 전달한 모든 이웃에게서 `done` 또는 `suppressed`를 받았거나 그 이웃을 시간 제한으로 포기했을 때 `net.topology.done`을 보낸다. 포기한 이웃은 `timed_out` 목록에 싣는다. 전체 완료는 요청자가 `final: true`인 `done`(기준 머신의 분기 완료, 또는 `route`를 중간에서 멈춘 hop의 종료)을 받았을 때, 또는 요청자 자신의 마감이 지났을 때다.
 - 같은 노드에 대한 합치기(요청자): 그 노드가 직접 만든(`from` = 그 노드) 조각이 하나라도 있으면 그 조각의 자기 노드 상태(`online` 또는 `sharing_off`)를 쓴다. 직접 응답은 다른 경로의 실패 관측보다 우선한다. 다른 경로의 전달자가 그 노드를 `timed_out`으로 보고했어도 상태를 바꾸지 않는다. 그 경로로는 응답을 못 받았다는 뜻일 뿐이다. 어느 경로로도 직접 조각이 없을 때만 보고된 상태(`timed_out`·`auth_rejected`·`no_capability`)를 쓴다.
 - 원격 ID를 확인할 수 없는 상태의 노드: `auth_rejected`·`timed_out`·`no_capability` 노드는 그 상대와 연결을 시도한 이웃이 만든다(`auth_rejected`는 위 "엣지 목록 입력"의 연결 실패 관측에서 나온다). 노드 식별자는 그 이웃이 아는 상대 기기 ID(링크의 `peer()`, 또는 TOFU 기록에 있는 기대값)다. 기기 ID를 모르면(인증 전에 거절돼 ID를 받지 못함) `device_id`가 비고 `reported_by`와 `peer_hint`로 구분한다. 요청자는 `device_id`가 있으면 그것으로, 없으면 `(reported_by, peer_hint)`로 합친다. `offline`은 정의 파일 방식에서 tasty만 만든다.
 - 결과는 도착하는 대로 점진적으로 낸다. 노드에는 응답 시각을 붙인다.
@@ -67,7 +68,7 @@
 
 사용자 결정: 공개 범위는 기기 단위 설정 하나다. 설정이 없으면 제공한다. 끄면 질의에 자기 자신만 답하는 말단 노드가 된다.
 
-- 원격 질의 응답: 공개 꺼짐이면 자기 노드 하나(`sharing_off`)만 답하고 전달하지 않는다. 공개 켜짐이어도 `workspace` 메타데이터는 소비자가 정한 범위(이름·ID 중 무엇을 내보내는가)만 싣는다.
+- 원격 질의 응답: 공개 꺼짐이면 자기 노드 하나(`sharing_off`)만 답하고 전달하지 않는다. `route`의 중간 hop이어도 같다. 공개 꺼짐이 중계보다 우선하므로, 자기 노드를 답한 뒤 사유 `route_sharing_off`로 위 "탐색 규칙"처럼 끝낸다(`done`, `final: true`). 공개 켜짐이어도 `workspace` 메타데이터는 소비자가 정한 범위(이름·ID 중 무엇을 내보내는가)만 싣는다.
 - 로컬 조회(자기 화면): 공개 설정과 관계없이 자기 엣지를 모두 보여 준다.
 - 두 범위를 함수로 나눈다: `local_view(links)`와 `remote_answer(links, sharing)`. 설정을 저장하는 일은 tasty 몫이다.
 - 응답 측 공통 함수 `answer_query`가 질의를 받아 자기 엣지를 답하고 다음 hop으로 전달한다. GUI·headless 배선은 tasty가 한다.
