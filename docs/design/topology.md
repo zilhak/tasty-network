@@ -38,7 +38,7 @@
 
 | 메시지 | `event` 값 | 필드 |
 |---|---|---|
-| 질의 | `net.topology.query` | `request_id`, `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록. 길이 상한 `MAX_ROUTE_HOPS`, 아래 "전달 hop 상한"), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`), `branch`(이 전달 한 건의 식별자. 전달하는 기기가 전달마다 새로 만드는 128비트 난수의 hex. 요청자가 처음 보내는 질의에도 붙인다) |
+| 질의 | `net.topology.query` | `request_id`, `requester`(질의를 처음 보낸 기기), `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록. 길이 상한 `MAX_ROUTE_HOPS`, 아래 "전달 hop 상한"), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`), `branch`(이 전달 한 건의 식별자. 전달하는 기기가 전달마다 새로 만드는 128비트 난수의 hex. 요청자가 처음 보내는 질의에도 붙인다) |
 | 결과 | `net.topology.result` | `request_id`, `branch`(이 응답을 부른 질의의 `branch`), `from`(이 조각을 만든 기기), `return_path`(결과를 되돌려 보낼 기기 ID 목록), `part`, `last`(bool, 이 `branch`에 대한 `from`의 자기 조각이 끝남), `nodes`, `edges` |
 | 억제 | `net.topology.suppressed` | `request_id`, `branch`, `from`, `return_path`. 같은 질의를 이미 같거나 큰 남은 depth로 답했다는 뜻 |
 | 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록), `final`(bool. 이 `done`으로 질의 전체가 끝남. 기준 머신, 또는 `route` 전달을 중간에서 멈춘 hop만 `true`로 보낸다) |
@@ -48,10 +48,10 @@
 
 ## 탐색 규칙
 
-- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달한다. 전달하지 못하면 기다리지 않고 바로 요청자에게 `origin` 노드 상태 `timed_out`과 사유를 담은 결과를 돌려주고, 이어서 `done`(`final: true`)을 보낸다. 사유는 `route_broken`(다음 hop과 링크가 없음), `route_sharing_off`(이 hop의 공개가 꺼져 있음, 아래 "공개 범위"), `route_invalid`(아래 "전달 hop 상한") 중 하나다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달하지 못했는지(위 세 사유)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
-- 전달 hop 상한: `route` 길이는 `MAX_ROUTE_HOPS`(`tasty-net-topology` 상수, 16) 이하이고, 같은 기기 ID가 두 번 나오지 않고, 요청자와 `origin`을 담지 않아야 한다. 요청자는 질의를 만들 때 검사해 어기면 보내지 않고 로컬 오류 `TopologyError::InvalidRoute`를 돌려준다. 각 `route` hop도 받을 때 같은 검사를 하고, 어기면 전달하지 않고 사유 `route_invalid`로 위처럼 끝낸다. 시험은 `tasty-net-topology`의 `route_over_hop_limit_is_rejected`, `route_with_repeated_device_is_rejected`다.
+- 기준 머신까지의 경로(`route`)는 요청한 기기가 정한다. 요청자가 이미 아는 연결(자기 이웃 또는 앞선 탐색 결과)에서 고른 경로다. 각 hop은 `route`의 다음 기기와 인증된 attach 링크가 있을 때만 전달한다. 전달하지 못하면 기다리지 않고 바로 요청자에게 `origin` 노드 상태 `timed_out`과 사유를 담은 결과를 돌려주고, 이어서 `done`(`final: true`)을 보낸다. 사유는 `route_broken`(다음 hop과 링크가 없음), `route_no_capability`(다음 hop과 링크는 있지만 그 상대 `caps`에 `net.topology`가 없음), `route_sharing_off`(이 hop의 공개가 꺼져 있음, 아래 "공개 범위"), `route_invalid`(아래 "전달 hop 상한") 중 하나다. 이때 결과의 `return_path`는 `route`에서 자기 앞의 hop들을 거꾸로 놓고 끝에 `requester`를 붙인 목록이다. `timed_out`은 "응답을 받지 못했다"는 상태이고, 사유가 기다려서 못 받았는지(사유 없음) 전달하지 못했는지(위 세 사유)를 가른다. 전달 hop은 depth에 세지 않는다. 남은 시간이 0이면 남은 hop은 전달하지 않는다.
+- 전달 hop 상한: `route` 길이는 `MAX_ROUTE_HOPS`(`tasty-net-topology` 상수, 16) 이하이고, 같은 기기 ID가 두 번 나오지 않고, 요청자와 `origin`을 담지 않아야 한다. 요청자는 질의를 만들 때 검사해 어기면 보내지 않고 로컬 오류 `TopologyError::InvalidRoute`를 돌려준다. 각 `route` hop도 받을 때 질의의 `requester`·`origin`으로 같은 검사를 하고, 어기면 전달하지 않고 사유 `route_invalid`로 위처럼 끝낸다. 첫 hop은 더해서 `requester`가 질의를 받은 링크의 상대와 같은지 본다. 시험은 `tasty-net-topology`의 `route_over_hop_limit_is_rejected`, `route_with_repeated_device_is_rejected`다.
 - 마감은 각 기기의 단조 시계로 판정한다. 질의를 받은 기기는 받은 때의 단조 시각 + `min(remaining_ms, MAX_QUERY_MS)`를 자기 마감으로 두고, 전달할 때 그때의 남은 시간을 `remaining_ms`에 넣는다. 요청자는 자기 단조 시계로 전체 상한을 지킨다. 기기 사이의 벽시계 차이는 판정에 들어가지 않는다.
-- 결과는 질의가 온 길을 거꾸로 돌아간다. 기준 머신부터의 결과는 `path`를 거꾸로, 그다음 `route`를 거꾸로 따라 요청자에게 간다. 중간 기기는 결과를 합치지 않고 그대로 넘긴다. 합치기(같은 노드의 중복 제거, 상태 고르기)는 요청자 한 곳에서만 한다.
+- 결과는 질의가 온 길을 거꾸로 돌아간다. 기준 머신부터의 결과는 `path`를 거꾸로, 그다음 `route`를 거꾸로, 마지막에 `requester`로 간다. 중간 기기는 결과를 합치지 않고 그대로 넘긴다. 합치기(같은 노드의 중복 제거, 상태 고르기)는 요청자 한 곳에서만 한다.
 - 기준 머신부터는 hop마다 depth를 1 줄인다. depth 0인 노드는 자기 엣지만 답하고 더 전달하지 않는다.
 - 들어오는 링크와 나가는 링크를 모두 따라간다.
 - 순환 차단은 경로별이다. 질의를 받은 기기는 `path`에 이미 있는 기기에는 다시 보내지 않는다. 그래서 A↔B 순환이 끝난다. 질의 전체가 공유하는 방문 집합은 두지 않는다(그러면 아래 "더 짧은 경로로 같은 노드에 다시 닿아 남은 depth가 더 크면" 항목의 이어 탐색을 막는다).

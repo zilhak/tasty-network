@@ -94,7 +94,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 
 ### 역할 반전 승인의 기한
 
-- 승인 대기는 `handshake_timeout`에 들어가지 않는다. `LinkTimeouts.role_proposal_timeout`(소비자가 줌)이 따로 잰다. 받는 쪽은 승인 콜백을 부른 때부터 이 시간 안에 답이 없으면 `RoleRefused`로 거절한다. 그 밖의 단계는 `handshake_timeout`을 쓴다.
+- 승인 대기는 `handshake_timeout`에 들어가지 않는다. `LinkTimeouts.role_proposal_timeout`(소비자가 줌)이 따로 잰다. 승인 콜백은 검사 1~6을 모두 통과한 뒤에만 부른다. 그래서 SSH에서는 토큰·서명, P2P에서는 페어링 목록에 있는 `remote_id()`가 확인된 상대만 승인 대기에 들어간다. 받는 쪽은 승인 콜백을 부른 때부터 이 시간 안에 답이 없으면 `RoleRefused`로 거절한다. 그 밖의 단계는 `handshake_timeout`을 쓴다.
 - dialer는 `holder = "acceptor"`로 연결할 때 ACK 기한을 `handshake_timeout + role_proposal_timeout`으로 잡는다. 양 끝이 같은 `LinkTimeouts` 값을 쓰는 것을 전제로 하고, 다르면 짧은 쪽이 먼저 끝난다.
 - 도메인 등록은 검사 9의 콜백 안에서만 일어난다. 콜백은 승인이 돌아온 뒤 handshake가 아직 살아 있을 때(기한·취소·상대 종료가 먼저 이기지 않았을 때)만 불린다. 그래서 늦게 돌아온 승인은 등록을 남기지 않는다.
 - 콜백이 돌려주는 수락 값은 소비자가 만든 등록 guard를 담는다. 성공 ACK를 다 쓰기 전에 기한·취소·쓰기 실패가 이기면 이 레포가 guard를 drop해 소비자가 등록을 되돌린다. ACK를 다 쓴 뒤 dialer가 기한으로 닫은 경우는 받는 쪽에서 성립한 링크가 곧 `PeerClosed`로 끝나는 보통 종료다.
@@ -175,7 +175,7 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
   2. bulk 수락: 잠금 아래에서 자격을 찾고, 부모가 살아 있으면 그 bulk 채널을 부모의 자식으로 등록한 뒤 잠금을 풀고 도메인 콜백과 성공 ACK로 간다. 부모가 이미 끝났으면 `bulk_credential_invalid`로 거절한다.
   3. 부모 종료: 잠금 아래에서 부모를 끝남으로 표시하고 자격을 빼고 자식 목록을 가져온 뒤, 잠금 밖에서 자식들을 강제 종료로 닫는다.
 
-  그래서 종료와 경쟁한 bulk는 2에서 거절되거나, 자식으로 등록돼 3에서 닫힌다. 자식으로 등록된 뒤 성공 ACK를 쓰기 전에 부모가 끝나면 ACK 대신 채널이 닫히고, dialer는 `HandshakeError`로 받는다.
+  그래서 종료와 경쟁한 bulk는 2에서 거절되거나, 자식으로 등록돼 3에서 닫힌다. 확정 시점은 2의 자식 등록 하나다. 성공 ACK 송신은 잠금 밖이라 3과 겹칠 수 있지만 결과는 하나다. 자식으로 등록된 bulk는 부모 종료가 오면 ACK가 나갔든 아니든 3에서 강제 종료로 닫히고, 그 채널의 등록 guard도 그 닫기에서 drop된다. dialer는 ACK를 읽기 전에 닫혔으면 `HandshakeError`, ACK를 읽은 뒤면 bulk 채널의 `PeerClosed`(O12의 결과 불명)로 본다.
 - 자격은 링크 수명 동안 바뀌지 않는다. 그래서 자격을 갱신하는 메시지가 없다. grant가 지금도 유효한지는 bulk handshake마다 acceptor의 도메인 콜백이 (부모 링크, grant)를 받아 판단한다. grant가 바뀌었으면 `domain` 사유로 거절한다.
 - 이미 열린 bulk 채널의 수명:
 
@@ -185,7 +185,7 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
   | 부모 링크의 강제 종료 | 위와 같다 | 위와 같다 |
   | grant 변경(부모는 살아 있음) | 이 레포는 끊지 않는다 | tasty가 commit 시점에 확인한다. 지금도 활성 holder와 registration이 바뀌었으면 완료를 거절한다(`tasty:src/remote/server.rs` `finalize_bulk_transfer`) |
 
-  부모가 끝난 뒤의 bulk는 지금 tasty에서도 완료 인가를 통과하지 못하므로(위 함수의 활성 holder 검사) 부모와 함께 닫아도 잃는 완료가 없다.
+  이 규칙은 지금 tasty 동작을 바꾼다. 지금 tasty 서버는 부모 attach 연결의 writer를 정리한 뒤 메인 루프에 `Disconnected`를 넣어 점유를 해제하므로(`tasty:src/adapters/production/tcp_ipc_server.rs` `finish_stream_connection`), 그 사이에 도착한 별도 bulk 연결의 commit은 이전 점유를 보고 저장되고 결과가 같은 bulk 연결로 돌아올 수 있다(완료 인가 `tasty:src/remote/transfer_spool.rs` `current`는 bulk 연결의 등록과 점유를 볼 뿐 부모 소켓의 EOF를 보지 않는다). 새 설계에서는 부모 종료가 bulk 채널을 먼저 닫으므로 그 결과는 보내는 쪽에 오지 않는다. 부모 종료와 저장 완료가 겹칠 때 보내는 쪽이 받는 결과는 결과 불명(O12, 자동 재시도 없음)이다. 받는 쪽에서 이미 저장된 파일은 되돌리지 않는다.
 
 ## capability
 

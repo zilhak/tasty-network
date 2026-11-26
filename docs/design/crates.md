@@ -71,7 +71,7 @@ demo ─> (transport, p2p, ssh, identity, frame)
 |---|---|
 | 크레이트 단위 시험 | 각 크레이트의 `src/` 안 `mod tests`와 `tests/` |
 | 소켓 없이 도는 handshake·heartbeat·취소 시험 | `tasty-net-transport`의 메모리 전송 위 |
-| 실제 iroh endpoint로 도는 P2P 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달) | `tasty-net-p2p`의 `tests/`. transport는 p2p를 dev-dependency로도 두지 않는다 |
+| 실제 iroh endpoint로 도는 P2P 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달, 양방향 마지막 프레임 전달) | `tasty-net-p2p`의 `tests/`. transport는 p2p를 dev-dependency로도 두지 않는다 |
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
 | relay 설정 기동 검사 | `relay/check-config.sh`(CI workflow `relay.yml`) |

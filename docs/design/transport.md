@@ -39,7 +39,7 @@ tasty 서버는 포트 하나에서 첫 줄을 읽어 `stream.open`이면 스트
 인증 전 읽기의 경계:
 
 - SSH 경로에서는 첫 줄을 소비자가 읽는다. 그래서 첫 줄의 크기 상한과 기한은 소비자 책임이다. tasty는 지금처럼 요청 줄 크기 상한과 첫 줄 전체 기한으로 읽고, 넘으면 거절하고 닫는다(`tasty:src/adapters/production/tcp_ipc_server.rs` `read_first_line`·`read_line_capped`). 이 레포는 같은 일을 하는 도우미 `read_first_line(reader, max_len, deadline)`을 주고, `accept_handshake`는 받은 첫 줄 길이가 `MAX_HANDSHAKE_LINE`(구현이 정하는 상수, tasty 요청 줄 상한 이하)을 넘으면 `malformed`로 거절한다.
-- `LinkTimeouts.handshake_timeout`은 첫 줄을 받은 뒤부터 ACK까지의 전체 기한이다. 첫 줄 기한과 합쳐 인증 전 연결 하나가 머무는 시간의 상한이 된다. 역할 반전 승인 대기만 이 기한 밖이고 `role_proposal_timeout`이 따로 잰다([handshake v2](handshake.md) "역할 반전 승인의 기한"). 승인 대기는 토큰·서명 검사를 통과한 연결에만 생긴다.
+- `LinkTimeouts.handshake_timeout`은 첫 줄을 받은 뒤부터 ACK까지의 전체 기한이다. 첫 줄 기한과 합쳐 인증 전 연결 하나가 머무는 시간의 상한이 된다. 역할 반전 승인 대기만 이 기한 밖이고 `role_proposal_timeout`이 따로 잰다([handshake v2](handshake.md) "역할 반전 승인의 기한"). 승인 대기는 검사 순서 1~6(전송별 인증: SSH는 토큰·서명, P2P는 페어링 목록의 `remote_id()`와 메시지 1 검사)을 통과한 연결에만 생긴다.
 - P2P 경로에서는 스트림을 이 레포가 받으므로 첫 메시지의 크기 상한과 기한도 이 레포가 건다(같은 상수와 `handshake_timeout`).
 
 ## 채널 대응
@@ -81,7 +81,7 @@ P2P 구현은 QUIC 오류를 이 `ErrorKind`로 바꿔 돌려준다. 상대가 �
 
 | 동작 | 계약 | 참고한 tasty 동작 |
 |---|---|---|
-| 시도 취소 `AttemptCancel` | 연결 시도마다 하나. 시도 중 만든 소켓·터널 자식·스트림과, 아직 다른 채널에 공개하지 않은 QUIC 연결을 등록한다. `cancel()` 뒤 진행 중인 `connect`·handshake는 정해진 시간 안에 `Cancelled`로 돌아오고 등록된 자원은 닫히고 회수된다. P2P에서 공유 연결을 쓰는 시도는 자기 스트림만 소유한다(아래 "P2P의 닫기 범위") | `tasty:crates/tasty-remote/src/outbound.rs` `register_socket` |
+| 시도 취소 `AttemptCancel` | 연결 시도마다 하나. 시도 중 만든 소켓·스트림과, 아직 다른 채널에 공개하지 않은 SSH 터널·QUIC 연결을 등록한다. `cancel()` 뒤 진행 중인 `connect`·handshake는 정해진 시간 안에 `Cancelled`로 돌아오고 등록된 자원은 닫히고 회수된다. 이미 공개된 터널·연결을 쓰는 시도는 자기 소켓·스트림만 소유한다(아래 "P2P의 닫기 범위"의 "연결 공유의 시작", "터널 수명과 재연결") | `tasty:crates/tasty-remote/src/outbound.rs` `register_socket` |
 | 쓰기 반쪽 닫기 `ChannelWriter::half_close` | 상대가 남은 프레임을 끝까지 읽은 뒤 EOF를 본다. TCP는 `shutdown(Write)`, QUIC는 송신 스트림 `finish` | `tasty:crates/tasty-remote/src/transport.rs` `Shutdown::Write` |
 | 강제 종료 `LinkCloser::force_close(reason)` | 그 링크의 모든 채널을 닫고 막혀 있는 읽기를 깨운다. TCP는 `shutdown(Both)` 뒤 Windows에서 진행 중 I/O 취소까지 한다. P2P는 그 링크의 스트림만 닫는다(아래 "P2P의 닫기 범위") | `tasty:crates/tasty-utils/src/socket_wake.rs` `shutdown_both_and_wake` |
 | 끝 사유 | 사유는 올라가기만 하고 한 번만 확정된다. 먼저 확정한 쪽의 사유가 최종이다. 깨우기는 두 가지로 나눈다. 소켓 I/O 깨우기(`shutdown_and_wake`)는 확정 결과와 관계없이 한다. 소비자에게 끝을 알리는 콜백은 확정에 이긴 쪽만 부른다 | `tasty:crates/tasty-remote/src/transport_end.rs` |
@@ -116,17 +116,21 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 - 정상 종료는 마지막 프레임을 상대가 읽게 하는 종료다. 송신 스트림을 `finish`한다. 거절 ACK와 요청 채널의 마지막 응답은 이 방식으로 보낸다. 송신 스트림의 완료 확인(`SendStream::stopped`)은 상대 QUIC 스택이 받았다는 뜻일 뿐 상대 앱이 읽었다는 뜻이 아니므로, 그것을 근거로 연결을 닫지 않는다(아래).
 - 강제 종료는 남은 바이트를 버린다. 송신 쪽 `reset`과 수신 쪽 `stop`을 쓴다. `force_close`, 시도 취소, 진행 중 bulk를 부모와 함께 끊을 때만 쓴다.
 - 연결을 닫는 때: 코드 0 종료는 마지막 데이터를 받는 쪽이 한다. `Connection::close`는 진행 중 작업을 모두 실패시키고, 상대 QUIC 스택에 도착했어도 상대 앱이 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(iroh `src/endpoint/connection.rs` `close` 설명).
-  - 그 QUIC 연결을 연 dialer가 닫는다. dialer는 연결 위 마지막 채널의 reader가 상대의 `finish`(EOF)까지 읽은 뒤 코드 0으로 닫는다. 거절 ACK와 요청 채널의 마지막 응답은 dialer가 받는 쪽이므로, dialer가 그것을 읽은 뒤에 연결이 닫힌다.
+  - QUIC 연결 위 스트림은 그 연결의 dialer만 연다. 연결을 받은 쪽이 채널을 열려면 자기 QUIC 연결을 새로 연다. 연결을 받은 쪽이 연 스트림은 받지 않는다(강제 종료). 그래서 그 연결 위 모든 채널에서 채널 dialer = 연결 dialer다.
+  - 정상 종료에서 acceptor는 자기 reader가 상대 EOF를 읽은 뒤에만 자기 송신을 `finish`한다(`drain_cap`까지 오지 않으면 그때 `finish`). acceptor가 먼저 끝내고 싶으면 끝내는 프레임(예: `force_detached` 통지)을 보내고 상대의 `half_close`를 기다린다. 거절 ACK만 예외다. 상대가 더 보낼 것이 없으므로 ACK 뒤 바로 `finish`한다. 그래서 dialer가 acceptor의 EOF를 읽었으면 양방향 데이터가 모두 상대 앱에 소비된 뒤다.
+  - 그 QUIC 연결을 연 dialer가 닫는다. dialer는 연결 위 마지막 채널의 reader가 acceptor의 EOF까지 읽은 뒤 코드 0으로 닫는다. 거절 ACK와 요청 채널의 마지막 응답도 dialer가 받는 쪽이므로, dialer가 그것을 읽은 뒤에 연결이 닫힌다.
   - acceptor는 마지막 채널이 끝나도 코드 0으로 닫지 않고 상대의 종료를 기다린다. `drain_cap` 안에 오지 않으면 그때 코드 0으로 닫는다. 그 경우 dialer가 아직 읽지 않은 프레임은 잃을 수 있고, dialer는 `ReadFailure::PeerClosed`로 본다.
-  - 첫 스트림이 거절돼 공유 링크가 하나도 없는 연결도 같다. 시험은 `tasty-net-p2p`의 `rejected_first_stream_ack_is_read`(거절 ACK의 `reason`을 dialer가 읽음)다.
+  - 첫 스트림이 거절돼 공유 링크가 하나도 없는 연결도 같다. 시험은 `tasty-net-p2p`의 `rejected_first_stream_ack_is_read`(거절 ACK의 `reason`을 dialer가 읽음)와 `bidirectional_last_frames_are_read`(양쪽이 마지막 프레임을 보낸 정상 종료에서 두 앱이 모두 상대의 마지막 프레임을 읽음)다.
 - 연결 공유의 시작: 새 QUIC 연결은 그 연결을 만든 시도의 첫 채널 handshake가 성공할 때까지 그 시도의 `AttemptCancel`이 소유한다. 그동안 다른 채널은 그 연결을 쓰지 않는다(공개를 기다리거나 시도가 끝나면 새 연결을 연다). handshake가 성공하면 연결을 공유 목록에 공개하고 `AttemptCancel`에서 뺀다. 그 뒤의 연결 수명은 공유 목록이 갖고, 시도 취소는 그 시도의 스트림만 닫는다.
 
 ### 터널 수명과 재연결
 
-- SSH 터널은 공유 핸들 `SshTunnel`이 소유한다. `SshTransport`는 대상마다 살아 있는 터널을 하나 두고, `connect`·`connect_more`로 연 채널(attach 링크, bulk, 요청 채널)이 각각 그 핸들의 참조를 가진다. 마지막 참조가 사라지면 터널 자식을 끝내고 회수한다. 그래서 attach 없이 연 요청 채널은 자기가 만든 터널을 혼자 소유하고, attach와 터널을 함께 쓰던 요청 채널은 attach가 먼저 닫혀도 계속 쓸 수 있다. 터널 자체가 죽으면 그 위 모든 채널이 `PeerClosed`로 끝난다.
+- SSH 터널은 공유 핸들 `SshTunnel`이 소유한다. `SshTransport`는 공유 키 (대상, 발견한 원격 포트, 원격 `instance_id`)마다 공개된 터널을 하나 두고, `connect`·`connect_more`로 연 채널(attach 링크, bulk, 요청 채널)이 각각 그 핸들의 참조를 가진다. 마지막 참조가 사라지면 터널 자식을 끝내고 회수한다. 그래서 attach 없이 연 요청 채널은 자기가 만든 터널을 혼자 소유하고, attach와 터널을 함께 쓰던 요청 채널은 attach가 먼저 닫혀도 계속 쓸 수 있다. 터널 자체가 죽으면 그 위 모든 채널이 `PeerClosed`로 끝난다.
+- 터널 공개는 P2P의 "연결 공유의 시작"과 같은 규칙이다. 새 터널은 그 터널을 만든 시도의 첫 채널 handshake가 성공할 때까지 그 시도의 `AttemptCancel`이 소유하고, 그동안 다른 채널은 쓰지 않는다. 성공하면 공유 목록에 공개하고 `AttemptCancel`에서 뺀다. 그 뒤 시도 취소는 그 시도의 소켓만 닫는다.
+- 공유 키에 발견 결과가 들어가므로, 재발견한 원격 포트나 `instance_id`가 바뀌면 옛 터널은 남은 참조가 있어도 새 연결에 쓰지 않는다. 옛 터널은 남은 참조가 놓일 때 회수된다.
 - 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널은 이 레포가 닫는다. 터널은 다른 채널이 쓰고 있으면 남는다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
 - 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum만 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
-- 다시 걸 때는 포트 발견과 터널 열기부터 새로 한다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
+- 다시 걸 때는 포트 발견부터 새로 하고, 발견 결과로 공유 키를 다시 만든다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
 
 ## 동기·비동기 경계
 

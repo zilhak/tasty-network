@@ -50,7 +50,7 @@ hub가 누구를 허용할지(페어링된 기기만, 로그인 사용자만 등
 | relay를 하나도 주지 않으면 | `P2pEndpoint::bind`가 오류를 돌려준다. `RelayMode::Default`(n0 운영 relay)로 바꾸지 않는다 |
 | 사용자 relay와 기본 relay가 둘 다 있으면 | 사용자 relay가 이긴다. 사용자 relay를 설정하면 기본 relay를 relay 목록에 넣지 않는다. 이 우선순위는 이 기기의 홈 relay 후보(`RelayMode::Custom`)에만 적용된다. 상대의 페어링 주소에 있는 상대 홈 relay에는 목록과 관계없이 iroh가 접속하고, 그 경로의 정책은 [P2P](p2p.md#relay-정책과-직접-경로-감시-1안)의 `unknown_relay_policy` 규칙을 따른다 |
 | 기본 relay의 정책 | `DirectRequired`(1안 적용). hub relay는 `punch-only`라 직접 경로를 기다리는 동안에도 낮은 속도로만 중계되고, 그 시간이 지나면 끊기 때문이다 |
-| 사용자 relay의 정책 | `RelayAllowed`(끊지 않음). 소비자가 바꿀 수 있다 |
+| 사용자 relay의 정책 | `RelayAllowed`(끊지 않음). 소비자가 바꿀 수 있다. 이 정책은 자기 목록의 relay에만 적용된다. 상대가 다른 사용자 relay를 쓰면 그 경로는 `unknown_relay_policy`를 따르고, 그 값은 [남은 결정](index.md#남은-결정)에 있다 |
 
 ## 위협 범위
 

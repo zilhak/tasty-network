@@ -19,7 +19,7 @@
 | T5 | relay가 보는 것 | relay는 QUIC 암호문만 중계한다. 내용은 보지 못한다. 접속한 endpoint ID, 접속 시각, 주고받은 양, 양쪽 IP 주소는 안다. hub relay는 `punch-only`이고 클라이언트는 `DirectRequired`라, 직접 경로를 기다리는 동안 낮은 속도로 중계되고 그 뒤에는 끊긴다. 중계 양이 0은 아니다([P2P](p2p.md#relay-정책과-직접-경로-감시-1안)). 사용자 relay는 사용자가 운영한다 | 문서로 알림 |
 | T6 | bulk 채널을 다른 세션이 가로챔 | bulk 자격을 부모 링크와 grant에 묶는다. 부모가 끝나면 자격을 폐기하고(`bulk_credential_invalid`) 그 부모의 열린 bulk 채널도 이 레포가 닫는다. grant가 바뀌면 자격은 그대로이고 새 bulk 요청을 acceptor의 도메인 콜백이 `domain`으로 거절한다. 그때 이미 열린 bulk 채널은 이 레포가 끊지 않고 tasty의 완료 인가가 막는다([handshake v2](handshake.md) "bulk 자격") | 이 레포, 완료 인가는 tasty |
 | T7 | `attach.acquire`의 `client_id` 위조(`tasty:src/adapters/ipc/handler/attach.rs`) | 점유를 연결에 묶는 일은 tasty 도메인이다. T3에서 일반 JSON-RPC를 좁히면 원격에서는 닿지 않는다. 로컬 호출자의 위조는 tasty가 별도로 막는다 | tasty |
-| T8 | handshake 자원 고갈(인증 전 연결을 많이 열어 둠, 아주 긴 첫 줄) | 첫 줄 크기 상한과 기한(SSH 경로는 첫 줄을 읽는 소비자, P2P는 이 레포), 첫 줄 뒤 ACK까지 `LinkTimeouts.handshake_timeout`, 동시 handshake 상한. 역할 반전 승인 대기(`role_proposal_timeout`)는 토큰·서명을 통과한 연결에만 생긴다. 동시 handshake 상한을 넘으면 `busy`, 첫 줄이 `MAX_HANDSHAKE_LINE`을 넘으면 `malformed`(SSH 경로에서 소비자의 첫 줄 상한을 넘으면 소비자가 거절하고 닫는다, [전송 추상화](transport.md) "받는 쪽 진입") | 이 레포, tasty(SSH 첫 줄) |
+| T8 | handshake 자원 고갈(인증 전 연결을 많이 열어 둠, 아주 긴 첫 줄) | 첫 줄 크기 상한과 기한(SSH 경로는 첫 줄을 읽는 소비자, P2P는 이 레포), 첫 줄 뒤 ACK까지 `LinkTimeouts.handshake_timeout`, 동시 handshake 상한. 역할 반전 승인 대기(`role_proposal_timeout`)는 전송별 인증(SSH는 토큰·서명, P2P는 페어링 목록의 `remote_id()`)을 통과한 연결에만 생긴다. 동시 handshake 상한을 넘으면 `busy`, 첫 줄이 `MAX_HANDSHAKE_LINE`을 넘으면 `malformed`(SSH 경로에서 소비자의 첫 줄 상한을 넘으면 소비자가 거절하고 닫는다, [전송 추상화](transport.md) "받는 쪽 진입") | 이 레포, tasty(SSH 첫 줄) |
 | T9 | 손상되거나 바뀐 기기 키 파일 | 손상이면 오류로 멈추고 새로 만들지 않는다. 바뀐 키는 상대 쪽 TOFU에서 `peer_key_mismatch`로 드러난다 | 이 레포 |
 
 ## 이 레포가 하지 않는 것

@@ -98,12 +98,12 @@
 
 ### reaper 계약은 훅을 넣는 tasty가 지킨다
 
-`tasty:crates/tasty-reaper/src/lib.rs`의 `spawn_bound_to_host` 문서(51행 부근)와 시험 `tasty:crates/tasty-reaper/tests/bound_spawn.rs`가 정한 계약:
+`tasty:crates/tasty-reaper/src/lib.rs`의 `spawn_bound_to_host` 문서(51행 부근)가 정한 계약이다. 시험 `tasty:crates/tasty-reaper/tests/bound_spawn.rs`는 파일 전체가 Linux 전용(`#![cfg(target_os = "linux")]`)이라 계약 1만 확인한다. 계약 2는 같은 `lib.rs`의 Windows 구현(`init_host_reaper`·`adopt_pid`, Windows용 `spawn`)이 근거이고, 그 단위 시험은 빈 job 생성과 미초기화 때 무동작까지만 본다. 초기화된 job에 자식을 등록하고 호스트가 끝날 때 자식이 끝나는지는 tasty 시험이 확인하지 않는다.
 
 1. Linux: 부모가 죽으면 자식이 SIGTERM을 받도록 PDEATHSIG를 건다. PDEATHSIG는 fork한 스레드의 종료에 반응하므로 짧게 사는 워커가 아니라 프로세스 수명 동안 남는 spawner 스레드에서 실행한다.
 2. Windows: `init_host_reaper`로 만든 호스트 job에 등록한다. 초기화하지 않은 CLI 등에서는 등록하지 않는다. 다른 OS는 그대로 실행한다.
 
-이 레포는 훅을 "자식을 만드는 유일한 자리"로 부르기만 한다. 훅이 어느 스레드에서 실제로 fork하는지는 훅이 정한다. 그래서 이 레포의 ssh 크레이트가 짧게 사는 워커 스레드에서 훅을 불러도 tasty 훅(spawner 스레드에 넘김)은 계약 1을 지킨다. 이 레포의 시험은 훅이 불린 횟수만 확인하고, 계약 1·2는 tasty의 `bound_spawn.rs`가 계속 확인한다.
+이 레포는 훅을 "자식을 만드는 유일한 자리"로 부르기만 한다. 훅이 어느 스레드에서 실제로 fork하는지는 훅이 정한다. 그래서 이 레포의 ssh 크레이트가 짧게 사는 워커 스레드에서 훅을 불러도 tasty 훅(spawner 스레드에 넘김)은 계약 1을 지킨다. 이 레포의 시험은 훅이 불린 횟수만 확인한다. 계약 1은 tasty의 `bound_spawn.rs`(Linux)가 계속 확인하고, 계약 2는 tasty의 Windows 구현이 지키며 그 시험은 이 레포 범위 밖이다.
 
 ### 포트 발견의 tasty 관례
 

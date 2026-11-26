@@ -52,4 +52,5 @@
 | 펀칭 실험 기기·네트워크·공인 relay 준비와 일정 | 미정. 조건은 [P2P](p2p.md#필요한-조건) | 사용자 |
 | 토폴로지 원격 응답에 실을 workspace 메타데이터 범위(이름·ID) | 미정 | tasty 제품 결정 |
 | 페어링 메시지를 나르는 경로와 승인 화면 | 미정 | tasty 제품 결정 |
+| 서로 다른 사용자 relay를 쓰는 두 기기에서 상대 홈 relay 경로의 정책. 지금 기본 `unknown_relay_policy = DirectRequired`라 직접 경로가 없으면 끊긴다. tasty가 사용자 relay를 설정했을 때 이 값을 `RelayAllowed`로 둘지([P2P](p2p.md#relay-정책과-직접-경로-감시-1안)) | 확인 필요 | 사용자, tasty 제품 결정 |
 | `DirectRequired` relay에서 직접 경로가 확인될 때까지 앱 프레임을 보류할지(지금은 보류하지 않아 그동안 낮은 속도로 중계될 수 있다, [P2P](p2p.md#relay-정책과-직접-경로-감시-1안)) | 확인 필요. 1안의 뜻에 닿는다 | 사용자 |
