@@ -455,6 +455,29 @@ mod unix {
         publication.retire().unwrap();
     }
 
+    /// A lock file that cannot be opened for writing (created 0400 by another process before it
+    /// set the mode) is opened read-only; `flock` still holds on it.
+    #[test]
+    fn a_read_only_lock_file_still_allows_publish_and_retire() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("home");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = dir.join("record.lock");
+        fs::write(&lock, b"").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o400)).unwrap();
+        let path = dir.join("record");
+        let publication = record(1).publish(&path).unwrap();
+        assert_eq!(
+            ConnectionRecord::parse(&fs::read_to_string(&path).unwrap()).unwrap(),
+            ParsedRecord::Record(record(1))
+        );
+        assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
+        assert!(!path.exists());
+        let mode = fs::metadata(&lock).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o400, "an existing lock file keeps its mode");
+    }
+
     /// Unix only: a Windows directory cannot be removed while the publication keeps the
     /// record open.
     #[test]

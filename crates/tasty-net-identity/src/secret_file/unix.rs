@@ -154,20 +154,23 @@ pub(super) fn open_for_id(path: &Path) -> io::Result<File> {
 
 /// Open the lock file, creating it when missing. A lock file this call creates is set to 0600
 /// explicitly, because the creation mode is reduced by the umask (0400 under 0277 would keep a
-/// later call from reopening it for writing). An existing lock file keeps its mode.
+/// later call from reopening it for writing). An existing lock file keeps its mode; when it
+/// cannot be opened for writing (a lock file another process created 0400 before setting its
+/// mode, or one left from an older version), it is opened read-only. The lock is `flock`
+/// (`File::lock` on Linux and macOS), which a read-only descriptor can hold.
 pub(super) fn open_lock(path: &Path) -> io::Result<File> {
-    let options = |create_new: bool| {
+    let options = |write: bool, create_new: bool| {
         let mut options = OpenOptions::new();
         options
             .read(true)
-            .write(true)
+            .write(write)
             .create_new(create_new)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW);
         options
     };
     loop {
-        match options(true).open(path) {
+        match options(true, true).open(path) {
             Ok(file) => {
                 file.set_permissions(fs::Permissions::from_mode(0o600))?;
                 return Ok(file);
@@ -175,9 +178,13 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
-        match options(false).open(path) {
+        let existing = match options(true, false).open(path) {
+            Err(e) if e.raw_os_error() == Some(libc::EACCES) => options(false, false).open(path),
+            other => other,
+        };
+        match existing {
             Ok(file) => return Ok(file),
-            // Removed between the two opens: try to create it again.
+            // Removed between the opens: try to create it again.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
