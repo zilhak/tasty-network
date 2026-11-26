@@ -198,15 +198,28 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     Ok(out)
 }
 
-/// Add `\\?\` (or `\\?\UNC\` for `\\server\share`) to a long absolute path. Paths that
-/// already are verbatim or device paths (`\\?\`, `\\.\`) and short paths stay as they are.
+/// Add `\\?\` (or `\\?\UNC\` for `\\server\share`) to a long absolute path. A long
+/// `\\.\<drive>:\` path becomes `\\?\<drive>:\`, as std does. Verbatim paths, other device
+/// paths (`\\.\pipe\` and the like) and short paths stay as they are.
 fn with_verbatim_prefix(path: Vec<u16>) -> Vec<u16> {
     let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
-    if path.len() < LEGACY_MAX_PATH
-        || path.starts_with(&wide(r"\\?\"))
-        || path.starts_with(&wide(r"\\.\"))
-    {
+    if path.len() < LEGACY_MAX_PATH || path.starts_with(&wide(r"\\?\")) {
         return path;
+    }
+    if let Some(rest) = path.strip_prefix(wide(r"\\.\").as_slice()) {
+        let is_drive = matches!(
+            rest,
+            [letter, colon, sep, ..]
+                if char::from_u32(u32::from(*letter)).is_some_and(|c| c.is_ascii_alphabetic())
+                    && *colon == u16::from(b':')
+                    && (*sep == u16::from(b'\\') || *sep == u16::from(b'/'))
+        );
+        if !is_drive {
+            return path;
+        }
+        let mut out = wide(r"\\?\");
+        out.extend_from_slice(rest);
+        return out;
     }
     if let Some(rest) = path.strip_prefix(wide(r"\\").as_slice()) {
         let mut out = wide(r"\\?\UNC\");
@@ -672,8 +685,16 @@ mod tests {
             with_verbatim_prefix(w(&format!(r"\\server\share\{long}"))),
             w(&format!(r"\\?\UNC\server\share\{long}"))
         );
-        for already in [format!(r"\\?\C:\{long}"), format!(r"\\.\C:\{long}")] {
-            assert_eq!(with_verbatim_prefix(w(&already)), w(&already));
+        assert_eq!(
+            with_verbatim_prefix(w(&format!(r"\\.\C:\{long}"))),
+            w(&format!(r"\\?\C:\{long}"))
+        );
+        for unchanged in [
+            format!(r"\\?\C:\{long}"),
+            format!(r"\\.\pipe\{long}"),
+            r"\\.\C:\x".to_owned(),
+        ] {
+            assert_eq!(with_verbatim_prefix(w(&unchanged)), w(&unchanged));
         }
     }
 
