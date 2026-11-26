@@ -63,7 +63,12 @@ for pkg in packages:
     src = pkg.get("source")
     if src is None:
         manifest_dir = norm(os.path.dirname(pkg["manifest_path"]))
-        if os.path.commonpath([root, manifest_dir]) == root:
+        try:
+            inside = os.path.commonpath([root, manifest_dir]) == root
+        except ValueError:
+            # Windows에서 드라이브가 다르면 공통 경로가 없다. 그러면 workspace 밖이다.
+            inside = False
+        if inside:
             path_inside += 1
         else:
             violations.append(f"path 의존이 workspace 밖이다: {pkg['name']} {pkg['version']} ({pkg['manifest_path']})")
