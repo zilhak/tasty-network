@@ -94,6 +94,8 @@ pub fn connection_closed_error(message: impl Into<String>) -> io::Error {
 #[derive(Default)]
 struct LineScanner {
     line: Vec<u8>,
+    /// The current line lost bytes past [`Self::MAX_LINE`].
+    truncated: bool,
 }
 
 impl LineScanner {
@@ -106,6 +108,8 @@ impl LineScanner {
                 self.finish_line(seen);
             } else if self.line.len() < Self::MAX_LINE {
                 self.line.push(b);
+            } else {
+                self.truncated = true;
             }
         }
     }
@@ -115,10 +119,13 @@ impl LineScanner {
         if is_channel_connect_failure(&line) {
             seen.channel_connect_failures.fetch_add(1, Ordering::AcqRel);
         }
-        if is_fork_option_refusal(&line) {
+        // A cut line could end right after `forkafterauthentication` while ssh wrote a longer
+        // name; the exact-name check needs the whole line.
+        if !self.truncated && is_fork_option_refusal(&line) {
             seen.fork_option_refused.store(true, Ordering::Release);
         }
         self.line.clear();
+        self.truncated = false;
     }
 }
 
@@ -380,6 +387,29 @@ mod tests {
         assert!(!is_fork_option_refusal(
             "Bad configuration option: forkafterauthentication_x"
         ));
+    }
+
+    /// A refusal that ends exactly at the line limit is judged; one whose option name goes on
+    /// past the limit is not, since the cut would hide the rest of the name.
+    #[test]
+    fn a_fork_refusal_cut_at_the_line_limit_is_not_judged() {
+        const DIAG: &str =
+            "command-line: line 0: Bad configuration option: forkafterauthentication";
+        let full_line = format!("{}{DIAG}", "x".repeat(LineScanner::MAX_LINE - DIAG.len()));
+        assert_eq!(full_line.len(), LineScanner::MAX_LINE);
+        let judge = |stderr: String| {
+            let seen = StderrMarks::default();
+            relay_stderr(io::Cursor::new(stderr.into_bytes()), io::sink(), &seen);
+            seen.fork_option_refused.load(Ordering::Acquire)
+        };
+        assert!(judge(format!("{full_line}\n")), "ends at the limit");
+        assert!(judge(full_line.clone()), "ends at the limit and at EOF");
+        assert!(
+            !judge(format!("{full_line}extra\n")),
+            "name goes on past the limit"
+        );
+        // The next line is judged on its own again.
+        assert!(judge(format!("{full_line}extra\n{DIAG}\n")));
     }
 
     #[test]
