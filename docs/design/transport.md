@@ -224,8 +224,8 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 |---|---|---|---|---|
 | `id`, `previous`, `parent` | 위 "항목의 단위와 ID" | 터널 항목 | TCP 연결 항목. bulk면 `parent` | QUIC 연결 항목 |
 | `peer` | 상대 기기 ID, 인스턴스 ID(handshake 뒤), 소비자가 준 표시 이름 | handshake가 확인한 값 | handshake가 확인한 값 | QUIC가 확인한 기기 ID + handshake의 인스턴스 ID |
-| `path` | `PathKind`(관측한 자리) | `ssh_forward` · `ssh_role_reversed`(그 터널 위 첫 attach 링크의 holder로 정한다. 링크가 없으면 프로필이 고른 방향) | `ssh_inbound`(루프백으로 받은 연결. 이 쪽은 SSH인지 알 수 없고 루프백 포트가 SSH 포워딩 전용이라는 tasty의 전제를 따른다, [위협 모델](threat-model.md) T2·T3) | `p2p_udp` |
-| `direction` | attach 방향. `forward`(holder = dialer) · `role_reversed`(holder = acceptor) · `none`(attach 링크가 없음) | 위 `path`와 같은 값 | handshake가 확인한 holder로 정한다 | 그 연결 위 attach 링크의 holder |
+| `path` | `PathKind`(관측한 자리) | `ssh_forward` · `ssh_role_reversed`(프로필이 고른 방향. 터널 위 각 링크의 실제 방향은 `links`의 holder와 `direction`에 있다) | `ssh_inbound`(루프백으로 받은 연결. 이 쪽은 SSH인지 알 수 없고 루프백 포트가 SSH 포워딩 전용이라는 tasty의 전제를 따른다, [위협 모델](threat-model.md) T2·T3) | `p2p_udp` |
+| `direction` | 항목 위 attach 링크들의 방향 요약. 링크가 하나면(또는 모두 같으면) 그 방향 `forward`(holder = dialer) · `role_reversed`(holder = acceptor), 방향이 다른 링크가 섞이면 `mixed`, attach 링크가 없으면 `none`. 엣지 값은 이 요약이 아니라 링크마다 정한다(아래 "토폴로지와의 관계") | 위 규칙 | 받는 쪽 항목은 채널 하나라 그 링크의 holder | 위 규칙 |
 | `local_side` | 이 기기가 물리 연결을 열었는지 받았는지(`dialer` · `acceptor`) | `dialer` | `acceptor` | P2P `side` |
 | `segments` | 주소 구간 목록. 구간마다 `{name, local, remote}` | `local_forward`: 로컬 포워딩 종단(`127.0.0.1:<포트>`) ↔ 그 포트에 연 채널들. `ssh`: 프로필의 SSH 대상(`<호스트>:<포트>`, 프로필 값 그대로. 실제 IP는 `ssh`가 정하고 이 레포는 모른다). `remote_listener`: 원격 쪽 루프백 리스너 포트(발견한 값) | `loopback`: 루프백 listener 주소 ↔ 루프백 상대 주소(sshd 쪽 포트). 이 쪽은 SSH 구간을 볼 수 없다 | `udp`: `local_bind`·`local_ip`(모르면 `unknown`) ↔ `remote_addr`(관측된 원격 주소 변화 뒤에는 새 주소) |
 | `via` | 소개·경유 | `ssh{target, remote_port}` | `loopback` | `rendezvous{server_addr, server_key}`와 성공 후보 종류, 양쪽 `NatMapping`. SSH 항목에는 rendezvous가 없다 |
@@ -233,11 +233,11 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 | `phase` | 세부 단계 | 터널 준비, 포트 발견, handshake | handshake | P2P 상태 기계의 상태 이름과 값 |
 | `last_cause` | 마지막 전이 원인 | 터널 종료, 원격 리스너 없음, 거절 사유, heartbeat 만료 등 | 거절 사유, 상대 닫음 등 | P2P 전이 원인(종료 코드 포함) |
 | `history` | 전이와 주소 변화 이력 | 상태 전이 | 상태 전이 | 상태 전이, `remote_address_observed_change`(관측된 원격 주소 변화, [P2P](p2p.md#주소-바뀜-quic-경로-이동)) |
-| `links` | 그 위의 링크·채널 | attach 링크(링크마다 holder), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
+| `links` | 그 위의 링크·채널 | attach 링크(링크마다 `link_id`([handshake v2](handshake.md#bulk-자격)), holder, 연 시각), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
 | `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
 | `applied` | 이 연결에 적용된 설정값과 진행 값. 항목마다 `{key, value, source}` | 재연결 시도 번호, 다음 시도까지 남은 시간, 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`) | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로 |
 
-- 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
+- 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 `link_id`로 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
 
 ### 보관 상한과 재연결 도우미
 
@@ -263,6 +263,6 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 
 ### 토폴로지와의 관계
 
-- topology의 자기 엣지 보고(`LocalLink`)는 이 목록의 attach 링크에서 만든다. 엣지는 물리 링크(attach 링크) 하나에 하나다. 항목 하나에 attach 링크가 여럿이면 엣지도 여럿이다.
-- 엣지의 `transport` 값은 `direction`과 경로 종류로 정한다: SSH는 `forward` → `ssh_forward`, `role_reversed` → `ssh_role_reversed`, P2P는 `p2p_udp`. 받는 쪽의 `ssh_inbound` 항목도 `direction`으로 같은 값을 낸다. 그래서 같은 링크를 양쪽이 보고해도 `transport`가 같고, 집계가 하나로 합친다([토폴로지](topology.md#모델)). `ssh_inbound`는 이 목록의 `path`에만 있고 엣지 값으로 쓰지 않는다.
+- topology의 자기 엣지 보고(`LocalLink`)는 이 목록의 attach 링크에서 만든다. 엣지는 attach 링크 하나에 하나이고 그 링크의 `link_id`를 싣는다. 항목 하나에 attach 링크가 여럿이면 엣지도 여럿이다.
+- 엣지의 `transport` 값은 링크마다 그 링크의 holder와 경로 종류로 정한다: SSH는 holder = dialer → `ssh_forward`, holder = acceptor → `ssh_role_reversed`, P2P는 `p2p_udp`. 항목의 `direction`(요약, `mixed`일 수 있다)은 쓰지 않는다. 그래서 한 터널 위에 정방향 링크와 역할 반전 링크가 함께 있어도 링크마다 양 끝의 `transport`가 같다. 받는 쪽의 `ssh_inbound` 항목도 같은 규칙으로 값을 낸다. `ssh_inbound`는 이 목록의 `path`에만 있고 엣지 값으로 쓰지 않는다.
 - `rtt`가 `rtt_ms`가 된다([토폴로지](topology.md#엣지-목록-입력)). 주소·서버 필드는 원격 응답에 싣지 않는다.
