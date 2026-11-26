@@ -33,6 +33,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Config reading, CI config conversion, and the per-mode limit rule,
+      # without docker. Needs python3 3.11+ (tomllib), which the runner has.
+      - name: relay config self-test
+        run: bash relay/check-config.sh --self-test
       # Starts each config with --dev and checks HTTP, metrics, and the receive
       # limit in the start log. Prints one "relay-check config=<name> result=..."
       # line per config.

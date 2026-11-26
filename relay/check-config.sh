@@ -2,6 +2,7 @@
 # relay 설정 예시 기동 검사. 동작 수준 기준 D5 (a)(.github/workflows/relay.yml의 relay-config-check 잡)가 부른다.
 #
 #   relay/check-config.sh [--keep-image] [설정.toml ...]
+#   relay/check-config.sh --self-test     docker 없이 설정 읽기·변환·상한 요구 판정만 시험한다
 #
 # 설정을 주지 않으면 relay/punch-only.toml과 relay/relay-fallback.toml을 본다. 설정마다:
 #   1. 운영 예시에서 [tls] 절과 enable_quic_addr_discovery를 뺀 CI용 설정을 임시 폴더에 만든다.
@@ -9,11 +10,13 @@
 #   3. HTTP(/healthz, /, /generate_204)와 metrics(/metrics) 응답, 시작 로그의 평문 리스너 줄
 #      ([HTTP/WS] relay: serving on), 시작 로그에 찍힌 수신 상한이 설정 파일과 같은지
 #      (설정 파일을 실제로 읽었는지) 본다.
+#   기본 예시 punch-only.toml은 수신 상한(client_rx)이 있어야, relay-fallback.toml은 없어야 통과한다.
+#   설정은 python3 tomllib로 읽는다(3.11 이상).
 #   4. 결과를 한 줄로 쓴다: relay-check config=<이름> result=ok|fail ...
 # 띄운 컨테이너와 임시 폴더는 끝날 때 지운다. 이 스크립트가 받은 이미지도 지운다(--keep-image면 남긴다).
 # TLS와 QUIC 주소 확인은 판정하지 않는다(docs/design/relay.md "배포 형태").
 #
-# 종료 코드: 0 모든 설정 통과, 1 하나라도 실패, 2 판정 불가(docker 없음, 인자 오류).
+# 종료 코드: 0 모든 설정 통과, 1 하나라도 실패, 2 판정 불가(docker·curl·python3 없음, 인자 오류).
 # relay/container-check.sh가 이 파일을 source해 같은 함수를 쓴다.
 #
 # 환경 변수:
@@ -29,6 +32,9 @@ RELAY_VERSION="${RELAY_VERSION:-1.5.0}"
 RELAY_READY_SECONDS="${RELAY_READY_SECONDS:-30}"
 
 rc_log() { echo "[relay-check] $*" >&2; }
+
+# 파일 $1 머리의 주석 블록(둘째 줄부터 첫 비주석 줄 전까지)을 도움말로 출력한다.
+rc_help() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$1"; }
 
 # 정리 대상. rc_cleanup이 EXIT에서 지운다.
 RC_CONTAINERS=()
@@ -73,6 +79,10 @@ rc_prepare() {
         rc_log "판정 불가: curl이 PATH에 없다."
         return 2
     fi
+    if ! python3 -I -c 'import tomllib' >/dev/null 2>&1; then
+        rc_log "판정 불가: python3(3.11 이상, tomllib)이 없다."
+        return 2
+    fi
     RC_TMP="$(mktemp -d)" || { rc_log "판정 불가: 임시 폴더를 만들지 못했다."; return 2; }
     if ! docker image inspect "$RELAY_IMAGE" >/dev/null 2>&1; then
         rc_log "이미지 받기: $RELAY_IMAGE"
@@ -100,29 +110,73 @@ rc_make_ci_config() {
         rc_log "$src: 표 머리 밖의 tls 키나 enable_quic_addr_discovery가 남았다. [tls] 표로 적는다."
         return 1
     fi
+    if ! rc_check_ci_config "$src" "$out"; then
+        rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery만 뺀 것과 다르다(TOML 비교)."
+        return 1
+    fi
     return 0
 }
 
-# TOML 파일 $1에서 [limits.client.rx] 표의 키 $2 값(정수)을 출력한다. 없으면 빈 줄.
-rc_toml_rx_value() {
-    awk -v key="$2" '
-        /^[[:space:]]*\[/ {
-            h = $0
-            gsub(/[[:space:]]/, "", h)
-            inrx = (h == "[limits.client.rx]")
-            next
-        }
-        inrx {
-            line = $0
-            sub(/#.*/, "", line)
-            if (line ~ "^[[:space:]]*" key "[[:space:]]*=") {
-                sub(/^[^=]*=[[:space:]]*/, "", line)
-                gsub(/[[:space:]_]/, "", line)
-                print line
-                exit
-            }
-        }
-    ' "$1"
+# TOML 파일 $1의 [limits.client.rx] 값을 "bytes_per_second max_burst_bytes"로 출력한다. 없는 값은 -.
+# TOML 표기(주석, 1_000 같은 숫자, 인라인 표)를 iroh-relay와 같게 읽도록 파이썬 tomllib로 읽는다.
+# 종료 코드: 0 읽음, 3 TOML 오류, 4 python3·tomllib 없음.
+rc_toml_rx() {
+    command -v python3 >/dev/null 2>&1 || return 4
+    python3 -I - "$1" <<'PY'
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(4)
+try:
+    with open(sys.argv[1], "rb") as f:
+        d = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError) as e:
+    print(e, file=sys.stderr)
+    sys.exit(3)
+rx = d.get("limits", {}).get("client", {}).get("rx") if isinstance(d.get("limits"), dict) else None
+if not isinstance(rx, dict):
+    print("- -")
+else:
+    print(rx.get("bytes_per_second", "-"), rx.get("max_burst_bytes", "-"))
+PY
+}
+
+# 운영 설정 $1에서 [tls]와 enable_quic_addr_discovery만 빠진 것이 CI용 설정 $2인지 TOML로 비교한다.
+rc_check_ci_config() {
+    python3 -I - "$1" "$2" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    a = tomllib.load(f)
+with open(sys.argv[2], "rb") as f:
+    b = tomllib.load(f)
+a.pop("tls", None)
+a.pop("enable_quic_addr_discovery", None)
+sys.exit(0 if a == b else 1)
+PY
+}
+
+# 설정 $1에 요구할 수신 상한: 기본 예시 punch-only.toml은 some, relay-fallback.toml은 none, 그 밖은 any.
+rc_limit_expectation() {
+    local d f
+    d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || { echo any; return 0; }
+    f="$d/$(basename "$1")"
+    if [[ "$f" == "$(cd "$RELAY_DIR" && pwd -P)/punch-only.toml" ]]; then
+        echo some
+    elif [[ "$f" == "$(cd "$RELAY_DIR" && pwd -P)/relay-fallback.toml" ]]; then
+        echo none
+    else
+        echo any
+    fi
+}
+
+# 요구 $1(some|none|any)과 읽은 bytes_per_second $2(-는 없음)가 맞으면 0.
+rc_limit_matches() {
+    case "$1" in
+        some) [[ "$2" != - ]] ;;
+        none) [[ "$2" == - ]] ;;
+        *) return 0 ;;
+    esac
 }
 
 # 설정 값 $2(키 이름)의 포트. 없으면 기본 $3.
@@ -163,7 +217,7 @@ RC_LAST_FAIL=""
 RC_LAST_LIMIT=""
 rc_start_relay() {
     local name="$1" src="$2" dir cfg cid http_port metrics_port http metrics waited body code_root code_204 mbody
-    local bps burst logs flat want
+    local bps burst logs flat want rx expect
     RC_LAST_CONTAINER="" RC_LAST_HTTP="" RC_LAST_METRICS="" RC_LAST_FAIL="" RC_LAST_LIMIT=""
     dir="$RC_TMP/$name"
     mkdir -p "$dir" || { RC_LAST_FAIL="stage=prepare"; return 1; }
@@ -174,6 +228,15 @@ rc_start_relay() {
         return 1
     fi
     rc_make_ci_config "$src" "$cfg" || { RC_LAST_FAIL="stage=config reason=ci-config"; return 1; }
+    rx=$(rc_toml_rx "$cfg") || { RC_LAST_FAIL="stage=config reason=toml-rc$?"; return 1; }
+    bps=${rx%% *}
+    burst=${rx##* }
+    expect=$(rc_limit_expectation "$src")
+    if ! rc_limit_matches "$expect" "$bps"; then
+        # 예: punch-only에서 [limits.client.rx] 표 이름을 틀리면 iroh-relay는 상한 없이 뜬다.
+        RC_LAST_FAIL="stage=config reason=limit-expected-$expect bytes_per_second=$bps"
+        return 1
+    fi
     chmod 0644 "$cfg"
     http_port=$(rc_toml_port "$cfg" http_bind_addr 3340)
     metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090)
@@ -248,12 +311,10 @@ rc_start_relay() {
 
     # 시작 로그(debug의 ServerConfig {:#?} 출력)에 설정 파일의 수신 상한이 그대로 있어야 한다.
     # 여러 줄로 찍히고 닫는 괄호 앞에 쉼표가 붙으므로, 공백·줄바꿈과 그 쉼표를 지운 뒤 비교한다.
-    bps=$(rc_toml_rx_value "$cfg" bytes_per_second)
-    burst=$(rc_toml_rx_value "$cfg" max_burst_bytes)
     logs=$(docker logs "$cid" 2>&1)
     flat=$(tr -d ' \t\n' <<<"$logs" | sed 's/,)/)/g; s/,}/}/g')
-    if [[ -n "$bps" ]]; then
-        if [[ -n "$burst" ]]; then
+    if [[ "$bps" != - ]]; then
+        if [[ "$burst" != - ]]; then
             want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:Some($burst)}"
         else
             want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:None}"
@@ -280,7 +341,8 @@ rc_start_relay() {
 
     RC_LAST_HTTP="$http"
     RC_LAST_METRICS="$metrics"
-    RC_LAST_LIMIT="${bps:-none}"
+    RC_LAST_LIMIT="$bps"
+    [[ "$bps" == - ]] && RC_LAST_LIMIT=none
     return 0
 }
 
@@ -313,13 +375,65 @@ rc_configs() {
     fi
 }
 
+# docker 없이 설정 읽기·변환·상한 요구 판정을 시험한다. 통과 0, 실패 1, 판정 불가 2.
+rc_self_test() {
+    local t fail=0 got
+    python3 -I -c 'import tomllib' >/dev/null 2>&1 || { rc_log "판정 불가: python3(tomllib)이 없다."; return 2; }
+    t=$(mktemp -d) || return 2
+    st_expect() { # 이름, 기대, 실제
+        if [[ "$2" == "$3" ]]; then
+            echo "self-test $1 ok"
+        else
+            echo "self-test $1 FAIL want=[$2] got=[$3]"
+            fail=1
+        fi
+    }
+    printf '[limits.client.rx] # 주석\nbytes_per_second = 16_384\nmax_burst_bytes = 65536\n' > "$t/comment.toml"
+    st_expect rx-header-comment "16384 65536" "$(rc_toml_rx "$t/comment.toml")"
+    printf '[limits.client.rxx]\nbytes_per_second = 100\n' > "$t/typo.toml"
+    st_expect rx-typo-table "- -" "$(rc_toml_rx "$t/typo.toml")"
+    printf 'limits.client.rx = { bytes_per_second = 7 }\n' > "$t/inline.toml"
+    st_expect rx-inline "7 -" "$(rc_toml_rx "$t/inline.toml")"
+    printf '[limits\n' > "$t/bad.toml"
+    rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
+    st_expect toml-error-rc 3 "$?"
+    # 기본 예시와 같은 자리의 punch-only.toml에서 표 이름을 rxx로 틀리면 상한 요구에서 실패해야 한다.
+    sed 's/^\[limits\.client\.rx\]/[limits.client.rxx]/' "$RELAY_DIR/punch-only.toml" > "$t/typo-punch.toml"
+    got=$(rc_toml_rx "$t/typo-punch.toml")
+    rc_limit_matches "$(rc_limit_expectation "$RELAY_DIR/punch-only.toml")" "${got%% *}"
+    st_expect punch-only-typo-rejected 1 "$?"
+    got=$(rc_toml_rx "$RELAY_DIR/punch-only.toml")
+    rc_limit_matches "$(rc_limit_expectation "$RELAY_DIR/punch-only.toml")" "${got%% *}"
+    st_expect punch-only-limit-required 0 "$?"
+    got=$(rc_toml_rx "$RELAY_DIR/relay-fallback.toml")
+    rc_limit_matches "$(rc_limit_expectation "$RELAY_DIR/relay-fallback.toml")" "${got%% *}"
+    st_expect relay-fallback-no-limit 0 "$?"
+    rc_limit_matches "$(rc_limit_expectation "$RELAY_DIR/relay-fallback.toml")" 100
+    st_expect relay-fallback-limit-rejected 1 "$?"
+    st_expect other-file-any any "$(rc_limit_expectation "$t/typo.toml")"
+    rc_make_ci_config "$RELAY_DIR/punch-only.toml" "$t/ci-punch.toml"
+    st_expect ci-config-punch-only 0 "$?"
+    st_expect ci-config-punch-only-rx "16384 65536" "$(rc_toml_rx "$t/ci-punch.toml")"
+    rc_make_ci_config "$RELAY_DIR/relay-fallback.toml" "$t/ci-fallback.toml"
+    st_expect ci-config-relay-fallback 0 "$?"
+    printf 'tls.cert_mode = "Manual"\n' > "$t/dotted-tls.toml"
+    rc_make_ci_config "$t/dotted-tls.toml" "$t/out.toml" 2>/dev/null
+    st_expect ci-config-dotted-tls-rejected 1 "$?"
+    rm -rf "${t:?}"
+    return "$fail"
+}
+
 rc_main() {
     local configs=() src name failed=0 prep
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --keep-image) rc_keep_image ;;
+            --self-test)
+                rc_self_test
+                return $?
+                ;;
             -h | --help)
-                sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+                rc_help "${BASH_SOURCE[0]}"
                 return 0
                 ;;
             -*) rc_log "모르는 옵션: $1"; return 2 ;;

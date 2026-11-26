@@ -10,7 +10,7 @@
 | `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, `scripts/check.sh test --no-fail-fast` |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
-| `relay-config-check` (`relay.yml`) | `ubuntu-latest` | `bash relay/check-config.sh` |
+| `relay-config-check` (`relay.yml`) | `ubuntu-latest` | `bash relay/check-config.sh --self-test`, `bash relay/check-config.sh` |
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
 - `relay.yml`은 `relay/` 밖만 바뀐 커밋에서도 돈다. `develop`의 어느 커밋이든 D5 (a)의 실행 ID를 남기기 위해서다. 러너의 docker로 고정 이미지 `n0computer/iroh-relay:v1.5.0`(digest 고정)을 받아 띄운다. 아래 concurrency 규칙은 두 워크플로가 같고 그룹 이름의 앞머리(`ci-`·`relay-`)만 다르다.
