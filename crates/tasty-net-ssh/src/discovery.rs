@@ -703,27 +703,30 @@ fn output_too_long(what: &str) -> PortDiscoveryError {
 const STDERR_GRACE: Duration = Duration::from_millis(500);
 
 /// Waits for a reader's result until `deadline`, stopping early on cancellation. A result that
-/// already arrived is taken even at the deadline.
+/// already arrived is taken even at the deadline. The cancel flag is read after every receive
+/// attempt, whatever it gave, so a cancel that meets the result or the deadline is `Cancelled`.
 fn collect(
     rx: &mpsc::Receiver<Captured>,
     deadline: Instant,
     what: &str,
 ) -> Result<Captured, PortDiscoveryError> {
     loop {
-        if cancel_requested() {
-            return Err(cancelled_error(what));
-        }
         let left = deadline.saturating_duration_since(Instant::now());
         let received = match rx.recv_timeout(left.min(Duration::from_millis(50))) {
             Ok(captured) => captured,
             Err(mpsc::RecvTimeoutError::Disconnected) => Captured::default(),
-            Err(mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
-                return Err(PortDiscoveryError::new(
-                    PortDiscoveryFailureKind::TimedOut,
-                    format!("{what}: the output stayed open after the command exited"),
-                ));
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel_requested() {
+                    return Err(cancelled_error(what));
+                }
+                if left.is_zero() {
+                    return Err(PortDiscoveryError::new(
+                        PortDiscoveryFailureKind::TimedOut,
+                        format!("{what}: the output stayed open after the command exited"),
+                    ));
+                }
+                continue;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
         };
         return settled(received, what);
     }
@@ -823,7 +826,11 @@ fn run_capture_with_budget(
     // closed (SIGPIPE), failed because of its output size. An exit code of its own (3: the
     // instance exited) still decides the class below.
     if stdout.overflowed() && (status.success() || status.code().is_none()) {
-        return Err(output_too_long(what));
+        return Err(if cancel_requested() {
+            cancelled_error(what)
+        } else {
+            output_too_long(what)
+        });
     }
     if !status.success() {
         // The exit settles the class; stderr is only a diagnostic and cannot override it.
@@ -2120,6 +2127,34 @@ mod tests {
             .expect("spawn");
         let err = cut_off(ChildOwner::Local(child), "expired", Duration::from_secs(1));
         assert_eq!(err.kind(), PortDiscoveryFailureKind::TimedOut);
+    }
+
+    /// A cancel that comes while collect waits on an empty channel ends it as cancelled, through
+    /// the branch that would otherwise go on waiting or time out.
+    #[test]
+    fn a_cancel_during_the_wait_for_output_is_cancelled() {
+        let handle = SshCancel::new();
+        let _scope = handle.scope();
+        let (_tx, rx) = mpsc::channel::<Captured>();
+        let killer = handle.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            killer.request_cancel();
+        });
+        let started = Instant::now();
+        let err = collect(&rx, started + Duration::from_secs(5), "waiting")
+            .map(|_| ())
+            .unwrap_err();
+        t.join().expect("killer thread");
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // At the deadline, a cancel already set wins over the timeout.
+        let past = Instant::now() - Duration::from_millis(1);
+        let err = collect(&rx, past, "at the deadline")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
     }
 
     /// The spawn hook's time comes out of the budget: the child is not given a fresh one.
