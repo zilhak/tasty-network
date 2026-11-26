@@ -397,10 +397,8 @@ pub(crate) mod testing {
         let mut control: u16 = 0;
         let mut revision: u32 = 0;
         // SAFETY: descriptor is live; out pointers are locals.
-        assert_ne!(
-            unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
-            0
-        );
+        let ok = unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) };
+        assert_ne!(ok, 0, "GetSecurityDescriptorControl");
         // SAFETY: owner points into the live descriptor; sid is valid.
         let owner_is_current_user =
             !owner.is_null() && unsafe { EqualSid(owner, sid.as_psid()) } != 0;
