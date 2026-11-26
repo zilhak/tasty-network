@@ -183,7 +183,7 @@ PY
 RC_SECRET_PLACEHOLDER="check-config-placeholder"
 rc_check_ci_config() {
     python3 -I - "$1" "$2" "$RC_SECRET_PLACEHOLDER" <<'PY'
-import json, sys, tomllib
+import sys, tomllib
 
 src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -219,13 +219,27 @@ def scrub(d):
             changed = True
     return changed
 
+def tstr(v):
+    # TOML 기본 문자열. 큰따옴표와 역슬래시는 이스케이프, 제어 문자(U+0000~U+001F, U+007F)는 \uXXXX, 나머지(BMP 밖 포함)는 그대로 쓴다.
+    out = []
+    for ch in v:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append("\\u%04X" % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
 def val(v):
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return repr(v)
     if isinstance(v, str):
-        return json.dumps(v)
+        return tstr(v)
     if isinstance(v, list) and all(not isinstance(x, dict) for x in v):
         return "[" + ", ".join(val(x) for x in v) + "]"
     raise ValueError(f"unsupported value {v!r}")
@@ -233,10 +247,10 @@ def val(v):
 def dump(d, prefix, lines):
     for k, v in d.items():
         if not isinstance(v, dict):
-            lines.append(f"{json.dumps(k)} = {val(v)}")
+            lines.append(f"{tstr(k)} = {val(v)}")
     for k, v in d.items():
         if isinstance(v, dict):
-            name = prefix + [json.dumps(k)]
+            name = prefix + [tstr(k)]
             lines.append("")
             lines.append("[" + ".".join(name) + "]")
             dump(v, name, lines)
@@ -616,6 +630,15 @@ rc_self_test() {
     st_expect access-invalid-no-docker no "$(if [[ -e "$t/docker-calls" ]]; then echo yes; else echo no; fi)"
     grep -q 'n10-scalar-secret' "$t/start.out"
     st_expect access-invalid-start-value-hidden 1 "$?"
+    # 비밀을 바꿔 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다.
+    printf '[access.http]\nurl = "https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"\nbearer_token = "n10-tok"\n' > "$t/emoji.toml"
+    rc_make_ci_config "$t/emoji.toml" "$t/ci-emoji.toml"
+    st_expect secret-emoji-url-converted 0 "$?"
+    python3 -I -c 'import sys, tomllib
+a = tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"]
+b = tomllib.load(open(sys.argv[2], "rb"))["access"]["http"]["url"]
+sys.exit(0 if a == b and "\U0001F511" in b else 1)' "$t/emoji.toml" "$t/ci-emoji.toml"
+    st_expect secret-emoji-url-kept 0 "$?"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
