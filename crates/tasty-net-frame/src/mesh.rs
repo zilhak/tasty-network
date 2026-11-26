@@ -186,28 +186,33 @@ impl MeshFrameAssembler {
         buf: &[u8],
     ) -> Result<Option<(MeshChunkMeta, Vec<u8>)>, MeshAssembleError> {
         let (meta, payload) = decode_mesh_chunk(buf).ok_or(MeshAssembleError::Malformed)?;
-        if meta.chunk_count == 0 || meta.chunk_index >= meta.chunk_count {
-            return Err(MeshAssembleError::Malformed);
-        }
+        let index_out_of_range = meta.chunk_count == 0 || meta.chunk_index >= meta.chunk_count;
         let key = (meta.surface_id, meta.frame_id);
         if let Some(slot) = self.inflight.get(&key) {
             // Every chunk of a frame carries the same header apart from chunk_index. A
             // chunk whose header disagrees (or a reused frame_id) is treated as
             // corruption, so the result never depends on which chunk arrived first. This
-            // comes before the length bound below, so such a chunk always drops the frame.
+            // comes before the index range and length bound checks, so such a chunk
+            // always drops the frame. A chunk that agrees but whose index is out of
+            // range is corrupt as well and drops the frame too.
             if slot.chunk_count != meta.chunk_count
                 || slot.total_len != meta.total_len
                 || slot.generation != meta.generation
                 || slot.frame_seq != meta.frame_seq
                 || slot.full_textures != meta.full_textures
+                || index_out_of_range
             {
                 self.inflight.remove(&key);
                 return Err(MeshAssembleError::Malformed);
             }
         } else {
-            // Reject a total_len that chunk_count full chunks could not reach, before
-            // any state exists for the frame. A frame in progress already passed this
-            // check with the same header.
+            // A chunk that would start a new frame is checked before any state exists
+            // for it: its index must be in range, and total_len must be reachable by
+            // chunk_count full chunks. A frame in progress already passed these checks
+            // with the same header.
+            if index_out_of_range {
+                return Err(MeshAssembleError::Malformed);
+            }
             let max_possible = u64::from(meta.chunk_count) * (MESH_CHUNK_MAX_PAYLOAD as u64);
             if u64::from(meta.total_len) > max_possible {
                 return Err(MeshAssembleError::LengthMismatch);
@@ -707,6 +712,43 @@ mod tests {
             Err(MeshAssembleError::LengthMismatch)
         );
         assert!(assembler.inflight.is_empty());
+    }
+
+    /// A chunk of a frame in progress whose chunk_count differs is Malformed and drops the
+    /// frame even when its index is also out of range for its own chunk_count.
+    #[test]
+    fn a_disagreeing_chunk_count_with_an_out_of_range_index_drops_the_frame() {
+        let bytes = vec![6u8; MESH_CHUNK_MAX_PAYLOAD + 1];
+        let chunks = split_mesh_frame(1, 1, 0, 0, false, &bytes);
+        let (base, data) = decode_mesh_chunk(&chunks[1]).unwrap();
+        type Change = fn(&mut MeshChunkMeta);
+        let changes: [(&str, Change); 2] = [
+            ("chunk_count=1, chunk_index=1", |m| {
+                m.chunk_count = 1;
+                m.chunk_index = 1;
+            }),
+            ("chunk_count=0", |m| m.chunk_count = 0),
+        ];
+        for (case, change) in changes {
+            let mut meta = base;
+            change(&mut meta);
+            let mut assembler = MeshFrameAssembler::new();
+            assert!(assembler.push_chunk(&chunks[0]).unwrap().is_none());
+            assert_eq!(
+                assembler.push_chunk(&encode_mesh_chunk(&meta, data)),
+                Err(MeshAssembleError::Malformed),
+                "{case}"
+            );
+            assert!(
+                assembler.inflight.is_empty(),
+                "{case}: frame state is dropped"
+            );
+            // The real index 1 now starts a new frame instead of completing the old one.
+            assert!(
+                assembler.push_chunk(&chunks[1]).unwrap().is_none(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
