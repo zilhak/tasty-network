@@ -1,0 +1,44 @@
+# cargo deny의 licenses·bans·sources 검사 정책. 실행: bash scripts/check.sh deny.
+# advisories는 커밋과 무관하게 새 공지로 실패하므로 이 레포의 검사에 넣지 않았다(docs/dev-guide/ci.md).
+
+[graph]
+# 선택 기능의 의존도 검사한다. targets를 두지 않아 모든 플랫폼의 의존을 본다.
+all-features = true
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# 허용 목록은 tasty deny.toml의 [licenses] allow와 같다. 여기서 쓰지 않는 항목도 두 목록이
+# 어긋나지 않도록 남기고, unused-allowed-license로 경고를 끈다.
+unused-allowed-license = "allow"
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "BSL-1.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "WTFPL",
+  "MPL-2.0",         # 파일 단위 copyleft — 링크만 하고 소스를 고치지 않는다
+  "OFL-1.1",         # 글꼴 자산
+  "Ubuntu-font-1.0", # 글꼴 자산
+]
+
+[bans]
+# 간접 의존의 버전 중복은 경고로 본다.
+multiple-versions = "warn"
+# 모든 크레이트가 publish = false라 workspace 안 path 의존의 버전 생략은 허용된다.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io 밖의 레지스트리와 git 의존을 받지 않는다. git 의존이 필요해지면 allow-git에 출처를 적는다.
+unknown-registry = "deny"
+unknown-git = "deny"
