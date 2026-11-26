@@ -351,8 +351,8 @@ pub(crate) mod testing {
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW},
             DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
-            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT,
-            SE_DACL_PROTECTED, UNPROTECTED_DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            PSID, SE_DACL_PRESENT, SE_DACL_PROTECTED,
         },
     };
 
@@ -445,16 +445,18 @@ pub(crate) mod testing {
         }
     }
 
-    /// Replace the DACL of `path` with a NULL DACL (everyone has access).
+    /// Replace the DACL of `path` with a NULL DACL (everyone has access) and keep the DACL
+    /// protected, so that NULL is the only thing wrong with it.
     pub(crate) fn set_null_dacl(path: &Path) {
         let name = wide(path);
         // SAFETY: name is a NUL-terminated wide string; a null DACL with
-        // DACL_SECURITY_INFORMATION sets a NULL DACL; other parts are not set.
+        // DACL_SECURITY_INFORMATION sets a NULL DACL; PROTECTED_DACL_SECURITY_INFORMATION keeps
+        // SE_DACL_PROTECTED set; other parts are not set.
         let rc = unsafe {
             SetNamedSecurityInfoW(
                 name.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null(),

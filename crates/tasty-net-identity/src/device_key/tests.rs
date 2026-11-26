@@ -550,8 +550,13 @@ mod windows {
         DeviceKey::load_or_create(dir.path()).unwrap();
         let path = dir.path().join(DEVICE_KEY_FILE);
         set_null_dacl(&path);
+        // The prepared file differs from a private one only by its NULL DACL: present,
+        // protected, owned by the current user.
         let acl = read_acl(&path);
-        assert!(acl.dacl_null && acl.entries.is_empty(), "{acl:?}");
+        assert!(acl.dacl_present && acl.dacl_null, "{acl:?}");
+        assert!(acl.protected, "{acl:?}");
+        assert!(acl.owner_is_current_user, "{acl:?}");
+        assert!(acl.entries.is_empty(), "{acl:?}");
         let error = DeviceKey::load_or_create(dir.path()).unwrap_err();
         assert!(
             matches!(
