@@ -436,6 +436,9 @@ impl Io<'_> {
         }
     }
 
+    /// Reads the next Control frame. The socket timeout is set to the time left before each
+    /// frame, and a frame that completes after the deadline is not taken: the handshake ends
+    /// with [`HandshakeError::TimedOut`].
     fn read_control(&mut self) -> Result<Vec<u8>, HandshakeError> {
         loop {
             let left = self.left()?;
@@ -444,7 +447,10 @@ impl Io<'_> {
                 .set_read_timeout(Some(left))
                 .map_err(HandshakeError::Io)?;
             match read_frame(&mut *self.ch) {
-                Ok(frame) if frame.tag == StreamTag::Control => return Ok(frame.payload),
+                Ok(frame) if frame.tag == StreamTag::Control => {
+                    self.left()?;
+                    return Ok(frame.payload);
+                }
                 Ok(frame) if frame.tag == StreamTag::Ping => {}
                 Ok(_) => return Err(HandshakeError::Protocol("a frame other than Control")),
                 Err(e) => return Err(self.fail(e)),
@@ -1002,7 +1008,8 @@ fn accept_on(
         Path::Ssh => None,
     };
     if open.purpose == Purpose::Request {
-        // 9. domain.
+        // 9. domain, only while the handshake is still in time.
+        io.left()?;
         if let Err(reject) = config.domain.accept_request(&peer) {
             return Err(io.refuse(RejectReason::Domain, Some(reject.ext()), linger));
         }
@@ -1054,7 +1061,9 @@ fn accept_on(
     if matches!(decision, RoleDecision::Refused) {
         return Err(io.refuse(RejectReason::RoleRefused, None, linger));
     }
-    // 9. domain (8 is the bulk credential, checked in `accept_bulk`).
+    // 9. domain (8 is the bulk credential, checked in `accept_bulk`), only while the
+    // handshake is still in time.
+    io.left()?;
     let request = AttachRequest {
         peer: &peer,
         ext: open.ext.as_deref(),
@@ -1207,7 +1216,8 @@ fn accept_bulk(
     if !parent.closer.adopt(io.ch.control()) {
         return Err(io.refuse(RejectReason::BulkCredentialInvalid, None, linger));
     }
-    // 9. domain.
+    // 9. domain, only while the handshake is still in time.
+    io.left()?;
     let request = BulkRequest {
         parent: &parent.peer,
         grant: &parent.grant,

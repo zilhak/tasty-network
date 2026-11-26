@@ -1150,3 +1150,43 @@ fn a_timeout_too_large_for_a_deadline_is_a_configuration_error() {
     let refused = a.framed(&config).expect_err("drain cap too large");
     assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+/// A proof that trickles in byte by byte completes after the deadline: the acceptor does not
+/// take it (each byte would renew a per-read socket timeout).
+#[test]
+fn a_frame_that_completes_after_the_deadline_is_not_taken() {
+    let policy = Arc::new(TestPolicy::default());
+    let config = AcceptConfig::new(key(2), "acceptor-1", Some(token('a')), policy.clone())
+        .with_timeouts(LinkTimeouts {
+            handshake_timeout: Duration::from_millis(300),
+            ..timeouts()
+        });
+    let (transport, listener) = pair(None);
+    let acceptor = accept_one(listener, config);
+    let mut conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let challenge = raw_open(
+        &mut conn.channel,
+        json!({
+            "proto": 2, "purpose": "attach", "token": token('a').expose_hex(),
+            "device_id": key(1).id().to_string(), "instance_id": "d",
+            "nonce": "00".repeat(32), "holder": "dialer", "caps": [],
+        }),
+    );
+    assert!(challenge.get("challenge").is_some(), "{challenge}");
+    let mut frame = Vec::new();
+    write_frame(&mut frame, StreamTag::Control, br#"{"proof":{"sig":"00"}}"#).expect("frame");
+    let (head, rest) = frame.split_at(6);
+    for byte in head {
+        conn.channel.write_all(&[*byte]).expect("byte");
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let _late = conn.channel.write_all(rest);
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::TimedOut)),
+        "{result:?}"
+    );
+    assert_eq!(policy.attach_calls.load(Ordering::SeqCst), 0);
+}
