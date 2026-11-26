@@ -429,15 +429,19 @@ impl ChildOwner {
         }
     }
 
-    /// Cuts the child off at the bound: kill and wait, so no zombie is left.
-    fn kill_and_reap_now(self) {
+    /// Cuts the child off at the bound: kill and wait, so no zombie is left. `false` means
+    /// cancellation had already taken it (and killed and reaped it).
+    fn kill_and_reap_now(self) -> bool {
         let child = match self {
             Self::Local(child) => Some(child),
-            // If cancellation took it, the kill and wait are done.
             Self::Scoped(handle, id) => handle.reclaim(id),
         };
-        if let Some(mut child) = child {
-            kill_and_reap(&mut child);
+        match child {
+            Some(mut child) => {
+                kill_and_reap(&mut child);
+                true
+            }
+            None => false,
         }
     }
 
@@ -607,10 +611,26 @@ impl Stdout {
 
     fn collect(self, deadline: Instant, what: &str) -> Result<Captured, PortDiscoveryError> {
         match (self.early, self.rx) {
-            (Some(captured), _) => Ok(captured),
+            (Some(captured), _) => settled(captured, what),
             (None, Some(rx)) => collect(&rx, deadline, what),
             (None, None) => Ok(Captured::default()),
         }
+    }
+}
+
+/// Kills a child the wait gave up on and says why. When cancellation took the child or came
+/// meanwhile, the reason is `Cancelled`, not the timeout or the overflow.
+fn cut_off(owner: ChildOwner, end: &WaitEnd, what: &str, budget: Duration) -> PortDiscoveryError {
+    let reclaimed = owner.kill_and_reap_now();
+    if !reclaimed || cancel_requested() {
+        cancelled_error(what)
+    } else if *end == WaitEnd::Stopped {
+        output_too_long(what)
+    } else {
+        PortDiscoveryError::new(
+            PortDiscoveryFailureKind::TimedOut,
+            format!("{what}: killed after not finishing within {budget:?}"),
+        )
     }
 }
 
@@ -638,17 +658,28 @@ fn collect(
             return Err(cancelled_error(what));
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
-            Ok(captured) => return Ok(captured),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Captured::default()),
+        let received = match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(captured) => captured,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Captured::default(),
             Err(mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
                 return Err(PortDiscoveryError::new(
                     PortDiscoveryFailureKind::TimedOut,
                     format!("{what}: the output stayed open after the command exited"),
                 ));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        };
+        return settled(received, what);
+    }
+}
+
+/// A received output, unless cancellation came while it arrived: a cancelled lookup does not
+/// return its result, even a successful one.
+fn settled(captured: Captured, what: &str) -> Result<Captured, PortDiscoveryError> {
+    if cancel_requested() {
+        Err(cancelled_error(what))
+    } else {
+        Ok(captured)
     }
 }
 
@@ -714,18 +745,7 @@ fn run_capture_with_budget(
     let mut owner = ChildOwner::adopt(child, what)?;
     let end = wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed());
     if end != WaitEnd::Ended {
-        let cancelled = owner.is_cancelled();
-        owner.kill_and_reap_now();
-        return Err(if cancelled {
-            cancelled_error(what)
-        } else if end == WaitEnd::Stopped {
-            output_too_long(what)
-        } else {
-            PortDiscoveryError::new(
-                PortDiscoveryFailureKind::TimedOut,
-                format!("{what}: killed after not finishing within {budget:?}"),
-            )
-        });
+        return Err(cut_off(owner, &end, what, budget));
     }
     let mut child = owner.finish(what)?;
     let status = child.wait().map_err(|e| {
@@ -1804,6 +1824,69 @@ mod tests {
                 .kind(),
             PortDiscoveryFailureKind::TimedOut
         );
+    }
+
+    /// An output that arrives together with cancellation is not returned.
+    #[test]
+    fn a_result_meeting_cancellation_is_cancelled() {
+        let handle = SshCancel::new();
+        let _scope = handle.scope();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Captured {
+            bytes: b"45123".to_vec(),
+            overflowed: false,
+        })
+        .expect("send");
+        handle.request_cancel();
+        let far = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            collect(&rx, far, "late cancel")
+                .map(|_| ())
+                .unwrap_err()
+                .kind(),
+            PortDiscoveryFailureKind::Cancelled
+        );
+        let early = Stdout {
+            rx: None,
+            early: Some(Captured::default()),
+        };
+        assert_eq!(
+            early
+                .collect(far, "late cancel")
+                .map(|_| ())
+                .unwrap_err()
+                .kind(),
+            PortDiscoveryFailureKind::Cancelled
+        );
+    }
+
+    /// A child that cancellation took before the bound's kill is reported as cancelled.
+    #[test]
+    fn a_child_taken_by_cancellation_is_not_a_timeout() {
+        let handle = SshCancel::new();
+        let child = never_returns_command()
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let id = handle.register(child).expect("register");
+        // Taken out the way cancel takes it, before the flag is read.
+        let mut taken = handle.reclaim(id).expect("registered");
+        kill_and_reap(&mut taken);
+        let owner = ChildOwner::Scoped(handle, id);
+        let err = cut_off(owner, &WaitEnd::Expired, "taken", Duration::from_secs(1));
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
+
+        let child = never_returns_command()
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let err = cut_off(
+            ChildOwner::Local(child),
+            &WaitEnd::Expired,
+            "expired",
+            Duration::from_secs(1),
+        );
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::TimedOut);
     }
 
     /// The spawn hook's time comes out of the budget: the child is not given a fresh one.
