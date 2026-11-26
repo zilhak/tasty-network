@@ -52,7 +52,7 @@ impl PortMode {
             "file-unix" => Self::FileUnix,
             "file-windows" => Self::FileWindows,
             other => {
-                return Err(PortModeParseError {
+                return Err(PortModeParseError::Unknown {
                     value: other.to_string(),
                 });
             }
@@ -86,24 +86,32 @@ impl fmt::Display for PortMode {
 
 /// A port mode string that is not one of the four modes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PortModeParseError {
-    value: String,
+#[non_exhaustive]
+pub enum PortModeParseError {
+    /// The string is none of the mode names.
+    Unknown {
+        /// The string that was not recognized.
+        value: String,
+    },
 }
 
 impl PortModeParseError {
     /// The string that was not recognized.
     pub fn value(&self) -> &str {
-        &self.value
+        match self {
+            Self::Unknown { value } => value,
+        }
     }
 }
 
 impl fmt::Display for PortModeParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Unknown port mode '{}' (expected auto, subcommand, file-unix, or file-windows).",
-            self.value
-        )
+        match self {
+            Self::Unknown { value } => write!(
+                f,
+                "Unknown port mode '{value}' (expected auto, subcommand, file-unix, or file-windows)."
+            ),
+        }
     }
 }
 
@@ -271,13 +279,22 @@ impl fmt::Display for PortDiscoveryError {
 
 impl std::error::Error for PortDiscoveryError {}
 
-/// The last line of the output is not a port number.
+/// Why [`decode_port`] refused the output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PortDecodeError;
+#[non_exhaustive]
+pub enum PortDecodeError {
+    /// The output has no non-empty line.
+    Empty,
+    /// The last non-empty line is not a number from 0 to 65535.
+    NotAPort,
+}
 
 impl fmt::Display for PortDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("The last output line is not a port number.")
+        f.write_str(match self {
+            Self::Empty => "The output has no line to read a port from.",
+            Self::NotAPort => "The last output line is not a port number.",
+        })
     }
 }
 
@@ -286,14 +303,14 @@ impl std::error::Error for PortDecodeError {}
 /// Decoder for a bare port number: the last non-empty line, trimmed (a trailing CR from `type`
 /// and a banner before it are fine).
 pub fn decode_port(stdout: &str) -> Result<u16, PortDecodeError> {
-    stdout
+    let last = stdout
         .trim()
         .lines()
         .next_back()
-        .unwrap_or("")
-        .trim()
+        .ok_or(PortDecodeError::Empty)?;
+    last.trim()
         .parse::<u16>()
-        .map_err(|_| PortDecodeError)
+        .map_err(|_| PortDecodeError::NotAPort)
 }
 
 /// Maps an exit code to a failure class. 255 or a signal means the connection failed; other
@@ -1253,6 +1270,7 @@ mod tests {
             PortMode::FileWindows
         );
         let err = PortMode::parse("nope").unwrap_err();
+        assert!(matches!(&err, PortModeParseError::Unknown { value } if value == "nope"));
         assert_eq!(err.value(), "nope");
         assert!(err.to_string().contains("'nope'"));
         assert!(err.to_string().is_ascii());
@@ -1278,8 +1296,10 @@ mod tests {
         assert_eq!(decode_port("  45123  "), Ok(45123));
         assert_eq!(decode_port("45123\r\n"), Ok(45123));
         assert_eq!(decode_port("Last login: ...\n45123\n"), Ok(45123));
-        assert_eq!(decode_port("not-a-port"), Err(PortDecodeError));
-        assert_eq!(decode_port(""), Err(PortDecodeError));
+        assert_eq!(decode_port("not-a-port"), Err(PortDecodeError::NotAPort));
+        assert_eq!(decode_port("70000"), Err(PortDecodeError::NotAPort));
+        assert_eq!(decode_port(""), Err(PortDecodeError::Empty));
+        assert_eq!(decode_port(" \r\n\n"), Err(PortDecodeError::Empty));
     }
 
     #[test]
