@@ -187,8 +187,8 @@ impl ConnectionRecord {
         let contents = self.to_line();
         let temp = secret_file::write_temp(dir, name, contents.as_bytes())?;
         if let Err(e) = std::fs::rename(&temp, &target) {
-            secret_file::remove_temp(&temp);
-            return Err(IdentityError::io(FileOp::Publish, &target, e));
+            let cause = IdentityError::io(FileOp::Publish, &target, e);
+            return Err(secret_file::fail_with_cleanup(&temp, cause));
         }
         // Read back through the privacy checks while the lock is held; the open handle keeps
         // this generation's file ID from being reused while the publication lives.

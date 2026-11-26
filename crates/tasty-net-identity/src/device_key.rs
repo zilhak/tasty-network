@@ -45,14 +45,20 @@ impl DeviceKey {
         text.extend_from_slice(hex::encode(&os_random_32()).as_bytes());
         text.push(b'\n');
         let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?;
-        let linked = std::fs::hard_link(&temp, &path);
-        secret_file::remove_temp(&temp);
-        match linked {
-            Ok(()) => {}
-            // Another creator won; its file is complete because it was linked after sync_all.
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(IdentityError::io(FileOp::Publish, &path, e)),
+        match std::fs::hard_link(&temp, &path) {
+            // AlreadyExists: another creator won; its file is complete because it was linked
+            // after sync_all.
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+                let cause = IdentityError::io(FileOp::Publish, &path, e);
+                return Err(secret_file::fail_with_cleanup(&temp, cause));
+            }
+            _ => {}
         }
+        secret_file::discard(&temp).map_err(|cleanup| IdentityError::Leftover {
+            leftover: temp.clone(),
+            cause: None,
+            cleanup,
+        })?;
         read(&path)?.ok_or_else(|| {
             IdentityError::io(
                 FileOp::Read,

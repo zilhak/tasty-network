@@ -68,7 +68,9 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<(), IdentityError> {
 
 /// Write `bytes` into a new private temporary file next to `name` in `dir` and return its path.
 /// The access restriction is set and verified before the first byte is written; when that
-/// fails, the temporary file is removed and nothing was written.
+/// fails, the temporary file is removed and nothing was written. When a later step fails, the
+/// temporary file is removed too; if that removal fails, the error is
+/// [`IdentityError::Leftover`].
 pub(crate) fn write_temp(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<PathBuf, IdentityError> {
     let (temp, mut file) = create_temp(dir, name)?;
     let result = (|| {
@@ -83,10 +85,7 @@ pub(crate) fn write_temp(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<PathB
     drop(file);
     match result {
         Ok(()) => Ok(temp),
-        Err(error) => {
-            remove_temp(&temp);
-            Err(error)
-        }
+        Err(error) => Err(fail_with_cleanup(&temp, error)),
     }
 }
 
@@ -113,13 +112,28 @@ fn protect(file: &File) -> io::Result<()> {
     os::protect(file)
 }
 
-/// Remove a temporary file this crate created. A failure is logged, not returned: the caller's
-/// own result decides the outcome.
-pub(crate) fn remove_temp(temp: &Path) {
-    if let Err(error) = std::fs::remove_file(temp)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(temp = %temp.display(), %error, "could not remove a temporary secret file");
+/// Remove a file this crate wrote. A file that is already gone counts as removed.
+pub(crate) fn discard(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if fault::discard_fails() {
+        return Err(io::Error::other("injected removal failure"));
+    }
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Remove `path` after `cause`; the result is `cause`, or [`IdentityError::Leftover`] holding
+/// `cause` when the removal failed.
+pub(crate) fn fail_with_cleanup(path: &Path, cause: IdentityError) -> IdentityError {
+    match discard(path) {
+        Ok(()) => cause,
+        Err(cleanup) => IdentityError::Leftover {
+            leftover: path.to_path_buf(),
+            cause: Some(Box::new(cause)),
+            cleanup,
+        },
     }
 }
 
@@ -167,23 +181,41 @@ pub(crate) fn lock(target: &Path) -> Result<File, IdentityError> {
 pub(crate) mod fault {
     use std::cell::Cell;
 
+    use std::thread::LocalKey;
+
     thread_local! {
         static PROTECT_FAILS: Cell<bool> = const { Cell::new(false) };
+        static DISCARD_FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) struct Guard(&'static LocalKey<Cell<bool>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.with(|f| f.set(false));
+        }
+    }
+
+    fn set(key: &'static LocalKey<Cell<bool>>) -> Guard {
+        key.with(|f| f.set(true));
+        Guard(key)
     }
 
     pub(crate) fn protect_fails() -> bool {
         PROTECT_FAILS.with(Cell::get)
     }
 
+    pub(crate) fn discard_fails() -> bool {
+        DISCARD_FAILS.with(Cell::get)
+    }
+
     /// Make the access restriction of new secret files fail on this thread while the guard lives.
-    pub(crate) fn fail_protect() -> impl Drop {
-        struct Guard;
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                PROTECT_FAILS.with(|f| f.set(false));
-            }
-        }
-        PROTECT_FAILS.with(|f| f.set(true));
-        Guard
+    pub(crate) fn fail_protect() -> Guard {
+        set(&PROTECT_FAILS)
+    }
+
+    /// Make the removal of files this crate wrote fail on this thread while the guard lives.
+    pub(crate) fn fail_discard() -> Guard {
+        set(&DISCARD_FAILS)
     }
 }

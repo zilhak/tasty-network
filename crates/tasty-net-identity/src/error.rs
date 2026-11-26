@@ -132,6 +132,17 @@ pub enum IdentityError {
         /// The OS error.
         source: io::Error,
     },
+    /// A file this crate wrote could not be removed. It can still hold the secret; the
+    /// consumer can report or remove `leftover`.
+    Leftover {
+        /// The file that is left.
+        leftover: PathBuf,
+        /// The failure that made the removal necessary. `None` when the operation itself
+        /// succeeded and only the temporary file stayed.
+        cause: Option<Box<IdentityError>>,
+        /// The OS error of the removal.
+        cleanup: io::Error,
+    },
 }
 
 impl IdentityError {
@@ -169,6 +180,9 @@ impl fmt::Display for IdentityError {
             Self::Protect { path, .. } => {
                 write!(f, "could not restrict access to {}", path.display())
             }
+            Self::Leftover { leftover, .. } => {
+                write!(f, "could not remove the secret file {}", leftover.display())
+            }
         }
     }
 }
@@ -181,6 +195,14 @@ impl Error for IdentityError {
                 source: Some(source),
                 ..
             } => Some(source),
+            Self::Leftover {
+                cause: Some(cause), ..
+            } => Some(&**cause),
+            Self::Leftover {
+                cause: None,
+                cleanup,
+                ..
+            } => Some(cleanup),
             Self::Corrupt { .. } | Self::UnsafeFile { source: None, .. } => None,
         }
     }

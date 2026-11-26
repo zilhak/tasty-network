@@ -145,6 +145,46 @@ fn protection_failure_writes_no_secret() {
 }
 
 #[test]
+fn a_temp_file_that_cannot_be_removed_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = {
+        let _fail = fault::fail_discard();
+        DeviceKey::load_or_create(dir.path()).unwrap_err()
+    };
+    let IdentityError::Leftover {
+        leftover, cause, ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert!(cause.is_none(), "the key itself was published: {error:?}");
+    assert!(leftover.exists());
+    assert_eq!(temps_in(dir.path()).len(), 1);
+    let key = DeviceKey::load_or_create(dir.path()).unwrap();
+    let seed = hex::encode(&key.to_seed());
+    assert!(!format!("{error} {error:?}").contains(&seed));
+}
+
+#[test]
+fn a_failure_whose_cleanup_fails_keeps_the_first_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = {
+        let _protect = fault::fail_protect();
+        let _discard = fault::fail_discard();
+        DeviceKey::load_or_create(dir.path()).unwrap_err()
+    };
+    assert!(
+        matches!(
+            &error,
+            IdentityError::Leftover { cause: Some(cause), .. }
+                if matches!(**cause, IdentityError::Protect { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
 fn sign_and_verify() {
     let key = DeviceKey::generate();
     let other = DeviceKey::generate();

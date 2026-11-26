@@ -173,6 +173,31 @@ fn protection_failure_publishes_nothing() {
 }
 
 #[test]
+fn a_failed_cleanup_after_a_failed_publication_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let error = {
+        let _protect = fault::fail_protect();
+        let _discard = fault::fail_discard();
+        record(1).publish(&path).unwrap_err()
+    };
+    let IdentityError::Leftover {
+        leftover,
+        cause: Some(cause),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert!(
+        matches!(**cause, IdentityError::Protect { .. }),
+        "{error:?}"
+    );
+    assert!(leftover.exists());
+    assert!(!path.exists());
+}
+
+#[test]
 fn concurrent_publishers_leave_one_complete_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("record");
