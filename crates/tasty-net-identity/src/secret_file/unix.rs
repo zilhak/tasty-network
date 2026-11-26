@@ -24,6 +24,18 @@ pub(super) fn is_link(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
+/// Set a directory this crate just created to 0700 and read the mode back.
+pub(super) fn set_new_dir_private(dir: &Path) -> io::Result<()> {
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    let mode = fs::symlink_metadata(dir)?.mode() & 0o7777;
+    if mode != 0o700 {
+        return Err(io::Error::other(format!(
+            "new secret directory has mode {mode:o}, not 700"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn narrow_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let mode = meta.mode() & 0o7777;
     if mode & 0o077 == 0 {

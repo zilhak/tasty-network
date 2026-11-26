@@ -62,11 +62,12 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
         p => p,
     };
     let lstat = || std::fs::symlink_metadata(&dir);
-    let meta = match lstat() {
-        Ok(meta) => meta,
+    let (meta, created) = match lstat() {
+        Ok(meta) => (meta, false),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             os::create_dir(&dir).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
-            lstat().map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?
+            let meta = lstat().map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+            (meta, true)
         }
         Err(e) => return Err(IdentityError::io(FileOp::CreateDir, &dir, e)),
     };
@@ -76,7 +77,13 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
     if !meta.is_dir() {
         return Err(IdentityError::unsafe_file(&dir, UnsafeReason::NotRegular));
     }
-    os::narrow_dir(&dir, &meta).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+    // A new directory is set to exactly 0700: the umask can also take owner bits away.
+    let fixed = if created {
+        os::set_new_dir_private(&dir)
+    } else {
+        os::narrow_dir(&dir, &meta)
+    };
+    fixed.map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
     Ok(dir)
 }
 
