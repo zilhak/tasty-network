@@ -139,6 +139,10 @@ pub struct Exploration {
     done_parts: HashMap<(String, DeviceId), PartTrack>,
     /// This device's local view was merged: its own edges are the local view's.
     local_merged: bool,
+    /// Devices known to have an incomplete answer → who reported it (`None` when this
+    /// device found it). Kept apart from the nodes so a later direct answer of the same
+    /// device does not erase it: it is applied again after each merge and at the end.
+    incomplete: HashMap<DeviceId, Option<DeviceId>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,6 +253,7 @@ impl Exploration {
             node.reported_by = Some(*from);
         }
         node.explored_at = unix_ms;
+        let device = node.device_id;
         let key = match node.device_id {
             Some(id) => NodeKey::Id(id),
             None => NodeKey::Hint(node.reported_by, node.peer_hint.clone()),
@@ -269,6 +274,9 @@ impl Exploration {
                     self.node_index.insert(key, (at, was_direct || direct));
                 }
             }
+        }
+        if let Some(device) = device {
+            self.apply_incomplete(device, unix_ms);
         }
     }
 
@@ -310,7 +318,8 @@ impl Exploration {
             .any(|n| n.reason == Some(NodeReason::Incomplete))
     }
 
-    /// Every answer with a missing result part or done marks its device incomplete.
+    /// Every answer with a missing result part or done marks its device incomplete, and
+    /// every device known incomplete is marked again.
     fn check_all_parts(&mut self, unix_ms: u64) {
         let broken: Vec<DeviceId> = self
             .parts
@@ -322,11 +331,28 @@ impl Exploration {
         for device in broken {
             self.mark_incomplete(device, None, unix_ms);
         }
+        let known: Vec<DeviceId> = self.incomplete.keys().copied().collect();
+        for device in known {
+            self.apply_incomplete(device, unix_ms);
+        }
     }
 
-    /// Marks `device` timed out with reason incomplete, over any answer of its own. A new
-    /// node records `reporter`.
+    /// Records `device` as incomplete and marks its node timed out with reason incomplete,
+    /// over any answer of its own, now and after any later merge.
     fn mark_incomplete(&mut self, device: DeviceId, reporter: Option<DeviceId>, unix_ms: u64) {
+        let entry = self.incomplete.entry(device).or_insert(reporter);
+        if reporter.is_some() {
+            *entry = reporter;
+        }
+        self.apply_incomplete(device, unix_ms);
+    }
+
+    /// Marks the node of `device` incomplete if `device` is recorded so. A new node
+    /// records the reporter.
+    fn apply_incomplete(&mut self, device: DeviceId, unix_ms: u64) {
+        let Some(&reporter) = self.incomplete.get(&device) else {
+            return;
+        };
         let key = NodeKey::Id(device);
         match self.node_index.get(&key).copied() {
             Some((at, _)) => {
@@ -491,6 +517,7 @@ impl Agent {
             parts: HashMap::new(),
             done_parts: HashMap::new(),
             local_merged: false,
+            incomplete: HashMap::new(),
         };
         if request.origin == me {
             self.explorations.insert(request_id.clone(), exploration);

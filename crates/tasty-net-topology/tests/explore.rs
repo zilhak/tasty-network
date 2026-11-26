@@ -1459,6 +1459,81 @@ fn an_answer_that_failed_after_forwarding_is_not_answered_again() {
     assert_eq!(status(x, D), NodeStatus::TimedOut);
 }
 
+/// A explores itself at depth 1 with neighbors B and D. B's done reports D incomplete
+/// (B could not relay D's answer on a longer path) and D's own answer on its direct
+/// branch arrives whole; `report_first` puts B's done before D's answer.
+fn incomplete_report_against_a_direct_answer(report_first: bool) -> Exploration {
+    let mut net = Net::new(&[A, B, D]);
+    net.link(A, B).link(A, D);
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    let to_b = queued_branch(&net, A, B);
+    let to_d = queued_branch(&net, A, D);
+    net.queue.clear();
+    let part = |branch: &str, from: u8| {
+        Message::Result(tasty_net_topology::ResultPart {
+            request_id: rid.clone(),
+            branch: branch.to_owned(),
+            from: id(from),
+            return_path: vec![id(A)],
+            part: 0,
+            last: true,
+            nodes: vec![tasty_net_topology::Node {
+                device_id: Some(id(from)),
+                display_name: None,
+                status: NodeStatus::Online,
+                reason: None,
+                reported_by: None,
+                peer_hint: None,
+                explored_at: 0,
+            }],
+            edges: Vec::new(),
+        })
+    };
+    let done = |branch: &str, from: u8, incomplete: Vec<DeviceId>| {
+        Message::Done(tasty_net_topology::Done {
+            request_id: rid.clone(),
+            branch: branch.to_owned(),
+            from: id(from),
+            return_path: vec![id(A)],
+            timed_out: Vec::new(),
+            is_final: false,
+            more: false,
+            part: 0,
+            incomplete,
+        })
+    };
+    let report = vec![(B, part(&to_b, B)), (B, done(&to_b, B, vec![id(D)]))];
+    let direct = vec![(D, part(&to_d, D)), (D, done(&to_d, D, Vec::new()))];
+    let order = if report_first {
+        report.into_iter().chain(direct).collect::<Vec<_>>()
+    } else {
+        direct.into_iter().chain(report).collect()
+    };
+    for (link, message) in order {
+        net.with_agent(id(A), |agent, local, out, now| {
+            agent.on_message(&id(link), message, local, out, now)
+        });
+    }
+    net.run();
+    net.agents
+        .get_mut(&id(A))
+        .unwrap()
+        .take_exploration(&rid)
+        .unwrap()
+}
+
+#[test]
+fn a_reported_incomplete_device_stays_incomplete_in_either_order() {
+    for report_first in [true, false] {
+        let x = incomplete_report_against_a_direct_answer(report_first);
+        assert_eq!(x.state(), ExplorationState::Incomplete, "{report_first}");
+        let d = x.node(&id(D)).unwrap();
+        assert_eq!(d.status, NodeStatus::TimedOut, "{report_first}");
+        assert_eq!(d.reason, Some(NodeReason::Incomplete), "{report_first}");
+        assert_eq!(status(&x, B), NodeStatus::Online, "{report_first}");
+    }
+}
+
 #[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
