@@ -134,10 +134,20 @@ rc_make_ci_config() {
         rc_log "$src: 표 머리 밖의 tls 키나 enable_quic_addr_discovery가 남았다. [tls] 표로 적는다."
         return 1
     fi
-    if ! rc_check_ci_config "$src" "$out"; then
-        rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery를 빼고 비밀을 바꾼 것과 다르다(TOML 비교)."
-        return 1
-    fi
+    rc_check_ci_config "$src" "$out"
+    case $? in
+        0) ;;
+        6)
+            # iroh-relay가 기동을 거절할 access 값이다. 원문이 든 변환 파일은 바로 지우고 컨테이너를 띄우지 않는다.
+            rm -f "${out:?}"
+            rc_log "$src: access 설정이 iroh-relay 1.5.0의 조건에 맞지 않는다(값은 출력하지 않는다)."
+            return 6
+            ;;
+        *)
+            rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery를 빼고 비밀을 바꾼 것과 다르다(TOML 비교)."
+            return 1
+            ;;
+    esac
     return 0
 }
 
@@ -177,6 +187,25 @@ import json, sys, tomllib
 
 src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
 
+def access_valid(d):
+    # iroh-relay 1.5.0 main.rs TryFrom<AccessConfig>와 serde 역직렬화가 받아들이는 조건.
+    # shared_token: 비어 있지 않은 배열이고 원소가 모두 비어 있지 않은 문자열. http.bearer_token: 있으면 문자열.
+    # 어긋난 값은 출력하지 않는다(토큰 원문일 수 있다).
+    acc = d.get("access")
+    if not isinstance(acc, dict):
+        return True
+    if "shared_token" in acc:
+        t = acc["shared_token"]
+        if not isinstance(t, list) or not t or not all(isinstance(x, str) and x for x in t):
+            return False
+    if "http" in acc:
+        http = acc["http"]
+        if not isinstance(http, dict):
+            return False
+        if "bearer_token" in http and not isinstance(http["bearer_token"], str):
+            return False
+    return True
+
 def scrub(d):
     acc = d.get("access")
     changed = False
@@ -214,6 +243,9 @@ def dump(d, prefix, lines):
 
 with open(src, "rb") as f:
     a = tomllib.load(f)
+if not access_valid(a):
+    print("access-invalid: shared_token must be a non-empty array of non-empty strings, http.bearer_token a string", file=sys.stderr)
+    sys.exit(6)
 with open(out, "rb") as f:
     b = tomllib.load(f)
 a.pop("tls", None)
@@ -318,7 +350,12 @@ rc_start_relay() {
         RC_LAST_FAIL="stage=config reason=missing-file"
         return 1
     fi
-    rc_make_ci_config "$src" "$cfg" || { RC_LAST_FAIL="stage=config reason=ci-config"; return 1; }
+    rc_make_ci_config "$src" "$cfg"
+    case $? in
+        0) ;;
+        6) RC_LAST_FAIL="stage=config reason=access-invalid"; return 1 ;;
+        *) RC_LAST_FAIL="stage=config reason=ci-config"; return 1 ;;
+    esac
     rx=$(rc_toml_rx "$cfg") || { RC_LAST_FAIL="stage=config reason=toml-rc$?"; return 1; }
     bps=${rx%% *}
     burst=${rx##* }
@@ -555,6 +592,30 @@ rc_self_test() {
     st_expect secret-bearer-absent 1 "$?"
     grep -q 'auth.example.com/x' "$t/ci-bearer.toml"
     st_expect secret-bearer-url-kept 0 "$?"
+    # iroh-relay가 기동을 거절할 access 값은 치환하지 않고 access-invalid로 끝나며, 원래 값을 출력하지 않는다.
+    local bad n=0
+    for bad in 'access.shared_token = []' 'access.shared_token = [""]' 'access.shared_token = [4242]' \
+        "access.http = { url = \"https://auth.example.com/x\", bearer_token = 4243 }" \
+        "access.shared_token = 'n10-scalar-secret'"; do
+        n=$((n + 1))
+        printf 'enable_relay = true\n%s\n' "$bad" > "$t/acc$n.toml"
+        rc_make_ci_config "$t/acc$n.toml" "$t/ci-acc$n.toml" > "$t/acc$n.out" 2>&1
+        st_expect "access-invalid-$n" 6 "$?"
+        grep -Eq '4242|4243|n10-scalar-secret' "$t/acc$n.out"
+        st_expect "access-invalid-$n-value-hidden" 1 "$?"
+        st_expect "access-invalid-$n-ci-file-removed" no "$(if [[ -e "$t/ci-acc$n.toml" ]]; then echo yes; else echo no; fi)"
+    done
+    # rc_start_relay에서도 컨테이너를 만들기 전에 access-invalid로 끝난다(docker를 부르지 않는다).
+    (
+        docker() { echo called >> "$t/docker-calls"; return 1; }
+        RC_TMP="$t"
+        rc_start_relay acc5 "$t/acc5.toml" > "$t/start.out" 2>&1
+        echo "$? $RC_LAST_FAIL"
+    ) > "$t/start.res"
+    st_expect access-invalid-start "1 stage=config reason=access-invalid" "$(cat "$t/start.res")"
+    st_expect access-invalid-no-docker no "$(if [[ -e "$t/docker-calls" ]]; then echo yes; else echo no; fi)"
+    grep -q 'n10-scalar-secret' "$t/start.out"
+    st_expect access-invalid-start-value-hidden 1 "$?"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
