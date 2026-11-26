@@ -3,14 +3,15 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 
 /// Cancels the port discovery children of another thread.
 ///
-/// The discovery child of a worker thread that installed this handle with [`SshCancel::scope`]
-/// is registered here, and [`SshCancel::cancel`] kills and reaps it. Tunnels are owned by
-/// `SshTunnel`, not by this handle.
+/// The discovery children of worker threads that installed this handle (or a clone) with
+/// [`SshCancel::scope`] are registered here, and [`SshCancel::cancel`] kills and reaps all of
+/// them. Several lookups may run under one handle at the same time; each one only polls and
+/// reclaims its own child. Tunnels are owned by `SshTunnel`, not by this handle.
 #[derive(Clone, Default)]
 pub struct SshCancel {
     inner: Arc<CancelInner>,
@@ -19,9 +20,11 @@ pub struct SshCancel {
 #[derive(Default)]
 struct CancelInner {
     cancelled: AtomicBool,
-    /// The discovery child running now (replaced at every step). The killing side takes it out:
-    /// `Child::kill` needs `&mut self`, so moving the child out makes the access exclusive.
-    child: Mutex<Option<Child>>,
+    /// The discovery children running now, one per lookup, by registration id. The killing side
+    /// takes a child out: `Child::kill` needs `&mut self`, so moving the child out makes the
+    /// access exclusive.
+    children: Mutex<Vec<(u64, Child)>>,
+    next_id: AtomicU64,
 }
 
 thread_local! {
@@ -51,12 +54,12 @@ impl SshCancel {
         self.inner.cancelled.store(true, Ordering::SeqCst);
     }
 
-    /// Marks the handle cancelled, then kills and reaps the registered child. Later discovery
+    /// Marks the handle cancelled, then kills and reaps every registered child. Later discovery
     /// steps under this handle do not start a child. Calling it more than once is safe.
     pub fn cancel(&self) {
         self.request_cancel();
-        let child = lock_slot(&self.inner.child).take();
-        if let Some(mut child) = child {
+        let children = std::mem::take(&mut *lock_slot(&self.inner.children));
+        for (_, mut child) in children {
             kill_and_reap(&mut child);
         }
     }
@@ -65,28 +68,31 @@ impl SshCancel {
         self.inner.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Registers a running child. After cancellation the child is refused and handed back so
-    /// the caller kills it at once; a child that races with `cancel` does not leak.
-    pub(crate) fn register(&self, child: Child) -> Result<(), Child> {
+    /// Registers a running child and returns its id. After cancellation the child is refused
+    /// and handed back so the caller kills it at once. A child registered while `cancel` runs
+    /// is caught by its owner, which sees the flag and kills it.
+    pub(crate) fn register(&self, child: Child) -> Result<u64, Child> {
         if self.is_cancelled() {
             return Err(child);
         }
-        // Discovery steps run one after another, so the slot should be empty. A child left
-        // there belongs to an earlier step that was not reaped; clean it up here.
-        if let Some(mut stale) = lock_slot(&self.inner.child).replace(child) {
-            kill_and_reap(&mut stale);
-        }
-        Ok(())
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        lock_slot(&self.inner.children).push((id, child));
+        Ok(id)
     }
 
-    /// Takes the child back. `None` means [`SshCancel::cancel`] already took and killed it.
-    pub(crate) fn reclaim(&self) -> Option<Child> {
-        lock_slot(&self.inner.child).take()
+    /// Takes child `id` back. `None` means [`SshCancel::cancel`] already took and killed it.
+    pub(crate) fn reclaim(&self, id: u64) -> Option<Child> {
+        let mut children = lock_slot(&self.inner.children);
+        let pos = children.iter().position(|(i, _)| *i == id)?;
+        Some(children.swap_remove(pos).1)
     }
 
-    /// Runs `f` on the registered child. `None` means the child was taken by cancellation.
-    pub(crate) fn with_child<R>(&self, f: impl FnOnce(&mut Child) -> R) -> Option<R> {
-        lock_slot(&self.inner.child).as_mut().map(f)
+    /// Runs `f` on child `id`. `None` means the child was taken by cancellation.
+    pub(crate) fn with_child<R>(&self, id: u64, f: impl FnOnce(&mut Child) -> R) -> Option<R> {
+        lock_slot(&self.inner.children)
+            .iter_mut()
+            .find(|(i, _)| *i == id)
+            .map(|(_, child)| f(child))
     }
 }
 
@@ -143,12 +149,12 @@ pub(crate) fn recover_mutex<'a, T: ?Sized>(
     })
 }
 
-/// A child slot holds at most one child, which stays valid after a panic. Recover it so the
-/// child can still be reaped.
-const CHILD_SLOT_WHAT: &str = "the ssh child slot";
+/// The child list stays valid after a panic (each entry is pushed or removed whole). Recover it
+/// so the children can still be reaped.
+const CHILD_SLOT_WHAT: &str = "the ssh child list";
 static CHILD_SLOT_POISON_REPORTED: AtomicBool = AtomicBool::new(false);
 
-fn lock_slot(m: &Mutex<Option<Child>>) -> MutexGuard<'_, Option<Child>> {
+fn lock_slot<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     recover_mutex(m.lock(), CHILD_SLOT_WHAT, &CHILD_SLOT_POISON_REPORTED)
 }
 
@@ -241,7 +247,7 @@ mod tests {
             "reaped right after the kill: {elapsed:?}"
         );
         assert!(handle.is_cancelled());
-        assert!(handle.reclaim().is_none());
+        assert!(handle.reclaim(0).is_none());
     }
 
     /// A child registered after cancellation is refused and handed back.

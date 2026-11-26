@@ -315,7 +315,7 @@ fn cancelled_error(what: &str) -> PortDiscoveryError {
 /// the watch and cancellation share one handle.
 enum ChildOwner {
     Local(Child),
-    Scoped(SshCancel),
+    Scoped(SshCancel, u64),
 }
 
 /// Result of [`ChildOwner::try_exited`].
@@ -331,7 +331,7 @@ impl ChildOwner {
     fn adopt(child: Child, what: &str) -> Result<Self, PortDiscoveryError> {
         match current_cancel() {
             Some(handle) => match handle.register(child) {
-                Ok(()) => Ok(Self::Scoped(handle)),
+                Ok(id) => Ok(Self::Scoped(handle, id)),
                 Err(mut rejected) => {
                     kill_and_reap(&mut rejected);
                     Err(cancelled_error(what))
@@ -345,7 +345,7 @@ impl ChildOwner {
     fn is_cancelled(&self) -> bool {
         match self {
             Self::Local(_) => false,
-            Self::Scoped(handle) => handle.is_cancelled(),
+            Self::Scoped(handle, _) => handle.is_cancelled(),
         }
     }
 
@@ -364,7 +364,7 @@ impl ChildOwner {
         }
         match self {
             Self::Local(child) => poll(child),
-            Self::Scoped(handle) => handle.with_child(poll).unwrap_or(ChildPoll::Taken),
+            Self::Scoped(handle, id) => handle.with_child(*id, poll).unwrap_or(ChildPoll::Taken),
         }
     }
 
@@ -373,7 +373,7 @@ impl ChildOwner {
         let child = match self {
             Self::Local(child) => Some(child),
             // If cancellation took it, the kill and wait are done.
-            Self::Scoped(handle) => handle.reclaim(),
+            Self::Scoped(handle, id) => handle.reclaim(id),
         };
         if let Some(mut child) = child {
             kill_and_reap(&mut child);
@@ -386,7 +386,7 @@ impl ChildOwner {
     fn finish(self, what: &str) -> Result<Child, PortDiscoveryError> {
         match self {
             Self::Local(child) => Ok(child),
-            Self::Scoped(handle) => match handle.reclaim() {
+            Self::Scoped(handle, id) => match handle.reclaim(id) {
                 None => Err(cancelled_error(what)),
                 Some(mut child) if handle.is_cancelled() => {
                     kill_and_reap(&mut child);
@@ -1329,6 +1329,55 @@ mod tests {
         assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
         let elapsed = started.elapsed();
         assert!(elapsed < CEILING, "cut before the bound: {elapsed:?}");
+    }
+
+    /// Two lookups under clones of one handle each get their own child's output, and one
+    /// cancel stops both.
+    #[test]
+    fn one_handle_serves_concurrent_lookups() {
+        let handle = SshCancel::new();
+        let lookups: Vec<_> = ["45001", "45002"]
+            .into_iter()
+            .map(|port| {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let _scope = h.scope();
+                    let out = capture(
+                        helper_command(&format!("echo:{port}")),
+                        Duration::from_secs(20),
+                        "concurrent",
+                    )
+                    .expect("echo");
+                    (port, decode_port(&out).expect("a port"))
+                })
+            })
+            .collect();
+        for lookup in lookups {
+            let (port, got) = lookup.join().expect("lookup thread");
+            assert_eq!(got.to_string(), port);
+        }
+
+        let sleepers: Vec<_> = (0..2)
+            .map(|_| {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let _scope = h.scope();
+                    capture(never_returns_command(), Duration::from_secs(20), "sleep")
+                        .expect_err("cancelled")
+                        .kind()
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        handle.cancel();
+        for sleeper in sleepers {
+            assert_eq!(
+                sleeper.join().expect("sleeper thread"),
+                PortDiscoveryFailureKind::Cancelled
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// A child killed by cancellation is not reported as a timeout.
