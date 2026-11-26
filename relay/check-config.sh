@@ -323,8 +323,13 @@ if v is None:
 port = v.rsplit(":", 1)[-1] if isinstance(v, str) and ":" in v else ""
 if not (port.isascii() and port.isdigit()):
     sys.exit(1)
-# 정수로 읽어 십진 표기로 돌려준다(iroh-relay의 SocketAddr처럼 "03340"은 3340). 게시·조회·리스너 비교가 이 값을 쓴다.
-print(int(port))
+# 앞의 0을 떼고(전부 0이면 0) 십진 표기로 돌려준다(iroh-relay의 SocketAddr처럼 "03340"은 3340).
+# 길이를 먼저 봐서 int()의 자릿수 한도(4300자리)에 닿지 않게 한다. 0~65535 밖은 설정 실패.
+# 게시·조회·리스너 비교가 이 값을 쓴다.
+port = port.lstrip("0") or "0"
+if len(port) > 5 or int(port) > 65535:
+    sys.exit(1)
+print(port)
 PY
 }
 
@@ -567,6 +572,21 @@ rc_self_test() {
     st_expect port-leading-zero 3340 "$got"
     rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:3340' "$got"
     st_expect port-leading-zero-listener 0 "$?"
+    printf 'http_bind_addr = "0.0.0.0:%s3340"\n' "$(printf '0%.0s' $(seq 1 4301))" > "$t/zeros.toml"
+    st_expect port-4301-leading-zeros "3340 0" "$(rc_toml_port "$t/zeros.toml" http_bind_addr 3340 2>&1; echo " $?")"
+    printf 'http_bind_addr = "0.0.0.0:000"\n' > "$t/allzero.toml"
+    st_expect port-all-zero 0 "$(rc_toml_port "$t/allzero.toml" http_bind_addr 3340)"
+    printf 'http_bind_addr = "0.0.0.0:65535"\n' > "$t/max.toml"
+    st_expect port-65535 65535 "$(rc_toml_port "$t/max.toml" http_bind_addr 3340)"
+    printf 'http_bind_addr = "0.0.0.0:65536"\n' > "$t/over.toml"
+    rc_toml_port "$t/over.toml" http_bind_addr 3340 >/dev/null 2>&1
+    st_expect port-65536-rejected 1 "$?"
+    printf 'http_bind_addr = "0.0.0.0:0065536"\n' > "$t/over0.toml"
+    rc_toml_port "$t/over0.toml" http_bind_addr 3340 >/dev/null 2>&1
+    st_expect port-leading-zero-65536-rejected 1 "$?"
+    printf 'http_bind_addr = "0.0.0.0:100000"\n' > "$t/long.toml"
+    rc_toml_port "$t/long.toml" http_bind_addr 3340 >/dev/null 2>&1
+    st_expect port-six-digits-rejected 1 "$?"
     # 정리 소유권: docker를 흉내 내는 함수로 응답을 바꿔 본다(서브셸 안에서만).
     (
         docker() { if [[ $1 == create ]]; then echo 'Error: Conflict. The container name is already in use' >&2; return 1; fi; return 0; }
