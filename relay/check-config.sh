@@ -42,7 +42,7 @@ rc_keep_image() { RC_KEEP_IMAGE=1; }
 rc_cleanup() {
     local c
     for c in "${RC_CONTAINERS[@]}"; do
-        docker rm -f "$c" >/dev/null 2>&1 || true
+        rc_remove_container "$c" || rc_log "컨테이너를 지우지 못했다: $c"
     done
     if [[ -n "$RC_TMP" ]]; then
         rm -rf "${RC_TMP:?}"
@@ -51,6 +51,12 @@ rc_cleanup() {
         docker image rm "$RELAY_IMAGE" >/dev/null 2>&1 || rc_log "이미지를 지우지 못했다: $RELAY_IMAGE"
     fi
     return 0
+}
+
+# 컨테이너 $1(이름 또는 ID)을 지우고, 없어졌는지 확인한다. 남았으면 1.
+rc_remove_container() {
+    docker rm -f "$1" >/dev/null 2>&1 || true
+    ! docker container inspect "$1" >/dev/null 2>&1
 }
 
 # docker와 이미지를 준비한다. 이미지가 없을 때만 받고, 받았으면 끝에 지운다.
@@ -165,14 +171,24 @@ rc_start_relay() {
     http_port=$(rc_toml_port "$cfg" http_bind_addr 3340)
     metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090)
 
-    cid=$(docker run -d \
-        --name "relay-check-$name-$$" \
+    # 이름을 먼저 정리 목록에 넣는다. create가 컨테이너를 만든 뒤 실패해도, start가 실패해도 EXIT 정리가 지운다.
+    cid="relay-check-$name-$$"
+    RC_CONTAINERS+=("$cid")
+    RC_LAST_CONTAINER="$cid"
+    if ! docker create \
+        --name "$cid" \
         -e RUST_LOG=iroh_relay=debug -e NO_COLOR=1 \
         -v "$cfg:/config/relay.toml:ro" \
         -p "127.0.0.1::$http_port" -p "127.0.0.1::$metrics_port" \
-        "$RELAY_IMAGE" --dev --config-path /config/relay.toml) || { RC_LAST_FAIL="stage=start reason=docker-run"; return 1; }
-    RC_CONTAINERS+=("$cid")
-    RC_LAST_CONTAINER="$cid"
+        "$RELAY_IMAGE" --dev --config-path /config/relay.toml >/dev/null; then
+        RC_LAST_FAIL="stage=start reason=docker-create"
+        return 1
+    fi
+    if ! docker start "$cid" >/dev/null; then
+        RC_LAST_FAIL="stage=start reason=docker-start"
+        rc_dump_logs "$cid"
+        return 1
+    fi
 
     http=$(rc_host_addr "$cid" "$http_port")
     metrics=$(rc_host_addr "$cid" "$metrics_port")
@@ -261,18 +277,18 @@ rc_dump_logs() {
     docker logs "$1" 2>&1 | tail -40 | sed 's/^/    /' >&2
 }
 
-# rc_start_relay가 띄운 컨테이너를 끝내고 지운다.
+# rc_start_relay가 띄운 컨테이너를 끝내고 지운다. 없어진 것이 확인될 때만 정리 목록에서 뺀다.
+# 남으면 목록에 둬서 EXIT 정리가 다시 지운다.
 rc_stop_relay() {
     local cid="$1" i
     [[ -n "$cid" ]] || return 0
-    docker rm -f "$cid" >/dev/null 2>&1 || true
+    if ! rc_remove_container "$cid"; then
+        rc_log "컨테이너가 남았다: $cid (끝날 때 다시 지운다)"
+        return 1
+    fi
     for i in "${!RC_CONTAINERS[@]}"; do
         [[ "${RC_CONTAINERS[$i]}" == "$cid" ]] && unset 'RC_CONTAINERS[i]'
     done
-    if docker inspect "$cid" >/dev/null 2>&1; then
-        rc_log "컨테이너가 남았다: $cid"
-        return 1
-    fi
     return 0
 }
 
