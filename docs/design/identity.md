@@ -25,8 +25,10 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 
 토큰을 포트와 따로 게시하지 않고 인스턴스 하나의 연결 레코드로 한 번에 게시한다. 포트와 토큰을 따로 읽으면 그 사이 인스턴스가 다시 시작했을 때 서로 다른 세대의 값이 묶일 수 있기 때문이다(포트 파일은 인스턴스가 게시·회수하는 수명 객체다, `tasty:crates/tasty-ipc/src/port_file.rs`). 게시는 `ConnectionRecord::publish(path)`가 권한 걸린 임시 파일 → 교체로 하고 게시 핸들 `RecordPublication`을 돌려준다. 핸들은 게시한 경로, 실제 대상, 파일 정체성(Unix 장치·inode, Windows 볼륨·파일 ID), 내용을 기억한다. 정리는 `RecordPublication::retire()` 하나뿐이다. 같은 경로의 게시와 정리가 함께 잡는 잠금 아래에서 대상의 정체성과 내용이 자기 게시분과 같을 때만 지우고, 다르면(새 인스턴스가 이미 교체함) 그대로 둔다. tasty `PortFilePublication`과 같은 방식이다(`tasty:crates/tasty-ipc/src/port_file.rs`). 소비자는 인스턴스가 끝날 때 핸들로 정리를 부른다. 경로를 받아 지우는 함수는 두지 않는다. 위 표의 "연결 토큰" 행도 이 레코드 안의 토큰을 뜻한다.
 
-- 연결 레코드 경로의 마지막 이름이 심볼릭 링크이거나 일반 파일이 아니면 게시하지 않고 `IdentityError::UnsafeFile`을 돌려준다(위 "파일 권한"의 읽기 검사가 링크를 거절하므로 링크를 따라가 게시하면 그 레코드를 다시 읽을 수 없다). 핸들이 기억하는 "실제 대상"은 정규화한 부모 디렉터리에 파일 이름을 붙인 경로다. 레코드의 부모 디렉터리도 기기 키 디렉터리와 같은 권한 계약(아래 "파일 권한")을 받는다. 게시·정리 잠금은 `<실제 대상>.lock` 파일의 배타 잠금이고, 잠금 파일은 정리 뒤에도 남는다.
-- `ConnectionRecord::parse(text)`는 레코드 파서 하나다. 앞뒤 공백을 무시하고, 십진 숫자만 있으면 `ParsedRecord::LegacyPort(port)`, JSON 객체면 `ParsedRecord::Record(..)`를 돌려준다. 모르는 필드는 무시한다. 실패는 `RecordParseError`이고 필드 이름이나 형식 종류만 담는다(아래 "토큰 비교"). `RecordPublication::retire()`는 `RetireOutcome::{Removed, Replaced, Missing}`을 돌려준다.
+- 연결 레코드 경로의 마지막 이름이 심볼릭 링크이거나 일반 파일이 아니면 게시하지 않고 `IdentityError::UnsafeFile`을 돌려준다(위 "파일 권한"의 읽기 검사가 링크를 거절하므로 링크를 따라가 게시하면 그 레코드를 다시 읽을 수 없다). 핸들이 기억하는 "실제 대상"은 정규화한 부모 디렉터리에 파일 이름을 붙인 경로다. 레코드의 부모 디렉터리도 기기 키 디렉터리와 같은 권한 계약(아래 "파일 권한")을 받는다. 게시·정리 잠금은 `<실제 대상>.lock` 파일의 배타 잠금이고, 잠금 파일은 정리 뒤에도 남는다. 그래서 파일 이름이 `.lock`으로 끝나는(대소문자 무관) 경로는 다른 레코드의 잠금 파일과 겹칠 수 있어 게시·정리 모두 `IdentityError::InvalidRecordPath`로 거절한다. 파일 이름이 없는 경로도 같은 오류다.
+- `ConnectionRecord::parse(text)`는 레코드 파서 하나다. 앞뒤 공백을 무시하고, 십진 숫자만 있으면 `ParsedRecord::LegacyPort(port)`, JSON 객체면 `ParsedRecord::Record(..)`를 돌려준다. 모르는 필드는 무시한다. 실패는 `RecordParseError`이고 필드 이름이나 형식 종류만 담는다(아래 "토큰 비교"). `RecordPublication::retire()`는 `RetireOutcome::{Removed, Replaced, Missing}`을 돌려준다. 부모 디렉터리가 이미 없으면 `Missing`이다.
+- `publish`는 읽는 쪽이 거절할 레코드(포트 0, 빈 인스턴스 ID, 4096바이트를 넘는 줄)를 쓰기 전에 `IdentityError::InvalidRecord`로 거절하고 기존 레코드를 그대로 둔다. 파일 정체성은 교체 전 임시 파일의 핸들에서 얻는다. 교체 뒤 확인 단계가 실패하면 잠금을 쥔 채 교체한 파일을 지우고 오류를 돌려준다. 핸들 없이 토큰이 든 레코드가 남지 않게 하기 위해서다.
+- 이 레포가 쓴 파일(임시 파일, 교체 뒤 실패한 레코드)을 지우지 못하면 `IdentityError::Leftover { leftover, cause, cleanup }`로 남은 경로와 처음 오류를 함께 돌려준다. 그 파일에는 비밀이 들어 있을 수 있다. 오류에는 비밀 원문을 담지 않는다.
 - 형식이 맞지 않는 파일은 손상으로 본다. `load_or_create`는 손상 파일을 만나면 `IdentityError::Corrupt`를 돌려주고 파일을 그대로 둔다. 새 키로 덮지 않는다. 덮으면 모든 상대가 이 기기를 다른 기기로 본다.
 - 키의 정본 표현은 32바이트 seed다. `iroh-base` 1.5.0의 `SecretKey::from_bytes(&[u8; 32])`로 그대로 iroh endpoint에 넘긴다(P2P와 SSH에서 같은 기기 ID).
 
@@ -38,13 +40,14 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 
 | OS | 계약 |
 |---|---|
-| Unix | 디렉터리 0700, 파일 0600. 비밀을 쓰기 전에 권한을 건다. 디렉터리가 이미 있고 더 넓은 권한이면 좁힌다. 읽을 때는 대상이 심볼릭 링크가 아닌 일반 파일이고, 소유자가 현재 사용자이며, 권한이 0600보다 넓지 않은지 확인한다. 어긋나면 `IdentityError::UnsafeFile`(손상과 구별)로 멈춘다 |
-| Windows | 비밀을 쓰기 전에 빈 파일에 소유자 = 현재 사용자 SID, 상속 차단, 현재 SID FullControl 항목 하나만 있는 DACL을 건다. 다시 읽어 그대로인지 확인한다. 설정이나 확인이 실패하면 내용을 쓰지 않고 오류를 돌려준다. 이미 있는 파일을 읽을 때(기존 키, 첫 생성 경쟁에서 진 경우)는 연 핸들 기준으로 일반 파일인지(재분석 지점이 아님), 소유자가 현재 SID인지, DACL이 게시 때와 같은 형태(보호된 DACL, 상속 차단, 현재 SID의 허용 항목 하나)인지 확인한다. DACL이 없거나 NULL DACL이면(Windows는 이때 모두에게 접근을 허용한다) 허용 항목이 하나도 없어 보여도 위반이다. 어긋나거나 검사 자체가 실패하면 `IdentityError::UnsafeFile`(손상과 구별)로 멈춘다 |
+| Unix | 디렉터리 0700, 파일 0600. 비밀을 쓰기 전에 권한을 건다. 디렉터리가 이미 있고 더 넓은 권한이면 좁힌다. 읽을 때는 대상이 심볼릭 링크가 아닌 일반 파일이고, 소유자가 현재 사용자이며, 권한이 0600보다 넓지 않은지 확인한다. 어긋나거나 열 수 없으면 `IdentityError::UnsafeFile`(손상과 구별)로 멈춘다 |
+| Windows | 임시 파일은 `CreateFileW`에 보안 설명자(소유자 = 현재 사용자 SID, 상속 차단, 현재 SID FullControl 항목 하나만 있는 보호된 DACL)를 주어 처음부터 그 권한으로 만들고, 쓰기가 끝날 때까지 공유 모드 0으로 연다. 비밀을 쓰기 전에 같은 보안을 다시 걸고 다시 읽어 그대로인지 확인한다. 설정이나 확인이 실패하면 내용을 쓰지 않고 오류를 돌려준다. 이미 있는 파일을 읽을 때(기존 키, 첫 생성 경쟁에서 진 경우)는 연 핸들 기준으로 일반 파일인지(재분석 지점이 아님), 소유자가 현재 SID인지, DACL이 게시 때와 같은 형태(보호된 DACL, 상속 차단, 현재 SID의 허용 항목 하나)인지 확인한다. DACL이 없거나 NULL DACL이면(Windows는 이때 모두에게 접근을 허용한다) 허용 항목이 하나도 없어 보여도 위반이다. 디렉터리나 재분석 지점(심볼릭 링크, junction)도 핸들로 열어 판정한다. 어긋나거나, 권한 때문에 열 수 없거나, 검사 자체가 실패하면 `IdentityError::UnsafeFile`(손상과 구별)로 멈춘다 |
 
 - Windows 계약은 tasty의 `tasty:crates/tasty-remote-profiles/src/secret_file.rs`와 같다. 구현은 PowerShell 대신 `windows-sys`의 보안 API로 한다. 외부 프로세스를 띄우지 않으므로 PowerShell 실행 정책·경로에 기대지 않고, 같은 프로세스 안에서 시험으로 다시 읽어 확인할 수 있다.
 - 읽기 검사는 이 레포가 로컬에서 비밀 파일을 여는 모든 경우에 같다. 기기 키와 연결 레코드(게시 확인, 정리 때 내용 비교) 모두다. 원격의 연결 레코드는 원격 `ssh` 명령이 읽으므로 이 검사 밖이고, 원격 쪽 권한은 그 레코드를 게시한 원격 인스턴스의 이 레포가 건다.
 - 소비자가 임의 디렉터리를 줄 수 있으므로 "사용자 프로필 아래라서 안전하다"는 가정을 하지 않는다.
-- 기기 키 디렉터리와 연결 레코드의 부모 디렉터리는 없으면 만든다(Unix 0700). 그 경로의 마지막 이름이 심볼릭 링크이거나 디렉터리가 아니면 `IdentityError::UnsafeFile`이다. Windows는 디렉터리 권한을 바꾸지 않고 파일에만 위 계약을 건다.
+- 알려진 한계: Unix 검사는 모드 비트와 소유자만 본다. macOS의 확장 ACL(모드 비트보다 먼저 적용되고 새 파일에 상속될 수 있다)은 보지 않는다. tasty의 `tasty:crates/tasty-remote-profiles/src/secret_file.rs`도 같다.
+- 기기 키 디렉터리와 연결 레코드의 부모 디렉터리는 없으면 만든다(Unix 0700). 만들기 전에 그 경로의 마지막 이름을 링크를 따라가지 않고 본다. 심볼릭 링크(끊어진 링크 포함)이거나 디렉터리가 아니면 `IdentityError::UnsafeFile`이다. 끝의 경로 구분자는 떼고 판정하므로 `링크/`도 링크로 거절된다. Windows는 디렉터리 권한을 바꾸지 않고 파일에만 위 계약을 건다.
 - 새 비밀 파일의 권한 설정이나 확인이 실패하면 `IdentityError::Protect`(임시 파일은 지움, 내용 없음)다.
 
 ## 동시 첫 생성
@@ -53,7 +56,7 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 
 1. 권한을 건 임시 파일(같은 디렉터리, 고유 이름, `create_new`로 만들어 기존 파일·심볼릭 링크를 따라가지 않음)에 키를 쓰고 `sync_all`한다.
 2. `std::fs::hard_link(임시, device_key)`로 게시한다. 대상이 있으면 실패하므로 덮어쓰지 않는다. `rename`은 대상이 있으면 바꿔 버릴 수 있어 쓰지 않는다.
-3. 게시에 성공해도, `AlreadyExists`여도, 그 밖의 오류여도 임시 이름은 지운다. `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
+3. 게시에 성공해도, `AlreadyExists`여도, 그 밖의 오류여도 임시 이름은 지운다. 지우지 못하면 `IdentityError::Leftover`다(게시에 성공했으면 `cause`가 없다). `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
 4. 파일 시스템이 하드 링크를 지원하지 않으면 오류를 돌려준다(조용히 다른 방식으로 바꾸지 않는다).
 
 ## 서명
