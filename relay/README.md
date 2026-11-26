@@ -115,7 +115,7 @@ echo | openssl s_client -connect relay.example.com:443 -servername relay.example
 ```
 
 - 기동 로그에 `[HTTPS/WSS] relay: serving on [::]:443`이 있어야 한다. QUIC 주소 확인을 켰으면 `QUIC server listening on`도 있어야 하고, 방화벽과 클라우드 보안 그룹에서 UDP 7842가 열렸는지 본다.
-- 수신 상한이 설정대로 들어갔는지는 `bash relay/check-config.sh <설정 파일>`로 본다. TLS와 QUIC 주소 확인을 뺀 같은 설정을 임시 컨테이너로 띄워 시작 로그의 `client_rx`와 비교한다. 실패해서 로그를 보여 줄 때는 따옴표 문자열을 가린다.
+- 수신 상한이 설정대로 들어갔는지는 `bash relay/check-config.sh <설정 파일>`로 본다. TLS와 QUIC 주소 확인을 뺀 같은 설정을 임시 컨테이너로 띄워 시작 로그의 `client_rx`와 비교한다. 검사 컨테이너에 넘기는 설정에서는 `shared_token`·`access.http.bearer_token` 값을 시험값(`check-config-placeholder`)으로 바꿔 넣고, 토큰 환경 변수도 넘기지 않는다. 실패해서 로그를 보여 줄 때는 따옴표 문자열을 가린다.
 - 운영 relay를 `RUST_LOG=iroh_relay=debug`로 띄우지 않는다. 시작 로그에 `ServerConfig` 전체가 찍히고, 그 안의 `shared_token` 목록과 `access.http.bearer_token` 값이 원문 그대로 나온다.
 - TLS와 QUIC 주소 확인은 이 레포의 CI와 컨테이너 확인이 판정하지 않는다. 배포할 때 위 절차로 본다.
 

@@ -135,7 +135,7 @@ rc_make_ci_config() {
         return 1
     fi
     if ! rc_check_ci_config "$src" "$out"; then
-        rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery만 뺀 것과 다르다(TOML 비교)."
+        rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery를 빼고 비밀을 바꾼 것과 다르다(TOML 비교)."
         return 1
     fi
     return 0
@@ -166,16 +166,70 @@ else:
 PY
 }
 
-# 운영 설정 $1에서 [tls]와 enable_quic_addr_discovery만 빠진 것이 CI용 설정 $2인지 TOML로 비교한다.
+# CI용 설정 $2의 접속 허용 비밀(access.shared_token 목록, access.http.bearer_token)을 고정 시험값
+# RC_SECRET_PLACEHOLDER로 바꾼다. 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로
+# 원래 토큰이 docker 로그 수집기에 닿지 않게 하려는 것이다. 비밀이 있으면 파일을 TOML로 다시 쓴다.
+# 그 뒤 운영 설정 $1에서 [tls]·enable_quic_addr_discovery를 빼고 같은 비밀을 바꾼 것과 $2가 TOML로 같은지 본다.
+RC_SECRET_PLACEHOLDER="check-config-placeholder"
 rc_check_ci_config() {
-    python3 -I - "$1" "$2" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], "rb") as f:
+    python3 -I - "$1" "$2" "$RC_SECRET_PLACEHOLDER" <<'PY'
+import json, sys, tomllib
+
+src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def scrub(d):
+    acc = d.get("access")
+    changed = False
+    if isinstance(acc, dict):
+        if isinstance(acc.get("shared_token"), list):
+            acc["shared_token"] = [ph for _ in acc["shared_token"]] or [ph]
+            changed = True
+        http = acc.get("http")
+        if isinstance(http, dict) and "bearer_token" in http:
+            http["bearer_token"] = ph
+            changed = True
+    return changed
+
+def val(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, list) and all(not isinstance(x, dict) for x in v):
+        return "[" + ", ".join(val(x) for x in v) + "]"
+    raise ValueError(f"unsupported value {v!r}")
+
+def dump(d, prefix, lines):
+    for k, v in d.items():
+        if not isinstance(v, dict):
+            lines.append(f"{json.dumps(k)} = {val(v)}")
+    for k, v in d.items():
+        if isinstance(v, dict):
+            name = prefix + [json.dumps(k)]
+            lines.append("")
+            lines.append("[" + ".".join(name) + "]")
+            dump(v, name, lines)
+
+with open(src, "rb") as f:
     a = tomllib.load(f)
-with open(sys.argv[2], "rb") as f:
+with open(out, "rb") as f:
     b = tomllib.load(f)
 a.pop("tls", None)
 a.pop("enable_quic_addr_discovery", None)
+scrub(a)
+if scrub(b):
+    lines = ["# relay/check-config.sh가 만든 CI용 설정. 접속 허용 비밀은 시험값으로 바꿨다."]
+    try:
+        dump(b, [], lines)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    with open(out, "rb") as f:
+        b = tomllib.load(f)
 sys.exit(0 if a == b else 1)
 PY
 }
@@ -278,6 +332,8 @@ rc_start_relay() {
     http_port=$(rc_toml_port "$cfg" http_bind_addr 3340) || { RC_LAST_FAIL="stage=config reason=http_bind_addr"; return 1; }
     metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090) || { RC_LAST_FAIL="stage=config reason=metrics_bind_addr"; return 1; }
 
+    # 환경 변수는 아래 두 개만 넘긴다. IROH_RELAY_HTTP_BEARER_TOKEN·IROH_RELAY_ACCESS_TOKEN은 넘기지 않는다
+    # (넘기면 설정의 시험값 대신 실제 토큰이 쓰이고 시작 로그에 찍힌다).
     # 이름은 실행마다 고유하게 만든다(PID와 난수). create가 성공한 ID만 정리 목록에 들어간다.
     if ! rc_create_container \
         --name "relay-check-$name-$$-$RANDOM$RANDOM" \
@@ -484,6 +540,21 @@ rc_self_test() {
         echo "$? ${RC_CONTAINERS[*]}"
     ) > "$t/own"
     st_expect stop-keeps-unconfirmed "1 x" "$(cat "$t/own")"
+    # 접속 허용 비밀은 CI용 설정에서 시험값으로 바뀌고 원래 문자열이 남지 않는다.
+    printf 'enable_relay = true\naccess.shared_token = ["n10-secret-a", "n10-secret-b"]\n[limits.client.rx]\nbytes_per_second = 9\n' > "$t/shared.toml"
+    rc_make_ci_config "$t/shared.toml" "$t/ci-shared.toml"
+    st_expect secret-shared-converted 0 "$?"
+    grep -q 'n10-secret' "$t/ci-shared.toml"
+    st_expect secret-shared-absent 1 "$?"
+    st_expect secret-shared-placeholder 2 "$(grep -o "$RC_SECRET_PLACEHOLDER" "$t/ci-shared.toml" | wc -l | tr -d ' ')"
+    st_expect secret-shared-limit-kept "9 -" "$(rc_toml_rx "$t/ci-shared.toml")"
+    printf '[access.http]\nurl = "https://auth.example.com/x"\nbearer_token = "n10-secret-c"\n' > "$t/bearer.toml"
+    rc_make_ci_config "$t/bearer.toml" "$t/ci-bearer.toml"
+    st_expect secret-bearer-converted 0 "$?"
+    grep -q 'n10-secret' "$t/ci-bearer.toml"
+    st_expect secret-bearer-absent 1 "$?"
+    grep -q 'auth.example.com/x' "$t/ci-bearer.toml"
+    st_expect secret-bearer-url-kept 0 "$?"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
