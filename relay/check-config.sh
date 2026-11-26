@@ -130,7 +130,7 @@ RC_SECRET_PLACEHOLDER="check-config-placeholder"
 RC_CONFIG_REASON=""
 # rc_make_ci_config(make)와 self-test의 rc_encode_toml(encode)이 같이 쓰는 파이썬. 인자: 모드 원본 출력 시험값.
 IFS= read -r -d '' RC_CI_PY <<'PY'
-import ipaddress, math, sys, tomllib
+import base64, binascii, ipaddress, math, sys, tomllib
 
 mode, src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -226,11 +226,46 @@ URL_PLACEHOLDER = "http://" + ph + ".invalid/"
 def is_str_list(v, nonempty):
     return isinstance(v, list) and (v or not nonempty) and all(isinstance(x, str) and (x or not nonempty) for x in v)
 
+# allowlist·denylist 원소는 iroh-base 1.5.0 EndpointId(src/key.rs:70 `pub type EndpointId = PublicKey`)다.
+# TOML(사람이 읽는 형식)에서는 문자열을 PublicKey::from_str로 읽는다(key.rs:91-103, :249-256).
+# from_str → decode_base32_hex(key.rs:475-496): 길이가 64면 소문자 hex(data_encoding HEXLOWER), 아니면 대문자로 바꾼 뒤
+# 패딩 없는 RFC 4648 base32(BASE32_NOPAD)로 정확히 32바이트가 되는 길이(52자). 그 뒤 PublicKey::from_bytes(key.rs:122-124)가
+# Ed25519 압축 점으로 풀리는지 본다(ed25519-dalek VerifyingKey::from_bytes). 이 검사는 같은 모양만 받는다.
+# base32 마지막 글자의 남는 4비트는 0이어야 한다(그 밖은 iroh가 받더라도 검사는 거절한다).
+ED_P = 2**255 - 19
+ED_D = (-121665 * pow(121666, -1, ED_P)) % ED_P
+B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+def endpoint_id_ok(s):
+    if not isinstance(s, str) or not s.isascii():
+        return False
+    if len(s) == 64:
+        if any(c not in "0123456789abcdef" for c in s):
+            return False
+        raw = bytes.fromhex(s)
+    else:
+        u = s.upper()
+        if len(u) != 52 or any(c not in B32 for c in u) or B32.index(u[-1]) & 0x0F:
+            return False
+        try:
+            raw = base64.b32decode(u + "====")
+        except (ValueError, binascii.Error):
+            return False
+    if len(raw) != 32:
+        return False
+    # curve25519-dalek CompressedEdwardsY::decompress: 최상위 비트는 x의 부호, 나머지가 y(정규형 검사 없이 mod p).
+    # x^2 = (y^2 - 1) / (d y^2 + 1)이 제곱수(또는 0)일 때만 점이다.
+    y = (int.from_bytes(raw, "little") & ((1 << 255) - 1)) % ED_P
+    r = (y * y - 1) * pow((ED_D * y * y + 1) % ED_P, -1, ED_P) % ED_P
+    return r == 0 or pow(r, (ED_P - 1) // 2, ED_P) == 1
+
+ACCESS_BAD_PATH = None
+
 def access_valid(d):
     # 허용 목록: access가 없음, 문자열 "everyone", 또는 키가 정확히 하나인 표(iroh-relay 1.5.0 main.rs AccessConfig).
     # 표의 키와 값 모양:
     #   everyone      빈 표 또는 빈 배열(toml 1.1.6 de/deserializer/table_enum.rs unit_variant가 받는 모양)
-    #   allowlist     문자열 배열(endpoint ID)        denylist  같음
+    #   allowlist     endpoint ID 문자열 배열(위 endpoint_id_ok)        denylist  같음
     #   http          표. url은 문자열(필수), bearer_token은 있으면 문자열, 다른 키 없음
     #   shared_token  비어 있지 않은 문자열만 있는 비어 있지 않은 배열(main.rs TryFrom<AccessConfig>)
     # 그 밖(배열, 오타 키, 키 두 개, 위치 기반 http 배열 표기 등)은 iroh가 받더라도 이 검사가 거절한다.
@@ -248,7 +283,14 @@ def access_valid(d):
     if kind == "everyone":
         return v == {} or v == []
     if kind in ("allowlist", "denylist"):
-        return is_str_list(v, nonempty=False)
+        global ACCESS_BAD_PATH
+        if not isinstance(v, list):
+            return False
+        for i, x in enumerate(v):
+            if not endpoint_id_ok(x):
+                ACCESS_BAD_PATH = f'"access"."{kind}"[{i}]'
+                return False
+        return True
     if kind == "shared_token":
         return is_str_list(v, nonempty=True)
     return (isinstance(v, dict) and isinstance(v.get("url"), str)
@@ -348,7 +390,11 @@ if bad:
     print("bad-value: " + ", ".join(f"{keypath(p)} (expected {kind})" for p, kind in bad), file=sys.stderr)
     sys.exit(8)
 if not access_valid(a):
-    print("access-invalid: access must be absent, \"everyone\", or a table with one of everyone, allowlist, denylist, http, shared_token in the checked shape", file=sys.stderr)
+    if ACCESS_BAD_PATH:
+        # 키 경로만 쓴다(값은 잘못 붙여 넣은 토큰일 수 있다).
+        print(f"access-invalid: {ACCESS_BAD_PATH} is not an endpoint ID (64 lowercase hex or 52 base32 of an Ed25519 public key)", file=sys.stderr)
+    else:
+        print("access-invalid: access must be absent, \"everyone\", or a table with one of everyone, allowlist, denylist, http, shared_token in the checked shape", file=sys.stderr)
     sys.exit(6)
 a.pop("tls", None)
 a.pop("enable_quic_addr_discovery", None)
@@ -817,7 +863,7 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
     # 허용 목록 안의 access 표기는 받는다.
     local ok n=0
     for ok in 'access = "everyone"' 'access.everyone = {}' 'access = { everyone = [] }' \
-        'access.allowlist = ["ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6"]' 'access.denylist = []'; do
+        'access.allowlist = ["d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"]' 'access.denylist = []'; do
         n=$((n + 1))
         printf 'enable_relay = true\n%s\n' "$ok" > "$t/acc-ok$n.toml"
         rc_make_ci_config "$t/acc-ok$n.toml" "$t/ci-acc-ok$n.toml"
@@ -955,9 +1001,57 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
         rc_make_ci_config "$t/bk$n.toml" "$t/ci-bk$n.toml" 2>/dev/null
         st_expect "field-kind-rejected-$n" "6 bad-value" "$? $RC_CONFIG_REASON"
     done
-    # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다(url은 바뀌므로 allowlist 원소로 본다).
+    # allowlist·denylist 원소는 endpoint ID 모양(소문자 hex 64자, 또는 base32 52자이고 Ed25519 점)만 받는다.
+    local eid kind
+    n=0
+    for kind in allowlist denylist; do
+        n=$((n + 1))
+        printf 'access.%s = ["n10-pasted-token-%s"]\n' "$kind" "$kind" > "$t/eid-bad$n.toml"
+        rc_make_ci_config "$t/eid-bad$n.toml" "$t/ci-eid-bad$n.toml" > "$t/eid-bad$n.out" 2>&1
+        st_expect "endpoint-id-$kind-token-rejected" "6 access-invalid" "$? $RC_CONFIG_REASON"
+        grep -q 'n10-' "$t/eid-bad$n.out"
+        st_expect "endpoint-id-$kind-token-value-hidden" 1 "$?"
+        grep -qF "\"access\".\"$kind\"[0]" "$t/eid-bad$n.out"
+        st_expect "endpoint-id-$kind-token-path-shown" 0 "$?"
+        st_expect "endpoint-id-$kind-token-ci-file-removed" no "$(if [[ -e "$t/ci-eid-bad$n.toml" ]]; then echo yes; else echo no; fi)"
+    done
+    # 받는 쪽: Ed25519 기준점과 RFC 8032 시험 공개 키의 hex, 그 base32(대문자·소문자).
+    local b32
+    b32=$(python3 -I -c 'import base64, sys; print(base64.b32encode(bytes.fromhex(sys.argv[1])).decode().rstrip("="))' \
+        d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a)
+    n=0
+    for eid in 5866666666666666666666666666666666666666666666666666666666666666 \
+        d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a "$b32" "${b32,,}"; do
+        n=$((n + 1))
+        printf 'access.allowlist = ["%s"]\n' "$eid" > "$t/eid-ok$n.toml"
+        rc_make_ci_config "$t/eid-ok$n.toml" "$t/ci-eid-ok$n.toml"
+        st_expect "endpoint-id-accepted-$n" 0 "$?"
+    done
+    st_expect endpoint-id-base32-length 52 "${#b32}"
+    # 거절 쪽 모양: hex 65자, 대문자 hex 64자, hex 63자, base32 51자, base32 마지막 글자의 남는 비트가 0이 아님, 빈 문자열.
+    n=0
+    for eid in 5866666666666666666666666666666666666666666666666666666666666666X \
+        D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A \
+        d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511 "${b32:0:51}" "${b32:0:51}B" ''; do
+        n=$((n + 1))
+        printf 'access.denylist = ["%s"]\n' "$eid" > "$t/eid-shape$n.toml"
+        rc_make_ci_config "$t/eid-shape$n.toml" "$t/ci-eid-shape$n.toml" 2>/dev/null
+        st_expect "endpoint-id-shape-rejected-$n" "6 access-invalid" "$? $RC_CONFIG_REASON"
+    done
+    # README 접속 허용 예시의 allowlist·denylist 줄도 이 모양이어야 한다.
+    local line
+    n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        printf '%s\n' "$line" > "$t/readme-eid$n.toml"
+        rc_make_ci_config "$t/readme-eid$n.toml" "$t/ci-readme-eid$n.toml"
+        st_expect "readme-endpoint-id-example-$n" 0 "$?"
+    done < <(grep -E '^access\.(allowlist|denylist) = ' "$RELAY_DIR/README.md")
+    st_expect readme-endpoint-id-example-count 2 "$n"
+    # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다. url은 바뀌고 allowlist는 endpoint ID만
+    # 받으므로, 스키마·access 검사 없이 같은 인코더를 부르는 rc_encode_toml로 본다.
     printf 'access.allowlist = ["https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"]\n' > "$t/emoji.toml"
-    rc_make_ci_config "$t/emoji.toml" "$t/ci-emoji.toml"
+    rc_encode_toml "$t/emoji.toml" "$t/ci-emoji.toml"
     st_expect encoder-emoji-converted 0 "$?"
     python3 -I -c 'import sys, tomllib
 a = tomllib.load(open(sys.argv[1], "rb"))["access"]["allowlist"][0]

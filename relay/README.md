@@ -68,11 +68,11 @@ docker compose logs -f iroh-relay
 ```toml
 access = "everyone"
 
-# 이 endpoint ID들만 받는다.
-access.allowlist = ["<endpoint id>", "<endpoint id>"]
+# 이 endpoint ID들만 받는다. endpoint ID는 소문자 hex 64자(또는 base32 52자)다. 아래 값은 RFC 8032 시험 공개 키로 든 예시다.
+access.allowlist = ["d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"]
 
 # 이 endpoint ID들만 막는다.
-access.denylist = ["<endpoint id>"]
+access.denylist = ["fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"]
 
 # 이 토큰 중 하나를 보낸 클라이언트만 받는다. 빈 목록·빈 문자열이면 시작하지 않는다.
 # 환경 변수 IROH_RELAY_ACCESS_TOKEN이 있으면 그 값 하나가 목록을 대신한다.
