@@ -5,7 +5,7 @@
 #   relay/check-config.sh --self-test     docker 없이 설정 읽기·변환·상한 요구 판정만 시험한다
 #
 # 설정을 주지 않으면 relay/punch-only.toml과 relay/relay-fallback.toml을 본다. 설정마다:
-#   1. 운영 예시에서 [tls] 절과 enable_quic_addr_discovery를 뺀 CI용 설정을 임시 폴더에 만든다.
+#   1. 운영 예시를 tomllib로 읽어 [tls] 표와 enable_quic_addr_discovery를 지운 값으로 CI용 설정을 임시 폴더에 새로 쓴다.
 #   2. 고정 이미지(RELAY_IMAGE)를 --dev와 그 설정으로 띄운다. 호스트 쪽은 127.0.0.1의 빈 포트에 게시한다.
 #   3. HTTP(/healthz, /, /generate_204)와 metrics(/metrics) 응답, 시작 로그의 평문 리스너 줄
 #      ([HTTP/WS] relay: serving on), 시작 로그에 찍힌 수신 상한이 설정 파일과 같은지
@@ -116,74 +116,19 @@ rc_prepare() {
     return 0
 }
 
-# 운영 예시 $1에서 [tls]·[tls.*] 표와 enable_quic_addr_discovery 키를 뺀 설정을 $2에 쓴다.
-# 표 머리 밖의 tls 키(tls.x = ..., tls = {...})는 이 변환이 다루지 않으므로 실패로 본다.
-rc_make_ci_config() {
-    local src="$1" out="$2"
-    awk '
-        /^[[:space:]]*\[/ {
-            h = $0
-            sub(/^[[:space:]]*\[+[[:space:]]*/, "", h)
-            skip = (h ~ /^tls[[:space:]]*(\]|\.)/)
-        }
-        skip { next }
-        /^[[:space:]]*enable_quic_addr_discovery[[:space:]]*=/ { next }
-        { print }
-    ' "$src" > "$out" || return 1
-    if grep -Eq '^[[:space:]]*(tls[[:space:]]*[.=]|"tls"|enable_quic_addr_discovery)' "$out"; then
-        rc_log "$src: 표 머리 밖의 tls 키나 enable_quic_addr_discovery가 남았다. [tls] 표로 적는다."
-        return 1
-    fi
-    rc_check_ci_config "$src" "$out"
-    case $? in
-        0) ;;
-        6)
-            # iroh-relay가 기동을 거절할 access 값이다. 원문이 든 변환 파일은 바로 지우고 컨테이너를 띄우지 않는다.
-            rm -f "${out:?}"
-            rc_log "$src: access 설정이 iroh-relay 1.5.0의 조건에 맞지 않는다(값은 출력하지 않는다)."
-            return 6
-            ;;
-        *)
-            rc_log "$src: CI용 설정이 [tls]·enable_quic_addr_discovery를 빼고 비밀을 바꾼 것과 다르다(TOML 비교)."
-            return 1
-            ;;
-    esac
-    return 0
-}
-
-# TOML 파일 $1의 [limits.client.rx] 값을 "bytes_per_second max_burst_bytes"로 출력한다. 없는 값은 -.
-# TOML 표기(주석, 1_000 같은 숫자, 인라인 표)를 iroh-relay와 같게 읽도록 파이썬 tomllib로 읽는다.
-# 종료 코드: 0 읽음, 3 TOML 오류, 4 python3·tomllib 없음.
-rc_toml_rx() {
-    command -v python3 >/dev/null 2>&1 || return 4
-    python3 -I - "$1" <<'PY'
-import sys
-try:
-    import tomllib
-except ImportError:
-    sys.exit(4)
-try:
-    with open(sys.argv[1], "rb") as f:
-        d = tomllib.load(f)
-except (OSError, tomllib.TOMLDecodeError) as e:
-    print(e, file=sys.stderr)
-    sys.exit(3)
-rx = d.get("limits", {}).get("client", {}).get("rx") if isinstance(d.get("limits"), dict) else None
-if not isinstance(rx, dict):
-    print("- -")
-else:
-    print(rx.get("bytes_per_second", "-"), rx.get("max_burst_bytes", "-"))
-PY
-}
-
-# CI용 설정 $2의 접속 허용 비밀(access.shared_token 목록, access.http.bearer_token)을 고정 시험값
-# RC_SECRET_PLACEHOLDER로 바꾼다. 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로
-# 원래 토큰이 docker 로그 수집기에 닿지 않게 하려는 것이다. 비밀이 있으면 파일을 TOML로 다시 쓴다.
-# 그 뒤 운영 설정 $1에서 [tls]·enable_quic_addr_discovery를 빼고 같은 비밀을 바꾼 것과 $2가 TOML로 같은지 본다.
+# 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀을
+# 시험값 RC_SECRET_PLACEHOLDER로 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 원본 텍스트를 고치지 않으므로
+# 표 머리·점 키·인라인 표·인용 키("tls") 어느 표기로 적었든 파싱 결과의 같은 키가 지워진다.
+# 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로 원래 토큰이 docker 로그 수집기에 닿지 않게 한다.
+# 쓰는 값 종류: 표, 배열(표 원소는 인라인 표), 문자열, 정수, 유한한 실수, 불리언. 날짜·시각 값과 inf·nan은
+# relay 설정에 쓰이지 않으므로 거절한다(rc 1). 다시 쓴 파일을 tomllib로 읽어 쓰려던 값과 같은지도 본다.
+# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 iroh-relay가 기동을 거절할 access 값. 0이 아니면 $2를 남기지 않는다.
 RC_SECRET_PLACEHOLDER="check-config-placeholder"
-rc_check_ci_config() {
-    python3 -I - "$1" "$2" "$RC_SECRET_PLACEHOLDER" <<'PY'
-import sys, tomllib
+rc_make_ci_config() {
+    local src="$1" out="$2" rc
+    rm -f "${out:?}"
+    python3 -I - "$src" "$out" "$RC_SECRET_PLACEHOLDER" <<'PY'
+import math, sys, tomllib
 
 src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -208,16 +153,15 @@ def access_valid(d):
 
 def scrub(d):
     acc = d.get("access")
-    changed = False
     if isinstance(acc, dict):
         if isinstance(acc.get("shared_token"), list):
-            acc["shared_token"] = [ph for _ in acc["shared_token"]] or [ph]
-            changed = True
+            acc["shared_token"] = [ph for _ in acc["shared_token"]]
         http = acc.get("http")
         if isinstance(http, dict) and "bearer_token" in http:
             http["bearer_token"] = ph
-            changed = True
-    return changed
+
+class Unsupported(Exception):
+    pass
 
 def tstr(v):
     # TOML 기본 문자열. 큰따옴표와 역슬래시는 이스케이프, 제어 문자(U+0000~U+001F, U+007F)는 \uXXXX, 나머지(BMP 밖 포함)는 그대로 쓴다.
@@ -233,50 +177,92 @@ def tstr(v):
             out.append(ch)
     return '"' + "".join(out) + '"'
 
-def val(v):
+def val(v, path):
+    # 값은 출력하지 않고 키 경로만 알린다(토큰 원문일 수 있다).
     if isinstance(v, bool):
         return "true" if v else "false"
-    if isinstance(v, (int, float)):
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            raise Unsupported(f"{path}: inf·nan 실수는 지원하지 않는다")
         return repr(v)
     if isinstance(v, str):
         return tstr(v)
-    if isinstance(v, list) and all(not isinstance(x, dict) for x in v):
-        return "[" + ", ".join(val(x) for x in v) + "]"
-    raise ValueError(f"unsupported value {v!r}")
+    if isinstance(v, list):
+        return "[" + ", ".join(val(x, f"{path}[{i}]") for i, x in enumerate(v)) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{tstr(k)} = {val(x, path + '.' + k)}" for k, x in v.items()) + "}"
+    raise Unsupported(f"{path}: {type(v).__name__} 값(날짜·시각 등)은 지원하지 않는다")
 
 def dump(d, prefix, lines):
     for k, v in d.items():
         if not isinstance(v, dict):
-            lines.append(f"{tstr(k)} = {val(v)}")
+            lines.append(f"{tstr(k)} = {val(v, '.'.join(prefix + [k]))}")
     for k, v in d.items():
         if isinstance(v, dict):
-            name = prefix + [tstr(k)]
+            name = prefix + [k]
             lines.append("")
-            lines.append("[" + ".".join(name) + "]")
+            lines.append("[" + ".".join(tstr(x) for x in name) + "]")
             dump(v, name, lines)
 
-with open(src, "rb") as f:
-    a = tomllib.load(f)
+try:
+    with open(src, "rb") as f:
+        a = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError) as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
 if not access_valid(a):
     print("access-invalid: shared_token must be a non-empty array of non-empty strings, http.bearer_token a string", file=sys.stderr)
     sys.exit(6)
-with open(out, "rb") as f:
-    b = tomllib.load(f)
 a.pop("tls", None)
 a.pop("enable_quic_addr_discovery", None)
 scrub(a)
-if scrub(b):
-    lines = ["# relay/check-config.sh가 만든 CI용 설정. 접속 허용 비밀은 시험값으로 바꿨다."]
-    try:
-        dump(b, [], lines)
-    except ValueError as e:
-        print(e, file=sys.stderr)
-        sys.exit(1)
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    with open(out, "rb") as f:
-        b = tomllib.load(f)
-sys.exit(0 if a == b else 1)
+lines = ["# relay/check-config.sh가 만든 CI용 설정. TLS 표와 QUIC 주소 확인 키를 뺐고 접속 허용 비밀은 시험값으로 바꿨다."]
+try:
+    dump(a, [], lines)
+except Unsupported as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
+text = "\n".join(lines) + "\n"
+if tomllib.loads(text) != a:
+    print("CI용 설정을 다시 읽은 값이 쓰려던 값과 다르다", file=sys.stderr)
+    sys.exit(1)
+with open(out, "w", encoding="utf-8") as f:
+    f.write(text)
+PY
+    rc=$?
+    case $rc in
+        0) return 0 ;;
+        6) rc_log "$src: access 설정이 iroh-relay 1.5.0의 조건에 맞지 않는다(값은 출력하지 않는다)." ;;
+        *) rc_log "$src: CI용 설정을 만들지 못했다."; rc=1 ;;
+    esac
+    rm -f "${out:?}"
+    return "$rc"
+}
+
+# TOML 파일 $1의 [limits.client.rx] 값을 "bytes_per_second max_burst_bytes"로 출력한다. 없는 값은 -.
+# TOML 표기(주석, 1_000 같은 숫자, 인라인 표)를 iroh-relay와 같게 읽도록 파이썬 tomllib로 읽는다.
+# 종료 코드: 0 읽음, 3 TOML 오류, 4 python3·tomllib 없음.
+rc_toml_rx() {
+    command -v python3 >/dev/null 2>&1 || return 4
+    python3 -I - "$1" <<'PY'
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(4)
+try:
+    with open(sys.argv[1], "rb") as f:
+        d = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError) as e:
+    print(e, file=sys.stderr)
+    sys.exit(3)
+rx = d.get("limits", {}).get("client", {}).get("rx") if isinstance(d.get("limits"), dict) else None
+if not isinstance(rx, dict):
+    print("- -")
+else:
+    print(rx.get("bytes_per_second", "-"), rx.get("max_burst_bytes", "-"))
 PY
 }
 
@@ -667,9 +653,39 @@ sys.exit(0 if a == b and "\U0001F511" in b else 1)' "$t/emoji.toml" "$t/ci-emoji
     st_expect ci-config-punch-only-rx "16384 65536" "$(rc_toml_rx "$t/ci-punch.toml")"
     rc_make_ci_config "$RELAY_DIR/relay-fallback.toml" "$t/ci-fallback.toml"
     st_expect ci-config-relay-fallback 0 "$?"
-    printf 'tls.cert_mode = "Manual"\n' > "$t/dotted-tls.toml"
+    # CI용 설정은 파싱한 값에서 다시 만들므로 점 키·인용 키로 적은 tls·enable_quic_addr_discovery도 지워진다.
+    printf 'tls.cert_mode = "Manual"\nenable_relay = true\n' > "$t/dotted-tls.toml"
     rc_make_ci_config "$t/dotted-tls.toml" "$t/out.toml" 2>/dev/null
-    st_expect ci-config-dotted-tls-rejected 1 "$?"
+    st_no_tls() { python3 -I -c 'import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+sys.exit(0 if "tls" not in d and "enable_quic_addr_discovery" not in d else 1)' "$1"; }
+    st_expect ci-config-dotted-tls-removed "0 0" "$? $(st_no_tls "$t/out.toml"; echo $?)"
+    local base
+    for base in punch-only relay-fallback; do
+        sed -e 's/^\[tls\]/["tls"]/' -e 's/^enable_quic_addr_discovery =/"enable_quic_addr_discovery" =/' \
+            "$RELAY_DIR/$base.toml" > "$t/quoted-$base.toml"
+        grep -Eq '^\["tls"\]' "$t/quoted-$base.toml" && grep -q '^"enable_quic_addr_discovery" =' "$t/quoted-$base.toml"
+        st_expect "ci-config-quoted-$base-variant-made" 0 "$?"
+        rc_make_ci_config "$t/quoted-$base.toml" "$t/ci-quoted-$base.toml"
+        st_expect "ci-config-quoted-$base" 0 "$?"
+        rc_make_ci_config "$RELAY_DIR/$base.toml" "$t/ci-plain-$base.toml"
+        cmp -s "$t/ci-quoted-$base.toml" "$t/ci-plain-$base.toml"
+        st_expect "ci-config-quoted-$base-same-as-default" 0 "$?"
+    done
+    st_no_tls "$t/ci-punch.toml"
+    st_expect ci-config-punch-only-no-tls 0 "$?"
+    printf 'enable_relay = true\nwhen = 2026-01-01T00:00:00Z\n' > "$t/datetime.toml"
+    rc_make_ci_config "$t/datetime.toml" "$t/ci-datetime.toml" 2>/dev/null
+    st_expect ci-config-datetime-rejected "1 no" "$? $(if [[ -e "$t/ci-datetime.toml" ]]; then echo yes; else echo no; fi)"
+    printf 'enable_relay = true\nratio = inf\n' > "$t/inf.toml"
+    rc_make_ci_config "$t/inf.toml" "$t/ci-inf.toml" 2>/dev/null
+    st_expect ci-config-inf-rejected 1 "$?"
+    printf 'enable_relay = true\nf = 1.5e-3\nlist = [1, "a", [true], { k = 2 }]\n[t.\"q k\"]\nv = -7\n' > "$t/kinds.toml"
+    rc_make_ci_config "$t/kinds.toml" "$t/ci-kinds.toml"
+    st_expect ci-config-value-kinds 0 "$?"
+    python3 -I -c 'import sys, tomllib
+sys.exit(0 if tomllib.load(open(sys.argv[1], "rb")) == tomllib.load(open(sys.argv[2], "rb")) else 1)' "$t/kinds.toml" "$t/ci-kinds.toml"
+    st_expect ci-config-value-kinds-same 0 "$?"
     rm -rf "${t:?}"
     return "$fail"
 }
