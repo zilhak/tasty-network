@@ -61,7 +61,8 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 
 - `cargo test -p tasty-net-p2p --locked`와 `cargo test -p tasty-net-rendezvous --locked`가 각각 다른 workspace 크레이트의 시험 도구 없이 통과해야 한다(의존 범위는 [크레이트 구성](crates.md#p2p-크레이트-격리)).
 - 크레이트 안의 두 프로세스 시험은 시험 바이너리가 자기 자신을 자식 프로세스로 다시 실행해 두 번째 기기를 만든다. 서버는 부모 시험 프로세스 안에 있다.
-- 예제: `cargo run -p tasty-net-rendezvous --bin tasty-rendezvous -- --config <예시 설정>`으로 서버를 띄우고, `cargo run -p tasty-net-p2p --example p2p_peer -- --listen ...`과 `-- --dial <기기 ID> ...` 두 프로세스가 펀칭·연결·echo를 한다. 예제는 같은 머신 루프백과 같은 망의 두 기기에서 돈다. 예제가 빌드되는지는 D1의 clippy(`--all-targets`)가 보고, 두 프로세스 실행은 D4 (a)의 `example_pair_punches_and_echoes` 시험이 예제 바이너리를 빌드해 띄우는 방식으로 본다.
+- 예제: `cargo run -p tasty-net-rendezvous --bin tasty-rendezvous -- --config <예시 설정>`으로 서버를 띄우고, `cargo run -p tasty-net-p2p --example p2p_peer -- --listen ...`과 `-- --dial <기기 ID> ...` 두 프로세스가 펀칭·연결·echo를 한다. 예제는 같은 머신 루프백과 같은 망의 두 기기에서 돈다. 예제가 빌드되는지는 D1의 clippy(`--all-targets`)가 본다.
+- 예제 두 프로세스 실행은 `cargo test`의 시험이 아니라 검사 단계 `bash scripts/check.sh p2p-example-pair`(후속 작업이 만든다)가 본다. 시험 바이너리는 예제 경로를 받을 길이 없기 때문이다(`CARGO_BIN_EXE_*`는 `[[bin]]`에만 생긴다, [크레이트 구성](crates.md#크레이트-표)). 이 단계는 `cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous`와 `cargo build --locked -p tasty-net-p2p --example p2p_peer`를 `--message-format=json`으로 돌려 출력의 `executable` 값에서 두 실행 파일 경로를 얻는다. 그래서 OS마다 다른 경로(`target/debug/examples/p2p_peer.exe` 등)를 스크립트가 짐작하지 않는다. 그 뒤 서버 하나와 예제 두 개를 루프백에 띄워 echo를 확인하고, 셋 모두 끝났는지 확인한다. CI는 세 OS의 clippy·test 잡에서 이 단계를 부른다.
 
 ### 모의 NAT
 
@@ -73,11 +74,14 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 
 | 크레이트·파일 | 시험 | 확인하는 것 |
 |---|---|---|
-| `tasty-net-p2p` `tests/punch.rs` | `eim_pair_punches`, `same_lan_uses_host_candidate`, `one_sided_dependent_uses_peer_reflexive`, `dependent_pair_is_refused_without_probes`, `blocked_udp_fails_after_all_attempts` | NAT 조합별로 펀칭이 서거나 정해진 사유로 끝나고, 시도 횟수·시간이 설정값을 따름 |
-| 같은 파일 | `declined_peer_gets_no_address`, `peer_on_other_server_is_not_found`, `disabled_endpoint_sends_nothing`, `self_dial_is_rejected_locally`, `identity_mismatch_fails_handshake`, `unpaired_quic_is_closed_with_not_paired` | 정책: 페어링 거절, 다른 서버, 꺼짐(보낸 패킷 0), 자기 연결, 키 확인 |
-| `tasty-net-p2p` `tests/lifecycle.rs` | `server_reconnect_follows_backoff`, `superseded_endpoint_stops`, `keepalive_keeps_mapping_alive`, `remote_address_change_is_recorded`, `state_events_follow_the_tables` | 재연결, 밀어내기, keepalive, 경로 이동 기록, 상태 기계 전이와 이벤트 원인 |
-| `tasty-net-p2p` `tests/two_process.rs` | `two_process_punch_and_echo`, `example_pair_punches_and_echoes` | 별도 OS 프로세스 두 개(자기 재실행, 예제 바이너리)의 펀칭·연결 |
-| `tasty-net-rendezvous` `tests/server.rs` | `server_never_forwards_device_bytes`, `stun_answers_only_the_sender`, `access_policy_rejects`, `superseded_registration_is_closed`, `limits_return_busy`, `punch_session_expires` | 중계 없음, 반사, 접근 정책, 상태 지우기, 상한 |
+| `tasty-net-p2p` `src/` 단위 시험 | `demux_classifies_first_byte`, `nat_mapping_follows_stun_results`, `probe_response_needs_txid_address_and_token` | 첫 바이트 분류 경계값, RFC 5780 비교 표(응답 누락·IP2 없음 포함), 프로브 응답의 세 조건 |
+| `tasty-net-p2p` `tests/punch.rs` | `eim_pair_punches`, `same_lan_uses_host_candidate`, `one_sided_dependent_uses_peer_reflexive`, `dependent_pair_tries_host_candidates_only`, `dependent_pair_without_host_path_is_unsupported`, `peer_udp_blocked_fails_after_all_attempts`, `server_unreachable_is_rendezvous_unavailable` | NAT 조합별로 펀칭이 서거나 정해진 사유로 끝나고, 시도 횟수·시간이 설정값을 따름. UDP 막힘은 둘로 나눈다: 서버에는 닿고 기기 사이만 막히면 시도를 다 쓴 뒤 `PunchFailed`, 서버에도 닿지 않으면 등록을 못 해 펀칭 없이 `RendezvousUnavailable` |
+| 같은 파일 | `declined_peer_gets_no_address`, `peer_on_other_server_is_not_found`, `disabled_endpoint_sends_nothing`, `self_dial_is_rejected_locally`, `identity_mismatch_fails_handshake`, `unpaired_quic_is_closed_with_not_paired`, `quic_outside_punch_session_is_refused` | 정책: 페어링 거절, 다른 서버(`PeerNotFound`이고 상대가 붙은 다른 서버로 나간 패킷 0), 꺼짐(보낸 패킷 0), 자기 연결, 키 확인, 펀칭 세션에 묶이지 않은 QUIC 거절(`session_mismatch`) |
+| 같은 파일 | `punch_cancel_ends_the_attempt`, `go_timeout_closes_the_offer`, `request_timeout_is_retryable`, `rendezvous_lost_before_go`, `late_probe_success_still_gets_handshake_time` | 취소·기한 경로와 그 오류 값, 창 끝 직전 성공에도 B가 `handshake_ms` 동안 받음 |
+| `tasty-net-p2p` `tests/lifecycle.rs` | `server_reconnect_follows_backoff`, `reconnect_delay_never_exceeds_max_delay`, `superseded_endpoint_stops`, `alpn_mismatch_stops_without_retry`, `server_key_mismatch_stops_without_retry`, `server_limits_mismatch_is_reported`, `keepalive_keeps_mapping_alive`, `client_remap_is_observed_on_acceptor`, `acceptor_remap_ends_by_idle_timeout`, `reflexive_change_triggers_rejudge`, `state_events_follow_the_tables` | 재연결(무작위 폭을 더해도 상한 안), 밀어내기, TLS 단계 불일치의 정지, 서버 한계값 불일치의 알림, keepalive, 주소 바뀜의 비대칭(A 쪽 재매핑은 B에 `remote_address_observed_change`로 남고, B 쪽 재매핑은 `idle_timeout`으로 끝남), `reflexive_changed` 뒤 재판별, 상태 기계 전이와 이벤트 원인 |
+| `tasty-net-p2p` `tests/two_process.rs` | `two_process_punch_and_echo` | 별도 OS 프로세스 두 개(시험 바이너리 자기 재실행)의 펀칭·연결 |
+| `tasty-net-rendezvous` `src/` 단위 시험 | `frame_length_bounds`, `partial_and_coalesced_frames`, `oversized_length_is_rejected_before_allocation` | 길이 접두의 경계값(`max_message_bytes` 범위, u32 끝), 헤더·본문 부분 도착, 두 프레임이 붙어 도착, 도중 종료, 선언 길이 검사 전 할당 없음 |
+| `tasty-net-rendezvous` `tests/server.rs` | `server_never_forwards_device_bytes`, `unknown_fields_are_not_forwarded`, `second_stream_is_refused`, `stun_answers_only_the_sender`, `stun_rate_limit_per_source`, `access_policy_rejects`, `superseded_registration_is_closed`, `limits_return_busy`, `punch_session_expires`, `frame_timeout_closes`, `advertised_addresses_are_used`, `wrong_alpn_fails_in_tls`, `settings_are_logged_at_start` | 중계 없음(상대에게 가는 값이 [rendezvous](rendezvous.md#중계-없음)의 닫힌 표뿐), 반사와 출발 주소별 속도 제한, 접근 정책, 상태 지우기, 상한, 프레임 기한, 광고 주소, ALPN 불일치, 시작 때 설정 로그 |
 | `tasty-net-transport` `tests/p2p_adapter.rs` | `p2p_ordered_stream_preserves_mixed_tag_order`, `rejected_first_stream_ack_is_read`, `bidirectional_last_frames_are_read` | 어댑터 위 채널 계약([전송 추상화](transport.md#p2p의-닫기-범위)) |
 | `tasty-net-demo` `tests/p2p_attach.rs` | `p2p_attach_echo`, `unpaired_peer_is_refused`, `bulk_transfer_matches_bytes`, `connection_table_reports_p2p` | transport 위 P2P 링크를 별도 OS 프로세스 두 개로 |
 
@@ -91,10 +95,13 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 
 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 확인한다. 대상은 `tasty-net-p2p`와 `tasty-net-rendezvous`다. 다른 크레이트는 후속 작업으로 규칙을 맞출 때 같은 시험을 더한다.
 
-- `settings_list_matches_query`(두 크레이트): 설정 모듈의 항목 목록과 `settings()` 조회 결과가 키 단위로 같고, 값을 설정하면 그 항목의 출처가 `configured`로, 안 하면 `default`로 나온다.
+- `settings_list_matches_query`(두 크레이트와 transport의 연결 목록 값): 설정 모듈의 항목 목록과 `settings()` 조회 결과가 키 단위로 같고, 값을 설정하면 그 항목의 출처가 `configured`로, 안 하면 `default`로, OS 값을 읽어 보이는 항목은 `os_default`로 나온다.
+- `defaults_match_design_tables`(두 크레이트와 transport): 코드의 기본값을 설계 문서 표의 기본값과 값까지 비교한다. 비교 대상 표는 [P2P](p2p.md#설정값)의 "이 레포가 정하는 값"·"의존성이 노출하는 값", [rendezvous](rendezvous.md#서버-설정값), [전송 추상화](transport.md#보관-상한과-재연결-도우미)다. 시험은 표를 그대로 옮긴 기대값 목록을 시험 코드에 두고, 표를 고치면 같은 커밋에서 그 목록도 고친다. "quinn 0.11.12 기본"으로 적은 항목은 quinn의 기본 `TransportConfig`·`EndpointConfig`·`ServerConfig`에서 읽은 값과 비교한다.
+- `dependency_settings_are_applied`(p2p): 의존성이 노출하는 값을 바꾸면 그 값이 실제 quinn·rustls 설정에 들어간다(예: `quic.initial_rtt`, `quic.max_uni_streams` 0이면 상대가 연 단방향 스트림이 거절됨, `tls.resumption` 끔).
 - `connection_reports_applied_settings`(p2p): 연결 정보의 `applied`가 그 연결에 쓰인 값과 같고, `RetryWait` 중에는 시도 번호와 남은 시간이 나온다.
-- 정적 검사 `no-hidden-constants`(`scripts/check.sh`의 단계, 후속 작업이 만든다): 두 크레이트의 `src/`에서 설정 모듈과 와이어 형식 모듈 밖의 숫자 리터럴(0과 1 제외)과 `Duration` 생성 리터럴을 찾는다. 찾으면 실패한다. 시간·횟수가 아닌 값은 그 줄에 `// not-a-setting: <이유>`를 달아 뺀다. 시험 코드(`tests/`, `#[cfg(test)]`)는 보지 않는다.
-- 설계 문서 표와의 대조: 같은 검사가 [P2P](p2p.md#설정값)·[rendezvous](rendezvous.md#서버-설정값) 표의 키 이름 집합과 코드의 항목 목록을 비교한다. 값은 비교하지 않는다(기본값의 정본은 코드다).
+- 정적 검사 `no-hidden-constants`(`scripts/check.sh`의 단계, 후속 작업이 만든다): 두 크레이트의 `src/`에서 설정 모듈 밖의 숫자 리터럴과 `Duration` 생성 리터럴을 모두 찾는다. 0과 1도 전역으로 빼지 않는다(재시도 한 번, 동시 처리 상한 1 같은 값을 놓치지 않기 위해서다). 허용은 목록(allowlist) 하나로만 한다. 목록의 각 줄은 파일·리터럴·이유이고(예: 와이어 형식 모듈의 STUN 헤더 길이 20, 배열 첨자 0), 목록에 없는 리터럴이 나오면 실패한다. 와이어 형식 모듈도 통째로 빼지 않고, 그 안의 상수도 목록에 하나씩 올린다([P2P](p2p.md#와이어-형식-상수-설정-아님) 표와 같은 값만). 시험 코드(`tests/`, `#[cfg(test)]`)는 보지 않는다.
+- 이 검사 자체의 시험: 검사 스크립트의 시험 입력에 숨은 값(예: `retries = 1`, `max_inflight = 1`, `Duration::from_millis(0)`)을 둔 파일과 목록에 오른 값만 둔 파일을 두고, 앞의 것은 실패하고 뒤의 것은 통과하는지 본다.
+- 설계 문서 표와의 대조: 같은 검사가 [P2P](p2p.md#설정값)·[rendezvous](rendezvous.md#서버-설정값)·[전송 추상화](transport.md#보관-상한과-재연결-도우미) 표의 키 이름 집합과 코드의 항목 목록을 비교한다. 값의 대조는 위 `defaults_match_design_tables`가 한다.
 
 ## 연결 목록 시험
 
@@ -102,10 +109,11 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 
 | 경로 | 시험 | 확인하는 것 |
 |---|---|---|
-| SSH 정방향 | `crates/tasty-net-demo/tests/ssh_attach.rs`의 `connection_table_reports_ssh_forward` | 기기, `ssh_forward`, 로컬 포워딩 포트 ↔ SSH 대상·원격 포트, `ssh` 경유, 상태 `connected`, 터널을 죽였을 때 `reconnecting` → `connected`와 원인 |
-| SSH 역할 반전 | `ssh_reverse_attach.rs`의 `connection_table_reports_ssh_role_reversed` | 같은 항목과 holder, 받는 쪽의 `ssh_inbound` 항목 |
-| P2P | `p2p_attach.rs`의 `connection_table_reports_p2p` | 기기, `p2p_udp`, 소켓 주소 ↔ 상대 주소, 소개한 서버 주소·공개키, 성공 후보 종류, 상태와 닫힌 뒤 원인 |
-| 공통 | `tasty-net-transport` `tests/connection_table.rs`의 `history_is_capped`, `closed_entries_are_capped` | 이력·끊긴 항목 상한 |
+| SSH 정방향 | `crates/tasty-net-demo/tests/ssh_attach.rs`의 `connection_table_reports_ssh_forward` | 기기, `path = ssh_forward`·`direction = forward`, 구간 셋(`local_forward`·`ssh`·`remote_listener`)의 값, `ssh` 경유이고 rendezvous 없음, 상태 `connected`, 한 터널의 attach·bulk·요청 채널이 항목 하나 안에 있음. 터널을 죽였을 때 옛 항목은 `disconnected`와 원인, 새 항목은 새 ID·`previous` = 옛 ID·`reconnecting` → `connected`. 받는 쪽에는 `ssh_inbound`·`direction = forward`·`loopback` 구간의 항목(채널마다, bulk는 `parent`) |
+| SSH 역할 반전 | `ssh_reverse_attach.rs`의 `connection_table_reports_ssh_role_reversed` | 같은 항목 모양에서 `path = ssh_role_reversed`·`direction = role_reversed`. 받는 쪽 항목은 `ssh_inbound`·`direction = role_reversed` |
+| P2P | `p2p_attach.rs`의 `connection_table_reports_p2p` | 기기, `p2p_udp`, `udp` 구간의 `local_bind`·`local_ip`(모르면 `unknown`) ↔ `remote_addr`, 소개한 서버 주소·공개키, 성공 후보 종류, 상태와 닫힌 뒤 원인 |
+| 토폴로지 | `tasty-net-demo` `tests/ssh_reverse_attach.rs`의 `both_ends_report_one_edge` | 같은 SSH 링크를 양쪽이 보고해도 `LocalLink`에서 만든 엣지가 하나이고 `transport`가 같음 |
+| 공통 | `tasty-net-transport` `tests/connection_table.rs`의 `history_is_capped`, `closed_entries_are_capped`, `event_queue_reports_lag`, `ids_are_stable_and_never_reused`, `redialer_follows_settings` | 이력·끊긴 항목·이벤트 큐 상한, ID 안정성, `Redialer`의 간격·포기 시간·`is_retryable` 정지 |
 
 ## 공통 규칙
 
