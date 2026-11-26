@@ -467,10 +467,11 @@ mod unix {
         fs::write(&lock, b"").unwrap();
         fs::set_permissions(&lock, fs::Permissions::from_mode(0o400)).unwrap();
         let path = dir.join("record");
-        let publication = record(1).publish(&path).unwrap();
+        let published = record(1);
+        let publication = published.publish(&path).unwrap();
         assert_eq!(
             ConnectionRecord::parse(&fs::read_to_string(&path).unwrap()).unwrap(),
-            ParsedRecord::Record(record(1))
+            ParsedRecord::Record(published)
         );
         assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
         assert!(!path.exists());
