@@ -118,21 +118,29 @@ rc_prepare() {
 
 # 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀
 # (shared_token 원소, http.bearer_token)을 시험값 RC_SECRET_PLACEHOLDER로, http.url을 자리표시 주소로
-# 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
+# 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 최상위 키는 iroh-relay Config의 키(아래 CONFIG_KEYS)만,
+# access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
 # 표 머리·점 키·인라인 표·인용 키("tls") 어느 표기로 적었든 파싱 결과의 같은 키가 지워진다.
 # 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로 원래 토큰이 docker 로그 수집기에 닿지 않게 한다.
 # 쓰는 값 종류: 표, 배열(표 원소는 인라인 표), 문자열, 정수, 유한한 실수, 불리언. 날짜·시각 값과 inf·nan은
 # relay 설정에 쓰이지 않으므로 거절한다(rc 1). 다시 쓴 파일을 tomllib로 읽어 쓰려던 값과 같은지도 본다.
-# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 허용 목록 밖의 access 값. 0이 아니면 $2를 남기지 않는다.
+# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 모르는 최상위 키나 허용 목록 밖의 access 값
+# (어느 쪽인지는 RC_CONFIG_REASON에 unknown-key·access-invalid로 둔다). 0이 아니면 $2를 남기지 않는다.
 RC_SECRET_PLACEHOLDER="check-config-placeholder"
+RC_CONFIG_REASON=""
 rc_make_ci_config() {
     local src="$1" out="$2" rc
+    RC_CONFIG_REASON=""
     rm -f "${out:?}"
     python3 -I - "$src" "$out" "$RC_SECRET_PLACEHOLDER" <<'PY'
 import math, sys, tomllib
 
 src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
 
+# iroh-relay v1.5.0 iroh-relay/src/main.rs:95-158 struct Config의 필드(serde rename 없음).
+# iroh는 그 밖의 최상위 키를 무시하지만(오타·인용 키 'access.http.url' 등) 검사는 거절한다.
+CONFIG_KEYS = ("enable_relay", "http_bind_addr", "tls", "enable_quic_addr_discovery", "limits",
+               "enable_metrics", "metrics_bind_addr", "key_cache_capacity", "access")
 ACCESS_KINDS = ("everyone", "allowlist", "denylist", "http", "shared_token")
 URL_PLACEHOLDER = "http://" + ph + ".invalid/"
 
@@ -233,6 +241,11 @@ try:
 except (OSError, tomllib.TOMLDecodeError) as e:
     print(e, file=sys.stderr)
     sys.exit(1)
+unknown = [k for k in a if k not in CONFIG_KEYS]
+if unknown:
+    # 키 이름만 쓴다(값은 토큰 원문일 수 있다).
+    print("unknown-key: " + ", ".join(tstr(k) for k in unknown), file=sys.stderr)
+    sys.exit(7)
 if not access_valid(a):
     print("access-invalid: access must be absent, \"everyone\", or a table with one of everyone, allowlist, denylist, http, shared_token in the checked shape", file=sys.stderr)
     sys.exit(6)
@@ -255,7 +268,14 @@ PY
     rc=$?
     case $rc in
         0) return 0 ;;
-        6) rc_log "$src: access 설정이 검사가 받는 표기가 아니다(relay/README.md 접속 허용. 값은 출력하지 않는다)." ;;
+        6)
+            RC_CONFIG_REASON=access-invalid
+            rc_log "$src: access 설정이 검사가 받는 표기가 아니다(relay/README.md 접속 허용. 값은 출력하지 않는다)."
+            ;;
+        7)
+            RC_CONFIG_REASON=unknown-key rc=6
+            rc_log "$src: iroh-relay 1.5.0 Config에 없는 최상위 키가 있다(위 키 이름. 값은 출력하지 않는다)."
+            ;;
         *) rc_log "$src: CI용 설정을 만들지 못했다."; rc=1 ;;
     esac
     rm -f "${out:?}"
@@ -380,7 +400,7 @@ rc_start_relay() {
     rc_make_ci_config "$src" "$cfg"
     case $? in
         0) ;;
-        6) RC_LAST_FAIL="stage=config reason=access-invalid"; return 1 ;;
+        6) RC_LAST_FAIL="stage=config reason=$RC_CONFIG_REASON"; return 1 ;;
         *) RC_LAST_FAIL="stage=config reason=ci-config"; return 1 ;;
     esac
     rx=$(rc_toml_rx "$cfg") || { RC_LAST_FAIL="stage=config reason=toml-rc$?"; return 1; }
@@ -688,6 +708,31 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
     st_expect access-invalid-no-docker no "$(if [[ -e "$t/docker-calls" ]]; then echo yes; else echo no; fi)"
     grep -q 'n10-scalar-secret' "$t/start.out"
     st_expect access-invalid-start-value-hidden 1 "$?"
+    # iroh-relay Config에 없는 최상위 키는 rc 6(unknown-key)로 끝난다. 키 이름은 쓰고 값은 쓰지 않는다.
+    local unk names=(access.http.url accesss Access)
+    n=0
+    for unk in "'access.http.url' = \"https://n10-user@auth.example.com/x?key=n10-quoted-secret\"" \
+        'accesss = { shared_token = ["n10-typo-top"] }' 'Access.shared_token = ["n10-case-top"]'; do
+        n=$((n + 1))
+        printf 'enable_relay = true\n%s\n' "$unk" > "$t/unk$n.toml"
+        rc_make_ci_config "$t/unk$n.toml" "$t/ci-unk$n.toml" > "$t/unk$n.out" 2>&1
+        st_expect "unknown-key-$n" "6 unknown-key" "$? $RC_CONFIG_REASON"
+        grep -q 'n10-' "$t/unk$n.out"
+        st_expect "unknown-key-$n-value-hidden" 1 "$?"
+        grep -qF "\"${names[n - 1]}\"" "$t/unk$n.out"
+        st_expect "unknown-key-$n-name-shown" 0 "$?"
+        st_expect "unknown-key-$n-ci-file-removed" no "$(if [[ -e "$t/ci-unk$n.toml" ]]; then echo yes; else echo no; fi)"
+    done
+    (
+        docker() { echo called >> "$t/docker-calls-unk"; return 1; }
+        RC_TMP="$t"
+        rc_start_relay unk1 "$t/unk1.toml" > "$t/start-unk.out" 2>&1
+        echo "$? $RC_LAST_FAIL"
+    ) > "$t/start-unk.res"
+    st_expect unknown-key-start "1 stage=config reason=unknown-key" "$(cat "$t/start-unk.res")"
+    st_expect unknown-key-no-docker no "$(if [[ -e "$t/docker-calls-unk" ]]; then echo yes; else echo no; fi)"
+    grep -q 'n10-' "$t/start-unk.out"
+    st_expect unknown-key-start-value-hidden 1 "$?"
     # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다(url은 바뀌므로 allowlist 원소로 본다).
     printf 'access.allowlist = ["https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"]\n' > "$t/emoji.toml"
     rc_make_ci_config "$t/emoji.toml" "$t/ci-emoji.toml"
@@ -740,13 +785,14 @@ sys.exit(0 if "tls" not in d and "enable_quic_addr_discovery" not in d else 1)' 
     done
     st_no_tls "$t/ci-punch.toml"
     st_expect ci-config-punch-only-no-tls 0 "$?"
-    printf 'enable_relay = true\nwhen = 2026-01-01T00:00:00Z\n' > "$t/datetime.toml"
+    # 값 종류 사례는 Config에 있는 키(limits) 아래에 둔다(모르는 최상위 키는 unknown-key로 먼저 끝난다).
+    printf 'enable_relay = true\nlimits.when = 2026-01-01T00:00:00Z\n' > "$t/datetime.toml"
     rc_make_ci_config "$t/datetime.toml" "$t/ci-datetime.toml" 2>/dev/null
     st_expect ci-config-datetime-rejected "1 no" "$? $(if [[ -e "$t/ci-datetime.toml" ]]; then echo yes; else echo no; fi)"
-    printf 'enable_relay = true\nratio = inf\n' > "$t/inf.toml"
+    printf 'enable_relay = true\nlimits.ratio = inf\n' > "$t/inf.toml"
     rc_make_ci_config "$t/inf.toml" "$t/ci-inf.toml" 2>/dev/null
     st_expect ci-config-inf-rejected 1 "$?"
-    printf 'enable_relay = true\nf = 1.5e-3\nlist = [1, "a", [true], { k = 2 }]\n[t.\"q k\"]\nv = -7\n' > "$t/kinds.toml"
+    printf 'enable_relay = true\n[limits]\nf = 1.5e-3\nlist = [1, "a", [true], { k = 2 }]\n[limits.\"q k\"]\nv = -7\n' > "$t/kinds.toml"
     rc_make_ci_config "$t/kinds.toml" "$t/ci-kinds.toml"
     st_expect ci-config-value-kinds 0 "$?"
     python3 -I -c 'import sys, tomllib
