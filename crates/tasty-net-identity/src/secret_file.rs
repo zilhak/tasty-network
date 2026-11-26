@@ -44,6 +44,14 @@ pub(crate) enum OpenFailure {
     Unsafe(UnsafeReason, Option<io::Error>),
 }
 
+/// Why a secret directory could not be created: an I/O failure at `path`, or an element that
+/// appeared meanwhile and is not a directory.
+pub(crate) enum DirFailure {
+    Io(PathBuf, io::Error),
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows uses create_dir_all"))]
+    Unsafe(PathBuf, UnsafeReason),
+}
+
 /// Why a new temporary file could not be created. `Protect` is a failure to prepare its access
 /// restriction (Windows creates the file with it); `Create` is the creation itself.
 #[derive(Debug)]
@@ -95,7 +103,10 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
     let (meta, created) = match lstat() {
         Ok(meta) => (meta, false),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            os::create_dir(&dir).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+            os::create_dir(&dir).map_err(|failure| match failure {
+                DirFailure::Io(path, e) => IdentityError::io(FileOp::CreateDir, &path, e),
+                DirFailure::Unsafe(path, reason) => IdentityError::unsafe_file(&path, reason),
+            })?;
             let meta = lstat().map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
             (meta, true)
         }

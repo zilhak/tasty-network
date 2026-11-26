@@ -5,9 +5,11 @@ use std::{
     io,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
+    thread,
+    time::Duration,
 };
 
-use super::{CreateFailure, OpenFailure};
+use super::{CreateFailure, DirFailure, OpenFailure};
 use crate::error::UnsafeReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,24 +18,80 @@ pub(crate) struct FileId {
     ino: u64,
 }
 
-/// Create the missing elements of `dir` from the top, one at a time. Each directory this call
-/// creates is set to 0700 before the next one is made, because the umask can take owner bits
-/// away (0500 under 0277 would keep the next element from being created). Elements that already
-/// exist, also when another process made them meanwhile, keep their mode.
-pub(super) fn create_dir(dir: &Path) -> io::Result<()> {
-    let mut missing: Vec<&Path> = dir
-        .ancestors()
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect();
-    missing.reverse();
-    for element in missing {
-        match DirBuilder::new().mode(0o700).create(element) {
-            Ok(()) => fs::set_permissions(element, fs::Permissions::from_mode(0o700))?,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+/// How long to wait for another thread to set a directory it just created to 0700.
+const NEW_PARENT_RETRIES: u32 = 50;
+const NEW_PARENT_WAIT: Duration = Duration::from_millis(10);
+
+/// Create the missing elements of `dir`. The deepest existing ancestor is found first (so `/`
+/// is never passed to mkdir, which macOS answers with `EISDIR`), then the elements below it are
+/// created from the top, one at a time. Each directory this call creates is set to 0700 before
+/// the next one is made, because the umask can take owner bits away (0500 under 0277 would keep
+/// the next element from being created). Existing elements keep their mode.
+pub(super) fn create_dir(dir: &Path) -> Result<(), DirFailure> {
+    let mut missing = Vec::new();
+    for element in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        match fs::symlink_metadata(element) {
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(element),
+            Err(e) => return Err(DirFailure::Io(element.to_owned(), e)),
         }
     }
+    for element in missing.into_iter().rev() {
+        create_one_dir(element)?;
+    }
     Ok(())
+}
+
+/// Create one directory element. An element that appeared meanwhile must be a directory, not a
+/// link or a file. Another thread of the same creation may have made the parent and not yet set
+/// it to 0700; while the parent is a directory of the current user, `EACCES` is retried briefly.
+fn create_one_dir(element: &Path) -> Result<(), DirFailure> {
+    let io_failure = |e| DirFailure::Io(element.to_owned(), e);
+    let mut retries = 0;
+    loop {
+        let error = match DirBuilder::new().mode(0o700).create(element) {
+            Ok(()) => {
+                return fs::set_permissions(element, fs::Permissions::from_mode(0o700))
+                    .map_err(io_failure);
+            }
+            Err(e) => e,
+        };
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            let meta = fs::symlink_metadata(element).map_err(io_failure)?;
+            if meta.file_type().is_symlink() {
+                return Err(DirFailure::Unsafe(
+                    element.to_owned(),
+                    UnsafeReason::Symlink,
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(DirFailure::Unsafe(
+                    element.to_owned(),
+                    UnsafeReason::NotRegular,
+                ));
+            }
+            return Ok(());
+        }
+        // Like std's create_dir_all: an element that is a directory by now is fine.
+        if fs::symlink_metadata(element).is_ok_and(|meta| meta.is_dir()) {
+            return Ok(());
+        }
+        let parent_is_ours = || {
+            element
+                .parent()
+                .and_then(|parent| fs::symlink_metadata(parent).ok())
+                .is_some_and(|meta| meta.is_dir() && meta.uid() == effective_uid())
+        };
+        if error.kind() == io::ErrorKind::PermissionDenied
+            && retries < NEW_PARENT_RETRIES
+            && parent_is_ours()
+        {
+            retries += 1;
+            thread::sleep(NEW_PARENT_WAIT);
+            continue;
+        }
+        return Err(io_failure(error));
+    }
 }
 
 pub(super) fn is_link(meta: &fs::Metadata) -> bool {

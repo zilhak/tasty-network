@@ -42,7 +42,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::{CreateFailure, OpenFailure};
+use super::{CreateFailure, DirFailure, OpenFailure};
 use crate::error::UnsafeReason;
 
 /// Volume serial plus the complete 128-bit file ID.
@@ -52,8 +52,8 @@ pub(crate) struct FileId {
     file_id: [u8; 16],
 }
 
-pub(super) fn create_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)
+pub(super) fn create_dir(dir: &Path) -> Result<(), DirFailure> {
+    std::fs::create_dir_all(dir).map_err(|e| DirFailure::Io(dir.to_owned(), e))
 }
 
 /// A symbolic link, junction or any other reparse point.

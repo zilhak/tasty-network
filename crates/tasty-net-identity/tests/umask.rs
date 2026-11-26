@@ -38,8 +38,15 @@ fn new_secret_files_and_directories_are_private_under_a_umask_that_removes_owner
         // 0700 & !0277 = 0500: without the explicit chmod the owner could not write.
         let _mask = Umask::set(0o277);
         DeviceKey::load_or_create(&key_dir).unwrap();
-        // Two missing levels: the intermediate directory must be usable for the next one.
-        DeviceKey::load_or_create(&nested_dir).unwrap();
+        // Two missing levels, created by eight threads at once: an intermediate directory that
+        // another thread made (and has not set to 0700 yet) must not fail the others.
+        let ids: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| DeviceKey::load_or_create(&nested_dir).unwrap().id()))
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
         let record = ConnectionRecord {
             port: 1,
             token: ConnectionToken::issue().unwrap(),
