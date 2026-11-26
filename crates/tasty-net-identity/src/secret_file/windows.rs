@@ -7,31 +7,37 @@ use std::{
     fs::{File, OpenOptions},
     io,
     os::windows::{
+        ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
-        io::AsRawHandle,
+        io::{AsRawHandle, FromRawHandle, RawHandle},
     },
     path::Path,
     ptr,
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree},
+    Foundation::{
+        CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        LocalFree,
+    },
     Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAce,
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo},
         CopySid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
         GetSecurityDescriptorControl, GetTokenInformation, INHERITED_ACE, InitializeAcl,
-        IsValidSid, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        InitializeSecurityDescriptor, IsValidSid, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT,
+        SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+        SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
-        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        CREATE_NEW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_SHARE_NONE, FileIdInfo, GetFileInformationByHandleEx, READ_CONTROL,
+        WRITE_DAC, WRITE_OWNER,
     },
     System::{
-        SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION},
         Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
@@ -60,12 +66,63 @@ pub(super) fn narrow_dir(_dir: &Path, _meta: &std::fs::Metadata) -> io::Result<(
     Ok(())
 }
 
+/// Create the temporary file already private: the security descriptor given to CreateFileW
+/// has the current user as owner and the protected one-entry DACL, so the file never carries
+/// the directory's inherited entries. The share mode is 0, so no other handle can open its data
+/// until this one is closed after the write. `protect` sets and verifies the same security
+/// again before the secret is written.
 pub(super) fn create_temp(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .access_mode(GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
-        .open(path)
+    let sid = Sid::current_user()?;
+    let dacl = private_dacl(&sid)?;
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    let sd: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
+    // SAFETY: sd points to writable SECURITY_DESCRIPTOR storage that lives in this frame.
+    if unsafe { InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: sd was initialized above; the SID buffer outlives every use of sd in this frame.
+    if unsafe { SetSecurityDescriptorOwner(sd, sid.as_psid(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: sd was initialized above; dacl is an initialized ACL that outlives every use of sd.
+    if unsafe { SetSecurityDescriptorDacl(sd, 1, dacl.as_ptr().cast::<ACL>(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: sd was initialized above; only the DACL protection bit is changed.
+    if unsafe { SetSecurityDescriptorControl(sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd,
+        bInheritHandle: 0,
+    };
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    if name[..name.len() - 1].contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL character",
+        ));
+    }
+    // SAFETY: name is a NUL-terminated wide string; attributes and the descriptor, SID and DACL
+    // it points to live until the call returns; no template handle is passed. CREATE_NEW does
+    // not follow an existing link, and FILE_FLAG_OPEN_REPARSE_POINT keeps it that way.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_NONE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateFileW returned a new open handle that nothing else owns; File takes it over.
+    Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
 }
 
 pub(super) fn protect(file: &File) -> io::Result<()> {
@@ -464,5 +521,38 @@ pub(crate) mod testing {
             )
         };
         assert_eq!(rc, ERROR_SUCCESS, "SetNamedSecurityInfoW");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_temporary_file_is_private_and_unshared_from_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".secret.tmp-test");
+        let file = create_temp(&path).unwrap();
+        // Read by path before protect() runs: the creation itself set the security.
+        let acl = testing::read_acl(&path);
+        assert!(
+            acl.owner_is_current_user && acl.protected && !acl.dacl_null,
+            "{acl:?}"
+        );
+        assert_eq!(acl.entries.len(), 1, "{acl:?}");
+        assert!(
+            acl.entries[0].current_user && acl.entries[0].flags == 0,
+            "{acl:?}"
+        );
+        assert_eq!(acl.entries[0].mask, FILE_ALL_ACCESS, "{acl:?}");
+        // ERROR_SHARING_VIOLATION while the creating handle is open.
+        let other = File::open(&path).unwrap_err();
+        assert_eq!(other.raw_os_error(), Some(32), "{other:?}");
+        drop(file);
+        File::open(&path).unwrap();
+        assert_eq!(
+            create_temp(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
     }
 }
