@@ -6,7 +6,7 @@
 
 | 용어 | 뜻 |
 |---|---|
-| 전송(transport) | 두 기기 사이에 바이트 채널을 만드는 방법. SSH 정방향, SSH 역할 반전, P2P(iroh), 시험용 메모리 |
+| 전송(transport) | 두 기기 사이에 바이트 채널을 만드는 방법. SSH 정방향, SSH 역할 반전, P2P(`tasty-net-p2p`의 quinn 연결을 쓰는 어댑터), 시험용 메모리 |
 | 채널(channel) | 순서를 지키는 양방향 프레임 흐름 하나. SSH에서는 터널을 지나는 TCP 연결 하나, P2P에서는 QUIC 양방향 스트림 하나 |
 | 링크(`Link`) | handshake를 마친 채널 묶음. 목적(`purpose`)이 `attach`이면 순서 채널 하나와 나중에 여는 bulk 채널들을 가진다 |
 | dialer / acceptor | 채널을 연 쪽 / 받은 쪽. SSH를 누가 띄웠는지, 누가 holder인지와 별개다 |
@@ -16,7 +16,7 @@
 두 층으로 나눈다. 전송마다 다른 것은 아래 층(`RawChannel`)뿐이고, handshake·heartbeat·링크 수명은 위 층이 모든 전송에 같게 한다.
 
 - `RawChannel`: 전송 구현이 제공하는 채널 하나. 읽기 반쪽(`Read`), 쓰기 반쪽(`Write`), 제어(`ChannelControl`: `set_read_timeout`, `set_write_timeout`, `shutdown_write`, `shutdown_and_wake`, P2P의 `close_reason`)로 나눌 수 있다.
-- `Transport`: `connect(&self, target, &AttemptCancel) -> Result<Connection, ConnectError>`로 순서 채널을 연다. `Connection`은 그 채널(`channel`)과 이번 연결이 닿은 끝점(`endpoint: Endpoint`)이다. 같은 끝점에 두 번째 채널(bulk·요청)을 여는 `Endpoint::connect_more`가 있고, `Transport::connect_more(&Endpoint, ..)`는 그것을 부른다. 끝점은 SSH 경로의 토큰(발견한 연결 레코드의 것)이나 P2P의 `remote_id`도 들고 있어 handshake가 쓴다. SSH 구현은 터널을 한 번 만들고 그 로컬 포트에 TCP를 다시 연다. P2P 구현은 같은 QUIC 연결에 양방향 스트림을 하나 더 연다.
+- `Transport`: `connect(&self, target, &AttemptCancel) -> Result<Connection, ConnectError>`로 순서 채널을 연다. `Connection`은 그 채널(`channel`)과 이번 연결이 닿은 끝점(`endpoint: Endpoint`)이다. 같은 끝점에 두 번째 채널(bulk·요청)을 여는 `Endpoint::connect_more`가 있고, `Transport::connect_more(&Endpoint, ..)`는 그것을 부른다. 끝점은 SSH 경로의 토큰(발견한 연결 레코드의 것)이나 P2P 연결이 확인한 상대 기기 ID(`P2pConnection::remote_device_id()`)도 들고 있어 handshake가 쓴다. SSH 구현은 터널을 한 번 만들고 그 로컬 포트에 TCP를 다시 연다. P2P 구현은 같은 QUIC 연결에 양방향 스트림을 하나 더 연다.
 - `Listener`: 받는 쪽. `accept() -> Result<RawChannel, AcceptError>`. SSH 경로에서는 소비자의 루프백 TCP listener가 받은 소켓을 `RawChannel::from_tcp`로 감싼다. 첫 줄 분기(`stream.open`인지 일반 JSON-RPC인지)는 소비자가 하고, 이미 읽은 바이트를 넘긴다(아래 "받는 쪽 진입").
 - 위 층 함수: `dial_handshake`(dialer)와 `accept_handshake`(acceptor)가 `RawChannel`에 handshake v2를 돌려 `Link`(또는 bulk·요청 채널)를 만든다([handshake v2](handshake.md)).
 
@@ -76,7 +76,7 @@ bulk 채널은 전송 구조상 언제나 부모 링크의 dialer가 열고 acce
 | `InvalidData`(모르는 tag, 상한 초과) | `Protocol` |
 | 그 밖 | `Other` |
 
-P2P 구현은 QUIC 오류를 이 `ErrorKind`로 바꿔 돌려준다. 상대가 연결이나 스트림을 닫음 → `ConnectionReset` 또는 `UnexpectedEof`, QUIC idle timeout → `TimedOut`, 이 쪽이 닫음 → `ConnectionAborted`. 그래서 소비자는 전송 종류를 모른 채 같은 분류를 쓴다. 연결 전체가 종료 코드와 함께 닫힌 경우의 사유는 분류가 아니라 `Link::close_reason()`으로 받는다([handshake v2](handshake.md) "QUIC 종료 코드"). 정확한 대응은 `tasty-net-p2p` 시험이 정본이다.
+`tasty-net-p2p`는 QUIC 오류를 이 `ErrorKind`로 바꿔 돌려주고 어댑터는 그대로 쓴다. 상대가 연결이나 스트림을 닫음 → `ConnectionReset` 또는 `UnexpectedEof`, QUIC idle timeout → `TimedOut`, 이 쪽이 닫음 → `ConnectionAborted`. 그래서 소비자는 전송 종류를 모른 채 같은 분류를 쓴다. 연결 전체가 종료 코드와 함께 닫힌 경우의 사유는 분류가 아니라 `Link::close_reason()`으로 받는다([handshake v2](handshake.md) "QUIC 종료 코드"). 정확한 대응은 `tasty-net-p2p` 시험이 정본이다. 경로가 펀칭된 직접 경로 하나뿐이므로 iroh 설계에 있던 "relay로 되돌아감" 같은 경로 사유는 없다.
 
 ## 시도 취소, 닫기, 회수
 
@@ -103,7 +103,7 @@ tasty attach writer의 종료 순서(`tasty:crates/tasty-remote/src/transport.rs
 
 ### P2P의 닫기 범위
 
-P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크와 채널이 함께 쓴다. 한 연결 위에 attach 링크 여럿과 요청 채널이 있을 수 있다.
+P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크와 채널이 함께 쓴다. 아래 규칙은 transport의 P2P 어댑터가 지킨다. `tasty-net-p2p`는 스트림·연결·종료 코드의 수단만 준다([P2P](p2p.md#스트림과-연결-어댑터와의-경계)). 한 연결 위에 attach 링크 여럿과 요청 채널이 있을 수 있다.
 
 | 일어난 일 | 닫히는 것 | 닫는 방식 | 남는 것 |
 |---|---|---|---|
@@ -111,12 +111,12 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | 요청 채널 닫기 | 그 스트림 | 정상 종료 | 나머지 |
 | 부모 링크의 정상 종료(양쪽이 `half_close`를 마치고 reader가 끝남, 위 "종료 순서") | 그 링크의 순서 스트림과 그 링크를 부모로 연 bulk 스트림 | 순서 스트림은 정상 종료, 진행 중 bulk 스트림은 강제 종료(아래) | 같은 연결의 다른 링크·요청 채널 |
 | `LinkCloser::force_close`, `Link` drop, 시도 취소 | 그 링크(또는 시도)의 스트림 | 강제 종료 | 같은 연결의 다른 링크·요청 채널 |
-| 페어링 거절, 직접 경로 정책 종료(`DirectPathTimeout`·`DirectPathLost`) | QUIC 연결 전체와 그 위 모든 링크·채널. 종료 코드는 [handshake v2](handshake.md) "QUIC 종료 코드" | `Connection::close` | 없음 |
+| 페어링 거절(`not_paired`) | QUIC 연결 전체와 그 위 모든 링크·채널. 종료 코드는 [handshake v2](handshake.md) "QUIC 종료 코드" | `Connection::close` | 없음 |
 | 연결 위 마지막 링크·채널이 닫힘, endpoint 종료 | QUIC 연결(코드 0 `closed`) | 아래 "연결을 닫는 때" | 없음 |
 
 - 정상 종료는 마지막 프레임을 상대가 읽게 하는 종료다. 송신 스트림을 `finish`한다. 거절 ACK와 요청 채널의 마지막 응답은 이 방식으로 보낸다. 송신 스트림의 완료 확인(`SendStream::stopped`)은 상대 QUIC 스택이 받았다는 뜻일 뿐 상대 앱이 읽었다는 뜻이 아니므로, 그것을 근거로 연결을 닫지 않는다(아래).
 - 강제 종료는 남은 바이트를 버린다. 송신 쪽 `reset`과 수신 쪽 `stop`을 쓴다. `force_close`, 시도 취소, 진행 중 bulk를 부모와 함께 끊을 때만 쓴다.
-- 연결을 닫는 때: 코드 0 종료는 마지막 데이터를 받는 쪽이 한다. `Connection::close`는 진행 중 작업을 모두 실패시키고, 상대 QUIC 스택에 도착했어도 상대 앱이 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(iroh `src/endpoint/connection.rs` `close` 설명).
+- 연결을 닫는 때: 코드 0 종료는 마지막 데이터를 받는 쪽이 한다. `Connection::close`는 진행 중 작업을 모두 실패시키고, 상대 QUIC 스택에 도착했어도 상대 앱이 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(quinn `Connection::close` 설명, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.2).
   - QUIC 연결 위 스트림은 그 연결의 dialer만 연다. 연결을 받은 쪽이 채널을 열려면 자기 QUIC 연결을 새로 연다. 연결을 받은 쪽이 연 스트림은 받지 않는다(강제 종료). 그래서 그 연결 위 모든 채널에서 채널 dialer = 연결 dialer다.
   - 정상 종료에서 acceptor는 자기 reader가 상대 EOF를 읽은 뒤에만 자기 송신을 `finish`한다(`drain_cap`까지 오지 않으면 그때 `finish`). acceptor가 먼저 끝내고 싶으면 끝내는 프레임(예: `force_detached` 통지)을 보내고 상대의 `half_close`를 기다린다. 거절 ACK만 예외다. 상대가 더 보낼 것이 없으므로 ACK 뒤 바로 `finish`한다. 그래서 dialer가 acceptor의 EOF를 읽었으면 양방향 데이터가 모두 상대 앱에 소비된 뒤다.
   - 그 QUIC 연결을 연 dialer가 닫는다. dialer는 연결 위 마지막 채널의 reader가 acceptor의 EOF까지 읽은 뒤 코드 0으로 닫는다. 거절 ACK와 요청 채널의 마지막 응답도 dialer가 받는 쪽이므로, dialer가 그것을 읽은 뒤에 연결이 닫힌다.
@@ -167,7 +167,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 
 - mesh는 지금처럼 순서 채널에 둔다. O6이 MeshInput을 Data·확인 지점과 한 순서로 묶기 때문이다. 나중에 대역폭 때문에 나눈다면 서버→client `MeshData`만 옮길 수 있고, MeshContext·MeshInput은 순서 채널에 남아야 하며, 손실 통지가 채널마다 따로 필요하다. 그때 이 표를 먼저 고친다.
 - bulk는 지금도 별도 소켓이다(O12). bulk 채널과 순서 채널 사이에 순서 계약은 없다. bulk의 시작 선언·데이터·완료와 그 결과·손실 통지는 모두 그 bulk 채널 안에서 오간다. 지금 tasty에서는 `StreamHub`가 연결과 `bulk_workspace` 결속을 기록하고(`register_bulk`), 시작(`BulkBegin`)과 완료(`BulkCommit`) 인가는 도메인이 한다(`tasty:src/remote/server.rs`). 이 레포의 bulk 자격은 그 앞에 새로 더하는 검사이고, 도메인의 시작·완료 인가는 그대로 남는다.
-- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 전송마다 그 전송을 가진 크레이트에 둔다. 메모리·루프백 TCP는 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`(handshake를 마친 루프백 링크는 `tests/loopback.rs`의 `a_handshaken_link_keeps_the_order_of_mixed_tag_frames`), P2P는 `tasty-net-p2p`의 `tests/`에 있는 `ordered_stream_preserves_mixed_tag_order`(실제 iroh endpoint 두 개와 시험 안 relay)다. transport는 p2p에 의존하지 않으므로(dev-dependency로도 두지 않는다) iroh 시험을 transport에 두지 않는다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
+- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 전송마다 그 전송을 가진 크레이트에 둔다. 메모리·루프백 TCP는 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`(handshake를 마친 루프백 링크는 `tests/loopback.rs`의 `a_handshaken_link_keeps_the_order_of_mixed_tag_frames`), P2P는 `tasty-net-transport`의 `tests/`에 있는 `p2p_ordered_stream_preserves_mixed_tag_order`(어댑터 위, 실제 P2P endpoint 두 개와 프로세스 안 rendezvous 서버)다. 프레임 순서는 어댑터 위의 계약이므로 transport에 둔다. `tasty-net-p2p`는 프레임을 모르고, 자기 시험에서는 바이트 순서만 본다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
 
 ## 역할
 
@@ -192,7 +192,7 @@ handshake의 역할 필드는 `holder: "dialer" | "acceptor"` 하나다. 나머�
 
 ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제공 쪽이 보낸다. 정방향은 acceptor, 역할 반전은 dialer A다. 역할 반전에서 A는 ACK(B→A)를 받은 다음 descriptor를 보내고, B는 ACK를 보낸 뒤 descriptor를 기다린다.
 
-자기 자신과의 연결은 역방향에서도 거절한다(`tasty:docs/dev-guide/attach-behavior.md` "Self-attach 거절 검증"). handshake가 양쪽 인스턴스 ID를 주고받고 같으면 `SelfAttach`로 거절한다. P2P에서 두 쪽이 같은 기기 키를 쓰면 iroh가 연결 단계에서 `SelfConnect`로 거절하고, 이 레포는 그것도 `SelfAttach`로 분류한다([P2P](p2p.md)).
+자기 자신과의 연결은 역방향에서도 거절한다(`tasty:docs/dev-guide/attach-behavior.md` "Self-attach 거절 검증"). handshake가 양쪽 인스턴스 ID를 주고받고 같으면 `SelfAttach`로 거절한다. P2P에서 자기 기기 ID로 걸면 `tasty-net-p2p`가 네트워크에 보내기 전에 `P2pConnectError::SelfAttach`로 끝내고(서버도 `self`로 거절한다), 어댑터는 그것도 `SelfAttach`로 분류한다([P2P](p2p.md#endpoint와-런타임)).
 
 ## 요청 채널 (포트 기반 조회·생성·상태 확인)
 
@@ -203,3 +203,30 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 - P2P에서도 같은 요청 채널을 지원한다. 목록 조회·생성·상태 확인이 SSH와 P2P에서 같다.
 - 자기 인스턴스 판정은 handshake의 인스턴스 ID 비교가 대신한다. `system.info`로 다시 물을 필요가 없다.
 - 요청 채널이 생기면 tasty는 포워딩 포트의 일반 JSON-RPC를 막을 수 있다. 막는 일은 tasty 몫이다.
+
+## 연결 목록
+
+사용자 결정(2026-11-27, 원문 "연결 자체를 위한 자동 동작은 만들어야하는데, 네트워크 장치간 어떻게 연결되어있는지 명확해야한단거야"): 라이브러리는 "지금 이 기기가 어떤 기기와, 어떤 경로로, 어떤 주소·포트 쌍으로, 어느 rendezvous 서버를 통해 소개받아 연결돼 있는지"를 조회할 수 있는 목록으로 준다.
+
+- 자리: `tasty-net-transport`의 `ConnectionTable`이다. 세 경로(P2P, SSH 정방향, SSH 역할 반전)를 모두 담아야 하고, 세 경로를 다 아는 크레이트가 transport뿐이기 때문이다. `tasty-net-p2p`는 자기 연결 정보(`P2pConnectionInfo`, [P2P](p2p.md#연결-정보))만 내보내고, transport가 그것을 읽어 항목을 채운다. P2P 크레이트는 transport에 의존하지 않는다([크레이트 구성](crates.md#p2p-크레이트-격리)).
+- 조회: `ConnectionTable::connections() -> Vec<ConnectionInfo>`(스냅샷), `ConnectionTable::events()`(전이 이벤트, 큐 상한은 설정값). `Transport`·`Listener`·handshake는 연결을 열고 받을 때 이 표에 항목을 만들고 상태를 바꾼다. 소비자가 항목을 직접 만들거나 고치는 API는 없다.
+- 항목 하나는 "한 상대에 닿은 한 물리 연결"이다. SSH는 터널 하나(공유 키 하나, 위 "터널 수명과 재연결"), P2P는 QUIC 연결 하나다. 그 위의 링크·채널은 항목 안의 개수와 목록으로 담는다.
+
+| 필드 | 뜻 | SSH 정방향·역할 반전(SSH를 띄운 쪽) | SSH 받는 쪽(루프백 listener) | P2P |
+|---|---|---|---|---|
+| `peer` | 상대 기기 ID, 인스턴스 ID(handshake 뒤), 소비자가 준 표시 이름 | handshake가 확인한 값 | handshake가 확인한 값 | QUIC가 확인한 기기 ID + handshake의 인스턴스 ID |
+| `path` | `PathKind` | `ssh_forward` · `ssh_role_reversed` | `ssh_inbound`(루프백으로 받은 연결. 이 쪽은 SSH인지 알 수 없고 루프백 포트가 SSH 포워딩 전용이라는 tasty의 전제를 따른다, [위협 모델](threat-model.md) T2·T3) | `p2p_udp` |
+| `local_addr`, `remote_addr` | 주소·포트 쌍 | 로컬 포워딩 포트(`127.0.0.1:<포트>`) ↔ SSH 대상(`<호스트>:<포트>`, 프로필 값 그대로)과 원격 리스너 포트 | 루프백 listener 주소 ↔ 루프백 상대 주소 | P2P 소켓 주소 ↔ 펀칭으로 얻은 상대 주소(경로 이동 뒤에는 새 주소) |
+| `via` | 소개·경유 | `ssh{target, remote_port}` | `loopback` | `rendezvous{server_addr, server_key}`와 성공 후보 종류, 양쪽 `NatMapping` |
+| `state` | `connecting` · `connected` · `reconnecting` · `disconnected` | 터널 준비·handshake 중 / 링크 성립 / 재연결 대기·시도 중 / 끝 | handshake 중 / 성립 / (받는 쪽은 재연결하지 않는다) / 끝 | P2P 상태 기계의 `Requesting`~`Handshaking` / `Connected` / 재연결 / `Closed` |
+| `phase` | 세부 단계 | 터널 준비, 포트 발견, handshake | handshake | P2P 상태 기계의 상태 이름과 값 |
+| `last_cause` | 마지막 전이 원인 | 터널 종료, 원격 리스너 없음, 거절 사유, heartbeat 만료 등 | 거절 사유, 상대 닫음 등 | P2P 전이 원인(종료 코드 포함) |
+| `history` | 전이와 경로 바뀜 이력 | 상태 전이, 재연결로 바뀐 원격 포트·`instance_id` | 상태 전이 | 상태 전이, `remote_address_changed` |
+| `links` | 그 위의 링크·채널 | attach 링크(holder 포함), bulk·요청 채널 수 | 같음 | 같음 |
+| `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
+| `applied` | 이 연결에 적용된 설정값과 진행 값 | 재연결 시도 번호, 다음 시도까지 남은 시간, 적용된 시간 값 | 적용된 시간 값 | P2P 연결의 `applied`·`attempt`를 그대로 |
+
+- 이력 상한: 항목마다 `connections.history_limit`(기본 32)개다. 넘치면 오래된 것부터 버리고 버린 수를 센다. `disconnected` 항목은 `connections.keep_closed`(기본 16)개까지 최근 것만 남기고 지운다. 끊긴 이유를 사용자가 볼 수 있게 하되 목록이 끝없이 자라지 않게 하기 위해서다.
+- 재연결: `reconnecting`은 transport의 재연결 도우미 `Redialer`가 그 항목을 다시 거는 동안의 상태다. `Redialer`는 설정값(처음 간격, 배수, 상한, 무작위 폭, 횟수 상한)으로 backoff를 하고, 거절 사유의 `is_retryable()`이 false면 멈춘다. 소비자가 `Redialer`를 쓰지 않고 직접 다시 걸면 옛 항목은 `disconnected`로 끝나고 새 항목이 `connecting`으로 생긴다. 어느 쪽이든 목록이 지금 일어나는 일을 보인다. 지금 "언제 다시 거는지는 소비자가 정한다"(위 "터널 수명과 재연결")는 규칙은 그대로이고, `Redialer`는 그 결정을 설정값으로 맡길 수 있는 선택지다.
+- 토폴로지와의 관계: topology의 자기 엣지 보고(`LocalLink`)는 이 목록에서 만든다. `path`가 엣지의 `transport` 값이 되고 `rtt`가 `rtt_ms`가 된다([토폴로지](topology.md#엣지-목록-입력)). 주소·서버 필드는 원격 응답에 싣지 않는다.
+- 설정값: `connections.history_limit`, `connections.keep_closed`, `connections.event_queue_limit`, `Redialer`의 값은 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 따른다. transport의 나머지 기존 상수는 그 규칙의 후속 작업 대상이다.

@@ -27,7 +27,7 @@
 
 v2의 거절 ACK는 `ok`·`proto`·`error`를 언제나 싣는다. `error`는 `ok:false`일 때 필수인 영어 한 문장이다. v1 클라이언트는 이 문자열을 `stream.open rejected: <error>`로 그대로 보여 주므로(`tasty:crates/tasty-ipc/src/client/stream.rs`) v1 사용자에게 보이는 문구는 이 값이다. `legacy_protocol` 거절의 `error`는 `unsupported stream proto 1 (server speaks 2); update Tasty on the connecting machine`로 고정한다. 앞부분은 지금 v1 서버의 거절 문구와 같은 모양이다(`tasty:src/adapters/production/tcp_ipc_server.rs` `validate_stream_proto`). 다른 사유의 `error` 문구는 `handshake.rs`가 사유마다 고정한다. v2 dialer는 `error`가 아니라 `reason`으로 분기한다.
 
-tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되지 않는다. 사용자에게는 거절 사유로 "상대를 업데이트하라"는 안내가 나간다(문구는 tasty 몫). 이 점은 [남은 결정](index.md#남은-결정)에 적었다.
+tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되지 않는다. 사용자에게는 거절 사유로 "상대를 업데이트하라"는 안내가 나간다(문구는 tasty 몫). 사용자 결정(2026-11-27): 마이그레이션은 지원하지 않는다. 허용 설정, 구버전 호환 계층, 별도 안내 작업을 두지 않는다. P2P 경로도 같다.
 
 ## 흐름 (SSH 경로)
 
@@ -57,12 +57,12 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 
 ## 흐름 (P2P 경로)
 
-- iroh 연결은 TLS로 양쪽 endpoint ID를 확인한다. 받는 쪽 `tasty-net-p2p`는 `Connection::remote_id()`가 페어링 허용 목록에 있는지 QUIC 연결을 받은 직후에 본다. 없으면 스트림을 받지 않고 QUIC 연결을 종료 코드 `not_paired`(아래 "QUIC 종료 코드")로 닫는다. ACK를 보내지 않으므로 `not_paired`는 ACK의 `reason`이 아니라 QUIC 종료 코드이고, dialer는 이것을 로컬 오류 `HandshakeError::Closed(P2pCloseReason::NotPaired)`로 받는다.
-- 메시지 1의 `token`·`nonce`와 메시지 2·3의 서명은 없다. 기기 ID는 `remote_id()`로 정한다. 메시지 1의 `device_id`가 `remote_id()`와 다르면 `Malformed`.
+- P2P 연결은 QUIC의 TLS 1.3에서 양쪽 기기 키를 raw public key로 확인한다([P2P](p2p.md#인증)). 연결이 확인한 상대 기기 ID는 `P2pConnection::remote_device_id()`다(아래에서 "연결의 상대 기기 ID"). 받는 쪽 `tasty-net-p2p`는 그 기기 ID가 페어링 허용 목록에 있는지 QUIC 연결을 받은 직후에 본다(펀칭 요청 단계에서 이미 한 번 거른다). 없으면 스트림을 받지 않고 QUIC 연결을 종료 코드 `not_paired`(아래 "QUIC 종료 코드")로 닫는다. ACK를 보내지 않으므로 `not_paired`는 ACK의 `reason`이 아니라 QUIC 종료 코드이고, dialer는 이것을 로컬 오류 `HandshakeError::Closed(P2pCloseReason::NotPaired)`로 받는다.
+- 메시지 1의 `token`·`nonce`와 메시지 2·3의 서명은 없다. 기기 ID는 연결의 상대 기기 ID로 정한다. 메시지 1의 `device_id`가 그 값과 다르면 `Malformed`. 기기 확인은 TLS가 한 번만 하고 handshake v2는 필드가 맞는지만 본다.
 - 그래서 P2P 흐름은 1 → (challenge 대신 받는 쪽 정보 `hello = {device_id, instance_id, caps}`) → 4다. 메시지 1·hello·4의 필드 이름은 SSH 경로와 같다.
 - 받는 쪽은 아래 "검사 순서"를 모두 마친 뒤에 hello와 성공 ACK를 이어 보낸다. 검사에 실패하면 hello 없이 거절 ACK만 보낸다. 그래서 거절된 상대는 받는 쪽 인스턴스 ID와 `caps`를 받지 못한다.
-- dialer는 성공 ACK를 받은 뒤 hello의 `device_id`가 자기 쪽 `remote_id()`와 같은지, `instance_id`가 자기와 다른지 본다. 어긋나면 그 스트림을 닫고 로컬 오류로 끝낸다.
-- 같은 기기 키(같은 endpoint ID)끼리는 iroh가 연결 단계에서 `SelfConnect`로 거절한다. 이 레포는 그 오류를 로컬 오류 `SelfAttach`로 분류한다. 인스턴스 ID 비교는 연결이 선 경우에만 한다([P2P](p2p.md)).
+- dialer는 성공 ACK를 받은 뒤 hello의 `device_id`가 연결의 상대 기기 ID와 같은지, `instance_id`가 자기와 다른지 본다. 어긋나면 그 스트림을 닫고 로컬 오류로 끝낸다.
+- 자기 기기 ID로 거는 연결은 `tasty-net-p2p`가 네트워크에 보내기 전에 `P2pConnectError::SelfAttach`로 끝낸다. transport 어댑터는 그것을 로컬 오류 `SelfAttach`로 분류한다. 인스턴스 ID 비교는 연결이 선 경우에만 한다([P2P](p2p.md)).
 
 ## 상태 표
 
@@ -73,7 +73,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 | SSH · bulk | `proto, purpose, token, instance_id, bulk_credential` (+`ext`) | ACK | 검사 1~3과 8~9 실패: 거절 ACK. 서명 없음(자격이 부모 링크의 인증을 잇는다) | 도메인이 정한다(tasty는 보내는 쪽의 `ClientLossNotify` 선언, 이어서 `BulkBegin`. [전송 추상화](transport.md) O12). 이 레포는 정하지 않는다 |
 | P2P · attach | `proto, purpose, device_id, instance_id, holder, caps` (+`ext`) | hello → ACK | 페어링 실패: QUIC 연결 종료(`not_paired`). 검사 실패: hello 없이 거절 ACK | SSH · attach와 같음 |
 | P2P · request | `proto, purpose, device_id, instance_id, caps` | hello → ACK | P2P · attach와 같음. 역할 검사 없음 | SSH · request와 같음 |
-| P2P · bulk | `proto, purpose, instance_id, bulk_credential` (+`ext`) | ACK | 자격이 이 스트림과 같은 QUIC 연결 위 attach 링크의 것인지 본다. 그래서 상대 기기 ID는 메시지 1의 필드가 아니라 연결의 `remote_id()`가 부모 링크의 상대와 같은 것으로 확인된다. 실패: 거절 ACK | SSH · bulk와 같음 |
+| P2P · bulk | `proto, purpose, instance_id, bulk_credential` (+`ext`) | ACK | 자격이 이 스트림과 같은 QUIC 연결 위 attach 링크의 것인지 본다. 그래서 상대 기기 ID는 메시지 1의 필드가 아니라 연결의 상대 기기 ID가 부모 링크의 상대와 같은 것으로 확인된다. 실패: 거절 ACK | SSH · bulk와 같음 |
 
 거절 ACK를 보낸 쪽은 그 채널을 정상 종료로 닫는다. 상대가 ACK를 읽을 수 있게 송신을 끝낸 뒤 닫는다는 뜻이다(TCP는 `shutdown(Write)`, P2P는 `finish`). 성공 ACK 뒤에만 일반 프레임 흐름이 시작된다. P2P에서 채널을 닫는 것은 그 스트림만이고 QUIC 연결은 닫지 않는다. 그 연결이 거절로 비게 되면 거절 ACK를 읽은 dialer가 연결을 닫는다([전송 추상화](transport.md) "P2P의 닫기 범위"의 "연결을 닫는 때").
 
@@ -83,7 +83,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 
 1. 메시지 1이 JSON 객체로 읽히는지와 `proto`(`Malformed`·`LegacyProtocol`·`UnsupportedProtocol`, 위 "구버전 처리"). 토큰이 없는 v1 요청도 여기서 `LegacyProtocol`이 된다
 2. 토큰(SSH 경로). `token` 필드가 없으면 `TokenMissing`, 값이 틀리면(형식이 64자 hex가 아닌 경우 포함) `TokenInvalid`. P2P의 페어링 검사는 이보다 앞서 QUIC 연결 단계에서 끝난다
-3. 목적별 필드(`Malformed`). `purpose` 값, 위 상태 표의 필수 필드, 필드 타입, `caps` 이름 문법, P2P의 `device_id`가 `remote_id()`와 같은지. 토큰 뒤에 두므로 토큰 없는 상대는 어떤 필드가 틀렸는지도 알 수 없다. SSH 경로는 여기까지 통과해야 challenge를 보낸다
+3. 목적별 필드(`Malformed`). `purpose` 값, 위 상태 표의 필수 필드, 필드 타입, `caps` 이름 문법, P2P의 `device_id`가 연결의 상대 기기 ID와 같은지. 토큰 뒤에 두므로 토큰 없는 상대는 어떤 필드가 틀렸는지도 알 수 없다. SSH 경로는 여기까지 통과해야 challenge를 보낸다
 4. 서명(SSH 경로, proof를 받은 뒤, `SignatureInvalid`)
 5. 자기 자신(`SelfAttach`). 기록을 바꿀 수 있는 TOFU보다 앞에 둔다. 자기 자신과의 연결이 빈 프로필에 자기 키를 기록해 두면, 사용자가 프로필 주소를 고친 뒤에도 그 기록 때문에 다시 등록해야 하기 때문이다
 6. TOFU(`PeerKeyMismatch`). 소비자가 `PeerKeyStore`를 준 쪽만 본다. 저장소 자체가 실패하면 거절 사유가 아니다. 그 쪽은 ACK 없이 채널을 닫고 로컬 오류 `HandshakeError::Store`로 끝낸다. tasty dialer는 원격 프로필 이름으로 상대 키를 기록한다. 받는 쪽은 상대를 부를 이름이 없으므로 보통 주지 않고, 확인된 상대 기기 ID를 `Link::peer()`로 받아 기록·표시한다
@@ -95,7 +95,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 
 ### 역할 반전 승인의 기한
 
-- 승인 대기는 `handshake_timeout`에 들어가지 않는다. `LinkTimeouts.role_proposal_timeout`(소비자가 줌)이 따로 잰다. 승인 콜백은 검사 1~6을 모두 통과한 뒤에만 부른다. 그래서 SSH에서는 토큰·서명, P2P에서는 페어링 목록에 있는 `remote_id()`가 확인된 상대만 승인 대기에 들어간다. 받는 쪽은 승인 콜백을 부른 때부터 이 시간 안에 답이 없으면 `RoleRefused`로 거절한다. 그 밖의 단계는 `handshake_timeout`을 쓴다.
+- 승인 대기는 `handshake_timeout`에 들어가지 않는다. `LinkTimeouts.role_proposal_timeout`(소비자가 줌)이 따로 잰다. 승인 콜백은 검사 1~6을 모두 통과한 뒤에만 부른다. 그래서 SSH에서는 토큰·서명, P2P에서는 페어링 목록에 있는 연결의 상대 기기 ID가 확인된 상대만 승인 대기에 들어간다. 받는 쪽은 승인 콜백을 부른 때부터 이 시간 안에 답이 없으면 `RoleRefused`로 거절한다. 그 밖의 단계는 `handshake_timeout`을 쓴다.
 - dialer는 `holder = "acceptor"`로 연결할 때 ACK 기한을 `handshake_timeout + role_proposal_timeout`으로 잡는다. 양 끝이 같은 `LinkTimeouts` 값을 쓰는 것을 전제로 하고, 다르면 짧은 쪽이 먼저 끝난다.
 - 도메인 등록은 검사 9의 콜백 안에서만 일어난다. 콜백은 승인이 돌아온 뒤 handshake가 아직 살아 있을 때(기한·취소·상대 종료가 먼저 이기지 않았을 때)만 불린다. 그래서 늦게 돌아온 승인은 등록을 남기지 않는다.
 - 콜백이 돌려주는 수락 값은 소비자가 만든 등록 guard를 담는다. 성공 ACK를 다 쓰기 전에 기한·취소·쓰기 실패가 이기면 이 레포가 guard를 drop해 소비자가 등록을 되돌린다. ACK를 다 쓴 뒤 dialer가 기한으로 닫은 경우는 받는 쪽에서 성립한 링크가 곧 `PeerClosed`로 끝나는 보통 종료다.
@@ -138,24 +138,24 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 | `domain` | 소비자 도메인 콜백이 거절. `ext`에 소비자 코드(예: `conflicting_targets`)를 싣는다 | 소비자가 정함 |
 | `busy` | 받는 쪽이 지금 받을 수 없음(동시 handshake 상한 등) | 예 |
 
-시간 초과와 취소는 와이어 사유가 아니라 로컬 오류(`HandshakeError::TimedOut`·`Cancelled`)다. P2P 페어링 거절과 직접 경로 정책 종료는 ACK 사유가 아니라 QUIC 연결 종료 코드다(아래).
+시간 초과와 취소는 와이어 사유가 아니라 로컬 오류(`HandshakeError::TimedOut`·`Cancelled`)다. P2P 페어링 거절은 ACK 사유가 아니라 QUIC 연결 종료 코드다(아래). 연결 시도 전이나 펀칭 단계에서 끝나는 P2P 로컬 오류(`Disabled`·`PeerNotFound`·`Declined`·`NatUnsupported`·`PunchFailed` 등)는 ACK가 오가지 않으므로 와이어 사유가 아니라 `P2pConnectError`다([P2P](p2p.md#재시도와-포기)).
 
 ### QUIC 종료 코드
 
-P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, reason)`에 싣는 값이다. `error_code`는 QUIC `VarInt`, `reason`은 같은 이름의 ASCII 바이트다. 읽는 쪽은 `error_code`로만 판정한다.
+기기 사이 QUIC 연결 전체를 닫을 때 quinn `Connection::close(error_code, reason)`에 싣는 값이다. 서버 조정 연결의 종료 코드는 따로 있다([rendezvous](rendezvous.md#메시지)). `error_code`는 QUIC `VarInt`, `reason`은 같은 이름의 ASCII 바이트다. 읽는 쪽은 `error_code`로만 판정한다.
 
 | `error_code` | `reason` | `P2pCloseReason` | `is_retryable` |
 |---|---|---|---|
 | 0 | `closed` | `Closed`(보통 종료, 마지막 채널이 닫힘·endpoint 종료) | 예 |
 | 1 | `not_paired` | `NotPaired` | 아니오 |
-| 2 | `direct_path_timeout` | `DirectPathTimeout` | 아니오 |
-| 3 | `direct_path_lost` | `DirectPathLost` | 아니오 |
+| 2, 3 | — | 쓰지 않음(예약) | — |
 | 그 밖 | — | `Unknown(u64)` | 아니오 |
 
-- `P2pCloseReason`은 `tasty-net-transport`가 정의한다. 이 값을 담는 `HandshakeError`와 `Link`가 transport 타입이고, 의존 방향이 p2p → transport이기 때문이다([크레이트 구성](crates.md) "의존 방향"). `tasty-net-p2p`는 위 표대로 숫자 코드와 이 enum을 서로 바꾸기만 한다.
+- 2와 3은 iroh 설계의 `direct_path_timeout`·`direct_path_lost`였다. 중계 경로가 없어 직접 경로를 기다리거나 잃는 사유가 없으므로 없앤다. 번호는 다시 쓰지 않는다. 받으면 `Unknown(2)`·`Unknown(3)`이다.
+- `P2pCloseReason`과 이 표는 `tasty-net-p2p`가 정의한다. 숫자 코드가 P2P 크레이트의 와이어 값이고, 의존 방향이 transport → p2p이기 때문이다([크레이트 구성](crates.md#p2p-크레이트-격리)). transport는 그 enum을 다시 내보내 `HandshakeError`와 `Link`에 싣는다. 지금 develop에서는 transport에 정의가 있고, 옮기는 일은 후속 작업이다.
 - handshake 중에 받으면 `HandshakeError::Closed(P2pCloseReason)`이다.
 - 링크가 선 뒤에 받으면 읽기·쓰기는 `ReadFailure::PeerClosed`로 끝나고, 사유는 `Link::close_reason() -> Option<P2pCloseReason>`으로 읽는다. 이 쪽이 닫았으면 이 쪽이 보낸 사유가 들어 있다.
-- 상대가 종료 프레임(CONNECTION_CLOSE)을 받은 경우에만 같은 사유를 얻는다. 받지 못하면 QUIC idle timeout으로 끝나고 `ReadFailure::HeartbeatTimeout`, `close_reason()`은 `None`이다(iroh `src/endpoint/connection.rs` `close` 설명).
+- 상대가 종료 프레임(CONNECTION_CLOSE)을 받은 경우에만 같은 사유를 얻는다. 받지 못하면 QUIC idle timeout으로 끝나고 `ReadFailure::HeartbeatTimeout`, `close_reason()`은 `None`이다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.2, quinn `Connection::close` 설명).
 
 ## 도메인 확장
 
