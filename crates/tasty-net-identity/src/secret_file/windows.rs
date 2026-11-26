@@ -99,7 +99,7 @@ pub(super) fn create_temp(path: &Path) -> Result<File, CreateFailure> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(CreateFailure::Create(io::Error::last_os_error()));
+        return Err(super::classify_create_error(io::Error::last_os_error()));
     }
     // SAFETY: CreateFileW returned a new open handle that nothing else owns; File takes it over.
     Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
@@ -671,6 +671,20 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_protect_error_codes_are_the_windows_constants() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_INVALID_OWNER, ERROR_INVALID_PRIMARY_GROUP, ERROR_PRIVILEGE_NOT_HELD,
+        };
+        let codes = [
+            ERROR_INVALID_OWNER,
+            ERROR_INVALID_PRIMARY_GROUP,
+            ERROR_PRIVILEGE_NOT_HELD,
+        ]
+        .map(|c| i32::try_from(c).unwrap());
+        assert_eq!(super::super::CREATE_PROTECT_ERRORS, codes);
+    }
 
     #[test]
     fn long_paths_get_the_verbatim_prefix() {

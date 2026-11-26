@@ -53,6 +53,27 @@ pub(crate) enum CreateFailure {
     Create(io::Error),
 }
 
+/// Windows error codes with which `CreateFileW` refuses the owner or group of the security
+/// descriptor the file is created with: the access restriction failed, not the creation.
+const CREATE_PROTECT_ERRORS: [i32; 3] = [
+    1307, // ERROR_INVALID_OWNER
+    1308, // ERROR_INVALID_PRIMARY_GROUP
+    1314, // ERROR_PRIVILEGE_NOT_HELD
+];
+
+/// Classify a failed Windows `CreateFileW` of a new temporary file. Kept OS independent so the
+/// mapping is tested everywhere.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "only Windows creates the file with its security")
+)]
+pub(crate) fn classify_create_error(error: io::Error) -> CreateFailure {
+    match error.raw_os_error() {
+        Some(code) if CREATE_PROTECT_ERRORS.contains(&code) => CreateFailure::Protect(error),
+        _ => CreateFailure::Create(error),
+    }
+}
+
 /// An existing secret file opened after the privacy checks, and its contents.
 pub(crate) struct PrivateFile {
     pub(crate) file: File,
@@ -236,6 +257,33 @@ pub(crate) fn lock(target: &Path) -> Result<File, IdentityError> {
     file.lock()
         .map_err(|e| IdentityError::io(FileOp::Lock, &path, e))?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_and_privilege_refusals_at_creation_are_protect_failures() {
+        let classify = |code| classify_create_error(io::Error::from_raw_os_error(code));
+        for code in [1307, 1308, 1314] {
+            assert!(
+                matches!(classify(code), CreateFailure::Protect(e) if e.raw_os_error() == Some(code)),
+                "{code}"
+            );
+        }
+        // ERROR_ACCESS_DENIED, ERROR_FILE_EXISTS, ERROR_PATH_NOT_FOUND stay creation failures.
+        for code in [5, 80, 3] {
+            assert!(
+                matches!(classify(code), CreateFailure::Create(e) if e.raw_os_error() == Some(code)),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            classify_create_error(io::Error::other("no code")),
+            CreateFailure::Create(_)
+        ));
+    }
 }
 
 #[cfg(test)]
