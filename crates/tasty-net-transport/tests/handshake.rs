@@ -365,8 +365,26 @@ fn a_proof_signed_by_another_key_is_refused_before_the_domain() {
             "nonce": "11".repeat(32), "holder": "dialer", "caps": [],
         }),
     );
-    assert!(challenge.get("challenge").is_some(), "{challenge}");
-    let forged = key(9).sign(b"anything");
+    let acceptor_nonce = hex32(
+        challenge["challenge"]["nonce"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{challenge}")),
+    );
+    // The right transcript, signed by a key other than the claimed device's.
+    let digest = transcript_digest(&TranscriptFields {
+        holder: "dialer",
+        dialer: key(1).id(),
+        acceptor: key(2).id(),
+        dialer_instance: "d",
+        acceptor_instance: "acceptor-1",
+        dialer_nonce: [0x11; 32],
+        acceptor_nonce,
+        dialer_caps: &[],
+        acceptor_caps: &["net.request"],
+        ext: "",
+        signer: "dialer",
+    });
+    let forged = key(9).sign(&digest);
     let proof = json!({"proof": {"sig": forged.to_string()}}).to_string();
     write_frame(&mut conn.channel, StreamTag::Control, proof.as_bytes()).expect("proof");
     let ack = read_control(&mut conn.channel);
@@ -384,15 +402,37 @@ fn a_dialer_refuses_a_challenge_signed_by_another_key() {
     let (transport, listener) = pair(Some(token('a')));
     let fake = std::thread::spawn(move || {
         let mut channel = listener.accept().expect("accept");
-        let _line = read_first_line(
+        let line = read_first_line(
             &mut channel,
             MAX_HANDSHAKE_LINE,
             Instant::now() + Duration::from_secs(5),
         )
         .expect("line");
+        let line: Value = serde_json::from_slice(&line).expect("open json");
+        let open = &line["params"];
+        let dialer_caps: Vec<&str> = open["caps"]
+            .as_array()
+            .expect("caps")
+            .iter()
+            .map(|c| c.as_str().expect("cap"))
+            .collect();
+        // The right transcript, signed by a key other than the claimed acceptor's.
+        let digest = transcript_digest(&TranscriptFields {
+            holder: "dialer",
+            dialer: key(1).id(),
+            acceptor: key(2).id(),
+            dialer_instance: "d",
+            acceptor_instance: "acc",
+            dialer_nonce: hex32(open["nonce"].as_str().expect("nonce")),
+            acceptor_nonce: [0x22; 32],
+            dialer_caps: &dialer_caps,
+            acceptor_caps: &[],
+            ext: "",
+            signer: "acceptor",
+        });
         let challenge = json!({"challenge": {
             "device_id": key(2).id().to_string(), "instance_id": "acc", "caps": [],
-            "nonce": "22".repeat(32), "sig": key(9).sign(b"x").to_string(),
+            "nonce": "22".repeat(32), "sig": key(9).sign(&digest).to_string(),
         }})
         .to_string();
         write_frame(&mut channel, StreamTag::Control, challenge.as_bytes()).expect("write");
@@ -739,6 +779,51 @@ fn a_bulk_channel_needs_the_live_parent_and_its_grant() {
         })
     ));
     assert!(acceptor.join().expect("acceptor").is_err());
+}
+
+/// A real credential, issued by another accepting end to its own link, opens nothing here.
+#[test]
+fn a_credential_issued_to_another_session_is_refused() {
+    let issuer = server(Some(token('a')));
+    let other = server(Some(token('a')));
+    let (transport, listener) = pair(Some(token('a')));
+    let acceptor = accept_one(listener.clone(), issuer.config.clone());
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let dialer = dial_handshake(
+        conn,
+        &client(1, "d"),
+        Holder::Dialer,
+        None,
+        &AttemptCancel::new(),
+    )
+    .expect("dial");
+    let _parent = link_of(acceptor.join().expect("acceptor"));
+    assert_eq!(issuer.config.bulk_registry().live(), 1);
+    // The next channel reaches an end that never issued the parent's credential.
+    let acceptor = accept_one(listener, other.config.clone());
+    let refused = dialer.open_bulk(None);
+    assert!(
+        matches!(
+            refused,
+            Err(HandshakeError::Rejected {
+                reason: RejectReason::BulkCredentialInvalid,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        acceptor.join().expect("acceptor"),
+        Err(HandshakeError::Refused(RejectReason::BulkCredentialInvalid))
+    ));
+    assert_eq!(other.policy.bulk_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        issuer.config.bulk_registry().live(),
+        1,
+        "the issuer's stays"
+    );
 }
 
 #[test]
@@ -1317,4 +1402,71 @@ fn hex32(text: &str) -> [u8; 32] {
         *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).expect("hex");
     }
     out
+}
+
+/// Bytes the consumer's line reader took after the first line (here the start of the next
+/// frame) are handed to `accept_handshake` as `buffered`: they are read before the channel,
+/// and the handshake goes on to a link.
+#[test]
+fn bytes_read_after_the_first_line_are_handed_to_the_handshake() {
+    let s = server(Some(token('a')));
+    let (transport, listener) = pair(None);
+    let config = s.config.clone();
+    let acceptor = std::thread::spawn(move || {
+        let mut channel = listener.accept().expect("accept");
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        // The consumer's reader took three bytes of the next frame along with the line.
+        let mut ahead = vec![0u8; 3];
+        channel
+            .read_exact(&mut ahead)
+            .expect("bytes after the line");
+        accept_handshake(channel, &line, ahead, &config, &AttemptCancel::new())
+    });
+    let mut conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let open = json!({"jsonrpc": "2.0", "id": 1, "method": "stream.open", "params": {
+        "proto": 2, "purpose": "attach", "token": token('a').expose_hex(),
+        "device_id": key(1).id().to_string(), "instance_id": "d",
+        "nonce": "11".repeat(32), "holder": "dialer", "caps": [],
+    }});
+    // The line and a whole Ping frame after it, in one write.
+    let mut first = format!("{open}\n").into_bytes();
+    write_frame(&mut first, StreamTag::Ping, b"").expect("ping");
+    conn.channel.write_all(&first).expect("write");
+    let challenge = read_control(&mut conn.channel);
+    let acceptor_nonce = hex32(
+        challenge["challenge"]["nonce"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{challenge}")),
+    );
+    let digest = transcript_digest(&TranscriptFields {
+        holder: "dialer",
+        dialer: key(1).id(),
+        acceptor: key(2).id(),
+        dialer_instance: "d",
+        acceptor_instance: "acceptor-1",
+        dialer_nonce: [0x11; 32],
+        acceptor_nonce,
+        dialer_caps: &[],
+        acceptor_caps: &["net.request"],
+        ext: "",
+        signer: "dialer",
+    });
+    let proof = json!({"proof": {"sig": key(1).sign(&digest).to_string()}});
+    write_frame(
+        &mut conn.channel,
+        StreamTag::Control,
+        proof.to_string().as_bytes(),
+    )
+    .expect("proof");
+    let ack = read_control(&mut conn.channel);
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    let link = link_of(acceptor.join().expect("acceptor"));
+    assert_eq!(link.peer().device_id(), key(1).id());
 }

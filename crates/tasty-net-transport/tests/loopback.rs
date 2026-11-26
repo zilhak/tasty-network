@@ -407,3 +407,86 @@ fn a_p2p_close_during_the_first_line_reports_its_code() {
         "{result:?}"
     );
 }
+
+/// What a recording channel's writer saw: the length of each write call, and the flushes.
+#[derive(Default)]
+struct Recorded {
+    writes: std::sync::Mutex<Vec<usize>>,
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+struct RecordingWriter(Arc<Recorded>);
+
+impl io::Write for RecordingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.writes.lock().expect("writes").push(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A control that does nothing, for a channel without a socket.
+struct NoSocket;
+
+impl ChannelControl for NoSocket {
+    fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown_and_wake(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// O13: a frame leaves in one write of one buffer (header and payload together) followed by
+/// one flush, and a TCP channel turns Nagle off, so a small frame is not held back.
+#[test]
+fn a_frame_is_one_write_and_one_flush_on_a_nodelay_socket() {
+    let recorded = Arc::new(Recorded::default());
+    let channel = RawChannel::new(
+        Box::new(io::empty()),
+        Box::new(RecordingWriter(Arc::clone(&recorded))),
+        Arc::new(NoSocket),
+        TransportKind::Memory,
+    );
+    let framed = channel
+        .framed(&tasty_net_transport::ChannelConfig {
+            read_timeout: Duration::from_secs(60),
+            write_timeout: Duration::from_secs(60),
+            heartbeat: tasty_net_transport::HeartbeatPolicy::WhenIdle,
+            drain_cap: Duration::from_millis(300),
+        })
+        .expect("framed");
+    framed
+        .writer
+        .write_frame(StreamTag::Data, &[7; 1000])
+        .expect("write");
+    assert_eq!(
+        *recorded.writes.lock().expect("writes"),
+        vec![tasty_net_frame::FRAME_HEADER_LEN + 1000]
+    );
+    assert_eq!(recorded.flushes.load(Ordering::SeqCst), 1);
+    drop(framed);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let stream = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+    let probe = stream.try_clone().expect("clone");
+    assert!(
+        !probe.nodelay().expect("nodelay"),
+        "the default keeps Nagle on"
+    );
+    let _channel = RawChannel::from_tcp(stream).expect("channel");
+    assert!(probe.nodelay().expect("nodelay"));
+}
