@@ -37,34 +37,44 @@
 ## 소켓 하나와 패킷 나누기
 
 - 기기는 P2P용 UDP 소켓을 하나만 연다. rendezvous 서버로 가는 QUIC 연결, STUN 반사 질의, 펀칭 프로브, 상대와의 QUIC 연결이 모두 이 소켓을 지난다. 서버가 보는 바깥 주소가 상대에게 줄 주소와 같은 NAT 매핑이 되게 하고, 서버 연결의 keepalive가 그 매핑을 살려 두게 하기 위해서다.
-- quinn에는 이 소켓을 직접 주지 않고 감싼 소켓(quinn의 `AsyncUdpSocket` 구현)을 준다. 받은 패킷은 첫 바이트로 나눈다([RFC 7983](https://www.rfc-editor.org/rfc/rfc7983) §7, QUIC 범위는 [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443)).
+- quinn에는 이 소켓을 직접 주지 않고 감싼 소켓(quinn의 `AsyncUdpSocket` 구현)을 준다. 감싼 소켓 아래의 실제 입출력은 trait `PacketIo`(보내기·받기·로컬 주소)이고, 기본 구현이 OS UDP 소켓이다(시험은 모의 NAT를 넣는다, [CI와 시험 환경](testing.md#모의-nat)). 받은 패킷은 첫 바이트로 나눈다([RFC 7983](https://www.rfc-editor.org/rfc/rfc7983) §7, [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §3).
 
   | 첫 바이트 | 보내는 곳 |
   |---|---|
   | 0–3 | STUN(서버의 반사 응답, 상대의 프로브와 그 응답). P2P 크레이트가 처리한다 |
-  | 64–191 | QUIC. quinn에 넘긴다 |
-  | 그 밖 | 버린다 |
+  | 64–127 | QUIC 짧은 헤더. quinn에 넘긴다(이 소켓에는 TURN이 없어 RFC 9443의 64–79 예외가 생기지 않는다) |
+  | 192–255 | QUIC 긴 헤더(Initial·Handshake 등, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §17.2). quinn에 넘긴다 |
+  | 4–63, 128–191 | 버린다(버린 수를 센다) |
 
-- QUIC의 fixed bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다. 켜 두면 QUIC 짧은 헤더의 첫 바이트가 0–63으로 내려와 STUN과 섞일 수 있다. quinn의 해당 설정(`EndpointConfig`의 grease 설정)은 구현 때 판의 API로 확인한다.
+- QUIC bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다(quinn `EndpointConfig::grease_quic_bit(false)`, 기본은 켬). RFC 9443 §1도 다른 프로토콜과 나눠 쓰는 포트에서는 `grease_quic_bit`를 보내지 말라고 한다. 켜 두면 QUIC의 첫 바이트가 위 범위 밖으로 내려와 버려지거나 STUN과 섞인다.
+- 분류는 단위 시험 `demux_classifies_first_byte`(경계값 0·3·4·63·64·127·128·191·192·255)가 고정한다. 서버의 주 포트도 같은 분류 코드를 쓴다.
 - 소켓은 `[::]:0` 이중 스택으로 연다. OS가 이중 스택을 받지 않으면 IPv4 `0.0.0.0:0`으로 연다. 반사 주소는 서버에 닿은 주소족 하나에서만 얻는다. 전역 IPv6 주소는 사설 후보와 같이 호스트 후보로 보낸다(NAT 없이 닿을 수 있다). IPv6 경로가 실제로 쓰이는지는 펀칭 실험에서 본다.
+- 소켓 수신·송신 버퍼 크기는 설정값이다(`socket.recv_buffer`·`socket.send_buffer`, 기본은 OS 값이고 조회에 실제 값과 출처 `os_default`가 보인다).
 
 ## NAT 판별
 
-목적은 매핑 성질(같은 내부 주소·포트가 목적지마다 같은 바깥 주소·포트를 받는지)을 알아 펀칭을 시도할지 정하는 것이다. 용어는 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1의 endpoint-independent mapping(EIM)·address-dependent mapping(ADM)·address and port-dependent mapping(APDM)이다. 방법은 [RFC 5780](https://www.rfc-editor.org/rfc/rfc5780) §4.3의 매핑 판별을 따른다.
+목적은 매핑 성질(같은 내부 주소·포트가 목적지마다 같은 바깥 주소·포트를 받는지)을 알아 펀칭 후보를 정하는 것이다. 용어는 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1의 endpoint-independent mapping(EIM)·address-dependent mapping(ADM)·address and port-dependent mapping(APDM)이다.
 
-- 서버 조건: 서버는 STUN Binding을 주 포트 P1과 보조 포트 P2(같은 IP)에서 받는다. 두 번째 공인 IP(IP2)가 있으면 IP2:P1에서도 받는다. 서버는 접속 응답(`welcome`)에 이 반사 주소 목록을 싣는다([rendezvous](rendezvous.md#포트와-전송)).
-- 기기는 같은 소켓에서 IP1:P1, IP1:P2, (있으면) IP2:P1로 STUN Binding Request를 보내고 응답의 XOR-MAPPED-ADDRESS([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §14.2)를 비교한다. 질의마다 `nat.stun_rto`(기본 500 ms) 간격으로 `nat.stun_attempts`(기본 3)번까지 보낸다.
+- 서버 조건: 서버는 STUN Binding을 주 포트 P1과 보조 포트 P2(같은 IP)에서 받는다. 두 번째 공인 IP(IP2)가 있으면 IP2:P1, IP2:P2에서도 받는다. 서버는 `welcome.stun`에 보조 주소(IP1:P2, IP2:P1, IP2:P2)를 싣는다. 주 주소는 기기가 접속한 주소를 쓴다([rendezvous](rendezvous.md#광고-주소와-바인딩-주소)).
+- 기기는 같은 소켓에서 주 주소와 보조 주소들로 STUN Binding Request를 보내고 응답의 XOR-MAPPED-ADDRESS([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §14.2)를 비교한다. 대상마다 `nat.stun_rto`(기본 500 ms) 간격으로 `nat.stun_attempts`(기본 3)번까지 보낸다. 대상들은 동시에 묻는다. RFC 8489 §6.2.1은 재전송마다 RTO를 두 배로 늘리지만, 여기서는 대상 수가 적고 응답 없음을 `unknown`으로 두면 되므로 고정 간격으로 줄인 것이다. 응답은 transaction ID가 맞고 보낸 대상 주소에서 온 것만 받는다([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.3).
+- 비교 방법:
+  - IP2가 있으면 [RFC 5780](https://www.rfc-editor.org/rfc/rfc5780) §4.3의 시험 II(IP2:P1)와 시험 III(IP2:P2)에 해당하는 비교를 한다. IP1:P1과 IP2:P1이 같으면 EIM, 다르고 IP2:P1과 IP2:P2가 같으면 ADM, 그것도 다르면 APDM이다.
+  - 같은 IP의 두 포트(IP1:P1과 IP1:P2) 비교는 RFC 5780의 시험이 아니라 이 설계가 더한 것이다. 다르면 포트 의존(APDM)이 확실하다. 같으면 EIM이거나 ADM이고 둘을 가를 수 없다.
 
-  | 결과 | 판별 `NatMapping` |
+  | 결과 | `NatMapping` |
   |---|---|
-  | 받은 바깥 주소·포트가 모두 같다 | `Independent` |
-  | 하나라도 다르다 | `Dependent` |
-  | 응답이 하나뿐이거나 없다 | `Unknown` |
+  | IP2가 있고, 질의한 대상 모두 응답했고 모두 같다 | `independent` |
+  | IP2가 없고(서버가 광고하지 않음) IP1:P1과 IP1:P2가 같다 | `independent_port_only`(잠정. ADM일 수 있다) |
+  | 응답 중 하나라도 다르다 | `dependent` |
+  | 광고된 대상 중 응답이 빠진 것이 있고, 받은 응답끼리는 같다 | `unknown`(빠진 대상을 함께 보고한다) |
+  | 응답이 하나뿐이거나 없다 | `unknown` |
 
-- 같은 IP의 두 포트만 있으면 APDM은 가를 수 있지만 ADM은 `Independent`로 보인다(RFC 5780 §4.3의 시험 III는 두 번째 IP가 필요하다). 그런 NAT에서는 펀칭이 실패할 수 있고, 그때는 아래 "실패"대로 연결 실패로 끝난다. hub 서버에 두 번째 IP를 둘지는 [남은 결정](index.md#남은-결정)에 있다.
 - 필터링 성질(RFC 4787 §5)은 판별하지 않는다. RFC 5780의 CHANGE-REQUEST가 필요하고, 판별 결과가 시도 여부를 바꾸지 않기 때문이다. 시도해 보고 결과로 판정한다.
-- 판별은 서버에 접속할 때와, 서버가 알려 준 반사 주소가 바뀔 때 다시 한다. 결과는 `nat_report`로 서버에 알린다.
-- 시도 규칙: 두 기기가 모두 `Dependent`면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. 판정은 서버가 펀칭 요청을 받을 때 한다. 양쪽 모두 APDM이면 상대가 볼 바깥 포트를 알 길이 없어 펀칭이 서지 않는다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3·§3.5). 포트 예측은 하지 않는다. 한쪽만 `Dependent`이거나 어느 쪽이 `Unknown`이면 시도한다. `Dependent` 쪽이 상대의 반사 주소로 보낸 프로브가 상대 NAT의 필터를 통과하면, 상대는 처음 보는 주소(peer reflexive, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.3.1.3)에서 온 프로브로 경로를 얻는다.
+- 판별은 서버에 등록한 직후와 `reflexive_changed`를 받을 때 다시 한다. 결과와 대상별 응답(`stun_results`)을 `nat_report`로 서버에 알린다. 서버는 다른 반사 주소를 `reported_reflexive` 후보로, `mapping`을 상대에게 줄 `peer_nat`으로 저장한다.
+- 시도 규칙(서버가 펀칭 요청을 받을 때 정한다):
+  - 두 기기가 모두 `dependent`면 반사 주소 후보로는 시도하지 않는다. 양쪽 모두 목적지마다 바깥 포트가 바뀌면 교환한 공인 매핑으로 펀칭이 서지 않기 때문이다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3. 포트 예측(§3.5)은 하지 않는다). 대신 호스트 후보(사설 IPv4, 전역 IPv6)로만 시도한다(`mode = host_only`). 같은 망 안의 두 기기나 NAT 없는 IPv6 경로는 이것으로 닿는다. 어느 한쪽에도 호스트 후보가 없으면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. `host_only` 시도가 실패해도 `NatUnsupported`다.
+  - 그 밖(한쪽만 `dependent`, `independent_port_only`, `unknown`)은 모든 후보로 시도한다(`mode = all`). `dependent` 쪽이 상대의 반사 주소로 보낸 프로브가 상대 NAT의 필터를 통과하면, 상대는 처음 보는 주소(peer reflexive, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.3.1.3)에서 온 프로브로 경로를 얻는다.
+  - 어느 경우든 중계로 넘어가지 않는다. 시도가 실패하면 연결 실패다.
 
 ## 펀칭 절차
 
@@ -78,7 +88,8 @@ A                         서버                          B
 |                         |                             | 페어링 목록에 A가 있나
 |                         |<---------- punch_answer(수락)|
 |<-- punch_go ------------|------------- punch_go ----->|
-|   (B 후보, 토큰, 지연)   |       (A 후보, 토큰, 지연)   |
+|   (B 후보, 토큰, 지연,   |  (A 후보, 토큰, 지연,        |
+|    창, handshake 기한)   |   창, handshake 기한)        |
 | start_after_ms 대기      |                 start_after_ms 대기
 |== STUN 프로브 ==========================================>| (양쪽이 동시에 후보마다)
 |<========================================== STUN 프로브 ==|
@@ -87,45 +98,49 @@ A                         서버                          B
 |-- punch_result(ok) ---->|<-------- punch_result(ok) ---|
 ```
 
-1. 요청: A가 서버에 `punch_request{request_id, peer: B의 기기 ID}`를 보낸다. 서버는 B가 등록돼 있는지, 상한(동시 펀칭 수), NAT 규칙을 본다. 통과하지 못하면 `punch_refused{reason}`(`not_found`·`nat_unsupported`·`busy`·`self`)로 끝난다.
-2. 받는 쪽 확인: 서버가 B에게 `punch_offer{punch_id, from: A}`를 보낸다. B는 A가 자기 페어링 허용 목록에 있는지 보고 `punch_answer{punch_id, accept}`로 답한다. B가 거절하면 A는 `declined`를 받는다. 수락 전에는 서버가 양쪽 주소를 서로에게 주지 않는다. 그래서 페어링하지 않은 기기는 B의 주소를 얻지 못한다. B가 서버 설정 `offer_timeout`(기본 2 s) 안에 답하지 않으면 서버는 `not_found`로 끝낸다.
-3. 통지와 시각 맞춤: 수락되면 서버가 두 기기에게 동시에 `punch_go`를 보낸다. 실린 것: 상대 기기 ID, 상대 후보 주소, 이쪽이 보낼 프로브 토큰과 상대가 보낼 토큰(서버가 만든 16바이트 난수 두 개), 역할(A는 `controlling`, B는 `controlled`), `start_after_ms`, `window_ms`. 두 기기의 시계는 맞추지 않는다. 서버는 자기 쪽 QUIC 연결의 RTT 추정(quinn `Connection::rtt`)으로 `start_after_ms = max(rtt_A, rtt_B)/2 + start_delay_margin − rtt_자기/2`(서버 설정, 기본 여유 100 ms, 상한 `start_delay_max` 1 s)를 계산해, 두 기기가 서버 기준으로 거의 같은 때 보내기 시작하게 한다.
-4. 후보 주소: 상대마다 최대 `punch.max_candidates`(기본 8)개다. 서버가 본 반사 주소(서버 QUIC 연결의 원격 주소), 판별에서 얻은 다른 반사 주소(있고 다르면), 상대가 `hello`로 알린 호스트 주소(사설 IPv4, 전역 IPv6, 소켓 포트)다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 루프백과 링크 로컬 주소는 보내지 않는다.
-5. 동시 송신: 시작 시각부터 양쪽이 상대 후보마다 STUN Binding Request를 보낸다. `punch.probe_interval`(기본 50 ms)마다 후보 하나씩 돌아가며 보낸다. 후보 8개면 한 후보에 400 ms마다 한 번이다. 요청에는 이쪽 토큰을 comprehension-optional 속성 `TASTY-PUNCH`로 싣는다(속성 번호는 [rendezvous](rendezvous.md#펀칭-프로브)). 프로브를 받은 쪽은 토큰이 맞으면 XOR-MAPPED-ADDRESS와 자기 토큰을 실은 Binding Success Response를 보낸 주소로 돌려준다. 후보에 없던 주소에서 맞는 토큰이 오면 그 주소를 후보에 더한다(peer reflexive).
-6. 성공 판정: 이쪽이 보낸 요청에 대한 맞는 토큰의 응답을 그 후보 주소에서 받으면, 그 주소 쌍은 양방향으로 통한다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.2.5.3의 확인 규칙과 같은 뜻). 토큰이 틀리거나 없는 STUN 패킷은 버린다.
-7. QUIC으로 넘어가는 때: A(`controlling`)는 처음 성공한 주소로 바로 quinn `connect`를 건다. 다른 후보의 프로브는 멈춘다. B는 프로브를 받은 주소에서 오는 QUIC 연결만 받고, 연결이 서거나 창이 끝날 때까지 프로브 응답과 송신을 계속한다(B 쪽 NAT 매핑을 열어 두기 위해서다). B가 먼저 성공을 보더라도 B는 QUIC을 걸지 않는다. QUIC 연결은 언제나 A가 연다([전송 추상화](transport.md#p2p의-닫기-범위)의 "스트림은 연결을 연 쪽만 연다"와 맞는다).
-8. 끝: QUIC handshake가 끝나면 두 기기가 `punch_result{punch_id, ok}`를 서버에 보낸다. 서버는 그 펀칭 상태를 지운다.
+1. 요청: A가 서버에 `punch_request{request_id, peer: B의 기기 ID}`를 보낸다. 서버는 B가 등록돼 있는지, 상한(동시 펀칭 수), NAT 규칙을 본다. 통과하지 못하면 `punch_refused{reason}`(`not_found`·`nat_unsupported`·`busy`·`self`)로 끝난다. A가 `punch.request_timeout` 안에 `punch_go`나 `punch_refused`를 받지 못하면 `RequestTimeout`으로 끝난다.
+2. 받는 쪽 확인: 서버가 B에게 `punch_offer{punch_id, from: A}`를 보낸다. B는 A가 자기 페어링 허용 목록에 있는지 보고 `punch_answer{punch_id, accept}`로 답한다. B가 거절하면 A는 `declined`를 받는다. 수락 전에는 서버가 양쪽 주소를 서로에게 주지 않는다. 그래서 페어링하지 않은 기기는 B의 주소를 얻지 못한다. B가 서버 설정 `offer_timeout`(기본 2 s) 안에 답하지 않으면 서버는 `not_found`로 끝낸다. 수락한 B는 `punch.go_timeout` 안에 `punch_go`나 `punch_cancel`을 기다리고, 오지 않으면 그 시도를 끝낸다.
+3. 통지와 시각 맞춤: 수락되면 서버가 두 기기에게 동시에 `punch_go`를 보낸다. 실린 것은 [rendezvous](rendezvous.md#메시지-표)의 표에 있다: 상대 기기 ID, 후보와 종류, 상대 `NatMapping`, 이쪽이 보낼 토큰과 상대가 보낼 토큰(서버가 만든 16바이트 난수 두 개), 역할(A는 `controlling`, B는 `controlled`), `mode`, `start_after_ms`, `window_ms`, `handshake_ms`. 두 기기의 시계는 맞추지 않는다. 서버는 자기 쪽 QUIC 연결의 RTT 추정(quinn `Connection::rtt`)으로 `start_after_ms = max(rtt_A, rtt_B)/2 + start_delay_margin − rtt_자기/2`(서버 설정, 상한 `start_delay_max`)를 계산해, 두 기기가 서버 기준으로 거의 같은 때 보내기 시작하게 한다.
+4. 후보 주소: 상대마다 최대 `punch.max_candidates`(기본 8)개다. 서버가 본 반사 주소(`server_reflexive`), 상대가 판별에서 보고한 다른 반사 주소(`reported_reflexive`), 상대가 알린 호스트 주소(`host`: 사설 IPv4, 전역 IPv6, 소켓 포트)다. `host_only`면 호스트 주소만 온다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 루프백과 링크 로컬 주소는 보내지 않는다.
+5. 동시 송신: 시작 시각부터 양쪽이 상대 후보마다 STUN Binding Request를 보낸다. `punch.probe_interval`(기본 50 ms)마다 후보 하나씩 돌아가며 보낸다. 후보 8개면 한 후보에 400 ms마다 한 번이다. 요청에는 이쪽 토큰을 속성 `TASTY-PUNCH`로 싣는다([rendezvous](rendezvous.md#펀칭-프로브)). 프로브를 받은 쪽은 토큰이 상대 토큰(`token_peer`)과 같으면 XOR-MAPPED-ADDRESS와 자기 토큰을 실은 Binding Success Response를 그 프로브가 온 주소로 돌려준다.
+6. peer reflexive: 후보에 없던 주소에서 맞는 토큰의 프로브가 오면 그 주소를 `peer_reflexive` 후보로 더하고 그 주소에도 프로브를 보낸다. 더한 뒤에도 후보 수는 `punch.max_candidates`를 넘지 않는다. 다 찼으면 그 주소는 응답만 하고 후보에 넣지 않으며 버린 수를 센다.
+7. 성공 판정: 이쪽이 보낸 요청에 대한 응답이 (a) 그 요청의 transaction ID를 담고, (b) 그 요청을 보낸 후보 주소에서 왔고, (c) 상대 토큰을 담았을 때만 그 주소 쌍이 양방향으로 통한다고 본다([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.3, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.2.5.3과 같은 뜻). 셋 중 하나라도 어긋난 STUN 패킷은 버린다.
+8. QUIC으로 넘어가는 때: A(`controlling`)는 처음 성공한 주소로 바로 quinn `connect`를 건다. 다른 후보의 프로브는 멈추고, 그 주소로 온 프로브에는 계속 응답한다. QUIC 연결은 언제나 A가 연다([전송 추상화](transport.md#p2p의-닫기-범위)의 "스트림은 연결을 연 쪽만 연다"와 맞는다). B(`controlled`)는 성공을 먼저 보거나 A의 응답을 못 받았더라도 QUIC을 걸지 않는다. B의 성공 여부는 B가 QUIC을 받을지에 쓰지 않는다. A의 응답이 잃어 A가 성공을 못 보면 A는 다른 후보나 같은 후보로 프로브를 계속 보내고, 창이 끝나면 실패다.
+9. B가 QUIC을 받는 조건(펀칭 세션에 묶기): B는 활성 펀칭 세션이 있고, 들어온 QUIC Initial의 원격 주소가 그 세션에서 맞는 토큰의 프로브를 받은 주소일 때만 연결을 받는다. 그 밖의 Initial은 handshake 전에 거절한다(quinn `Incoming::refuse`). handshake가 끝나면 TLS가 확인한 기기 ID가 그 세션의 상대(`punch_go.peer`)와 같은지 보고, 다르면 종료 코드 `session_mismatch`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 같으면 그 세션을 끝내고 연결을 그 세션의 서버·후보 정보와 묶어 [연결 정보](#연결-정보)에 남긴다.
+10. 기한: 두 기기 모두 프로브 송신은 시작 시각부터 `window_ms`까지다. A는 창 안에 성공을 보고 QUIC을 걸면 그때부터 `handshake_ms` 안에 handshake가 끝나야 한다. B는 새 QUIC Initial을 시작 시각 + `window_ms` + `handshake_ms`까지 받는다(A가 창 끝 직전에 걸어도 받을 수 있게). B는 이미 받기 시작한 handshake에는 받은 때부터 `handshake_ms`를 준다. B는 연결이 서거나 받기 기한이 끝날 때까지 프로브 응답을 계속한다(B 쪽 NAT 매핑을 열어 두기 위해서다).
+11. 끝: 각 기기는 QUIC handshake가 끝나거나 자기 기한이 지나면 `punch_result{punch_id, ok}`를 서버에 보낸다. 서버는 두 기기의 결과를 모두 받거나 세션 TTL이 지나면 그 펀칭 상태를 지운다.
 
-위 절차의 시간 값(`offer_timeout`, 시작 지연, `punch.window`, `quic.handshake_timeout`, 프로브 간격)은 모두 설정값이다. 기본값과 근거는 아래 [설정값](#설정값) 표에 있다.
-
-- `punch.window` 안에 성공 응답이 하나도 없으면 그 시도는 실패다. 성공 뒤 `quic.handshake_timeout` 안에 handshake가 끝나지 않아도 실패다.
-- 연결 시도 하나의 전체 상한은 `punch.request_timeout + punch.start_delay_max + punch.window + quic.handshake_timeout`에 아래 재시도를 더한 값이다. 서버 쪽 `offer_timeout`은 `punch.request_timeout`보다 짧아야 한다(기본 2 s < 3 s).
+- 창과 handshake 기한의 정본은 서버다(`punch_go.window_ms`·`handshake_ms`). 기기 설정 `punch.window_max`·`quic.handshake_timeout_max`는 서버 값의 상한 검사에만 쓴다(넘으면 `ServerLimitsInvalid`, [rendezvous](rendezvous.md#메시지-표)의 `welcome.limits`).
+- 진행 중 `punch_cancel`을 받으면: 프로브 단계면 그 시도를 끝낸다(`PunchCancelled{reason}`). 이미 QUIC handshake 중이거나 연결이 섰으면 무시한다. 서버가 없어도 기기 사이 경로는 성립하기 때문이다.
+- 조정 연결을 잃으면: 아직 `punch_go`를 받지 못한 단계(A의 `Requesting`, B의 `Offered`)는 `RendezvousLost`로 끝난다. `punch_go`를 받은 뒤의 단계는 서버 없이 계속하고, `punch_result`는 보내지 않는다.
 
 ## 흐름
 
 어떤 패킷이 언제 어느 주소·포트로 나가는지의 설명이다. 사용자 원칙(2026-11-27): "네트워크 장치간 어떻게 연결되어있는지 명확해야한단거야". 연결을 맺고 유지하는 자동 동작(재연결, keepalive, 펀칭 재시도)은 라이브러리가 한다. 대신 그 동작이 지금 어느 단계인지와 결과를 [상태 기계](#상태-기계)와 [연결 정보](#연결-정보)로 드러낸다.
 
-주소 표기: 기기 소켓 `L`(P2P 소켓 하나), 서버 `IP1:P1`(주 포트), `IP1:P2`(보조 포트), `IP2:P1`(두 번째 IP, 있을 때), 상대 후보 `C1..Cn`. 모두 UDP다.
+주소 표기: 기기 소켓 `L`(P2P 소켓 하나), 서버 주 주소 `S`(기기가 접속한 주소), 보조 STUN 주소 `S2..S4`(`welcome.stun`), 상대 후보 `C1..Cn`. 모두 UDP다.
 
 | # | 단계 | 송신 → 수신 | 주소 | 내용 | 주기·횟수 | 타임아웃(설정) |
 |---|---|---|---|---|---|---|
-| 1 | 서버 접속 | 기기 → 서버 | `L` → `IP1:P1` | QUIC Initial(ALPN `tasty-rendezvous/1`, 서로 raw public key) | 접속 시도마다 한 번(QUIC 재전송은 quinn) | `rendezvous.connect_timeout` |
+| 1 | 서버 접속 | 기기 → 서버 | `L` → `S` | QUIC Initial(ALPN `tasty-rendezvous/1`, 서로 raw public key) | 접속 시도마다 한 번(QUIC 재전송은 quinn, 손실 복구 값은 [설정값](#설정값)) | `rendezvous.connect_timeout` |
 | 2 | 등록 | 기기 ↔ 서버 | 1의 연결, 조정 스트림 | `hello` → `welcome` | 접속마다 한 번 | `rendezvous.hello_timeout` |
-| 3 | NAT 판별 | 기기 → 서버 | `L` → `IP1:P1`, `IP1:P2`, `IP2:P1` | STUN Binding Request / Success Response | 대상마다 `nat.stun_rto` 간격 `nat.stun_attempts`번 | 대상마다 `stun_rto × stun_attempts` |
+| 3 | NAT 판별 | 기기 → 서버 | `L` → `S`, `S2..S4` | STUN Binding Request / Success Response | 대상마다 `nat.stun_rto` 간격 `nat.stun_attempts`번, 대상끼리 동시 | `nat.stun_rto × nat.stun_attempts` |
 | 4 | 판별 보고 | 기기 → 서버 | 조정 스트림 | `nat_report` | 3이 끝날 때마다 | 없음 |
-| 5 | 서버 연결 유지 | 양쪽 | `L` ↔ `IP1:P1` | QUIC PING | `rendezvous.keepalive_interval` | `rendezvous.idle_timeout` |
+| 5 | 서버 연결 유지 | 양쪽 | `L` ↔ `S` | QUIC PING | `rendezvous.keepalive_interval` | `rendezvous.idle_timeout` |
+| 5a | 반사 주소 바뀜 | 서버 → 기기 | 조정 스트림 | `reflexive_changed` → 기기는 3·4를 다시 | 서버 관측 때 | 없음 |
 | 6 | 펀칭 요청 | A → 서버 → B → 서버 | 조정 스트림 | `punch_request` → `punch_offer` → `punch_answer` | 요청마다 한 번 | A: `punch.request_timeout`, 서버: `offer_timeout` |
-| 7 | 통지 | 서버 → A, B | 조정 스트림 | `punch_go`(후보, 토큰, 지연) | 수락마다 한 번 | 없음 |
-| 8 | 프로브 | A ↔ B | `L_A` ↔ `C1..Cn` | STUN Binding Request(`TASTY-PUNCH`) | 후보를 돌며 `punch.probe_interval`마다 하나 | `punch.window` |
+| 7 | 통지 | 서버 → A, B | 조정 스트림 | `punch_go`(후보, 토큰, 지연, 창, handshake 기한) | 수락마다 한 번 | B: `punch.go_timeout` |
+| 8 | 프로브 | A ↔ B | `L_A` ↔ `C1..Cn` | STUN Binding Request(`TASTY-PUNCH`) | 후보를 돌며 `punch.probe_interval`마다 하나 | `punch_go.window_ms` |
 | 9 | 프로브 응답 | 받은 쪽 → 보낸 쪽 | 프로브가 온 주소로 | Binding Success Response(XOR-MAPPED-ADDRESS, `TASTY-PUNCH`) | 받은 프로브마다 | 없음 |
-| 10 | 기기 사이 QUIC | A → B | `L_A` → 성공한 주소 | QUIC Initial(ALPN `tasty-net/2`) | 시도마다 한 번 | `quic.handshake_timeout` |
+| 10 | 기기 사이 QUIC | A → B | `L_A` → 성공한 주소 | QUIC Initial(ALPN `tasty-net/2`) | 시도마다 한 번 | `punch_go.handshake_ms` |
 | 11 | 결과 | A, B → 서버 | 조정 스트림 | `punch_result` | 시도마다 한 번 | 없음 |
+| 11a | 취소 | 서버 → A, B | 조정 스트림 | `punch_cancel` | 상대가 사라지거나 세션 TTL이 지날 때 | 없음 |
 | 12 | 경로 유지 | 양쪽 | `L_A` ↔ `L_B`의 바깥 주소 | QUIC PING | `quic.keepalive_interval` | `quic.idle_timeout` |
 | 13 | 닫기 | 닫는 쪽 → 상대 | 같은 경로 | QUIC CONNECTION_CLOSE(종료 코드) | 한 번 | 없음 |
 | 14 | 서버 재연결 | 기기 → 서버 | 1과 같음 | 1~4 반복 | `rendezvous.reconnect.*` backoff | 1과 같음 |
 | 15 | 펀칭 재시도 | A → 서버 | 6과 같음 | 3(반사 주소 재확인), 6~11 반복 | `punch.attempts`, `punch.retry_delay` | 6~10과 같음 |
 
-- 서버는 8~10과 12~13의 패킷을 보지도 나르지도 않는다. 서버가 기기에게 보내는 것은 2·3·5·6·7의 응답과 통지뿐이다.
+- 서버는 8~10과 12~13의 패킷을 보지도 나르지도 않는다. 서버가 기기에게 보내는 것은 2·3의 응답, 5의 PING, 5a·6·7·11a의 통지와 `punch_refused`뿐이다. 11은 기기가 서버에게 보내는 보고다.
 - 13 뒤에 남은 연결이 없어도 서버 연결(5)은 P2P가 켜져 있는 동안 유지된다. P2P를 끄면 서버 연결을 코드 0으로 닫고 소켓을 닫는다.
 
 ## 정책

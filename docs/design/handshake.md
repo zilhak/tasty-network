@@ -149,6 +149,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 | 0 | `closed` | `Closed`(보통 종료, 마지막 채널이 닫힘·endpoint 종료) | 예 |
 | 1 | `not_paired` | `NotPaired` | 아니오 |
 | 2, 3 | — | 쓰지 않음(예약) | — |
+| 4 | `session_mismatch` | `SessionMismatch`(받는 쪽이 받은 연결의 TLS 기기 ID가 그 주소의 펀칭 세션 상대와 다름, [P2P](p2p.md#펀칭-절차) 9) | 아니오 |
 | 그 밖 | — | `Unknown(u64)` | 아니오 |
 
 - 2와 3은 iroh 설계의 `direct_path_timeout`·`direct_path_lost`였다. 중계 경로가 없어 직접 경로를 기다리거나 잃는 사유가 없으므로 없앤다. 번호는 다시 쓰지 않는다. 받으면 `Unknown(2)`·`Unknown(3)`이다.
