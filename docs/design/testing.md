@@ -43,6 +43,8 @@ CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절�
 
 준비 확인은 sshd가 stderr에 `Server listening on`을 남겼는지로 한다. 포트에 TCP로 붙어 보는 방식은 인증 없이 끊는 연결이 되어 `PerSourcePenalties`의 벌점 대상이 되므로 쓰지 않는다. 시험은 준비 확인 뒤 시작하고, 끝나면 클라이언트가 모두 끝난 뒤 sshd에 세션 자식 프로세스가 남지 않았는지 보고 sshd를 PID로 끝내며, 임시 디렉터리를 지운 뒤 자식 프로세스가 남지 않았는지 확인한다. sshd가 없거나(`sshd` 경로를 못 찾음) 준비 확인이 실패하면 시험 도우미는 대체 서버로 넘어간다(위 표). 대체 서버도 시작하지 못하면 시험은 통과가 아니라 실패로 끝난다. CI는 준비 단계에서 sshd가 있는지 확인하고 결과를 로그에 남긴다. 서버 선택은 `TASTY_NET_TEST_SSHD`(`auto` 기본, `openssh`, `russh`)로 고정할 수 있다. 도우미는 `tests/support/sshd.rs`(OpenSSH와 선택), `tests/support/russh_server.rs`(대체 서버)다.
 
+알려진 한계: 이미 끝난 자식의 PID를 나중에 PID만으로 조회·종료하므로 OS가 번호를 재사용하면 무관한 프로세스를 볼 수 있다.
+
 ### Windows
 
 1. GitHub Windows 러너에서 OpenSSH 서버(`sshd.exe`)를 준비해 같은 방식으로 띄운다. 러너는 관리자 권한이라 설치 단계를 둘 수 있다. 사용자 계정 아래에서 서비스가 아닌 전경 실행이 되는지는 CI 첫 실행으로 판정한다.
