@@ -573,7 +573,8 @@ rc_self_test() {
     rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:3340' "$got"
     st_expect port-leading-zero-listener 0 "$?"
     printf 'http_bind_addr = "0.0.0.0:%s3340"\n' "$(printf '0%.0s' $(seq 1 4301))" > "$t/zeros.toml"
-    st_expect port-4301-leading-zeros "3340 0" "$(rc_toml_port "$t/zeros.toml" http_bind_addr 3340 2>&1; echo " $?")"
+    got=$(rc_toml_port "$t/zeros.toml" http_bind_addr 3340 2>&1)
+    st_expect port-4301-leading-zeros "3340 0" "$got $?"
     printf 'http_bind_addr = "0.0.0.0:000"\n' > "$t/allzero.toml"
     st_expect port-all-zero 0 "$(rc_toml_port "$t/allzero.toml" http_bind_addr 3340)"
     printf 'http_bind_addr = "0.0.0.0:65535"\n' > "$t/max.toml"
