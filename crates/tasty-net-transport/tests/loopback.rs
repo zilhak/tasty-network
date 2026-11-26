@@ -906,3 +906,57 @@ fn a_late_attach_ack_ends_the_bulk_channels_opened_meanwhile() {
         Err(HandshakeError::Refused(RejectReason::BulkCredentialInvalid))
     ));
 }
+
+/// A refusing ACK whose write completes only after the handshake deadline ends the accepting
+/// side with `TimedOut`, not `Refused`: here a dialer with the wrong token, so the refusal is
+/// the acceptor's first write.
+#[test]
+fn a_refusal_written_past_the_deadline_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let config = AcceptConfig::new(
+        key(2),
+        "acceptor-1",
+        Some(token('a')),
+        Arc::new(common::EchoPolicy::default()),
+    )
+    .with_timeouts(LinkTimeouts {
+        handshake_timeout: Duration::from_millis(800),
+        ..timeouts()
+    });
+    let acceptor = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut channel = RawChannel::new(
+            Box::new(stream.try_clone().expect("clone")),
+            Box::new(SlowWriter {
+                inner: stream.try_clone().expect("clone"),
+                calls: 0,
+                slow_at: 1,
+                delay: Duration::from_millis(1200),
+            }),
+            CodedControl::over(&stream),
+            TransportKind::Tcp,
+        );
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(channel, &line, Vec::new(), &config, &AttemptCancel::new())
+    });
+    let transport = Loopback {
+        addr,
+        token: token('b'),
+    };
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let dialer = dial_handshake(conn, &client(), Holder::Dialer, None, &AttemptCancel::new());
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::TimedOut)),
+        "{result:?}"
+    );
+    drop(dialer);
+}

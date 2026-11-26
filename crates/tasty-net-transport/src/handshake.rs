@@ -506,7 +506,9 @@ impl Io<'_> {
 
     /// Sends a refusing ACK, ends the sending direction so the peer reads it, and waits a
     /// little for the peer to close, so unread bytes of the peer do not turn the close into
-    /// a reset that drops the ACK. Returns the error the accepting end reports.
+    /// a reset that drops the ACK. Returns the error the accepting end reports:
+    /// [`HandshakeError::Refused`], or [`HandshakeError::TimedOut`] when the refusal itself
+    /// ran past the handshake deadline.
     fn refuse(
         &mut self,
         reason: RejectReason,
@@ -514,10 +516,17 @@ impl Io<'_> {
         linger: Duration,
     ) -> HandshakeError {
         let ack = Ack::refusal(&reason, ext);
-        if let Err(error) = self.write_control(&ack.encode()) {
-            tracing::debug!(%error, %reason, "the refusing ACK could not be written");
-        } else {
-            linger_close(self.ch, linger);
+        match self.write_control(&ack.encode()) {
+            Ok(()) => linger_close(self.ch, linger),
+            // The refusal went past the handshake deadline: that is the local result, as for
+            // any other message of the handshake.
+            Err(HandshakeError::TimedOut) => {
+                tracing::debug!(%reason, "the refusing ACK ran past the handshake deadline");
+                return HandshakeError::TimedOut;
+            }
+            Err(error) => {
+                tracing::debug!(%error, %reason, "the refusing ACK could not be written");
+            }
         }
         HandshakeError::Refused(reason)
     }
