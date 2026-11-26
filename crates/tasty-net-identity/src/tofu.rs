@@ -172,8 +172,8 @@ mod tests {
     fn new_match_mismatch_and_reregister() {
         let store = MemoryPeerKeyStore::new();
         let peer = PeerRef::new("work-laptop");
-        let first = DeviceKey::generate().id();
-        let second = DeviceKey::generate().id();
+        let first = DeviceKey::generate().unwrap().id();
+        let second = DeviceKey::generate().unwrap().id();
 
         assert_eq!(check_peer(&store, &peer, &first).unwrap(), TofuVerdict::New);
         assert_eq!(store.get(&peer).unwrap(), Some(first));
@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn peers_are_independent() {
         let store = MemoryPeerKeyStore::new();
-        let id = DeviceKey::generate().id();
-        let other = DeviceKey::generate().id();
+        let id = DeviceKey::generate().unwrap().id();
+        let other = DeviceKey::generate().unwrap().id();
         assert_eq!(
             check_peer(&store, &PeerRef::new("a"), &id).unwrap(),
             TofuVerdict::New
@@ -227,7 +227,9 @@ mod tests {
     fn concurrent_first_connections_insert_once() {
         let store = MemoryPeerKeyStore::new();
         let peer = PeerRef::new("peer");
-        let ids: Vec<DeviceId> = (0..8).map(|_| DeviceKey::generate().id()).collect();
+        let ids: Vec<DeviceId> = (0..8)
+            .map(|_| DeviceKey::generate().unwrap().id())
+            .collect();
         let verdicts: Vec<TofuVerdict> = std::thread::scope(|s| {
             let handles: Vec<_> = ids
                 .iter()
@@ -255,7 +257,7 @@ mod tests {
                 Err(StoreError::new("disk"))
             }
         }
-        let id = DeviceKey::generate().id();
+        let id = DeviceKey::generate().unwrap().id();
         let error = check_peer(&Failing, &PeerRef::new("p"), &id).unwrap_err();
         assert_eq!(error.into_inner().to_string(), "disk");
         assert!(reregister(&Failing as &dyn PeerKeyStore, &PeerRef::new("p"), &id).is_err());

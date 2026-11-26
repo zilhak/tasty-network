@@ -5,7 +5,7 @@ use std::{ffi::OsStr, fmt, io, path::Path, str::FromStr};
 use iroh_base::{PublicKey, SecretKey};
 
 use crate::{
-    error::{CorruptKind, FileOp, IdentityError},
+    error::{CorruptKind, FileOp, IdentityError, RandomError},
     hex, secret_file,
 };
 
@@ -28,11 +28,8 @@ impl DeviceKey {
     /// processes or threads create it at the same time: the new key is published with
     /// `hard_link`, which never replaces an existing file, and every caller then reads the file
     /// that won. A file in the wrong format is [`IdentityError::Corrupt`] and is left as it is;
-    /// a file that is not private is [`IdentityError::UnsafeFile`].
-    ///
-    /// # Panics
-    ///
-    /// When the OS random source fails.
+    /// a file that is not private is [`IdentityError::UnsafeFile`]. A failure of the OS random
+    /// source is [`IdentityError::Random`].
     pub fn load_or_create(dir: &Path) -> Result<Self, IdentityError> {
         let dir = &secret_file::prepare_dir(dir)?;
         let path = dir.join(DEVICE_KEY_FILE);
@@ -42,7 +39,9 @@ impl DeviceKey {
         let mut text = Vec::with_capacity(HEADER.len() + 66);
         text.extend_from_slice(HEADER);
         text.push(b'\n');
-        text.extend_from_slice(hex::encode(&os_random_32()).as_bytes());
+        text.extend_from_slice(
+            hex::encode(&os_random_32().map_err(IdentityError::Random)?).as_bytes(),
+        );
         text.push(b'\n');
         let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?.path;
         match std::fs::hard_link(&temp, &path) {
@@ -79,12 +78,8 @@ impl DeviceKey {
     }
 
     /// A new random key, without any file.
-    ///
-    /// # Panics
-    ///
-    /// When the OS random source fails.
-    pub fn generate() -> Self {
-        Self::from_seed(os_random_32())
+    pub fn generate() -> Result<Self, RandomError> {
+        os_random_32().map(Self::from_seed)
     }
 
     /// The 32-byte seed, for `iroh_base::SecretKey::from_bytes`.
@@ -140,12 +135,42 @@ fn parse(bytes: &[u8]) -> Result<[u8; 32], CorruptKind> {
     }
 }
 
-pub(crate) fn os_random_32() -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    if let Err(error) = getrandom::fill(&mut bytes) {
-        panic!("the OS random source failed: {error}");
+/// 32 bytes from the OS random source.
+pub(crate) fn os_random_32() -> Result<[u8; 32], RandomError> {
+    #[cfg(test)]
+    if random_fault::fails() {
+        return Err(RandomError::new(io::Error::other(
+            "injected random failure",
+        )));
     }
-    bytes
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| RandomError::new(io::Error::other(e)))?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) mod random_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn fails() -> bool {
+        FAILS.with(Cell::get)
+    }
+
+    /// Make the OS random source fail on this thread while the guard lives.
+    pub(crate) fn fail_random() -> impl Drop {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                FAILS.with(|f| f.set(false));
+            }
+        }
+        FAILS.with(|f| f.set(true));
+        Guard
+    }
 }
 
 /// The device ID: the ed25519 public key of a [`DeviceKey`]. Its text form is 64 lowercase hex

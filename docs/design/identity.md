@@ -9,7 +9,7 @@
 | 기기 키(ed25519 비밀키) | 영속. 디렉터리에 한 번 만들고 계속 쓴다 | 같은 디렉터리를 쓰는 모든 인스턴스. P2P endpoint는 그중 하나만 연다([P2P](p2p.md) "endpoint와 런타임") | handshake 서명, P2P endpoint 키, 토폴로지 노드 ID |
 | 연결 토큰 | 인스턴스 하나. 시작 때 발급하고, 인스턴스가 끝나면 소비자가 게시 핸들로 자기 레코드만 정리한다(아래 "파일 형식") | 그 인스턴스 하나 | SSH 경로 handshake의 `token` |
 
-API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`(값만 만들고 게시는 연결 레코드로 한다). 같은 디렉터리로 토큰을 두 번 발급하면 값이 다르다. 기기 키는 같다.
+API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityError>`와 `ConnectionToken::issue() -> Result<ConnectionToken, RandomError>`(값만 만들고 게시는 연결 레코드로 한다). 같은 디렉터리로 토큰을 두 번 발급하면 값이 다르다. 기기 키는 같다. OS 난수 원천이 실패하면 패닉하지 않고 `RandomError`(키 생성 중이면 `IdentityError::Random`)를 돌려준다.
 
 ## 저장 위치
 
@@ -60,7 +60,7 @@ API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`
 
 - `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`. 검증은 `verify_strict`다(`iroh-base` `PublicKey::verify`).
 - `Signature`는 64바이트이고 문자열 표현은 소문자 hex 128자다(handshake `sig`). `FromStr`은 그 형식만 받는다.
-- 파일 없이 키를 만드는 `DeviceKey::from_seed([u8; 32])`·`DeviceKey::generate()`와 iroh에 넘길 `DeviceKey::to_seed()`를 둔다. `DeviceKey`의 `Debug`는 seed를 찍지 않는다.
+- 파일 없이 키를 만드는 `DeviceKey::from_seed([u8; 32])`·`DeviceKey::generate() -> Result<DeviceKey, RandomError>`와 iroh에 넘길 `DeviceKey::to_seed()`를 둔다. `DeviceKey`의 `Debug`는 seed를 찍지 않는다.
 - handshake는 서명 대상의 SHA-256에 서명한다([handshake v2](handshake.md) "흐름 (SSH 경로)").
 
 ## 토큰 비교

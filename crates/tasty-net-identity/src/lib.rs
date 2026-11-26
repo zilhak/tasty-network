@@ -20,7 +20,7 @@ mod token;
 pub use device_key::{
     DEVICE_KEY_FILE, DeviceId, DeviceIdParseError, DeviceKey, Signature, SignatureParseError,
 };
-pub use error::{CorruptKind, FileOp, IdentityError, UnsafeReason};
+pub use error::{CorruptKind, FileOp, IdentityError, RandomError, UnsafeReason};
 pub use record::{
     ConnectionRecord, ParsedRecord, RecordField, RecordParseError, RecordPathProblem,
     RecordProblem, RecordPublication, RetireOutcome,

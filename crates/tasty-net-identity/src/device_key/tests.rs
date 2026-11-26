@@ -185,9 +185,22 @@ fn a_failure_whose_cleanup_fails_keeps_the_first_error() {
 }
 
 #[test]
+fn a_random_source_failure_is_an_error_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let _fail = super::random_fault::fail_random();
+    let error = DeviceKey::load_or_create(dir.path()).unwrap_err();
+    assert!(matches!(error, IdentityError::Random(_)), "{error:?}");
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
+    assert!(temps_in(dir.path()).is_empty());
+    assert!(DeviceKey::generate().is_err());
+    assert!(crate::ConnectionToken::issue().is_err());
+}
+
+#[test]
 fn sign_and_verify() {
-    let key = DeviceKey::generate();
-    let other = DeviceKey::generate();
+    let key = DeviceKey::generate().unwrap();
+    let other = DeviceKey::generate().unwrap();
     let payload = b"tasty-net handshake v2 payload".to_vec();
     let signature = key.sign(&payload);
     assert!(key.id().verify(&payload, &signature));
@@ -204,7 +217,7 @@ fn sign_and_verify() {
 
 #[test]
 fn seed_round_trip_keeps_the_id() {
-    let key = DeviceKey::generate();
+    let key = DeviceKey::generate().unwrap();
     let again = DeviceKey::from_seed(key.to_seed());
     assert_eq!(key.id(), again.id());
     assert_eq!(
@@ -218,7 +231,7 @@ fn seed_round_trip_keeps_the_id() {
 
 #[test]
 fn device_id_text_is_strict_lowercase_hex() {
-    let id = DeviceKey::generate().id();
+    let id = DeviceKey::generate().unwrap().id();
     let text = id.to_string();
     assert_eq!(text.len(), 64);
     assert_eq!(text.parse::<DeviceId>().unwrap(), id);
@@ -246,7 +259,7 @@ fn device_id_text_is_strict_lowercase_hex() {
 
 #[test]
 fn signature_text_round_trip() {
-    let signature = DeviceKey::generate().sign(b"x");
+    let signature = DeviceKey::generate().unwrap().sign(b"x");
     let text = signature.to_string();
     assert_eq!(text.len(), 128);
     assert_eq!(text.parse::<Signature>().unwrap(), signature);
@@ -255,7 +268,7 @@ fn signature_text_round_trip() {
 
 #[test]
 fn debug_hides_the_seed() {
-    let key = DeviceKey::generate();
+    let key = DeviceKey::generate().unwrap();
     let debug = format!("{key:?}");
     assert!(!debug.contains(&hex::encode(&key.to_seed())));
     assert!(debug.contains(&key.id().to_string()));

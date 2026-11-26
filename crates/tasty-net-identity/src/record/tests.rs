@@ -9,7 +9,7 @@ use crate::{
 fn record(port: u16) -> ConnectionRecord {
     ConnectionRecord {
         port,
-        token: ConnectionToken::issue(),
+        token: ConnectionToken::issue().unwrap(),
         instance_id: "instance \"one\"".to_owned(),
     }
 }
@@ -37,7 +37,7 @@ fn legacy_port_and_unknown_fields() {
         ConnectionRecord::parse("70000").unwrap_err().problem,
         RecordProblem::BadPort
     );
-    let token = ConnectionToken::issue();
+    let token = ConnectionToken::issue().unwrap();
     let text = format!(
         r#"{{"future":1,"port":1,"token":"{}","instance_id":"i"}}"#,
         token.expose_hex()
@@ -50,7 +50,7 @@ fn legacy_port_and_unknown_fields() {
 
 #[test]
 fn errors_name_the_field_and_never_carry_the_text() {
-    let token = ConnectionToken::issue();
+    let token = ConnectionToken::issue().unwrap();
     let hex = token.expose_hex();
     let cases = [
         (

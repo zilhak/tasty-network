@@ -96,6 +96,28 @@ impl fmt::Display for UnsafeReason {
     }
 }
 
+/// The OS random source failed, so no key or token was made.
+#[derive(Debug)]
+pub struct RandomError(io::Error);
+
+impl RandomError {
+    pub(crate) fn new(error: io::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl fmt::Display for RandomError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the OS random source failed")
+    }
+}
+
+impl Error for RandomError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// The error of key loading and record publication.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -132,6 +154,8 @@ pub enum IdentityError {
         /// The OS error.
         source: io::Error,
     },
+    /// The OS random source failed while making a new key; nothing was written.
+    Random(RandomError),
     /// A connection record path this crate does not publish at.
     InvalidRecordPath {
         /// The refused path.
@@ -189,6 +213,7 @@ impl fmt::Display for IdentityError {
             Self::Protect { path, .. } => {
                 write!(f, "could not restrict access to {}", path.display())
             }
+            Self::Random(_) => f.write_str("could not make a new device key"),
             Self::InvalidRecordPath { path, problem } => {
                 write!(
                     f,
@@ -223,6 +248,7 @@ impl Error for IdentityError {
                 ..
             } => Some(cleanup),
             Self::InvalidRecord(problem) => Some(problem),
+            Self::Random(error) => Some(error),
             Self::Corrupt { .. }
             | Self::InvalidRecordPath { .. }
             | Self::UnsafeFile { source: None, .. } => None,

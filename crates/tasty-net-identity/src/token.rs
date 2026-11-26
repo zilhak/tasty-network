@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 
 use subtle::ConstantTimeEq;
 
-use crate::{device_key::os_random_32, hex};
+use crate::{device_key::os_random_32, error::RandomError, hex};
 
 /// The token of one running instance: 32 OS random bytes as 64 lowercase hex digits, the same
 /// form as tasty's `SessionToken::generate`. A new value per instance start; it is published in
@@ -17,12 +17,8 @@ pub struct ConnectionToken(String);
 
 impl ConnectionToken {
     /// Issue a new token.
-    ///
-    /// # Panics
-    ///
-    /// When the OS random source fails.
-    pub fn issue() -> Self {
-        Self(hex::encode(&os_random_32()))
+    pub fn issue() -> Result<Self, RandomError> {
+        Ok(Self(hex::encode(&os_random_32()?)))
     }
 
     /// The 64 lowercase hex digits. Do not log them.
@@ -91,8 +87,8 @@ mod tests {
 
     #[test]
     fn issue_gives_64_lowercase_hex_and_new_values() {
-        let a = ConnectionToken::issue();
-        let b = ConnectionToken::issue();
+        let a = ConnectionToken::issue().unwrap();
+        let b = ConnectionToken::issue().unwrap();
         assert_eq!(a.expose_hex().len(), 64);
         assert!(
             a.expose_hex()
@@ -105,7 +101,7 @@ mod tests {
 
     #[test]
     fn comparison_same_one_byte_off_and_other_length() {
-        let token = ConnectionToken::issue();
+        let token = ConnectionToken::issue().unwrap();
         let same = token.expose_hex().as_bytes().to_vec();
         assert!(token.matches(&same));
 
@@ -128,7 +124,7 @@ mod tests {
 
     #[test]
     fn parse_refuses_other_forms_and_formatting_hides_the_value() {
-        let token = ConnectionToken::issue();
+        let token = ConnectionToken::issue().unwrap();
         let hex = token.expose_hex();
         assert!("A".repeat(64).parse::<ConnectionToken>().is_err());
         assert!("a".repeat(64).parse::<ConnectionToken>().is_ok());
