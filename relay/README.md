@@ -160,7 +160,7 @@ bash relay/container-check.sh --peer-bin <경로>    # 기동 검사 + p2p-peer 
 ```
 
 - 운영 설정에서 `[tls]`와 `enable_quic_addr_discovery`를 뺀 설정을 임시로 만들어 `--dev`(평문 HTTP)로 띄운다. 그래서 TLS와 QUIC 주소 확인은 보지 않고, `enable_relay`·`[limits]`·`access`·metrics 설정을 본다.
-- 최상위 키는 iroh-relay 1.5.0 `Config`의 키(`enable_relay`·`http_bind_addr`·`tls`·`enable_quic_addr_discovery`·`limits`·`enable_metrics`·`metrics_bind_addr`·`key_cache_capacity`·`access`)만 받는다. iroh-relay는 그 밖의 최상위 키(오타 `accesss`, 인용 키 `'access.http.url'` 등)를 무시하고 뜨지만, 검사는 `reason=unknown-key`로 거절한다(키 이름만 출력한다).
+- 최상위와 `limits` 아래 키는 iroh-relay 1.5.0 설정 구조체의 키만 받는다. 최상위는 `enable_relay`·`http_bind_addr`·`tls`·`enable_quic_addr_discovery`·`limits`·`enable_metrics`·`metrics_bind_addr`·`key_cache_capacity`·`access`, `[limits]`는 `accept_conn_limit`·`accept_conn_burst`·`client`, `[limits.client]`는 `rx`, `[limits.client.rx]`는 `bytes_per_second`·`max_burst_bytes`다. iroh-relay는 그 밖의 키(오타 `accesss`, 인용 키 `'access.http.url'`, `[limits.client.rx]` 아래 잘못 놓인 `access` 등)를 무시하고 뜨지만, 검사는 `reason=unknown-key`로 거절한다(키 경로만 출력한다).
 - `http_bind_addr`·`metrics_bind_addr`의 포트 0(iroh-relay가 임의 포트에 바인딩)은 검사가 게시할 포트를 정할 수 없어 지원하지 않는다. `reason=port-zero`로 끝난다.
 - 설정마다 `relay-check config=<이름> result=<ok|relay-only|fail> ...` 한 줄을 쓴다. 종료 코드는 0 통과, 1 실패, 2 판정 불가(docker·`p2p-peer` 없음 등)다.
 - `--dev`는 검사와 로컬 확인에만 쓴다. 평문 relay는 접속 메타데이터와 접속 허용 토큰을 보호하지 못한다.
