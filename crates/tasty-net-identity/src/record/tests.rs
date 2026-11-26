@@ -188,11 +188,14 @@ fn protection_failure_publishes_nothing() {
     };
     assert!(matches!(error, IdentityError::Protect { .. }), "{error:?}");
     assert!(!path.exists());
-    let leftovers: Vec<_> = fs::read_dir(dir.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .filter(|n| n.to_string_lossy().contains(".tmp-"))
-        .collect();
+    for name in temps(dir.path()) {
+        assert_eq!(
+            fs::metadata(dir.path().join(&name)).unwrap().len(),
+            0,
+            "{name:?}"
+        );
+    }
+    let leftovers = temps(dir.path());
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
@@ -218,6 +221,8 @@ fn a_failed_cleanup_after_a_failed_publication_is_reported() {
         "{error:?}"
     );
     assert!(leftover.exists());
+    // The kept temporary file shows that the protection failed before the token was written.
+    assert_eq!(fs::metadata(leftover).unwrap().len(), 0);
     assert!(!path.exists());
 }
 

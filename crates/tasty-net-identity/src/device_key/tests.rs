@@ -11,6 +11,14 @@ fn temps_in(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Every temporary file left in `dir` is empty: no secret byte was written before the failure.
+fn assert_temps_empty(dir: &Path) {
+    for name in temps_in(dir) {
+        let len = fs::metadata(dir.join(&name)).unwrap().len();
+        assert_eq!(len, 0, "{name} holds {len} bytes");
+    }
+}
+
 #[test]
 fn same_dir_same_id_other_dir_other_id() {
     let a = tempfile::tempdir().unwrap();
@@ -140,6 +148,7 @@ fn protection_failure_writes_no_secret() {
     };
     assert!(matches!(error, IdentityError::Protect { .. }), "{error:?}");
     assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
+    assert_temps_empty(dir.path());
     assert!(temps_in(dir.path()).is_empty());
     DeviceKey::load_or_create(dir.path()).unwrap();
 }
@@ -182,6 +191,13 @@ fn a_failure_whose_cleanup_fails_keeps_the_first_error() {
         "{error:?}"
     );
     assert!(std::error::Error::source(&error).is_some());
+    // The kept temporary file shows that the protection failed before any byte was written.
+    let IdentityError::Leftover { leftover, .. } = &error else {
+        unreachable!()
+    };
+    assert_eq!(fs::metadata(leftover).unwrap().len(), 0);
+    assert_eq!(temps_in(dir.path()).len(), 1);
+    assert_temps_empty(dir.path());
 }
 
 #[test]
