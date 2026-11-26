@@ -819,7 +819,14 @@ mod tests {
         assert_eq!(a.writer.finish(), Finish::DrainCapReached { settled: true });
         assert!(started.elapsed() >= Duration::from_millis(300));
         assert_eq!(a.closer.settled(), Some(EndReason::Lost));
+        let closed = Instant::now();
         let result = woken.join().expect("reader thread");
         assert!(result.is_err(), "the forced close woke the blocked read");
+        // Woken by the close, not ended by the 5 s read timeout.
+        assert!(
+            closed.elapsed() < Duration::from_secs(1),
+            "the reader ended {:?} after the close",
+            closed.elapsed()
+        );
     }
 }

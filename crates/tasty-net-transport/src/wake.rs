@@ -81,15 +81,19 @@ mod tests {
             (Instant::now(), result)
         });
         ready_rx.recv_timeout(READ_LIMIT).expect("reader ready");
-        // The ready signal does not prove the thread is inside recv; give it time.
-        std::thread::sleep(Duration::from_millis(50));
+        // The ready signal does not prove the thread is inside recv; give it ample time, and
+        // check the read is still blocked when the wake comes.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!reader.is_finished(), "the read returned before the wake");
 
         let called = Instant::now();
         shutdown_both_and_wake(&socket).expect("shutdown");
         let (ended, result) = reader.join().expect("reader thread");
         let took = ended.saturating_duration_since(called);
+        // Every branch must end well before the socket timeout: a read that ended only by
+        // its timeout was not woken.
         match &result {
-            Ok(0) => {}
+            Ok(0) if took < WOKEN_WITHIN => {}
             Err(error)
                 if error
                     .raw_os_error()
