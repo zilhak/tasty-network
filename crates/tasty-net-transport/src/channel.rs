@@ -177,7 +177,8 @@ impl RawChannel {
             reader_end_cv: Condvar::new(),
             writer_closed: AtomicBool::new(false),
             on_normal_end: Mutex::new(NormalEnd::default()),
-            heartbeat: Mutex::new(None),
+            heartbeat: Mutex::new(HeartbeatSlot::Stopped),
+            heartbeat_stopped: Condvar::new(),
         });
         let out = Arc::new(Outbox {
             state: Mutex::new(OutState {
@@ -192,7 +193,7 @@ impl RawChannel {
             config.heartbeat,
             heartbeat_interval(read_timeout),
         )?;
-        *lock(&shared.heartbeat) = Some(heartbeat);
+        *lock(&shared.heartbeat) = HeartbeatSlot::Running(heartbeat);
         Ok(Framed {
             reader: ChannelReader {
                 inner: self.reader,
@@ -308,8 +309,17 @@ pub(crate) struct ChannelShared {
     /// the link's drop claimed the end first. The one lock decides which of the two wins.
     on_normal_end: Mutex<NormalEnd>,
     /// The heartbeat thread, stopped and joined by whoever comes first: the writer's half
-    /// close, the writer's drop, or the link's drop.
-    heartbeat: Mutex<Option<Heartbeat>>,
+    /// close, the writer's drop, or the link's drop. A later caller waits for that join.
+    heartbeat: Mutex<HeartbeatSlot>,
+    heartbeat_stopped: Condvar,
+}
+
+/// Where the heartbeat thread of a channel is: running, being joined by one caller (taken
+/// out, not yet joined), or joined.
+pub(crate) enum HeartbeatSlot {
+    Running(Heartbeat),
+    Stopping,
+    Stopped,
 }
 
 type NormalEndHook = Box<dyn FnOnce() + Send>;
@@ -324,16 +334,45 @@ pub(crate) struct NormalEnd {
 }
 
 impl ChannelShared {
-    /// Stops and joins the heartbeat thread, once. The join runs outside the lock, so a second
-    /// caller returns at once.
+    /// Stops and joins the heartbeat thread. The first caller takes it out and joins it
+    /// outside the lock; a caller that comes while that join runs waits until it completed, so
+    /// every caller returns only once the thread is gone.
     pub(crate) fn stop_heartbeat(&self) {
-        let heartbeat = lock(&self.heartbeat).take();
-        drop(heartbeat);
+        let mut slot = lock(&self.heartbeat);
+        loop {
+            match std::mem::replace(&mut *slot, HeartbeatSlot::Stopping) {
+                HeartbeatSlot::Running(heartbeat) => {
+                    drop(slot);
+                    drop(heartbeat);
+                    *lock(&self.heartbeat) = HeartbeatSlot::Stopped;
+                    self.heartbeat_stopped.notify_all();
+                    return;
+                }
+                HeartbeatSlot::Stopping => {
+                    slot = self
+                        .heartbeat_stopped
+                        .wait(slot)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                HeartbeatSlot::Stopped => {
+                    *slot = HeartbeatSlot::Stopped;
+                    return;
+                }
+            }
+        }
     }
 
+    /// True until the heartbeat thread was joined (also while one caller is joining it).
     #[cfg(test)]
     pub(crate) fn heartbeat_running(&self) -> bool {
-        lock(&self.heartbeat).is_some()
+        !matches!(*lock(&self.heartbeat), HeartbeatSlot::Stopped)
+    }
+
+    /// Puts the slot in a state, for tests that hold a join in progress.
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_slot(&self, state: HeartbeatSlot) {
+        *lock(&self.heartbeat) = state;
+        self.heartbeat_stopped.notify_all();
     }
 
     fn mark_reader_end(&self) {

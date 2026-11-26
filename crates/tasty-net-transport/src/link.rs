@@ -376,4 +376,40 @@ mod tests {
         assert!(!shared.heartbeat_running(), "the link's drop joined it");
         drop(writer);
     }
+
+    /// A link dropped while another caller (the writer) is still joining the heartbeat waits
+    /// until that join completed, so its drop never returns with the worker still alive.
+    #[test]
+    fn dropping_a_link_waits_for_a_heartbeat_join_in_progress() {
+        use crate::channel::HeartbeatSlot;
+
+        let (a, _b) = memory_channel_pair();
+        let control = a.control();
+        let framed = a
+            .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::Periodic))
+            .expect("framed");
+        let shared = framed.shared();
+        let mut link = Link {
+            ordered_shared: Arc::clone(&shared),
+            ordered: Some((framed.reader, framed.writer)),
+            closer: framed.closer,
+            control,
+            peer: peer(),
+            client_id: None,
+            ext: None,
+            bulk: None,
+            _guard: None,
+        };
+        let halves = link.take_ordered().expect("ordered");
+        // Another caller took the worker out and is joining it.
+        shared.set_heartbeat_slot(HeartbeatSlot::Stopping);
+        assert!(shared.heartbeat_running(), "not joined yet");
+        let dropping = std::thread::spawn(move || drop(link));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!dropping.is_finished(), "the drop waits for the join");
+        shared.set_heartbeat_slot(HeartbeatSlot::Stopped);
+        dropping.join().expect("drop");
+        assert!(!shared.heartbeat_running());
+        drop(halves);
+    }
 }
