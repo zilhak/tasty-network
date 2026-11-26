@@ -7,7 +7,7 @@
 #   scripts/check.sh test [ARGS]    cargo test --workspace. ARGS는 cargo test에 그대로 넘긴다
 #   scripts/check.sh check          cargo check --workspace --all-targets
 #   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
-#   scripts/check.sh no-tasty-deps  tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
+#   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
 # cargo 명령은 모두 --locked라 Cargo.lock을 바꾸지 않는다.
@@ -27,7 +27,10 @@ cmd_lint() { run cargo clippy --workspace --all-targets --locked -- -D warnings;
 cmd_test() { run cargo test --workspace --locked "$@"; }
 cmd_check() { run cargo check --workspace --all-targets --locked; }
 cmd_shell() { run bash scripts/check-shell-assets.sh; }
-cmd_no_tasty_deps() { run bash scripts/check-no-tasty-deps.sh; }
+cmd_no_tasty_deps() {
+    run bash scripts/check-no-tasty-deps.sh --self-test
+    run bash scripts/check-no-tasty-deps.sh
+}
 # advisories는 커밋과 무관하게 새 공지로 실패하므로 여기서 보지 않는다(docs/dev-guide/ci.md).
 cmd_deny() { run cargo deny --locked --workspace check licenses bans sources; }
 
