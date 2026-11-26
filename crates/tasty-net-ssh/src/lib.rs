@@ -376,9 +376,10 @@ pub(crate) mod test_helper {
         pid_runs(&pid.to_string())
     }
 
-    /// Whether process `pid` exists at all, a zombie included. A reaped child does not.
+    /// Whether process `pid` exists at all, a zombie included. A reaped child does not. A lookup
+    /// that cannot run or fails panics, so a test never reads "gone" from a failed query.
     pub(crate) fn process_exists(pid: u32) -> bool {
-        pid_stat(&pid.to_string()).is_some_and(|stat| !stat.is_empty())
+        !pid_stat(&pid.to_string()).is_empty()
     }
 
     #[cfg(unix)]
@@ -386,20 +387,33 @@ pub(crate) mod test_helper {
         let _status = Command::new("kill").args(["-KILL", pid]).status();
     }
 
-    /// The `ps` state of `pid`: empty when there is no such process, `None` when `ps` fails.
+    /// The `ps` state of `pid`, empty when there is no such process. `ps -p` exits 1 with no
+    /// output for a PID it does not find; any other failure (no `ps`, another exit, an error
+    /// message) panics.
     #[cfg(unix)]
-    fn pid_stat(pid: &str) -> Option<String> {
+    fn pid_stat(pid: &str) -> String {
         let out = Command::new("ps")
             .args(["-o", "stat=", "-p", pid])
             .output()
-            .ok()?;
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|e| panic!("ps could not run: {e}"));
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let no_such_process =
+            out.status.code() == Some(1) && stat.is_empty() && out.stderr.is_empty();
+        if out.status.success() || no_such_process {
+            return stat;
+        }
+        panic!(
+            "ps -p {pid} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// Whether `pid` still runs. A zombie waiting for its new parent to reap it does not run.
     #[cfg(unix)]
     fn pid_runs(pid: &str) -> bool {
-        pid_stat(pid).is_none_or(|stat| !stat.is_empty() && !stat.starts_with('Z'))
+        let stat = pid_stat(pid);
+        !stat.is_empty() && !stat.starts_with('Z')
     }
 
     /// `taskkill /F` ends the process with TerminateProcess.
@@ -412,32 +426,57 @@ pub(crate) mod test_helper {
             .status();
     }
 
-    /// The `tasklist` row of `pid`: empty when there is no such process, `None` when it fails.
-    /// Windows has no zombies; an exited process whose handle is still open is not listed.
+    /// The `tasklist` row of `pid`, empty when there is no such process. Windows has no zombies;
+    /// an exited process whose handle is still open is not listed. `tasklist` exits 0 whether or
+    /// not it finds the PID, so a failure to run it or another exit panics.
     #[cfg(windows)]
-    fn pid_stat(pid: &str) -> Option<String> {
+    fn pid_stat(pid: &str) -> String {
         let filter = format!("PID eq {pid}");
         let out = Command::new("tasklist")
             .args(["/FI", &filter, "/NH", "/FO", "CSV"])
             .output()
-            .ok()?;
+            .unwrap_or_else(|e| panic!("tasklist could not run: {e}"));
+        assert!(
+            out.status.success(),
+            "tasklist for {pid} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
         let rows = String::from_utf8_lossy(&out.stdout).into_owned();
-        Some(if rows.contains(&format!("\"{pid}\"")) {
+        if rows.contains(&format!("\"{pid}\"")) {
             rows
         } else {
             String::new()
-        })
+        }
     }
 
     #[cfg(windows)]
     fn pid_runs(pid: &str) -> bool {
-        pid_stat(pid).is_none_or(|row| !row.is_empty())
+        !pid_stat(pid).is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process lookup tells a running process from a missing one. A failed lookup would
+    /// panic rather than read as "gone".
+    #[test]
+    fn the_process_lookup_tells_running_from_gone() {
+        use test_helper::{process_exists, process_runs};
+        assert!(process_exists(std::process::id()));
+        assert!(process_runs(std::process::id()));
+        let mut child = test_helper::helper_command("sleep")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        assert!(process_runs(pid));
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        assert!(!process_exists(pid), "a reaped child is gone");
+    }
 
     #[test]
     fn ssh_target_parse_keeps_destination() {
