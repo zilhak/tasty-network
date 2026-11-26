@@ -449,7 +449,7 @@ fn a_dialer_reports_a_v1_server_as_too_old() {
         ),
         "{result:?}"
     );
-    assert!(!result.as_ref().err().expect("error").is_retryable());
+    assert!(!result.as_ref().expect_err("error").is_retryable());
     let line = fake.join().expect("fake");
     let sent: Value = serde_json::from_str(&line).expect("json");
     assert_eq!(sent["params"]["proto"], json!(2));
