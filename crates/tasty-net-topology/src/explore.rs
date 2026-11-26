@@ -146,9 +146,11 @@ struct PartTrack {
 }
 
 impl PartTrack {
+    /// Every part from 0 to the last arrived. Counted in `u64`, so no part number
+    /// overflows on any target.
     fn complete(&self) -> bool {
         self.last.is_some_and(|last| {
-            usize::try_from(last).is_ok_and(|l| self.seen.len() == l + 1)
+            u64::try_from(self.seen.len()).is_ok_and(|n| n == u64::from(last) + 1)
                 && self.seen.iter().all(|p| *p <= last)
         })
     }
@@ -1468,6 +1470,19 @@ mod tests {
         agent.answer_query(Some(&id(1)), query("r3"), local, &mut Sink, at(3_500));
         assert_eq!(agent.answered.len(), 1);
         assert!(agent.answered.contains_key("r3"));
+    }
+
+    #[test]
+    fn the_largest_part_number_does_not_overflow_the_count() {
+        let mut track = PartTrack::default();
+        track.seen.insert(u32::MAX);
+        track.last = Some(u32::MAX);
+        assert!(!track.complete());
+        let whole = PartTrack {
+            seen: [0].into_iter().collect(),
+            last: Some(0),
+        };
+        assert!(whole.complete());
     }
 
     /// Fails its first send, then records what it sends.

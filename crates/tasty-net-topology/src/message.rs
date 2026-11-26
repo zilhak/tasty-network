@@ -35,6 +35,11 @@ pub const MAX_QUERY_MS: u64 = 30_000;
 /// remote read results.
 pub const MAX_MESSAGE_JSON: usize = tasty_net_frame::MAX_FRAME_LEN as usize / 2;
 
+/// Upper bound of the result parts, and separately of the dones, of one answer (one
+/// `branch` and `from`): `part` is below it. A message with a larger `part` is malformed,
+/// and an answer that would need more is not sent.
+pub const MAX_PARTS: u32 = 1_024;
+
 /// A topology query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
@@ -158,12 +163,22 @@ impl Message {
     }
 
     /// Reads one message. Longer than [`MAX_MESSAGE_JSON`] is [`MessageError::TooLarge`]
-    /// before parsing.
+    /// before parsing. A result or done whose `part` is [`MAX_PARTS`] or more is
+    /// [`MessageError::Malformed`].
     pub fn from_json(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.len() > MAX_MESSAGE_JSON {
             return Err(MessageError::TooLarge);
         }
-        serde_json::from_slice(bytes).map_err(|_| MessageError::Malformed)
+        let message: Self = serde_json::from_slice(bytes).map_err(|_| MessageError::Malformed)?;
+        let part = match &message {
+            Self::Result(part) => part.part,
+            Self::Done(done) => done.part,
+            Self::Query(_) | Self::Suppressed(_) => 0,
+        };
+        if part >= MAX_PARTS {
+            return Err(MessageError::Malformed);
+        }
+        Ok(message)
     }
 
     /// The JSON of this message. [`MessageError::TooLarge`] when it is longer than
@@ -223,8 +238,9 @@ pub struct ResultHeader {
 /// Splits an answer into parts whose JSON (as [`Message::Result`]) is at most `limit`
 /// bytes. Parts are numbered from 0 and only the final one has `last: true`. An empty
 /// answer is one empty part. Concatenating the `nodes` and `edges` of the parts in order
-/// gives the input back. [`MessageError::TooLarge`] when the header alone does not fit,
-/// [`MessageError::EntryTooLarge`] when one entry does not fit with it.
+/// gives the input back. [`MessageError::TooLarge`] when the header alone does not fit or
+/// more than [`MAX_PARTS`] parts would be needed, [`MessageError::EntryTooLarge`] when
+/// one entry does not fit with it.
 pub fn split_result(
     header: &ResultHeader,
     nodes: Vec<Node>,
@@ -267,7 +283,7 @@ pub fn split_result(
             return Err(MessageError::EntryTooLarge);
         }
         if size + len > limit {
-            let next = empty(next_part(&current)?, false);
+            let next = empty(next_part(current.part)?, false);
             parts.push(std::mem::replace(&mut current, next));
             size = base;
         }
@@ -280,7 +296,7 @@ pub fn split_result(
             return Err(MessageError::EntryTooLarge);
         }
         if size + len > limit {
-            let next = empty(next_part(&current)?, false);
+            let next = empty(next_part(current.part)?, false);
             parts.push(std::mem::replace(&mut current, next));
             size = base;
         }
@@ -297,7 +313,7 @@ pub fn split_result(
 /// from 0, all but the last with `more: true` and `final: false`; the last carries
 /// `is_final`. Concatenating each
 /// list over the messages in order gives the input back. [`MessageError::TooLarge`] when
-/// the header alone does not fit.
+/// the header alone does not fit or more than [`MAX_PARTS`] dones would be needed.
 pub fn split_done(
     header: &ResultHeader,
     timed_out: Vec<DeviceId>,
@@ -357,7 +373,7 @@ pub fn split_done(
             return Err(MessageError::TooLarge);
         }
         if size + len > limit {
-            let part = current.part.checked_add(1).ok_or(MessageError::TooLarge)?;
+            let part = next_part(current.part)?;
             dones.push(std::mem::replace(&mut current, Done { part, ..empty() }));
             size = base;
         }
@@ -374,8 +390,11 @@ pub fn split_done(
     Ok(dones)
 }
 
-fn next_part(current: &ResultPart) -> Result<u32, MessageError> {
-    current.part.checked_add(1).ok_or(MessageError::TooLarge)
+/// The number after `part`. [`MessageError::TooLarge`] when it reaches [`MAX_PARTS`].
+fn next_part(part: u32) -> Result<u32, MessageError> {
+    part.checked_add(1)
+        .filter(|next| *next < MAX_PARTS)
+        .ok_or(MessageError::TooLarge)
 }
 
 fn json_len<T: Serialize>(value: &T) -> Result<usize, MessageError> {
@@ -669,6 +688,75 @@ mod limit_tests {
         }
         let joined: Vec<DeviceId> = dones.iter().flat_map(|d| d.timed_out.clone()).collect();
         assert_eq!(joined, ids);
+    }
+
+    #[test]
+    fn a_part_number_at_the_part_limit_is_malformed() {
+        let part = |n: u32| {
+            Message::Result(ResultPart {
+                request_id: "r".into(),
+                branch: "b".into(),
+                from: id(1),
+                return_path: vec![id(2)],
+                part: n,
+                last: true,
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            })
+        };
+        let done = |n: u32| {
+            Message::Done(Done {
+                request_id: "r".into(),
+                branch: "b".into(),
+                from: id(1),
+                return_path: vec![id(2)],
+                timed_out: Vec::new(),
+                is_final: false,
+                more: false,
+                part: n,
+                incomplete: Vec::new(),
+            })
+        };
+        for n in [MAX_PARTS - 1, MAX_PARTS, u32::MAX] {
+            let ok = n < MAX_PARTS;
+            for message in [part(n), done(n)] {
+                let json = message.to_json().unwrap();
+                let read = Message::from_json(&json);
+                if ok {
+                    assert_eq!(read, Ok(message));
+                } else {
+                    assert_eq!(read, Err(MessageError::Malformed), "part {n}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_needing_more_parts_than_the_limit_is_refused() {
+        use crate::model::{Side, TransportKind};
+        let h = header(1);
+        let edges: Vec<Edge> = (0..=MAX_PARTS)
+            .map(|n| Edge {
+                dialer: id(n),
+                acceptor: id(n + 10_000),
+                holder: Side::Dialer,
+                transport: TransportKind::SshForward,
+                rtt_ms: None,
+                connected_at: 0,
+                workspace: None,
+            })
+            .collect();
+        // Room for one edge per part, not two: one part more than the limit allows.
+        let one = split_result(&h, Vec::new(), edges[..1].to_vec(), usize::MAX).unwrap();
+        let limit = Message::Result(one[0].clone()).to_json().unwrap().len() + 20;
+        assert_eq!(
+            split_result(&h, Vec::new(), edges.clone(), limit),
+            Err(MessageError::TooLarge)
+        );
+        let allowed = usize::try_from(MAX_PARTS).unwrap();
+        let parts = split_result(&h, Vec::new(), edges[..allowed].to_vec(), limit).unwrap();
+        assert_eq!(parts.len(), allowed);
+        assert_eq!(parts.last().unwrap().part, MAX_PARTS - 1);
     }
 }
 
