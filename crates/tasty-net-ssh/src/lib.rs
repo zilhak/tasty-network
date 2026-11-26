@@ -194,7 +194,9 @@ pub(crate) mod test_helper {
     const ENTRY: &str = "test_helper::helper_entry";
 
     /// The helper in `mode`:
-    /// - `sleep`: runs for 60 s.
+    /// - `sleep` or `sleep:<secs>`: runs for 60 s (or `<secs>`).
+    /// - `orphan:<secs>`: starts `sleep:<secs>` sharing its stdout, prints a port line, and
+    ///   exits 0 at once, so the stdout pipe stays open after it exits.
     /// - `echo:<text>`: prints `<text>` on its own line and exits 0. The test harness prints its
     ///   own lines before it, so read the last line.
     /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
@@ -216,7 +218,16 @@ pub(crate) mod test_helper {
         let (name, arg) = mode.split_once(':').unwrap_or((mode.as_str(), ""));
         match name {
             "sleep" => {
-                std::thread::sleep(Duration::from_secs(60));
+                let secs = arg.parse().unwrap_or(60);
+                std::thread::sleep(Duration::from_secs(secs));
+                std::process::exit(0);
+            }
+            "orphan" => {
+                let _grandchild = helper_command(&format!("sleep:{arg}"))
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .expect("grandchild");
+                println!("\n45123");
                 std::process::exit(0);
             }
             "echo" => {

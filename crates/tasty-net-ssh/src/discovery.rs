@@ -5,8 +5,10 @@
 //! names of the remote side come from [`PortDiscoveryConfig`]; this crate has no defaults.
 
 use std::fmt;
+use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
@@ -425,12 +427,108 @@ fn wait_with_timeout(owner: &mut ChildOwner, budget: Duration) -> bool {
     }
 }
 
+/// A discovery command's stdout beyond this many bytes is refused. A record is small.
+const OUTPUT_LIMIT: usize = 64 * 1024;
+/// Only this much of stderr is kept for the detail. The rest is read and dropped.
+const STDERR_LIMIT: usize = 16 * 1024;
+
+/// What a reader thread read from one pipe.
+#[derive(Default)]
+struct Captured {
+    bytes: Vec<u8>,
+    /// More than the limit arrived; `bytes` holds the first `limit` bytes.
+    overflowed: bool,
+}
+
+/// Reads `pipe` to its end on a thread, keeping the first `limit` bytes and dropping the rest so
+/// the writer never blocks on a full pipe. The result arrives on the returned channel when the
+/// pipe closes. A descendant that holds the pipe keeps the thread waiting; the caller stops
+/// waiting at its deadline and the thread ends when the pipe finally closes.
+fn spawn_reader(
+    mut pipe: impl Read + Send + 'static,
+    limit: usize,
+    name: &str,
+) -> std::io::Result<mpsc::Receiver<Captured>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let mut captured = Captured::default();
+            let mut buf = [0u8; 8192];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = limit.saturating_sub(captured.bytes.len());
+                        captured.bytes.extend_from_slice(&buf[..n.min(room)]);
+                        captured.overflowed |= n > room;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        tracing::debug!(%e, "ssh output read ended");
+                        break;
+                    }
+                }
+            }
+            // The receiver may have given up already.
+            let _unwanted = tx.send(captured);
+        })?;
+    Ok(rx)
+}
+
+/// Readers for the child's stdout and stderr.
+type Readers = (
+    Option<mpsc::Receiver<Captured>>,
+    Option<mpsc::Receiver<Captured>>,
+);
+
+fn start_readers(child: &mut Child) -> std::io::Result<Readers> {
+    let stdout = child
+        .stdout
+        .take()
+        .map(|p| spawn_reader(p, OUTPUT_LIMIT, "ssh-discovery-stdout"))
+        .transpose()?;
+    let stderr = child
+        .stderr
+        .take()
+        .map(|p| spawn_reader(p, STDERR_LIMIT, "ssh-discovery-stderr"))
+        .transpose()?;
+    Ok((stdout, stderr))
+}
+
+/// Waits for a reader's result until `deadline`, stopping early on cancellation.
+fn collect(
+    rx: &mpsc::Receiver<Captured>,
+    deadline: Instant,
+    what: &str,
+) -> Result<Captured, PortDiscoveryError> {
+    loop {
+        if cancel_requested() {
+            return Err(cancelled_error(what));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(PortDiscoveryError::new(
+                PortDiscoveryFailureKind::TimedOut,
+                format!("{what}: the output stayed open after the command exited"),
+            ));
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(captured) => return Ok(captured),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Captured::default()),
+        }
+    }
+}
+
 /// Runs `cmd` through `spawn`, polls its exit, and applies cancellation and the bound. Returns
 /// stdout on exit 0.
 ///
-/// Output that fills the pipe and blocks the child is caught by the polling bound, but spawning,
-/// reaping after a kill, and `wait_with_output` have no bound of their own. When cancellation
-/// and the bound meet, the result is `Cancelled`.
+/// stdout and stderr are read while the child runs, so a large output cannot block it. stdout
+/// over [`OUTPUT_LIMIT`] is refused as [`PortDiscoveryFailureKind::PortParseFailed`]. The
+/// bound and cancellation also cover the wait for the pipes to close after the child exits (a
+/// descendant can hold them). Spawning and reaping after a kill have no bound of their own.
+/// When cancellation and the bound meet, the result is `Cancelled`.
 fn run_capture_with_budget(
     mut cmd: Command,
     budget: Duration,
@@ -452,12 +550,22 @@ fn run_capture_with_budget(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = spawn.spawn(cmd).map_err(|e| {
+    let mut child = spawn.spawn(cmd).map_err(|e| {
         PortDiscoveryError::new(
             PortDiscoveryFailureKind::SshConnectionFailed,
             format!("{what}: spawn failed: {e}"),
         )
     })?;
+    let (stdout_rx, stderr_rx) = match start_readers(&mut child) {
+        Ok(rx) => rx,
+        Err(e) => {
+            kill_and_reap(&mut child);
+            return Err(PortDiscoveryError::new(
+                PortDiscoveryFailureKind::SshConnectionFailed,
+                format!("{what}: the output reader could not start: {e}"),
+            ));
+        }
+    };
     // Hand the child to the cancel scope, so the bound watch and an outside cancel share it
     // and whichever comes first can cut it off.
     let mut owner = ChildOwner::adopt(child, what)?;
@@ -473,16 +581,22 @@ fn run_capture_with_budget(
             )
         });
     }
-    let child = owner.finish(what)?;
-    let output = child.wait_with_output().map_err(|e| {
+    let mut child = owner.finish(what)?;
+    let status = child.wait().map_err(|e| {
         PortDiscoveryError::new(
             PortDiscoveryFailureKind::SshConnectionFailed,
-            format!("{what}: collecting the output failed: {e}"),
+            format!("{what}: reaping the command failed: {e}"),
         )
     })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output.status.code();
+    let deadline = started + budget;
+    let wait_for = |rx: Option<mpsc::Receiver<Captured>>| match rx {
+        Some(rx) => collect(&rx, deadline, what),
+        None => Ok(Captured::default()),
+    };
+    if !status.success() {
+        let stderr = wait_for(stderr_rx)?;
+        let stderr = String::from_utf8_lossy(&stderr.bytes);
+        let code = status.code();
         let elapsed = started.elapsed();
         let mut error = PortDiscoveryError::new(
             refine_with_elapsed(classify_by_exit_code(code), elapsed),
@@ -494,7 +608,14 @@ fn run_capture_with_budget(
         error.exit_code = code;
         return Err(error);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let stdout = wait_for(stdout_rx)?;
+    if stdout.overflowed {
+        return Err(PortDiscoveryError::new(
+            PortDiscoveryFailureKind::PortParseFailed,
+            format!("{what}: the output is longer than {OUTPUT_LIMIT} bytes"),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
 
 /// Decodes the stdout of a successful command. A refusal is
@@ -1329,6 +1450,74 @@ mod tests {
         assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
         let elapsed = started.elapsed();
         assert!(elapsed < CEILING, "cut before the bound: {elapsed:?}");
+    }
+
+    /// A large output is drained while the child runs: the command ends at once and the output
+    /// is refused for its size, not reported as a timeout.
+    #[test]
+    fn a_large_output_is_refused_not_timed_out() {
+        let started = Instant::now();
+        let err = capture(
+            helper_command("flood:1048576"),
+            Duration::from_secs(20),
+            "flood",
+        )
+        .expect_err("too long");
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::PortParseFailed,
+            "{}",
+            err.detail()
+        );
+        assert!(err.detail().contains("longer than"), "{}", err.detail());
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
+
+    /// A descendant that keeps stdout open after the command exits is bounded by the budget.
+    #[test]
+    fn an_output_held_open_by_a_descendant_times_out_within_the_budget() {
+        let started = Instant::now();
+        let err = capture(
+            helper_command("orphan:4"),
+            Duration::from_millis(1500),
+            "orphan",
+        )
+        .expect_err("held open");
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::TimedOut,
+            "{}",
+            err.detail()
+        );
+        assert!(err.detail().contains("stayed open"), "{}", err.detail());
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// Cancellation also stops the wait for an output held open by a descendant.
+    #[test]
+    fn cancel_stops_the_wait_for_a_held_output() {
+        let handle = SshCancel::new();
+        let _scope = handle.scope();
+        let killer = handle.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            killer.cancel();
+        });
+        let started = Instant::now();
+        let err = capture(
+            helper_command("orphan:4"),
+            Duration::from_secs(20),
+            "orphan cancel",
+        )
+        .expect_err("cancelled");
+        t.join().expect("killer thread");
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::Cancelled,
+            "{}",
+            err.detail()
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 
     /// Two lookups under clones of one handle each get their own child's output, and one
