@@ -224,7 +224,9 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
             .write(write)
             .create_new(create_new)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW);
+            // O_NONBLOCK: a FIFO at the lock path must not block the open (it is refused by
+            // the regular-file check in `secret_file::lock`); flock still waits.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         options
     };
     loop {

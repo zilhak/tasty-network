@@ -479,6 +479,35 @@ mod unix {
         assert_eq!(mode, 0o400, "an existing lock file keeps its mode");
     }
 
+    /// A read-only FIFO at the lock path neither blocks the publication nor is used as a lock.
+    #[test]
+    fn a_fifo_at_the_lock_path_is_refused_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("home");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = dir.join("record.lock");
+        let status = std::process::Command::new("mkfifo")
+            .args(["-m", "400"])
+            .arg(&lock)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let path = dir.join("record");
+        let error = record(1).publish(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::UnsafeFile {
+                    reason: UnsafeReason::NotRegular,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(!path.exists());
+    }
+
     /// Unix only: a Windows directory cannot be removed while the publication keeps the
     /// record open.
     #[test]

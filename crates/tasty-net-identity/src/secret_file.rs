@@ -265,6 +265,13 @@ pub(crate) fn lock(target: &Path) -> Result<File, IdentityError> {
     name.push(".lock");
     let path = PathBuf::from(name);
     let file = os::open_lock(&path).map_err(|e| IdentityError::io(FileOp::Lock, &path, e))?;
+    // Judged on the opened handle: a FIFO, device or directory is not a lock file.
+    let meta = file
+        .metadata()
+        .map_err(|e| IdentityError::io(FileOp::Lock, &path, e))?;
+    if !meta.is_file() {
+        return Err(IdentityError::unsafe_file(&path, UnsafeReason::NotRegular));
+    }
     file.lock()
         .map_err(|e| IdentityError::io(FileOp::Lock, &path, e))?;
     Ok(file)
