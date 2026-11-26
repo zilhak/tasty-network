@@ -157,7 +157,7 @@ cc_stop_peer() {
 
 # docker·p2p-peer 없이 경로 판정과 peer 정리를 시험한다. 통과 0, 실패 1.
 cc_self_test() {
-    local t fail=0 pid start
+    local t fail=0 pid start i
     t=$(mktemp -d) || return 2
     st_case() { # 이름, 기대 rc, 실제 rc
         if [[ "$2" == "$3" ]]; then echo "self-test $1 ok"; else echo "self-test $1 FAIL want=$2 got=$3"; fail=1; fi
@@ -177,13 +177,22 @@ cc_self_test() {
         'p2p-peer path-selected path=direct addr=127.0.0.1:9' > "$t/other.log"
     cc_path_switched "$t/other.log" "http://127.0.0.1:5"
     st_case other-relay-rejected 1 $?
-    # TERM을 무시하는 자식도 KILL로 끝내고 회수한다.
-    bash -c 'trap "" TERM; while :; do sleep 1; done' &
+    # TERM을 무시하는 자식도 KILL로 끝내고 회수한다. 자식이 trap을 설치하고 준비 파일을 쓴 뒤에 정리를 시작하고,
+    # KILL 분기에 들어갔는지(그 분기의 로그 줄)를 단언한다.
+    bash -c 'trap "" TERM; : > "$1"; while :; do sleep 1; done' _ "$t/ready" &
     pid=$!
     CC_PEER_PIDS+=("$pid")
+    for ((i = 0; i < 50; i++)); do
+        [[ -e "$t/ready" ]] && break
+        sleep 0.1
+    done
+    [[ -e "$t/ready" ]]
+    st_case term-trap-installed 0 $?
     start=$SECONDS
-    PEER_KILL_SECONDS=1 cc_stop_peer "$pid" 2>/dev/null
+    PEER_KILL_SECONDS=1 cc_stop_peer "$pid" 2>"$t/stop.err"
     st_case stop-term-ignoring-child 0 $?
+    grep -q 'KILL한다' "$t/stop.err"
+    st_case kill-branch-taken 0 $?
     cc_alive "$pid"
     st_case child-gone 1 $?
     (( SECONDS - start <= 3 ))
