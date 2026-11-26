@@ -1348,7 +1348,26 @@ fn await_proposal(
             past_deadline = true;
             continue;
         }
+        #[cfg(test)]
+        if deadline - now <= PROPOSAL_POLL {
+            before_last_watch(deadline);
+        }
         peer_still_there(io, (deadline - now).min(PROPOSAL_POLL))?;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once on this thread when the approval wait enters its last channel watch, with
+    /// the approval deadline.
+    static BEFORE_LAST_WATCH: std::cell::RefCell<Option<Box<dyn FnOnce(Instant)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_last_watch(deadline: Instant) {
+    if let Some(hook) = BEFORE_LAST_WATCH.with(|hook| hook.borrow_mut().take()) {
+        hook(deadline);
     }
 }
 
@@ -1427,7 +1446,63 @@ fn accept_bulk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::memory_channel_pair;
+    use crate::transport::TransportKind;
     use serde_json::{Value, json};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Mutex;
+    use tasty_net_identity::DeviceKey;
+
+    /// An approval given inside the last channel watch, before the approval deadline, counts
+    /// although the wait takes it only when that watch returns after the deadline. The hook
+    /// gives the approval once the wait has entered its last watch; the dialer sends nothing,
+    /// so the watch runs to its end past the deadline.
+    #[test]
+    fn an_approval_given_in_the_last_watch_before_the_deadline_is_taken() {
+        let (mut acceptor, _dialer) = memory_channel_pair();
+        let cancel = AttemptCancel::new();
+        let proposals: Arc<Mutex<Option<RoleProposal>>> = Arc::default();
+        let kept = Arc::clone(&proposals);
+        let handler: ProposalHandler = Arc::new(move |proposal| {
+            *kept.lock().expect("lock") = Some(proposal);
+        });
+        let approval_deadline: Rc<Cell<Option<Instant>>> = Rc::default();
+        let seen = Rc::clone(&approval_deadline);
+        BEFORE_LAST_WATCH.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |deadline| {
+                let proposal = proposals.lock().expect("lock").take().expect("a proposal");
+                proposal.accept();
+                assert!(
+                    Instant::now() < deadline,
+                    "the approval was not given before the deadline"
+                );
+                seen.set(Some(deadline));
+            }));
+        });
+        let peer = PeerInfo {
+            device_id: DeviceKey::from_seed([1; 32]).id(),
+            instance_id: "peer".into(),
+            holder: Some(Holder::Acceptor),
+            caps: Vec::new(),
+            transport: TransportKind::Memory,
+            local_side: Side::Acceptor,
+        };
+        let mut io = Io {
+            ch: &mut acceptor,
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancel: &cancel,
+        };
+        let decision = await_proposal(&mut io, &handler, &peer, Duration::from_millis(40));
+        let deadline = approval_deadline
+            .get()
+            .expect("the wait entered its last watch");
+        assert!(
+            Instant::now() >= deadline,
+            "the last watch returned before the deadline"
+        );
+        assert!(matches!(decision, Ok(RoleDecision::Accepted)));
+    }
 
     fn refusal(value: Value) -> HandshakeError {
         match parse_reply(value.to_string().as_bytes()) {
