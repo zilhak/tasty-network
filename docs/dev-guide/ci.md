@@ -12,7 +12,8 @@
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
-- 같은 브랜치의 새 push는 앞 실행을 취소하지 않는다. PR은 마지막 커밋만 돌린다.
+- push와 수동 실행은 브랜치와 커밋마다 다른 concurrency 그룹을 쓴다. 그래서 push한 커밋마다 실행이 하나씩 남고, 뒤 push가 앞 실행을 취소하거나 대기 중인 실행을 밀어내지 않는다. 같은 브랜치·같은 커밋을 다시 수동 실행하면 같은 그룹이라 앞 실행이 끝난 뒤 돈다.
+- PR은 PR마다 그룹 하나를 쓰고, 새 커밋이 오면 앞 커밋의 실행을 취소한다.
 - Windows 잡은 Git Bash(`shell: bash`)로 돈다.
 
 ## 툴체인
