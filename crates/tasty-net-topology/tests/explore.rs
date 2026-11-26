@@ -759,8 +759,30 @@ fn a_route_whose_first_hop_did_not_get_it_from_the_requester_is_invalid() {
     net.with_agent(id(B), |agent, local, out, now| {
         agent.on_message(&id(A), Message::Query(forged), local, out, now)
     });
-    // B stops it: nothing goes to D, and C gets the origin as timed out for route_invalid.
-    assert!(net.queue.iter().all(|m| m.to == id(C)));
+    // B drops it: nothing goes to D, nor to the claimed requester C.
+    assert!(net.queue.is_empty());
+}
+
+#[test]
+fn a_route_that_breaks_the_rules_is_answered_with_route_invalid() {
+    // The link matches (B got it from the requester A), but the route repeats C.
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(B, C).link(C, D);
+    let broken = tasty_net_topology::Query {
+        request_id: "r".into(),
+        requester: id(A),
+        origin: id(D),
+        route: vec![id(B), id(C), id(C)],
+        path: Vec::new(),
+        depth: 1,
+        remaining_ms: 5_000,
+        branch: "b".into(),
+    };
+    net.with_agent(id(B), |agent, local, out, now| {
+        agent.on_message(&id(A), Message::Query(broken), local, out, now)
+    });
+    // B answers A (the checked previous hop) with the origin timed out for route_invalid.
+    assert!(net.queue.iter().all(|m| m.to == id(A)));
     let reasons: Vec<Option<NodeReason>> = net
         .queue
         .iter()
@@ -971,15 +993,16 @@ fn a_later_route_hop_checks_the_previous_hop() {
         remaining_ms: 5_000,
         branch: "b".into(),
     };
-    // C is the second hop; the query must come from B, not from A.
+    // C is the second hop; the query must come from B, not from A. It is dropped.
     net.with_agent(id(C), |agent, local, out, now| {
-        agent.on_message(&id(A), Message::Query(forged), local, out, now)
+        agent.on_message(&id(A), Message::Query(forged.clone()), local, out, now)
     });
-    assert!(net.queue.iter().all(|m| m.to != id(D)));
-    assert!(net.queue.iter().any(|m| matches!(
-        &m.message,
-        Message::Result(p) if p.nodes.iter().any(|n| n.reason == Some(NodeReason::RouteInvalid))
-    )));
+    assert!(net.queue.is_empty());
+    // The control: from B it is forwarded to D.
+    net.with_agent(id(C), |agent, local, out, now| {
+        agent.on_message(&id(B), Message::Query(forged), local, out, now)
+    });
+    assert!(net.queue.iter().any(|m| m.to == id(D)));
 }
 
 #[test]

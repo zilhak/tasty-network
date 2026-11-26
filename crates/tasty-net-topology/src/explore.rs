@@ -716,13 +716,20 @@ impl Agent {
             from: me,
             return_path: back,
         };
-        let valid = validate_route(&query.requester, &query.origin, &query.route).is_ok()
-            && match at {
-                Some(0) => from == Some(&query.requester),
-                Some(k) => from == query.route.get(k - 1),
-                None => false,
-            };
-        let Some(at) = at.filter(|_| valid) else {
+        // The link first: a query that did not come from the previous device (or that does
+        // not name this device on its route) is dropped, since its return path cannot be
+        // trusted. Only a route that breaks the rules of `validate_route` is answered with
+        // `route_invalid`, back along the checked previous hop.
+        let link_ok = match at {
+            Some(0) => from == Some(&query.requester),
+            Some(k) => from == query.route.get(k - 1),
+            None => false,
+        };
+        let Some(at) = at.filter(|_| link_ok) else {
+            tracing::debug!("topology route query that does not match its link dropped");
+            return;
+        };
+        if validate_route(&query.requester, &query.origin, &query.route).is_err() {
             self.stop_route(
                 &header,
                 &query,
@@ -732,7 +739,7 @@ impl Agent {
                 now,
             );
             return;
-        };
+        }
         if !local.sharing.enabled {
             let own = self_node(&self.me, NodeStatus::SharingOff, now.unix_ms);
             self.stop_route(
