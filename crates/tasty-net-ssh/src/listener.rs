@@ -96,6 +96,9 @@ struct LineScanner {
     line: Vec<u8>,
     /// The current line lost bytes past [`Self::MAX_LINE`].
     truncated: bool,
+    /// A `\r` was read and not yet kept: it ends the line if `\n` follows (CRLF), so it does
+    /// not count toward the line's length.
+    pending_cr: bool,
 }
 
 impl LineScanner {
@@ -106,11 +109,24 @@ impl LineScanner {
         for &b in bytes {
             if b == b'\n' {
                 self.finish_line(seen);
-            } else if self.line.len() < Self::MAX_LINE {
-                self.line.push(b);
-            } else {
-                self.truncated = true;
+                continue;
             }
+            if std::mem::take(&mut self.pending_cr) {
+                self.keep(b'\r');
+            }
+            if b == b'\r' {
+                self.pending_cr = true;
+            } else {
+                self.keep(b);
+            }
+        }
+    }
+
+    fn keep(&mut self, b: u8) {
+        if self.line.len() < Self::MAX_LINE {
+            self.line.push(b);
+        } else {
+            self.truncated = true;
         }
     }
 
@@ -126,6 +142,7 @@ impl LineScanner {
         }
         self.line.clear();
         self.truncated = false;
+        self.pending_cr = false;
     }
 }
 
@@ -404,6 +421,19 @@ mod tests {
         };
         assert!(judge(format!("{full_line}\n")), "ends at the limit");
         assert!(judge(full_line.clone()), "ends at the limit and at EOF");
+        assert!(
+            judge(format!("{full_line}\r\n")),
+            "ends at the limit before CRLF"
+        );
+        assert!(
+            judge(format!("{full_line}\r")),
+            "ends at the limit before CR and EOF"
+        );
+        // A CR inside a line is data: past the limit it cuts the line.
+        assert!(
+            !judge(format!("{full_line}\rx\n")),
+            "a CR in the line past the limit"
+        );
         assert!(
             !judge(format!("{full_line}extra\n")),
             "name goes on past the limit"
