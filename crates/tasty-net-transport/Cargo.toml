@@ -1,0 +1,20 @@
+[package]
+name = "tasty-net-transport"
+description = "Transport abstraction, logical channels, handshake v2, roles and the SSH transport of the Tasty network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tasty-net-frame = { path = "../tasty-net-frame" }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# Cancels a socket read blocked in another thread (docs/design/transport.md "시도 취소, 닫기, 회수").
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO"] }
+
+[lints]
+workspace = true
