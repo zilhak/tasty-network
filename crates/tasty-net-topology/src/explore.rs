@@ -21,8 +21,8 @@ use crate::local::{
     self_node,
 };
 use crate::message::{
-    Done, MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
-    Suppressed, split_result, validate_route,
+    MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
+    Suppressed, split_done, split_result, validate_route,
 };
 use crate::model::{Edge, EdgeKey, Node, NodeReason, NodeStatus};
 
@@ -108,8 +108,11 @@ pub struct ExploreRequest {
 pub enum ExplorationState {
     /// Results may still arrive.
     Running,
-    /// The final `done` arrived.
+    /// The final `done` arrived and every answer arrived whole.
     Finished,
+    /// The final `done` arrived, but at least one answer is incomplete (its node is
+    /// [`NodeStatus::TimedOut`] with [`NodeReason::Incomplete`]).
+    Incomplete,
     /// The requester's deadline passed first.
     TimedOut,
 }
@@ -723,16 +726,30 @@ impl Agent {
         ) {
             Ok(parts) => parts,
             Err(MessageError::EntryTooLarge) => {
-                // Drop the entries that cannot fit alone; keep the rest of the answer.
+                // Leave out the entries that cannot fit alone and say so: this device's
+                // own node becomes timed out with reason `incomplete`.
                 let fits_node = |n: &Node| {
                     split_result(header, vec![n.clone()], Vec::new(), MAX_MESSAGE_JSON).is_ok()
                 };
                 let fits_edge = |e: &Edge| {
                     split_result(header, Vec::new(), vec![e.clone()], MAX_MESSAGE_JSON).is_ok()
                 };
-                let nodes: Vec<Node> = view.nodes.into_iter().filter(fits_node).collect();
+                let me = self.me.device_id;
+                let own = |n: &Node| n.device_id == Some(me) && n.reported_by.is_none();
+                let marker = Node {
+                    device_id: Some(me),
+                    display_name: None,
+                    status: NodeStatus::TimedOut,
+                    reason: Some(NodeReason::Incomplete),
+                    reported_by: None,
+                    peer_hint: None,
+                    explored_at: now.unix_ms,
+                };
+                let nodes: Vec<Node> = std::iter::once(marker)
+                    .chain(view.nodes.into_iter().filter(|n| !own(n) && fits_node(n)))
+                    .collect();
                 let edges: Vec<Edge> = view.edges.into_iter().filter(fits_edge).collect();
-                tracing::warn!("dropped topology entries too large for one message");
+                tracing::warn!("topology entries too large for one message left out");
                 match split_result(header, nodes, edges, MAX_MESSAGE_JSON) {
                     Ok(parts) => parts,
                     Err(e) => {
@@ -759,15 +776,20 @@ impl Agent {
         out: &mut dyn Outbox,
         now: Now,
     ) {
-        let done = Message::Done(Done {
-            request_id: header.request_id.clone(),
-            branch: header.branch.clone(),
+        let header = ResultHeader {
             from: self.me.device_id,
-            return_path: header.return_path.clone(),
-            timed_out,
-            is_final,
-        });
-        self.send_reply(done, out, now);
+            ..header.clone()
+        };
+        let dones = match split_done(&header, timed_out, is_final, MAX_MESSAGE_JSON) {
+            Ok(dones) => dones,
+            Err(e) => {
+                tracing::warn!(error = %e, "topology done not sent");
+                return;
+            }
+        };
+        for done in dones {
+            self.send_reply(Message::Done(done), out, now);
+        }
     }
 
     /// Sends a reply to the first entry of its return path, or handles it here when that
@@ -844,6 +866,7 @@ impl Agent {
         }
         match reply {
             Message::Result(_) => child.answered = true,
+            Message::Done(done) if done.more => child.answered = true,
             Message::Suppressed(_) | Message::Done(_) => {
                 wait.pending.remove(&branch);
                 self.children.remove(&branch);
@@ -881,9 +904,18 @@ impl Agent {
                 }
                 // Only the origin or a route hop that stopped the query ends it.
                 if done.is_final
+                    && !done.more
                     && (done.from == exploration.origin || exploration.route.contains(&done.from))
                 {
-                    exploration.state = ExplorationState::Finished;
+                    let incomplete = exploration
+                        .nodes
+                        .iter()
+                        .any(|n| n.reason == Some(NodeReason::Incomplete));
+                    exploration.state = if incomplete {
+                        ExplorationState::Incomplete
+                    } else {
+                        ExplorationState::Finished
+                    };
                 }
             }
             Message::Suppressed(_) | Message::Query(_) => {}

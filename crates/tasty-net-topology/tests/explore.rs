@@ -1007,6 +1007,7 @@ fn replies_from_unexpected_links_or_senders_are_dropped() {
         return_path: vec![id(A)],
         timed_out: Vec::new(),
         is_final: true,
+        more: false,
     };
     net.with_agent(id(A), |agent, local, out, now| {
         agent.on_message(&id(B), Message::Done(fake_final), local, out, now)
@@ -1060,4 +1061,75 @@ fn a_neighbor_given_up_is_not_relayed_later() {
             *t != id(A) || !matches!(m, Message::Result(p) if p.from == id(C))
         })
     );
+}
+
+#[test]
+fn many_timed_out_neighbors_come_back_in_several_dones() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B has 9,000 neighbors that never answer: one done could not carry them all.
+    let silent = 9_000u32;
+    for n in 0..silent {
+        let mut seed = [0xDDu8; 32];
+        seed[..4].copy_from_slice(&n.to_be_bytes());
+        let peer = DeviceKey::from_seed(seed).id();
+        net.silent.insert(peer);
+        net.links.get_mut(&id(B)).unwrap().push(LocalLink {
+            peer,
+            local_side: Side::Dialer,
+            holder: Side::Dialer,
+            transport: TransportKind::SshForward,
+            rtt: None,
+            connected_at: 0,
+            workspace: None,
+            kind: LinkKind::Attach,
+        });
+    }
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    let dones: Vec<_> = net
+        .log
+        .iter()
+        .filter_map(|(f, t, m)| match m {
+            Message::Done(d) if *f == id(B) && *t == id(A) => Some(d.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(dones.len() > 1, "{} dones", dones.len());
+    assert!(dones[..dones.len() - 1].iter().all(|d| d.more));
+    assert!(!dones.last().unwrap().more);
+    let timed_out = x
+        .nodes()
+        .iter()
+        .filter(|n| n.status == NodeStatus::TimedOut && n.reported_by == Some(id(B)))
+        .count();
+    assert_eq!(timed_out, silent as usize);
+}
+
+#[test]
+fn an_entry_too_large_to_send_marks_the_answer_incomplete() {
+    let mut net = Net::new(&[A, B, C]);
+    let huge = WorkspaceRef {
+        id: Some("ws".into()),
+        name: Some("n".repeat(600_000)),
+    };
+    net.link(A, B).link_on(B, C, Some(huge));
+    net.sharing.insert(
+        id(B),
+        Sharing {
+            enabled: true,
+            workspace: WorkspaceExposure::ALL,
+        },
+    );
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+    // What fit still arrived; the edge that did not is left out.
+    assert_eq!(x.edges().len(), 1);
 }

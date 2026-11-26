@@ -6,7 +6,7 @@
 
 | 타입 | 필드 |
 |---|---|
-| `Node` | `device_id`(모르면 빈 값), `display_name`(선택), `status: NodeStatus`, `reason`(선택, 예: `route_broken`), `reported_by`(이 노드 상태를 만든 기기, 선택), `peer_hint`(소비자가 준 표시 이름, 선택), `explored_at`(응답 받은 시각, Unix ms, 표시용. 마감 판정에 쓰지 않는다) |
+| `Node` | `device_id`(모르면 빈 값), `display_name`(선택), `status: NodeStatus`, `reason`(선택, 예: `route_broken`. 응답이 온전히 오지 않았으면 `incomplete`), `reported_by`(이 노드 상태를 만든 기기, 선택), `peer_hint`(소비자가 준 표시 이름, 선택), `explored_at`(응답 받은 시각, Unix ms, 표시용. 마감 판정에 쓰지 않는다) |
 | `NodeStatus` | `online` · `offline`(정의 파일 방식에서만) · `auth_rejected`(인증 단계에서 연결이 거절됨. 인증을 못 하는 구버전 포함) · `no_capability`(연결은 되지만 상대 `caps`에 `net.topology`가 없음) · `timed_out` · `sharing_off`(공개 꺼짐) |
 | `Edge` | `dialer: DeviceId`, `acceptor: DeviceId`, `holder: dialer \| acceptor`, `transport: TransportKind`, `rtt_ms`(선택), `connected_at`(Unix ms), `workspace`(선택, `WorkspaceRef{id, name}` — 공개 범위에 따라 빠짐) |
 | `TransportKind` | `ssh_forward` · `ssh_role_reversed` · `p2p_direct` · `p2p_relay` |
@@ -43,10 +43,12 @@
 | 질의 | `net.topology.query` | `request_id`, `requester`(질의를 처음 보낸 기기), `origin`(기준 머신), `route`(요청한 기기에서 기준 머신까지 거칠 기기 ID 목록, 요청자가 기준 머신이면 빈 목록. 길이 상한 `MAX_ROUTE_HOPS`, 아래 "전달 hop 상한"), `path`(기준 머신부터 이 질의가 지나온 기기 ID 목록), `depth`(남은 depth), `remaining_ms`(보낼 때의 남은 시간, 상한 `MAX_QUERY_MS`), `branch`(이 전달 한 건의 식별자. 전달하는 기기가 전달마다 새로 만드는 128비트 난수의 hex. 요청자가 처음 보내는 질의에도 붙인다) |
 | 결과 | `net.topology.result` | `request_id`, `branch`(이 응답을 부른 질의의 `branch`), `from`(이 조각을 만든 기기), `return_path`(결과를 되돌려 보낼 기기 ID 목록), `part`, `last`(bool, 이 `branch`에 대한 `from`의 자기 조각이 끝남), `nodes`, `edges` |
 | 억제 | `net.topology.suppressed` | `request_id`, `branch`, `from`, `return_path`. 같은 질의를 이미 같거나 큰 남은 depth로 답했다는 뜻 |
-| 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록), `final`(bool. 이 `done`으로 질의 전체가 끝남. 기준 머신, 또는 `route` 전달을 중간에서 멈춘 hop만 `true`로 보낸다) |
+| 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록), `final`(bool. 이 `done`으로 질의 전체가 끝남. 기준 머신, 또는 `route` 전달을 중간에서 멈춘 hop만 `true`로 보낸다), `more`(bool, 없으면 `false`. `true`면 같은 `branch`·`from`의 `done`이 `timed_out` 나머지를 싣고 더 온다. `more`가 없는 마지막 것만 분기를 끝낸다) |
 
 - 상대가 `caps`에 `net.topology`를 알리지 않았으면 질의를 보내지 않고 그 노드를 `no_capability`로 둔다. tasty는 모르는 event를 조용히 버리므로(`tasty:crates/tasty-ipc/src/stream_hub.rs` `collect_other_control`) 보내 봐야 답이 오지 않는다.
 - 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`. 조각은 `(branch, from, part)`로 구별한다. 그래서 여러 기기가 같은 `request_id`로 보내도, 한 기기가 더 큰 남은 depth로 다시 방문돼 두 번 답해도 섞이지 않는다. 전달한 기기는 자기가 보낸 `branch`마다 `done`·`suppressed`를 기다리므로 같은 이웃에게 보낸 두 전달을 구별한다. `branch`는 전달 추적용이고, 노드 상태와 엣지의 합치기는 계속 요청자가 노드·엣지 기준으로 한다.
+- 모든 메시지가 `MAX_FRAME_LEN / 2` 이하다. 받는 쪽은 그보다 긴 JSON을 읽기 전에 거절한다(`MessageError::TooLarge`). `done`의 `timed_out`이 한 메시지에 들어가지 않으면 `more`로 나눈다(`split_done`). 헤더(`return_path` 등)만으로 넘는 결과·`done`은 보내지 않는다.
+- 항목 하나(노드나 엣지)가 혼자서도 한 메시지에 들어가지 않으면 그 항목을 빼고 보내되, 자기 노드를 `timed_out` + 사유 `incomplete`로 바꿔 싣는다. 요청자는 그런 노드가 있으면 `final` `done`을 받아도 탐색 상태를 `Finished`가 아니라 `Incomplete`로 둔다.
 
 ## 탐색 규칙
 

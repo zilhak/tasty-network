@@ -30,7 +30,7 @@ pub use local::{
 pub use message::{
     CAPABILITY, Done, EVENT_DONE, EVENT_QUERY, EVENT_RESULT, EVENT_SUPPRESSED, MAX_MESSAGE_JSON,
     MAX_QUERY_MS, MAX_ROUTE_HOPS, Message, MessageError, Query, ResultHeader, ResultPart,
-    RouteError, Suppressed, split_result, validate_route,
+    RouteError, Suppressed, split_done, split_result, validate_route,
 };
 pub use model::{Edge, Node, NodeReason, NodeStatus, Side, TransportKind, WorkspaceRef};
 

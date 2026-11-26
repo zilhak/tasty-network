@@ -105,6 +105,15 @@ pub struct Done {
     /// This ends the whole query (the origin, or a route hop that stopped the query).
     #[serde(rename = "final")]
     pub is_final: bool,
+    /// More `done` messages of the same `branch` and `from` follow with the rest of
+    /// `timed_out` (a list too long for one message, [`split_done`]). Only the one without
+    /// `more` finishes the branch. Absent when `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub more: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Any topology message, tagged by `event`.
@@ -131,7 +140,12 @@ impl Message {
         )
     }
 
+    /// Reads one message. Longer than [`MAX_MESSAGE_JSON`] is [`MessageError::TooLarge`]
+    /// before parsing.
     pub fn from_json(bytes: &[u8]) -> Result<Self, MessageError> {
+        if bytes.len() > MAX_MESSAGE_JSON {
+            return Err(MessageError::TooLarge);
+        }
         serde_json::from_slice(bytes).map_err(|_| MessageError::Malformed)
     }
 
@@ -192,7 +206,8 @@ pub struct ResultHeader {
 /// Splits an answer into parts whose JSON (as [`Message::Result`]) is at most `limit`
 /// bytes. Parts are numbered from 0 and only the final one has `last: true`. An empty
 /// answer is one empty part. Concatenating the `nodes` and `edges` of the parts in order
-/// gives the input back.
+/// gives the input back. [`MessageError::TooLarge`] when the header alone does not fit,
+/// [`MessageError::EntryTooLarge`] when one entry does not fit with it.
 pub fn split_result(
     header: &ResultHeader,
     nodes: Vec<Node>,
@@ -211,6 +226,9 @@ pub fn split_result(
     };
     // The longest empty part: the largest part number and `false` (longer than `true`).
     let base = json_len(&Message::Result(empty(u32::MAX, false)))?;
+    if base > limit {
+        return Err(MessageError::TooLarge);
+    }
     let mut parts = Vec::new();
     let mut current = empty(0, false);
     let mut size = base;
@@ -244,6 +262,53 @@ pub fn split_result(
     current.last = true;
     parts.push(current);
     Ok(parts)
+}
+
+/// Splits a branch's `done` so that each message's JSON is at most `limit` bytes: the
+/// `timed_out` list is spread over several messages, all but the last with `more: true`
+/// and `final: false`; the last carries `is_final`. Concatenating the `timed_out` lists in
+/// order gives the input back. [`MessageError::TooLarge`] when the header alone does not
+/// fit.
+pub fn split_done(
+    header: &ResultHeader,
+    timed_out: Vec<DeviceId>,
+    is_final: bool,
+    limit: usize,
+) -> Result<Vec<Done>, MessageError> {
+    let empty = || Done {
+        request_id: header.request_id.clone(),
+        branch: header.branch.clone(),
+        from: header.from,
+        return_path: header.return_path.clone(),
+        timed_out: Vec::new(),
+        is_final: false,
+        more: true,
+    };
+    // The longest empty done: `more` present and `false` (longer than `true`).
+    let base = json_len(&Message::Done(empty()))?;
+    if base > limit {
+        return Err(MessageError::TooLarge);
+    }
+    let mut dones = Vec::new();
+    let mut current = empty();
+    let mut size = base;
+    for device in timed_out {
+        // The quoted ID and at most one comma.
+        let len = device.to_string().len() + 3;
+        if base + len > limit {
+            return Err(MessageError::TooLarge);
+        }
+        if size + len > limit {
+            dones.push(std::mem::replace(&mut current, empty()));
+            size = base;
+        }
+        size += len;
+        current.timed_out.push(device);
+    }
+    current.more = false;
+    current.is_final = is_final;
+    dones.push(current);
+    Ok(dones)
 }
 
 fn next_part(current: &ResultPart) -> Result<u32, MessageError> {
@@ -416,11 +481,13 @@ mod tests {
             return_path: vec![id(2)],
             timed_out: vec![id(3)],
             is_final: true,
+            more: false,
         });
         let value: serde_json::Value = serde_json::from_slice(&done.to_json().unwrap()).unwrap();
         assert_eq!(value["event"], EVENT_DONE);
         assert_eq!(value["final"], true);
         assert_eq!(value["timed_out"][0], id(3).to_string());
+        assert!(value.get("more").is_none());
 
         let query = Message::Query(Query {
             request_id: "r".into(),
@@ -464,5 +531,74 @@ mod tests {
         assert_eq!(validate_route(&r, &o, &limit), Ok(()));
         let over: Vec<DeviceId> = (10..11 + MAX_ROUTE_HOPS as u32).map(id).collect();
         assert_eq!(validate_route(&r, &o, &over), Err(RouteError::TooLong));
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use tasty_net_identity::DeviceKey;
+
+    fn id(n: u32) -> DeviceId {
+        let mut seed = [7u8; 32];
+        seed[..4].copy_from_slice(&n.to_be_bytes());
+        DeviceKey::from_seed(seed).id()
+    }
+
+    fn header(hops: u32) -> ResultHeader {
+        ResultHeader {
+            request_id: "r".into(),
+            branch: "b".into(),
+            from: id(0),
+            return_path: (1..=hops).map(id).collect(),
+        }
+    }
+
+    #[test]
+    fn reading_refuses_more_than_half_a_frame() {
+        let done = Message::Done(Done {
+            request_id: "r".into(),
+            branch: "b".into(),
+            from: id(0),
+            return_path: vec![id(1)],
+            timed_out: Vec::new(),
+            is_final: false,
+            more: false,
+        });
+        let mut json = done.to_json().unwrap();
+        assert!(Message::from_json(&json).is_ok());
+        // Valid JSON padded with spaces past the limit.
+        json.resize(MAX_MESSAGE_JSON + 1, b' ');
+        assert_eq!(Message::from_json(&json), Err(MessageError::TooLarge));
+    }
+
+    #[test]
+    fn a_header_too_large_alone_is_refused() {
+        // About 67 bytes per return path entry: 8,000 entries are past half a frame.
+        let big = header(8_000);
+        assert_eq!(
+            split_result(&big, Vec::new(), Vec::new(), MAX_MESSAGE_JSON),
+            Err(MessageError::TooLarge)
+        );
+        assert_eq!(
+            split_done(&big, Vec::new(), true, MAX_MESSAGE_JSON),
+            Err(MessageError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_long_timed_out_list_is_spread_over_several_dones() {
+        let ids: Vec<DeviceId> = (1..=9_000).map(id).collect();
+        let dones = split_done(&header(3), ids.clone(), true, MAX_MESSAGE_JSON).unwrap();
+        assert!(dones.len() > 1, "{} dones", dones.len());
+        for (i, done) in dones.iter().enumerate() {
+            let is_last = i + 1 == dones.len();
+            assert_eq!(done.more, !is_last);
+            assert_eq!(done.is_final, is_last);
+            let json = Message::Done(done.clone()).to_json().unwrap();
+            assert!(json.len() <= MAX_MESSAGE_JSON);
+        }
+        let joined: Vec<DeviceId> = dones.iter().flat_map(|d| d.timed_out.clone()).collect();
+        assert_eq!(joined, ids);
     }
 }

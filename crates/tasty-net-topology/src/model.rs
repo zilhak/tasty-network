@@ -69,6 +69,9 @@ pub enum NodeReason {
     RouteSharingOff,
     /// The route breaks a rule of [`crate::validate_route`].
     RouteInvalid,
+    /// The answer of this device did not arrive whole: an entry too large for one message
+    /// was left out, or a part is missing.
+    Incomplete,
 }
 
 /// Which end of a link: the one that opened it or the one that accepted it.
