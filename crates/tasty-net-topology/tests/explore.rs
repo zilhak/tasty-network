@@ -1535,6 +1535,47 @@ fn a_reported_incomplete_device_stays_incomplete_in_either_order() {
 }
 
 #[test]
+fn a_remote_origin_whose_only_done_is_lost_ends_incomplete() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B's whole answer arrives; its done does not go out.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B) && to == id(A) && matches!(m, Message::Done(_))
+    }));
+    let rid = net.explore(A, request(B, 0)).unwrap();
+    net.run();
+    assert!(net.log.iter().any(|(f, t, m)| {
+        *f == id(B) && *t == id(A) && matches!(m, Message::Result(p) if p.last)
+    }));
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+}
+
+#[test]
+fn a_remote_origin_whose_done_a_route_hop_cannot_relay_ends_incomplete() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    // The route hop B relays C's answer but not C's done.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B) && to == id(A) && matches!(m, Message::Done(d) if d.from == id(C))
+    }));
+    let request = ExploreRequest {
+        origin: id(C),
+        route: vec![id(B)],
+        depth: 0,
+        timeout: TIMEOUT,
+    };
+    let rid = net.explore(A, request).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    assert_eq!(x.node(&id(C)).unwrap().reason, Some(NodeReason::Incomplete));
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);

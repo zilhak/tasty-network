@@ -318,15 +318,22 @@ impl Exploration {
             .any(|n| n.reason == Some(NodeReason::Incomplete))
     }
 
-    /// Every answer with a missing result part or done marks its device incomplete, and
-    /// every device known incomplete is marked again.
+    /// Every answer with a missing result part or done, or with results but no done at
+    /// all, marks its device incomplete, and every device known incomplete is marked
+    /// again.
     fn check_all_parts(&mut self, unix_ms: u64) {
+        let no_done = self
+            .parts
+            .keys()
+            .filter(|key| !self.done_parts.contains_key(*key));
         let broken: Vec<DeviceId> = self
             .parts
             .iter()
             .chain(&self.done_parts)
             .filter(|(_, t)| !t.complete())
-            .map(|((_, from), _)| *from)
+            .map(|(key, _)| key)
+            .chain(no_done)
+            .map(|(_, from)| *from)
             .collect();
         for device in broken {
             self.mark_incomplete(device, None, unix_ms);
