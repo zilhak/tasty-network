@@ -8,7 +8,7 @@ Status: under construction. Nothing here is used by a Tasty release yet.
 
 ## Design
 
-See the [design documents](docs/design/index.md).
+See the [design documents](docs/design/index.md). [Examples](docs/examples.md) shows how to run the demo binaries and the SSH integration tests.
 
 ## Development
 
