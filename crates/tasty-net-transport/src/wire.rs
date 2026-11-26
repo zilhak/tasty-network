@@ -183,15 +183,15 @@ pub(crate) fn parse_open_line(line: &[u8]) -> Result<Map<String, Value>, RejectR
     }
 }
 
-/// Step 2: the token, compared in constant time. Missing is [`RejectReason::TokenMissing`];
-/// anything that is not the token (another type, another format) is
-/// [`RejectReason::TokenInvalid`].
+/// Step 2: the token, compared in constant time. Only a missing field is
+/// [`RejectReason::TokenMissing`]; anything that is not the token (`null`, another type,
+/// another format) is [`RejectReason::TokenInvalid`].
 pub(crate) fn check_token(
     params: &Map<String, Value>,
     token: Option<&ConnectionToken>,
 ) -> Result<(), RejectReason> {
     let received = match params.get("token") {
-        None | Some(Value::Null) => return Err(RejectReason::TokenMissing),
+        None => return Err(RejectReason::TokenMissing),
         Some(Value::String(s)) => s.as_bytes(),
         Some(_) => return Err(RejectReason::TokenInvalid),
     };
@@ -403,7 +403,7 @@ impl Ack {
 
     fn parse(fields: &Map<String, Value>) -> Option<Self> {
         let ok = fields.get("ok")?.as_bool()?;
-        // A v1 ACK may leave `proto` out (serde default 0).
+        // A missing `proto` reads as 0, which no refusal or success accepts.
         let proto = match fields.get("proto") {
             None => 0,
             Some(v) => u32::try_from(v.as_u64()?).ok()?,
@@ -620,7 +620,8 @@ mod tests {
         );
         assert_eq!(
             check_token(&params(Value::Null), Some(&t)),
-            Err(RejectReason::TokenMissing)
+            Err(RejectReason::TokenInvalid),
+            "null is a value that is not the token"
         );
         assert_eq!(
             check_token(&params(json!("cd".repeat(32))), Some(&t)),

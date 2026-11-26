@@ -658,21 +658,30 @@ fn read_ack(io: &mut Io<'_>) -> Result<Ack, HandshakeError> {
     }
 }
 
-/// The error for an ACK that came where it ends the handshake.
+/// The error for an ACK that came where it ends the handshake. A refusing ACK carries
+/// `proto` and `error` (v1 too); a v2 refusal carries `reason` as well
+/// (docs/design/handshake.md "구버전 처리", "필드").
 fn refusal_of(ack: Ack) -> HandshakeError {
     if ack.ok {
         return HandshakeError::Protocol("a success ACK before the challenge");
     }
+    if ack.proto == 0 {
+        return HandshakeError::Protocol("a refusing ACK without proto");
+    }
+    let Some(error) = ack.error else {
+        return HandshakeError::Protocol("a refusing ACK without error");
+    };
     if ack.proto == 1 {
         return HandshakeError::PeerTooOld {
             evidence: TooOldEvidence::V1Ack,
         };
     }
+    let Some(reason) = ack.reason else {
+        return HandshakeError::Protocol("a v2 refusing ACK without reason");
+    };
     HandshakeError::Rejected {
-        reason: ack
-            .reason
-            .unwrap_or_else(|| RejectReason::Unknown(String::new())),
-        error: ack.error.unwrap_or_default(),
+        reason,
+        error,
         ext: ack.ext,
     }
 }
@@ -1192,4 +1201,50 @@ fn accept_bulk(
     };
     io.write_control(&ack.encode())?;
     Ok((parent, accept, open.ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn refusal(value: Value) -> HandshakeError {
+        match parse_reply(value.to_string().as_bytes()) {
+            Some(Reply::Ack(ack)) => refusal_of(ack),
+            other => panic!("not an ACK: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refusing_ack_needs_proto_error_and_in_v2_reason() {
+        assert!(matches!(
+            refusal(json!({"ok": false, "error": "no", "reason": "busy"})),
+            HandshakeError::Protocol(_)
+        ));
+        assert!(matches!(
+            refusal(json!({"ok": false, "proto": 2, "reason": "busy"})),
+            HandshakeError::Protocol(_)
+        ));
+        assert!(matches!(
+            refusal(json!({"ok": false, "proto": 2, "error": "no"})),
+            HandshakeError::Protocol(_)
+        ));
+        assert!(matches!(
+            refusal(json!({"ok": false, "proto": 1})),
+            HandshakeError::Protocol(_)
+        ));
+        assert!(matches!(
+            refusal(json!({"ok": false, "proto": 1, "error": "old"})),
+            HandshakeError::PeerTooOld {
+                evidence: TooOldEvidence::V1Ack
+            }
+        ));
+        match refusal(json!({"ok": false, "proto": 2, "error": "busy", "reason": "busy"})) {
+            HandshakeError::Rejected { reason, error, .. } => {
+                assert_eq!(reason, RejectReason::Busy);
+                assert_eq!(error, "busy");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
