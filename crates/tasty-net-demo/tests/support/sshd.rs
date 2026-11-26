@@ -58,49 +58,70 @@ impl Reaped {
         self.child.id()
     }
 
-    /// Every process below the listener (session processes and their children).
-    fn sessions(&self) -> Result<Vec<u32>, String> {
+    /// Every process below the listener (session processes and their children) that the
+    /// listing found, with the error of a query that failed on the way. The PIDs found before
+    /// the error stay in it.
+    fn sessions(&self) -> Sessions {
         let mut found = Vec::new();
+        let mut error = None;
         let mut parents = vec![self.pid()];
         while let Some(parent) = parents.pop() {
-            for child in children_of(parent)? {
-                if !found.contains(&child) {
-                    found.push(child);
-                    parents.push(child);
+            match children_of(parent) {
+                Ok(children) => {
+                    for child in children {
+                        if !found.contains(&child) {
+                            found.push(child);
+                            parents.push(child);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error.get_or_insert(e);
                 }
             }
         }
-        Ok(found)
+        Sessions { found, error }
     }
 
-    /// Ends the session processes that still run, then kills and reaps the listener, then
-    /// waits until the sessions are gone. Returns the sessions it had to end. Calling it again
-    /// does nothing.
+    /// Ends every session process the listing found, then kills and reaps the listener, then
+    /// waits until those sessions are gone. Returns the sessions it had to end; a listing
+    /// error comes out after all of that. Calling it again does nothing.
     fn end(&mut self) -> Result<Vec<u32>, String> {
         if self.ended {
             return Ok(Vec::new());
         }
         self.ended = true;
-        let listed = self.sessions();
-        if let Ok(sessions) = &listed {
-            for pid in sessions {
-                terminate(*pid);
-            }
+        let Sessions { found, error } = self.sessions();
+        for pid in &found {
+            terminate(*pid);
         }
         let _killed = self.child.kill().is_ok();
         let status = self.child.wait();
         log(&format!("sshd pid={} ended ({status:?})", self.pid()));
-        let sessions = listed?;
-        let named: Vec<_> = sessions
+        let named: Vec<_> = found
             .iter()
             .map(|pid| ("sshd session".to_string(), *pid))
             .collect();
-        let left = wait_all_gone(&named, SESSION_END_LIMIT)?;
+        let left = wait_all_gone(&named, SESSION_END_LIMIT);
+        if let Some(e) = error {
+            return Err(format!(
+                "listing the sessions of sshd {} (ended the {} found): {e}",
+                self.pid(),
+                found.len()
+            ));
+        }
+        let left = left?;
         if !left.is_empty() {
             return Err(format!("sshd session processes still run: {left:?}"));
         }
-        Ok(sessions)
+        Ok(found)
     }
+}
+
+/// What [`Reaped::sessions`] found, and the error of a query that failed on the way.
+struct Sessions {
+    found: Vec<u32>,
+    error: Option<String>,
 }
 
 impl Drop for Reaped {
@@ -218,12 +239,13 @@ impl SshServer {
                 // The clients have ended; their sessions should follow on their own.
                 let deadline = Instant::now() + Duration::from_secs(15);
                 let mut sessions = child.sessions();
-                while matches!(&sessions, Ok(s) if !s.is_empty()) && Instant::now() < deadline {
-                    if let Ok(s) = &sessions {
-                        for p in s {
-                            if !pids.iter().any(|(_, q)| q == p) {
-                                pids.push(("sshd session".to_string(), *p));
-                            }
+                while sessions.error.is_none()
+                    && !sessions.found.is_empty()
+                    && Instant::now() < deadline
+                {
+                    for p in &sessions.found {
+                        if !pids.iter().any(|(_, q)| q == p) {
+                            pids.push(("sshd session".to_string(), *p));
                         }
                     }
                     std::thread::sleep(Duration::from_millis(200));
@@ -231,16 +253,23 @@ impl SshServer {
                 }
                 // Ends what is left either way, before a failure below is reported.
                 let ended = child.end();
-                match sessions {
-                    Err(e) => panic!("listing the sessions of sshd {pid}: {e}"),
+                if let Some(e) = sessions.error {
+                    panic!("listing the sessions of sshd {pid}: {e} (ending sshd: {ended:?})");
+                }
+                if !sessions.found.is_empty() {
+                    panic!(
+                        "sshd still had session processes {:?} 15 s after its clients ended \
+                         (ending them: {ended:?})",
+                        sessions.found
+                    );
+                }
+                match ended {
+                    Err(e) => panic!("ending sshd {pid}: {e}"),
+                    // Found by the listing of the end itself: they were left all the same.
                     Ok(s) if !s.is_empty() => panic!(
-                        "sshd still had session processes {s:?} 15 s after its clients ended \
-                         (ending them: {ended:?})"
+                        "sshd still had session processes {s:?} when it ended; they were ended"
                     ),
                     Ok(_) => {}
-                }
-                if let Err(e) = ended {
-                    panic!("ending sshd {pid}: {e}");
                 }
             }
             Running::Russh(server) => server.stop(),
@@ -452,10 +481,10 @@ fn start_openssh() -> Result<SshServer, String> {
                 };
                 if let Err(reason) = verify(&server) {
                     let log_text = std::fs::read_to_string(&log_path).unwrap_or_default();
-                    // Dropping the server kills sshd and removes the directory.
-                    let _pids = stop_quietly(server);
+                    // Ends sshd and its sessions as `stop` does, and removes the directory.
+                    let ended = stop_quietly(server);
                     return Err(format!(
-                        "{reason} (penalties option {}; sshd log: {})",
+                        "{reason} (penalties option {}; sshd log: {}){ended}",
                         if penalties { "set" } else { "unsupported" },
                         log_text.trim()
                     ));
@@ -531,20 +560,36 @@ fn start_russh() -> Result<SshServer, String> {
         dir,
     };
     if let Err(reason) = verify(&server) {
-        let _pids = stop_quietly(server);
-        return Err(reason);
+        let ended = stop_quietly(server);
+        return Err(format!("{reason}{ended}"));
     }
     Ok(server)
 }
 
-/// Ends a server that failed its checks; its PIDs are not tracked by a test.
-fn stop_quietly(server: SshServer) -> Vec<(String, u32)> {
+/// Ends a server that failed its checks; its PIDs are not tracked by a test. For OpenSSH it
+/// takes the same way as [`SshServer::stop`]'s end: every session found is ended, then the
+/// listener. Returns what went wrong on the way (sessions found or left, a failed listing) as
+/// text for the failure reason, or nothing.
+fn stop_quietly(server: SshServer) -> String {
     match server.running {
-        // Dropping it kills and reaps sshd.
-        Running::OpenSsh { child, .. } => drop(child),
-        Running::Russh(s) => s.stop(),
+        Running::OpenSsh { mut child, .. } => match child.end() {
+            Ok(found) if found.is_empty() => String::new(),
+            Ok(found) => {
+                log(&format!(
+                    "ended sshd session processes {found:?} after a failed check"
+                ));
+                format!("; ended sshd session processes {found:?}")
+            }
+            Err(e) => {
+                log(&format!("ending sshd after a failed check: {e}"));
+                format!("; ending sshd: {e}")
+            }
+        },
+        Running::Russh(s) => {
+            s.stop();
+            String::new()
+        }
     }
-    Vec::new()
 }
 
 /// The base `ssh` command of a check: the test key, this server's port and options, no
