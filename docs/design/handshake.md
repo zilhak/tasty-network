@@ -47,7 +47,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
   4. dialer 기기 ID, acceptor 기기 ID(각 32바이트 공개키 원본)
   5. dialer 인스턴스 ID, acceptor 인스턴스 ID(UTF-8)
   6. dialer nonce, acceptor nonce(각 32바이트 원본)
-  7. dialer `caps`, acceptor `caps`. 각 목록은 이름 개수(u32 big-endian) 뒤에 이름마다 4바이트 big-endian 길이 + 바이트를 이은 것이다. 이름은 바이트 오름차순으로 정렬한다. 빈 목록은 개수 0 하나다. 이름 문법과 중복 처리는 아래 "capability"
+  7. dialer `caps`, acceptor `caps`. 각 목록은 이름 개수(u32 big-endian) 뒤에 이름마다 4바이트 big-endian 길이 + 바이트를 이은 것이다. 이름은 바이트 오름차순으로 정렬한다. 빈 목록은 개수 0 하나다. 이 목록은 위 "각 필드는 4바이트 길이 + 바이트" 규칙의 예외다. 목록 전체를 그 길이로 한 번 더 감싸지 않는다. 고정 입력의 기대 SHA-256은 구현과 따로 계산한 값으로 시험이 고정한다. 이름 문법과 중복 처리는 아래 "capability"
   8. `ext`. 와이어의 `ext`는 JSON 문자열이고 그 안에 소비자의 JSON 텍스트가 들어 있다. 서명 대상은 그 문자열 값을 JSON 문자열로 풀어낸 UTF-8 바이트 그대로다. 다시 직렬화하지 않으므로 숫자 표기·키 순서가 양 끝의 `serde_json` feature(`arbitrary_precision` 등)에 따라 달라지지 않는다. 없으면 빈 바이트
 
   그래서 두 기기 ID, 역할, capability 제안, 도메인 요청이 이 채널 하나에 묶인다. 이 인코딩을 바꾸면 `proto`를 올린다.
@@ -125,7 +125,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 
 | 값 | 뜻 | 다시 걸어도 되는가(`is_retryable`) |
 |---|---|---|
-| `malformed` | 메시지 형식 오류, 필드 타입 틀림 | 아니오 |
+| `malformed` | 메시지 형식 오류, 필드 타입 틀림. bulk 요청에서 `bulk_credential`이 없거나 타입·길이가 틀린 경우도 여기다 | 아니오 |
 | `legacy_protocol` | 상대가 v1(토큰 없음) | 아니오 |
 | `unsupported_protocol` | `proto` 값이 다름 | 아니오 |
 | `token_missing` | 토큰이 없음 | 아니오 |
@@ -134,7 +134,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 | `peer_key_mismatch` | TOFU 기록과 다른 기기 키 | 아니오 |
 | `self_attach` | 같은 인스턴스끼리 연결 | 아니오 |
 | `role_refused` | 받는 쪽이 요청한 역할을 받지 않음(역방향 제안 거절 포함) | 아니오 |
-| `bulk_credential_invalid` | bulk 자격이 없거나 폐기됨 | 아니오 |
+| `bulk_credential_invalid` | 형식은 맞지만 받는 쪽이 발급한 적 없거나 이미 폐기된 bulk 자격 | 아니오 |
 | `domain` | 소비자 도메인 콜백이 거절. `ext`에 소비자 코드(예: `conflicting_targets`)를 싣는다 | 소비자가 정함 |
 | `busy` | 받는 쪽이 지금 받을 수 없음(동시 handshake 상한 등) | 예 |
 
