@@ -16,8 +16,24 @@ pub(crate) struct FileId {
     ino: u64,
 }
 
+/// Create the missing elements of `dir` from the top, one at a time. Each directory this call
+/// creates is set to 0700 before the next one is made, because the umask can take owner bits
+/// away (0500 under 0277 would keep the next element from being created). Elements that already
+/// exist, also when another process made them meanwhile, keep their mode.
 pub(super) fn create_dir(dir: &Path) -> io::Result<()> {
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    let mut missing: Vec<&Path> = dir
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    missing.reverse();
+    for element in missing {
+        match DirBuilder::new().mode(0o700).create(element) {
+            Ok(()) => fs::set_permissions(element, fs::Permissions::from_mode(0o700))?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn is_link(meta: &fs::Metadata) -> bool {

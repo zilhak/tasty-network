@@ -33,10 +33,13 @@ fn new_secret_files_and_directories_are_private_under_a_umask_that_removes_owner
     let root = tempfile::tempdir().unwrap();
     let key_dir = root.path().join("keys");
     let record_dir = root.path().join("home");
+    let nested_dir = root.path().join("a").join("keys");
     {
         // 0700 & !0277 = 0500: without the explicit chmod the owner could not write.
         let _mask = Umask::set(0o277);
         DeviceKey::load_or_create(&key_dir).unwrap();
+        // Two missing levels: the intermediate directory must be usable for the next one.
+        DeviceKey::load_or_create(&nested_dir).unwrap();
         let record = ConnectionRecord {
             port: 1,
             token: ConnectionToken::issue().unwrap(),
@@ -52,4 +55,7 @@ fn new_secret_files_and_directories_are_private_under_a_umask_that_removes_owner
     }
     assert_eq!(mode(&key_dir), 0o700);
     assert_eq!(mode(&key_dir.join(DEVICE_KEY_FILE)), 0o600);
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(mode(&nested_dir), 0o700);
+    assert_eq!(mode(&nested_dir.join(DEVICE_KEY_FILE)), 0o600);
 }
