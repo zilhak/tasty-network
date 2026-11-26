@@ -1,90 +1,378 @@
-# P2P 전송 (iroh)
+# P2P 전송 (quinn + rendezvous)
 
-크레이트는 `tasty-net-p2p`다. iroh는 `=1.5.0`으로 고정한다([버전·호환](versioning.md)). relay 배포와 relay 모드는 [relay](relay.md)에 있다.
+사용자 결정(2026-11-27): P2P는 iroh를 쓰지 않고 직접 구현한다. 원문은 "내가 원하는건 iroh의 철학과 맞지 않아보이는데. 제어된 환경과 네트워크 효율성을 직접 설정해서 쓰는게 내가 원하는 방향이잖아"이다. 구조는 셋이다.
 
-## 쓰는 iroh 1.5.0 API
+1. rendezvous 서버는 기기에게 바깥에서 보이는 주소를 알려 주고(STUN 같은 반사), 같은 서버에 붙은 두 기기의 동시 펀칭을 조정한다. 데이터를 중계하는 기능은 없다. 서버에 중계 코드 경로 자체를 두지 않는 구조로 보장한다([rendezvous](rendezvous.md)).
+2. 펀칭된 UDP 소켓 위에서 quinn QUIC으로 연결한다. 인증은 기기 키로 한다(아래 "인증").
+3. 이미 정한 정책이 기본 동작이다. 아래 "정책"에 있다.
 
-아래 목록은 계획 단계에서 docs.rs와 v1.5.0 소스로 확인한 것이다(<https://github.com/n0-computer/iroh/tree/v1.5.0>). 구현 때 v1.5.0 소스로 다시 확인하고, 다르면 이 표를 고친다.
+이 문서는 기기 쪽 크레이트 `tasty-net-p2p`를 다룬다. 서버 프로토콜·서버 상태·배포는 [rendezvous](rendezvous.md)에 있다. 크레이트 경계와 의존 방향의 정본은 [크레이트 구성](crates.md)이다.
 
-| API | 쓰는 곳 |
+## 구성 요소와 크레이트
+
+| 구성 요소 | 자리 | 맡는 것 |
+|---|---|---|
+| P2P 전송 라이브러리 | `crates/tasty-net-p2p` | UDP 소켓과 패킷 나누기, NAT 판별, 펀칭, quinn 연결, 기기 키 인증, 페어링 허용 목록, 동기 API와 소유 런타임 |
+| rendezvous 프로토콜과 서버 | `crates/tasty-net-rendezvous`(라이브러리 + 실행 파일 `tasty-rendezvous`) | 조정 메시지 형식, STUN 부분 집합 코덱, 펀칭 프로브 형식, 기기 키 raw public key TLS 설정, 서버 본체 |
+| 전송 어댑터 | `tasty-net-transport`의 P2P 모듈 | `tasty-net-p2p`의 스트림을 `RawChannel`로 감싸고 handshake v2·링크·연결 공유를 얹는다([전송 추상화](transport.md)) |
+| 배포물 | `rendezvous/`(지금의 `relay/`를 바꾼다) | 서버 컨테이너 설정 예시와 검사, 운영 안내([rendezvous](rendezvous.md#배포-형태)) |
+
+- 격리: `tasty-net-p2p`와 `tasty-net-rendezvous`는 이 workspace의 SSH·토폴로지·전송·프레임 크레이트에 의존하지 않는다. 공용 크레이트는 `tasty-net-identity` 하나다(근거는 [크레이트 구성](crates.md#p2p-크레이트-격리)). 전송 쪽이 P2P를 어댑터로 쓰고, 반대 방향 의존은 없다.
+- `tasty-net-p2p`는 `tasty-net-rendezvous`의 라이브러리(메시지 형식·코덱·TLS 설정)를 쓰고, 시험에서는 같은 크레이트의 서버를 프로세스 안에서 띄운다. 서버 크레이트는 `tasty-net-p2p`에 의존하지 않는다. 그래서 둘 사이에 순환이 없다.
+- iroh·iroh-relay·iroh-base 의존은 설계에서 없앤다. 기기 키의 ed25519 구현도 `iroh-base` 대신 `ed25519-dalek`을 직접 쓴다([기기 키·토큰](identity.md)).
+
+### 외부 의존과 고정
+
+| 의존 | 쓰는 크레이트 | 쓰는 것 |
+|---|---|---|
+| `quinn` | p2p, rendezvous | QUIC endpoint·연결·스트림. 기본 feature 대신 `runtime-tokio`·`rustls-ring`만 켠다(`platform-verifier`는 쓰지 않는다. 신뢰는 기기 키로 정한다) |
+| `rustls` | p2p, rendezvous | TLS 1.3과 RFC 7250 raw public key. crypto provider는 `ring` |
+| `tokio` | p2p, rendezvous | 런타임, UDP 소켓, 타이머 |
+| `ed25519-dalek` | identity(간접으로 p2p, rendezvous) | 기기 키 서명·검증 |
+| `serde`·`serde_json` | rendezvous | 조정 메시지 |
+
+- 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다), rustls 0.23.46이다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
+- crypto provider를 `ring`으로 고르는 근거: `aws-lc-rs`는 Windows 빌드에 C 도구(cmake 등)를 더 요구한다. 세 OS 호스트 러너에서 추가 준비가 없는 쪽을 고른다.
+
+## 소켓 하나와 패킷 나누기
+
+- 기기는 P2P용 UDP 소켓을 하나만 연다. rendezvous 서버로 가는 QUIC 연결, STUN 반사 질의, 펀칭 프로브, 상대와의 QUIC 연결이 모두 이 소켓을 지난다. 서버가 보는 바깥 주소가 상대에게 줄 주소와 같은 NAT 매핑이 되게 하고, 서버 연결의 keepalive가 그 매핑을 살려 두게 하기 위해서다.
+- quinn에는 이 소켓을 직접 주지 않고 감싼 소켓(quinn의 `AsyncUdpSocket` 구현)을 준다. 받은 패킷은 첫 바이트로 나눈다([RFC 7983](https://www.rfc-editor.org/rfc/rfc7983) §7, QUIC 범위는 [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443)).
+
+  | 첫 바이트 | 보내는 곳 |
+  |---|---|
+  | 0–3 | STUN(서버의 반사 응답, 상대의 프로브와 그 응답). P2P 크레이트가 처리한다 |
+  | 64–191 | QUIC. quinn에 넘긴다 |
+  | 그 밖 | 버린다 |
+
+- QUIC의 fixed bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다. 켜 두면 QUIC 짧은 헤더의 첫 바이트가 0–63으로 내려와 STUN과 섞일 수 있다. quinn의 해당 설정(`EndpointConfig`의 grease 설정)은 구현 때 판의 API로 확인한다.
+- 소켓은 `[::]:0` 이중 스택으로 연다. OS가 이중 스택을 받지 않으면 IPv4 `0.0.0.0:0`으로 연다. 반사 주소는 서버에 닿은 주소족 하나에서만 얻는다. 전역 IPv6 주소는 사설 후보와 같이 호스트 후보로 보낸다(NAT 없이 닿을 수 있다). IPv6 경로가 실제로 쓰이는지는 펀칭 실험에서 본다.
+
+## NAT 판별
+
+목적은 매핑 성질(같은 내부 주소·포트가 목적지마다 같은 바깥 주소·포트를 받는지)을 알아 펀칭을 시도할지 정하는 것이다. 용어는 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1의 endpoint-independent mapping(EIM)·address-dependent mapping(ADM)·address and port-dependent mapping(APDM)이다. 방법은 [RFC 5780](https://www.rfc-editor.org/rfc/rfc5780) §4.3의 매핑 판별을 따른다.
+
+- 서버 조건: 서버는 STUN Binding을 주 포트 P1과 보조 포트 P2(같은 IP)에서 받는다. 두 번째 공인 IP(IP2)가 있으면 IP2:P1에서도 받는다. 서버는 접속 응답(`welcome`)에 이 반사 주소 목록을 싣는다([rendezvous](rendezvous.md#포트와-전송)).
+- 기기는 같은 소켓에서 IP1:P1, IP1:P2, (있으면) IP2:P1로 STUN Binding Request를 보내고 응답의 XOR-MAPPED-ADDRESS([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §14.2)를 비교한다. 질의마다 `nat.stun_rto`(기본 500 ms) 간격으로 `nat.stun_attempts`(기본 3)번까지 보낸다.
+
+  | 결과 | 판별 `NatMapping` |
+  |---|---|
+  | 받은 바깥 주소·포트가 모두 같다 | `Independent` |
+  | 하나라도 다르다 | `Dependent` |
+  | 응답이 하나뿐이거나 없다 | `Unknown` |
+
+- 같은 IP의 두 포트만 있으면 APDM은 가를 수 있지만 ADM은 `Independent`로 보인다(RFC 5780 §4.3의 시험 III는 두 번째 IP가 필요하다). 그런 NAT에서는 펀칭이 실패할 수 있고, 그때는 아래 "실패"대로 연결 실패로 끝난다. hub 서버에 두 번째 IP를 둘지는 [남은 결정](index.md#남은-결정)에 있다.
+- 필터링 성질(RFC 4787 §5)은 판별하지 않는다. RFC 5780의 CHANGE-REQUEST가 필요하고, 판별 결과가 시도 여부를 바꾸지 않기 때문이다. 시도해 보고 결과로 판정한다.
+- 판별은 서버에 접속할 때와, 서버가 알려 준 반사 주소가 바뀔 때 다시 한다. 결과는 `nat_report`로 서버에 알린다.
+- 시도 규칙: 두 기기가 모두 `Dependent`면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. 판정은 서버가 펀칭 요청을 받을 때 한다. 양쪽 모두 APDM이면 상대가 볼 바깥 포트를 알 길이 없어 펀칭이 서지 않는다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3·§3.5). 포트 예측은 하지 않는다. 한쪽만 `Dependent`이거나 어느 쪽이 `Unknown`이면 시도한다. `Dependent` 쪽이 상대의 반사 주소로 보낸 프로브가 상대 NAT의 필터를 통과하면, 상대는 처음 보는 주소(peer reflexive, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.3.1.3)에서 온 프로브로 경로를 얻는다.
+
+## 펀칭 절차
+
+A가 연결을 거는 쪽(dialer), B가 받는 쪽이다. 두 기기 모두 같은 rendezvous 서버에 등록돼 있어야 한다.
+
+```
+A                         서버                          B
+|-- punch_request(B) ---->|                             |
+|                         | B 등록·상한·NAT 규칙 확인     |
+|                         |-- punch_offer(A) ---------->|
+|                         |                             | 페어링 목록에 A가 있나
+|                         |<---------- punch_answer(수락)|
+|<-- punch_go ------------|------------- punch_go ----->|
+|   (B 후보, 토큰, 지연)   |       (A 후보, 토큰, 지연)   |
+| start_after_ms 대기      |                 start_after_ms 대기
+|== STUN 프로브 ==========================================>| (양쪽이 동시에 후보마다)
+|<========================================== STUN 프로브 ==|
+| 첫 성공 응답 → 그 주소로 QUIC connect                     |
+|== QUIC handshake (raw public key, ALPN tasty-net/2) ====>|
+|-- punch_result(ok) ---->|<-------- punch_result(ok) ---|
+```
+
+1. 요청: A가 서버에 `punch_request{request_id, peer: B의 기기 ID}`를 보낸다. 서버는 B가 등록돼 있는지, 상한(동시 펀칭 수), NAT 규칙을 본다. 통과하지 못하면 `punch_refused{reason}`(`not_found`·`nat_unsupported`·`busy`·`self`)로 끝난다.
+2. 받는 쪽 확인: 서버가 B에게 `punch_offer{punch_id, from: A}`를 보낸다. B는 A가 자기 페어링 허용 목록에 있는지 보고 `punch_answer{punch_id, accept}`로 답한다. B가 거절하면 A는 `declined`를 받는다. 수락 전에는 서버가 양쪽 주소를 서로에게 주지 않는다. 그래서 페어링하지 않은 기기는 B의 주소를 얻지 못한다. B가 서버 설정 `offer_timeout`(기본 2 s) 안에 답하지 않으면 서버는 `not_found`로 끝낸다.
+3. 통지와 시각 맞춤: 수락되면 서버가 두 기기에게 동시에 `punch_go`를 보낸다. 실린 것: 상대 기기 ID, 상대 후보 주소, 이쪽이 보낼 프로브 토큰과 상대가 보낼 토큰(서버가 만든 16바이트 난수 두 개), 역할(A는 `controlling`, B는 `controlled`), `start_after_ms`, `window_ms`. 두 기기의 시계는 맞추지 않는다. 서버는 자기 쪽 QUIC 연결의 RTT 추정(quinn `Connection::rtt`)으로 `start_after_ms = max(rtt_A, rtt_B)/2 + start_delay_margin − rtt_자기/2`(서버 설정, 기본 여유 100 ms, 상한 `start_delay_max` 1 s)를 계산해, 두 기기가 서버 기준으로 거의 같은 때 보내기 시작하게 한다.
+4. 후보 주소: 상대마다 최대 `punch.max_candidates`(기본 8)개다. 서버가 본 반사 주소(서버 QUIC 연결의 원격 주소), 판별에서 얻은 다른 반사 주소(있고 다르면), 상대가 `hello`로 알린 호스트 주소(사설 IPv4, 전역 IPv6, 소켓 포트)다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 루프백과 링크 로컬 주소는 보내지 않는다.
+5. 동시 송신: 시작 시각부터 양쪽이 상대 후보마다 STUN Binding Request를 보낸다. `punch.probe_interval`(기본 50 ms)마다 후보 하나씩 돌아가며 보낸다. 후보 8개면 한 후보에 400 ms마다 한 번이다. 요청에는 이쪽 토큰을 comprehension-optional 속성 `TASTY-PUNCH`로 싣는다(속성 번호는 [rendezvous](rendezvous.md#펀칭-프로브)). 프로브를 받은 쪽은 토큰이 맞으면 XOR-MAPPED-ADDRESS와 자기 토큰을 실은 Binding Success Response를 보낸 주소로 돌려준다. 후보에 없던 주소에서 맞는 토큰이 오면 그 주소를 후보에 더한다(peer reflexive).
+6. 성공 판정: 이쪽이 보낸 요청에 대한 맞는 토큰의 응답을 그 후보 주소에서 받으면, 그 주소 쌍은 양방향으로 통한다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.2.5.3의 확인 규칙과 같은 뜻). 토큰이 틀리거나 없는 STUN 패킷은 버린다.
+7. QUIC으로 넘어가는 때: A(`controlling`)는 처음 성공한 주소로 바로 quinn `connect`를 건다. 다른 후보의 프로브는 멈춘다. B는 프로브를 받은 주소에서 오는 QUIC 연결만 받고, 연결이 서거나 창이 끝날 때까지 프로브 응답과 송신을 계속한다(B 쪽 NAT 매핑을 열어 두기 위해서다). B가 먼저 성공을 보더라도 B는 QUIC을 걸지 않는다. QUIC 연결은 언제나 A가 연다([전송 추상화](transport.md#p2p의-닫기-범위)의 "스트림은 연결을 연 쪽만 연다"와 맞는다).
+8. 끝: QUIC handshake가 끝나면 두 기기가 `punch_result{punch_id, ok}`를 서버에 보낸다. 서버는 그 펀칭 상태를 지운다.
+
+위 절차의 시간 값(`offer_timeout`, 시작 지연, `punch.window`, `quic.handshake_timeout`, 프로브 간격)은 모두 설정값이다. 기본값과 근거는 아래 [설정값](#설정값) 표에 있다.
+
+- `punch.window` 안에 성공 응답이 하나도 없으면 그 시도는 실패다. 성공 뒤 `quic.handshake_timeout` 안에 handshake가 끝나지 않아도 실패다.
+- 연결 시도 하나의 전체 상한은 `punch.request_timeout + punch.start_delay_max + punch.window + quic.handshake_timeout`에 아래 재시도를 더한 값이다. 서버 쪽 `offer_timeout`은 `punch.request_timeout`보다 짧아야 한다(기본 2 s < 3 s).
+
+## 흐름
+
+어떤 패킷이 언제 어느 주소·포트로 나가는지의 설명이다. 사용자 원칙(2026-11-27): "네트워크 장치간 어떻게 연결되어있는지 명확해야한단거야". 연결을 맺고 유지하는 자동 동작(재연결, keepalive, 펀칭 재시도)은 라이브러리가 한다. 대신 그 동작이 지금 어느 단계인지와 결과를 [상태 기계](#상태-기계)와 [연결 정보](#연결-정보)로 드러낸다.
+
+주소 표기: 기기 소켓 `L`(P2P 소켓 하나), 서버 `IP1:P1`(주 포트), `IP1:P2`(보조 포트), `IP2:P1`(두 번째 IP, 있을 때), 상대 후보 `C1..Cn`. 모두 UDP다.
+
+| # | 단계 | 송신 → 수신 | 주소 | 내용 | 주기·횟수 | 타임아웃(설정) |
+|---|---|---|---|---|---|---|
+| 1 | 서버 접속 | 기기 → 서버 | `L` → `IP1:P1` | QUIC Initial(ALPN `tasty-rendezvous/1`, 서로 raw public key) | 접속 시도마다 한 번(QUIC 재전송은 quinn) | `rendezvous.connect_timeout` |
+| 2 | 등록 | 기기 ↔ 서버 | 1의 연결, 조정 스트림 | `hello` → `welcome` | 접속마다 한 번 | `rendezvous.hello_timeout` |
+| 3 | NAT 판별 | 기기 → 서버 | `L` → `IP1:P1`, `IP1:P2`, `IP2:P1` | STUN Binding Request / Success Response | 대상마다 `nat.stun_rto` 간격 `nat.stun_attempts`번 | 대상마다 `stun_rto × stun_attempts` |
+| 4 | 판별 보고 | 기기 → 서버 | 조정 스트림 | `nat_report` | 3이 끝날 때마다 | 없음 |
+| 5 | 서버 연결 유지 | 양쪽 | `L` ↔ `IP1:P1` | QUIC PING | `rendezvous.keepalive_interval` | `rendezvous.idle_timeout` |
+| 6 | 펀칭 요청 | A → 서버 → B → 서버 | 조정 스트림 | `punch_request` → `punch_offer` → `punch_answer` | 요청마다 한 번 | A: `punch.request_timeout`, 서버: `offer_timeout` |
+| 7 | 통지 | 서버 → A, B | 조정 스트림 | `punch_go`(후보, 토큰, 지연) | 수락마다 한 번 | 없음 |
+| 8 | 프로브 | A ↔ B | `L_A` ↔ `C1..Cn` | STUN Binding Request(`TASTY-PUNCH`) | 후보를 돌며 `punch.probe_interval`마다 하나 | `punch.window` |
+| 9 | 프로브 응답 | 받은 쪽 → 보낸 쪽 | 프로브가 온 주소로 | Binding Success Response(XOR-MAPPED-ADDRESS, `TASTY-PUNCH`) | 받은 프로브마다 | 없음 |
+| 10 | 기기 사이 QUIC | A → B | `L_A` → 성공한 주소 | QUIC Initial(ALPN `tasty-net/2`) | 시도마다 한 번 | `quic.handshake_timeout` |
+| 11 | 결과 | A, B → 서버 | 조정 스트림 | `punch_result` | 시도마다 한 번 | 없음 |
+| 12 | 경로 유지 | 양쪽 | `L_A` ↔ `L_B`의 바깥 주소 | QUIC PING | `quic.keepalive_interval` | `quic.idle_timeout` |
+| 13 | 닫기 | 닫는 쪽 → 상대 | 같은 경로 | QUIC CONNECTION_CLOSE(종료 코드) | 한 번 | 없음 |
+| 14 | 서버 재연결 | 기기 → 서버 | 1과 같음 | 1~4 반복 | `rendezvous.reconnect.*` backoff | 1과 같음 |
+| 15 | 펀칭 재시도 | A → 서버 | 6과 같음 | 3(반사 주소 재확인), 6~11 반복 | `punch.attempts`, `punch.retry_delay` | 6~10과 같음 |
+
+- 서버는 8~10과 12~13의 패킷을 보지도 나르지도 않는다. 서버가 기기에게 보내는 것은 2·3·5·6·7의 응답과 통지뿐이다.
+- 13 뒤에 남은 연결이 없어도 서버 연결(5)은 P2P가 켜져 있는 동안 유지된다. P2P를 끄면 서버 연결을 코드 0으로 닫고 소켓을 닫는다.
+
+## 정책
+
+사용자 결정(2026-11-27)이 기본 동작이다. 앞선 iroh 설계 단계의 결정(Q3·Q4와 그 대체 결정)도 이 구조에서 아래처럼 성립한다.
+
+- P2P는 기기 설정이고 기본은 꺼짐이다. `P2pConfig.enabled` 기본값은 false다. 꺼져 있으면 `P2pEndpoint::bind`는 소켓을 열지 않는 꺼진 endpoint를 돌려준다. 서버에 연결하지 않고 연결도 받지 않는다. 꺼진 endpoint의 연결 시도는 네트워크에 아무것도 보내지 않고 `P2pConnectError::Disabled`로, 받기는 `P2pError::Disabled`로 끝난다.
+- 켰을 때만 서버 연결을 유지한다. 연결을 거는 쪽도 켜져 있어야 한다. 거는 쪽의 펀칭 요청도 자기 서버 연결로 보내기 때문이다.
+- 같은 서버에 붙은 기기끼리만 연결된다. 같은 서버인지 비교하는 로직은 두지 않는다. 기기는 설정한 서버 하나에만 등록하고 그 서버에만 요청한다. 다른 서버에 등록한 상대는 이 서버에 없으므로 `not_found`로 끝난다(`P2pConnectError::PeerNotFound`). 서버끼리 연동하는 기능도 없다.
+- 전역 discovery는 없다. 상대를 찾는 길은 설정한 rendezvous 서버 하나뿐이다. DNS 기반 주소 게시나 공용 디렉터리를 쓰지 않는다.
+- 펀칭 실패는 연결 실패다. 양쪽 모두 `Dependent`인 NAT 조합을 포함한다. 중계로 넘어가지 않는다. 넘어갈 중계 경로가 이 구조에 없다.
+- 앞서 정한 Q3(직접 경로 확인 전 attach 데이터 보류, 2026-11-27)는 이 구조에서 저절로 충족된다. QUIC 연결은 펀칭으로 확인한 직접 주소 위에서만 서고, 서버는 기기 사이 패킷을 나르지 않는다. 그래서 handshake v2도 attach 데이터도 서버를 지나지 않는다. iroh 설계의 `hold_until_direct` 설정, `DirectRequired`·`RelayAllowed` 정책, `direct_wait`, `unknown_relay_policy`는 지킬 대상이 없어져 없앤다.
+- 서버 주소는 소비자(tasty) 설정이다. 라이브러리에 기본 서버 상수를 두지 않는다. tasty의 기본은 hub가 운영하는 rendezvous 서버(hub rendezvous)이고, 사용자가 자기 서버를 지정하면 그 서버 하나만 쓴다([rendezvous](rendezvous.md#클라이언트-설정)).
+
+## 연결 유지
+
+| 대상 | keepalive | idle timeout | 근거 |
+|---|---|---|---|
+| 서버 QUIC 연결 | `rendezvous.keepalive_interval` 15 s(quinn `TransportConfig::keep_alive_interval`) | `rendezvous.idle_timeout` 45 s(`max_idle_timeout`. QUIC은 양쪽 값 중 작은 쪽을 쓴다, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1) | 아래 |
+| 펀칭된 경로의 QUIC 연결 | `quic.keepalive_interval` 15 s | `quic.idle_timeout` 45 s | 아래 |
+
+- NAT의 UDP 매핑 만료: [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3 REQ-5는 2분 미만으로 만료하지 말라고(권장 5분 이상) 하지만, 같은 절이 짧은 타이머의 NAT가 실제로 있다고 적는다. ICE는 이 사정으로 keepalive 기본을 15초로 둔다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11, Tr 기본 15 s, 15 s 미만 금지). 같은 값을 쓴다.
+- idle timeout은 keepalive의 세 배다. keepalive 패킷 두 개를 잃어도 끊지 않는다.
+- EIM NAT에서는 서버 연결의 keepalive가 같은 매핑을 살리지만, 상대 주소에 대한 필터 상태는 상대와 주고받는 패킷만 살린다. 그래서 펀칭된 경로에도 따로 keepalive를 둔다.
+- 링크의 heartbeat와의 관계: attach 링크는 프레임 heartbeat(`HEARTBEAT_INTERVAL` 5 s, `read_timeout` 기본 30 s, [전송 추상화](transport.md#heartbeat와-읽기-시간-제한))를 그대로 쓴다. 링크가 살아 있는 동안은 heartbeat가 먼저 끊김을 본다(기본값에서 30 s < 45 s. 설정을 바꿔 이 순서가 뒤집혀도 동작은 맞고, 끊김을 먼저 보는 쪽만 바뀐다). QUIC keepalive는 링크가 없거나 조용한 연결(요청 채널만 있는 연결, 다음 채널을 기다리는 연결)의 매핑을 살린다. QUIC idle timeout으로 끝난 연결의 읽기는 `TimedOut`으로 분류된다([전송 추상화](transport.md#읽기-실패-분류)).
+
+## 재시도와 포기
+
+- 서버 재연결: 서버 연결이 끊기면 지수 backoff로 다시 붙는다. 처음 `rendezvous.reconnect.initial`(1 s), `multiplier`(2)배씩, 상한 `max_delay`(60 s), 각 간격에 `jitter`(±20%) 무작위 폭. 연결이 `reset_after`(60 s) 넘게 유지되면 간격을 처음으로 되돌린다. 횟수 상한 `max_attempts` 기본은 0(켜져 있는 동안 계속)이다. 상한을 주면 그 횟수 뒤 `Stopped{cause: reconnect_exhausted}`로 멈춘다. P2P를 끄면 재연결을 멈춘다. 서버가 `superseded`(같은 기기 ID의 새 등록, [rendezvous](rendezvous.md#서버-상태))나 `access_denied`로 닫으면 다시 붙지 않고 endpoint 상태로 알린다(소비자가 사용자에게 보인다).
+- 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 `punch.window`나 `quic.handshake_timeout`으로 실패하면 `punch.retry_delay`(기본 1 s) 뒤 새 `punch_request`로 다시 한다(그 사이 반사 주소를 다시 확인한다). 모두 실패하면 `P2pConnectError::PunchFailed`로 끝낸다.
+- 바로 끝내는 경우(재시도 없음): `nat_unsupported`, `declined`, `self`, P2P 꺼짐, 상대 키 불일치, ALPN 불일치.
+- 서버에 아직 붙지 못한 상태의 연결 시도는 `RendezvousUnavailable`로 바로 끝난다. 다음 시도를 언제 할지는 소비자가 정한다.
+
+| `P2pConnectError` | 뜻 | `is_retryable` |
+|---|---|---|
+| `Disabled` | 이 기기의 P2P가 꺼져 있다. 네트워크에 아무것도 보내지 않았다 | 아니오 |
+| `RendezvousUnavailable` | 서버에 붙어 있지 않다 | 예 |
+| `PeerNotFound` | 서버에 상대가 없다(꺼져 있음, 다른 서버, 응답 없음) | 예 |
+| `Declined` | 상대가 이 기기를 페어링 목록에 두지 않았다 | 아니오 |
+| `NatUnsupported` | 두 기기 모두 `Dependent` 매핑 | 아니오 |
+| `PunchFailed` | 펀칭 두 번이 시간 안에 서지 않았다 | 아니오 |
+| `Busy` | 서버 상한(동시 펀칭 수 등) | 예 |
+| `PeerIdentityMismatch` | QUIC 상대 키가 요청한 기기 ID와 다르다 | 아니오 |
+| `SelfAttach` | 자기 기기 ID로 연결하려 했다 | 아니오 |
+| `AlpnMismatch` | 상대와 ALPN(`proto`)이 다르다([버전·호환](versioning.md)) | 아니오 |
+
+`PunchFailed`의 `is_retryable`이 false인 것은 같은 망 조건에서 곧바로 다시 걸어도 같은 결과일 가능성이 높아서다. 소비자가 자동으로 되풀이하지 않고 사용자에게 알린다. 망이 바뀐 뒤 사용자가 다시 거는 것은 막지 않는다.
+
+## 상태 기계
+
+endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전이마다 이벤트 `{from, to, cause, at}`를 하나 낸다. `cause`는 아래 표의 원인 값이고, 오류가 원인이면 그 오류 값(`P2pConnectError`, QUIC 종료 코드, io 분류)을 함께 싣는다. 호출자는 `status()`로 지금 상태를, `events()`로 전이 이력을 본다. 이벤트 큐 상한은 `events.queue_limit`(기본 256)이고, 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 이벤트 하나를 남긴다.
+
+### endpoint
+
+| 상태 | 뜻 | 상태가 싣는 값 |
+|---|---|---|
+| `Off` | P2P 꺼짐. 소켓 없음 | 없음 |
+| `Connecting` | 서버 접속·등록 중(흐름 1~2) | 서버 주소, 시도 번호 |
+| `Registered` | 등록됨. 연결을 걸고 받을 수 있다 | 서버 주소, 로컬 소켓 주소, 반사 주소, `NatMapping`, 등록 시각 |
+| `Backoff` | 다음 재연결 대기 | 시도 번호, 다음 시도 시각, 직전 실패 원인 |
+| `Stopped` | 재연결하지 않고 멈춤 | 원인 |
+
+| 전이 | 원인(`cause`) |
 |---|---|
-| `Endpoint::builder(presets::Minimal)` + `Builder::secret_key` + `Builder::relay_mode` + `Builder::alpns` | 기기 키 seed로 endpoint를 만든다. endpoint ID = 기기 ID. preset은 `Minimal`(crypto provider만 정함)이다. iroh는 `tls-ring`이나 `tls-aws-lc-rs` 중 하나가 켜져 있으면 `Minimal`을 주고 둘 다면 ring을 고른다(`src/endpoint/presets.rs`). 이 설계는 `tls-ring`을 고른다. `N0` preset은 n0 DNS 주소 조회와 n0 relay를 켜므로 쓰지 않는다 |
-| `RelayMode::Custom(RelayMap)` | 이 endpoint의 홈 relay 후보를 소비자가 준 relay로 한정한다. `RelayMode::Default`(n0 운영 relay)는 쓰지 않는다. 상대 주소에 다른 relay URL이 있으면 iroh는 로컬 map에 없어도 그 relay에 접속한다. 그때 인증 토큰은 로컬 map의 같은 URL 항목에서만 찾는다(`src/socket/transports/relay/actor.rs` `start_active_relay`). QUIC 주소 확인은 map 항목의 `RelayConfig.quic`으로만 시도한다(`src/net_report/reportgen.rs`) |
-| `EndpointAddr` | 상대 주소: endpoint ID, relay URL, 직접 주소 |
-| `Connection::remote_id()` | TLS로 확인된 상대 ID. 서명 증명을 다시 하지 않는다 |
-| `Connection::path_events`(`PathEvent`: 열림·닫힘·선택 경로 바뀜·`Lagged`), `Connection::paths`·`paths_stream`(스냅샷), `Path::{is_selected, is_ip, is_relay, rtt}` | 선택 경로가 직접인지 relay인지, RTT. 정책은 두 입력을 함께 쓴다. `PathEvent::Selected`는 선택이 바뀔 때마다 오므로 짧게 relay로 갔다 돌아온 것도 이것으로 본다. `paths_stream` 스냅샷은 poll할 때의 상태만 주므로 그 사이의 전환이 빠질 수 있다. 대신 시작 때의 상태, 선택 경로가 없는 구간(이때는 `Selected`가 오지 않는다), `Lagged` 뒤의 현재 상태를 스냅샷으로 맞춘다. `path_events`는 경로 전환 이력(로그·펀칭 측정)에도 쓴다 |
-| `Path::stats()`, `PathEvent::Closed` | 경로별 바이트(펀칭 실험의 relay 경유 바이트) |
-| `iroh-base` `SecretKey::from_bytes`·`to_bytes`·`public`, `PublicKey::from_bytes`·`as_bytes`·`Display` | 기기 키와 같은 32바이트 |
-| feature `test-utils`의 `run_relay_server`·`run_relay_server_with`·`run_relay_server_with_access`(async, `Result<(RelayMap, RelayUrl, Server), _>`) | 시험 안 relay. 자체 서명 인증서라 시험용 TLS 신뢰 설정을 함께 넘긴다 |
-| `ConnectWithOptsError::SelfConnect` | 같은 endpoint ID(같은 기기 키)로 연결하면 iroh가 스트림 전에 거절한다. 로컬 오류 `SelfAttach`로 분류한다 |
-| `clear_ip_transports()` | 직접 경로를 실제로 막는 시험. 상대 주소에서 IP만 빼는 방법은 iroh가 직접 경로로 바꾸므로 막지 못한다 |
+| `Off` → `Connecting` | `enabled` |
+| `Connecting` → `Registered` | `registered` |
+| `Connecting` → `Backoff` | `connect_timeout`, `hello_timeout`, `io`(분류 포함), `server_closed`(코드 포함) |
+| `Registered` → `Registered` | `nat_changed`(반사 주소나 `NatMapping`이 바뀜. 상태는 같고 값만 바뀐다) |
+| `Registered` → `Backoff` | `idle_timeout`, `server_closed`, `io` |
+| `Backoff` → `Connecting` | `backoff_elapsed` |
+| `Connecting`·`Registered`·`Backoff` → `Stopped` | `superseded`, `access_denied`, `reconnect_exhausted` |
+| 어느 상태든 → `Off` | `disabled` |
 
-- 시험용 TLS 신뢰 설정과 `test-utils`는 dev-dependency로만 넣는다. 제품 경로에는 들어가지 않는다.
-- iroh 기본 feature에 `fast-apple-datapath`가 있다. macOS CI에서 기본 feature로 빌드한다.
+### 연결 시도와 연결
+
+| 상태 | 쪽 | 뜻 |
+|---|---|---|
+| `Requesting` | A | `punch_request`를 보내고 `punch_go`·`punch_refused`를 기다림 |
+| `Offered` | B | `punch_offer`를 받고 페어링 목록 확인 |
+| `Punching` | 양쪽 | 프로브 송수신(흐름 8~9). 시도 번호와 후보 목록을 싣는다 |
+| `Handshaking` | 양쪽 | 성공한 주소로 QUIC handshake(흐름 10). 주소 쌍을 싣는다 |
+| `RetryWait` | A | 다음 펀칭 시도 대기. 시도 번호, 다음 시도 시각, 직전 실패 원인 |
+| `Connected` | 양쪽 | QUIC 연결이 섰다. 로컬·원격 주소, 상대 기기 ID, 서버 |
+| `Closed` | 양쪽 | 끝. 원인 |
+
+| 전이 | 원인 |
+|---|---|
+| (시작) → `Requesting` | `connect_called` |
+| `Requesting` → `Punching` | `punch_go` |
+| `Requesting` → `Closed` | `not_found`, `declined`, `nat_unsupported`, `busy`, `self`, `request_timeout`, `rendezvous_lost` |
+| (시작) → `Offered` → `Punching` | `punch_offer` → `accepted` |
+| `Offered` → `Closed` | `not_paired`(B가 거절) |
+| `Punching` → `Handshaking` | `probe_succeeded`(주소 포함) |
+| `Punching` → `RetryWait` / `Closed` | `punch_window_elapsed`(남은 시도가 있으면 `RetryWait`, 없으면 `Closed`) |
+| `Handshaking` → `Connected` | `quic_established` |
+| `Handshaking` → `RetryWait` / `Closed` | `quic_handshake_timeout`, `peer_identity_mismatch`(바로 `Closed`), `alpn_mismatch`(바로 `Closed`) |
+| `RetryWait` → `Requesting` | `retry_elapsed` |
+| `Connected` → `Connected` | `remote_address_changed`(상대 NAT 재매핑으로 QUIC 경로가 옮겨짐. 이전·새 주소를 싣는다) |
+| `Connected` → `Closed` | `closed_by_local(code)`, `closed_by_peer(code)`, `idle_timeout`, `endpoint_off` |
+| 어느 상태든 → `Closed` | `cancelled`, `disabled` |
+
+- `Connected`에서 끊긴 연결을 다시 맺는 일은 연결 목록을 가진 transport 쪽이 한다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 새 연결 시도로 받는다.
+- QUIC 경로 이동: quinn은 상대 주소가 바뀌면(NAT 재매핑) 경로 확인 뒤 연결을 새 주소로 옮긴다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9). 연결 유지를 위한 동작이라 켜 둔다(`quic.allow_migration`, 기본 켬). 옮겨진 것은 `remote_address_changed`로 드러난다. quinn에는 이 변화를 알리는 콜백이 없으므로 `path.poll_interval`(기본 1 s)마다 `Connection::remote_address()`를 읽어 비교한다.
+
+## 설정값
+
+모든 타이머·재시도 횟수·간격·타임아웃·keepalive 주기·상한은 설정값이다(사용자 결정 2026-11-27, 원문 "타이머, 재시도횟수 이런것은 전부 설정가능 및 보기 가능값이어야하지").
+
+- 바꾸기: `P2pConfig.settings`(`P2pSettings`)로 준다. 주지 않은 항목은 기본값이다. 값의 범위 검사(예: `idle_timeout > keepalive_interval`)는 `bind`가 하고 어긋나면 오류로 돌려준다.
+- 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default` 또는 `configured`다. 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
+- 코드 안 상수로만 있는 시간·횟수·상한은 두지 않는다. 와이어 형식 값(STUN magic cookie, 토큰 길이 16바이트, 속성 번호)은 시간·횟수가 아니므로 설정이 아니고 형식 모듈에 모은다. 정적 검사가 설정 모듈 밖의 시간·횟수 리터럴을 찾는다([CI와 시험 환경](testing.md#설정값-시험)).
+- 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh·identity의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖).
+
+| 키 | 기본 | 근거 |
+|---|---|---|
+| `rendezvous.connect_timeout` | 5 s | 서버까지 QUIC handshake는 RTT 두세 번이다. 먼 서버(RTT 300 ms)와 손실 몇 번을 덮는다 |
+| `rendezvous.hello_timeout` | 5 s | `hello` → `welcome` 한 번 왕복. 위와 같은 여유 |
+| `rendezvous.keepalive_interval` | 15 s | [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11 Tr 기본 15 s. NAT 매핑 만료가 짧은 망을 덮는다([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3) |
+| `rendezvous.idle_timeout` | 45 s | keepalive의 세 배. 두 번 잃어도 유지 |
+| `rendezvous.reconnect.initial` | 1 s | 일시 끊김은 바로 복구 |
+| `rendezvous.reconnect.multiplier` | 2 | 서버 장애 때 접속 폭주를 줄이는 보통의 지수 backoff |
+| `rendezvous.reconnect.max_delay` | 60 s | 서버가 돌아온 뒤 1분 안에는 다시 등록 |
+| `rendezvous.reconnect.jitter` | 0.2 | 같은 때 끊긴 기기들이 같은 때 다시 붙지 않게 |
+| `rendezvous.reconnect.reset_after` | 60 s | 1분 유지되면 안정된 연결로 본다 |
+| `rendezvous.reconnect.max_attempts` | 0(무제한) | 켜 둔 동안은 계속 붙으려 한다. 끄는 것은 사용자가 P2P를 끄는 것이다 |
+| `nat.stun_rto` | 500 ms | [RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.2.1 RTO 권장 초깃값 500 ms |
+| `nat.stun_attempts` | 3 | RFC 8489의 Rc 기본 7보다 적다. 대상이 셋이고 응답 없음은 `Unknown`으로 두면 되므로 1.5 s 안에 끝낸다 |
+| `punch.request_timeout` | 3 s | 서버 `offer_timeout` 2 s + 서버 왕복 여유 |
+| `punch.probe_interval` | 50 ms | [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §14.2 Ta 기본 50 ms |
+| `punch.window` | 5 s(임시) | 후보 8개에서 후보마다 열 번 넘게 보낸다. [펀칭 실험](#펀칭-실험)으로 확정 |
+| `punch.max_candidates` | 8 | 반사 2 + 호스트 6이면 보통의 기기(유선·무선·IPv6)를 덮는다. 프로브 한 바퀴 400 ms |
+| `punch.attempts` | 2 | 일시 손실로 한 번 실패한 경우만 덮는다. 펀칭 실패는 연결 실패라는 결정에 맞춰 짧게 둔다 |
+| `punch.retry_delay` | 1 s | 반사 주소를 다시 확인할 시간 |
+| `quic.handshake_timeout` | 5 s(임시) | 직접 경로 RTT 몇 번. 실험으로 확정 |
+| `quic.keepalive_interval` | 15 s | 서버 연결과 같은 근거 |
+| `quic.idle_timeout` | 45 s | 서버 연결과 같은 근거 |
+| `quic.max_bidi_streams` | 64 | attach 링크 몇 개와 bulk·요청 채널을 넉넉히 덮는다 |
+| `quic.allow_migration` | 켬 | 상대 NAT 재매핑에도 연결을 유지한다(위 "QUIC 경로 이동") |
+| `path.poll_interval` | 1 s | 주소 바뀜을 1초 안에 연결 정보에 반영 |
+| `history.limit` | 32 | 연결마다 전이 이력 상한. 재연결 몇 번과 경로 바뀜을 담고, 넘치면 오래된 것부터 버리고 버린 수를 센다 |
+| `events.queue_limit` | 256 | 이벤트를 읽지 않는 호출자 때문에 메모리가 늘지 않게 |
+
+- 서버 쪽 값(`offer_timeout`, 시작 지연, 상한)은 서버 설정이다([rendezvous](rendezvous.md#서버-설정값)).
+- quinn·rustls·OS 소켓의 기본값 중 위 표에 걸리는 것은 기본값에 맡기지 않고 표의 값으로 명시해 넣는다. quinn `TransportConfig`의 `keep_alive_interval`(quinn 기본은 꺼짐), `max_idle_timeout`(quinn 기본 30 s), `max_concurrent_bidi_streams`(quinn 기본 100), `max_concurrent_uni_streams`(0으로 넣는다), `ServerConfig::migration`이다. quinn의 손실 복구·혼잡 제어 값(초기 RTT 등)은 QUIC 표준 값을 그대로 쓰고 이 표에 넣지 않는다. 그 값을 바꿀 필요가 생기면 이 표에 항목을 더한다.
+
+## 연결 정보
+
+호출자가 "지금 이 기기가 어떤 기기와, 어떤 주소 쌍으로, 어느 서버를 통해 소개받아 연결돼 있는지"를 볼 수 있게 한다. 세 경로(P2P, SSH 정방향, SSH 역할 반전)를 한 목록에 모으는 것은 transport의 연결 목록이다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 자기 연결의 정보만 내보낸다.
+
+- `P2pEndpoint::status()`: endpoint 상태(위 표), 서버 주소와 서버 공개키, 로컬 소켓 주소, 반사 주소, `NatMapping`, 재연결 시도 번호와 다음 시도까지 남은 시간.
+- `P2pEndpoint::connections()`: 연결과 진행 중 시도마다 `P2pConnectionInfo`.
+
+| 필드 | 뜻 |
+|---|---|
+| `id` | 이 endpoint 안에서 고유한 연결 번호 |
+| `peer` | 상대 기기 ID |
+| `side` | `dialer`(A) · `acceptor`(B) |
+| `state` | 위 상태 기계의 상태와 그 상태의 값 |
+| `local_addr`, `remote_addr` | 지금 쓰는 주소 쌍. 로컬은 소켓 주소, 원격은 펀칭으로 얻은(또는 경로 이동 뒤의) 상대 주소 |
+| `candidate_kind` | 성공한 후보의 종류: `server_reflexive` · `host` · `peer_reflexive` |
+| `rendezvous` | 소개해 준 서버 주소와 서버 공개키 |
+| `nat` | 양쪽 `NatMapping`(펀칭 때의 값) |
+| `attempt` | 지금 몇 번째 펀칭 시도인지, `RetryWait`면 다음 시도까지 남은 시간 |
+| `rtt` | quinn RTT 추정 |
+| `last_cause` | 마지막 전이의 원인 |
+| `history` | 전이 이력(최대 `history.limit`개, 버린 수 함께) |
+| `applied` | 이 연결에 적용된 설정값(위 표의 해당 항목, 값과 출처) |
+
+## 인증
+
+고른 방식: RFC 7250 raw public key. 기기 키(ed25519)의 SubjectPublicKeyInfo를 TLS 인증서 대신 그대로 보낸다. 서버 연결과 기기 사이 연결이 같은 방식이다.
+
+- 근거:
+  1. rustls 0.23은 TLS 1.3에서 RFC 7250 raw public key를 지원한다(rustls 기능 목록 "RFC7250 raw public keys for TLS1.3", 클라이언트·서버 쪽 `AlwaysResolvesClientRawPublicKeys`·`AlwaysResolvesServerRawPublicKeys`). QUIC은 TLS 1.3만 쓰므로 제약이 걸리지 않는다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)).
+  2. 자체 인증서 방식은 X.509 생성(`rcgen` 등)과 파싱이 더 들어온다. 확인할 것은 "상대가 이 ed25519 키를 가졌는가" 하나뿐이라 X.509의 이름·기간·확장은 쓸 데가 없다. 덜 들어오고 공격 면이 작은 쪽을 고른다.
+  3. TLS 1.3의 CertificateVerify가 개인키 소유를 증명한다([RFC 8446](https://www.rfc-editor.org/rfc/rfc8446) §4.4.3). 그래서 그 위에서 서명 증명을 다시 하지 않는다.
+- 위험과 대체: rustls의 raw public key 경로는 X.509 경로보다 쓰는 곳이 적다. quinn이 그 설정을 그대로 받는지와 ed25519 서명 검증(ring provider)은 구현 첫 단계에서 시험으로 확인한다. 안 되면 기기 키로 만든 자체 서명 인증서와 SPKI만 보는 검증기로 바꾸고 이 절을 고친다. 바깥 계약(상대 기기 ID 확인)은 같다.
+- 키 변환: 기기 키 seed 32바이트로 PKCS#8 v1 DER(ed25519, [RFC 8410](https://www.rfc-editor.org/rfc/rfc8410))을 만들어 rustls 서명 키로 넣는다. 공개키 SPKI는 고정 앞머리 12바이트 + 공개키 32바이트다. 받은 SPKI는 이 길이와 앞머리(ed25519 OID)가 정확히 맞을 때만 받고, 그 32바이트를 기기 ID로 쓴다.
+- dialer: 검증기가 상대 SPKI의 키가 요청한 기기 ID와 같은지 TLS handshake 안에서 본다. 다르면 handshake를 실패시키고 `PeerIdentityMismatch`다. 서버 이름(SNI)은 고정값 `tasty-p2p`이고 검증에 쓰지 않는다.
+- acceptor: 검증기는 형식이 맞는 ed25519 raw public key면 받는다. 연결이 선 직후 그 기기 ID가 페어링 허용 목록에 있는지 보고, 없으면 스트림을 받지 않고 종료 코드 `not_paired`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 펀칭 단계의 `punch_offer` 확인이 이미 걸렀으므로 보통은 생기지 않는 경로다.
+- 연결이 확인한 상대 기기 ID는 `P2pConnection::remote_device_id()`로 읽는다. transport 어댑터는 이것을 iroh 설계의 `remote_id()` 자리에 쓴다.
+- handshake v2와의 정리: 지금 [handshake v2](handshake.md#흐름-p2p-경로)의 P2P 흐름(토큰·nonce·서명 없음, 메시지 1의 `device_id`가 연결의 상대 기기 ID와 같은지만 봄, hello → ACK)을 그대로 쓴다. 기기 확인은 TLS가 한 번만 하고, handshake v2는 그 결과와 메시지 필드가 맞는지만 본다. 인스턴스 ID 비교, 역할, `caps`, bulk 자격은 handshake v2 몫으로 남는다.
+- 서버 인증: 기기는 서버의 raw public key를 설정에서 받은 값과 비교한다(키 고정). 서버는 기기의 raw public key로 기기 ID를 정한다. 자세한 것은 [rendezvous](rendezvous.md#기기-인증).
+- ALPN: 기기 사이 연결은 `tasty-net/2`, 서버 연결은 `tasty-rendezvous/1`이다. 기기 사이 ALPN 숫자는 handshake `proto`와 같이 움직인다([버전·호환](versioning.md)).
 
 ## endpoint와 런타임
 
-- `P2pEndpoint::bind(config)`가 tokio 런타임을 만들고 endpoint를 연다. config: 기기 키, relay 목록과 정책(아래), 직접 경로 대기 시간, 페어링 허용 목록 저장소.
-- 동기 API와 런타임의 관계는 [전송 추상화](transport.md) "동기·비동기 경계".
-- ALPN은 `tasty-net/2` 하나다. 받는 쪽은 `Builder::alpns`로 등록하고 dialer는 연결할 때 같은 값을 넘긴다. 숫자는 handshake `proto`와 같이 움직인다. `proto`를 올리면 ALPN도 새 값을 쓰고, 다른 ALPN의 연결은 iroh가 받지 않는다([버전·호환](versioning.md)).
-- QUIC 연결 하나 위의 스트림마다 handshake 메시지 1의 `purpose`로 용도를 정한다. 연결 뒤 첫 스트림이 `request`여도 된다(attach 전에 목록·상태를 묻는 경우). 순서 채널은 `purpose = attach`로 연 스트림이고, bulk 스트림은 같은 QUIC 연결 위의 attach 링크를 부모로 가진다. 한 스트림 안에서 프레임 순서가 지켜진다. 스트림은 그 QUIC 연결을 연 쪽만 열고, 반대쪽이 채널을 열려면 자기 연결을 새로 연다([전송 추상화](transport.md) "P2P의 닫기 범위").
-- 같은 기기 키를 쓰는 두 인스턴스(같은 키 디렉터리)끼리는 endpoint ID가 같아 iroh가 `SelfConnect`로 거절한다. 다른 인스턴스끼리 P2P로 붙으려면 키 디렉터리가 달라야 한다. endpoint ID가 다를 때만 handshake의 인스턴스 ID 비교가 의미를 가진다.
-- 같은 기기 키로 P2P endpoint는 하나만 연다. iroh-relay는 같은 endpoint ID의 접속 중 가장 최근 것 하나만 활성으로 두고 패킷을 그쪽에만 보낸다(`iroh-relay/src/server/clients.rs` `register`). 그래서 두 인스턴스가 같은 키로 endpoint를 열면 제3자는 둘 중 하나에만 닿는다. `P2pEndpoint::bind`는 키 디렉터리의 잠금 파일을 배타로 잡고, 이미 잡혀 있으면 `P2pError::EndpointInUse`를 돌려준다. 한 인스턴스가 그 기기 ID를 대표하고, 독립 P2P endpoint가 필요한 인스턴스는 다른 키 디렉터리를 쓴다. SSH 경로는 이 제약 없이 같은 키를 함께 쓴다.
+- `P2pEndpoint::bind(config)`가 tokio 런타임을 만들고 소켓을 연다. config: `enabled`, 기기 키, rendezvous 서버(주소와 서버 공개키), 페어링 허용 목록 저장소, `settings`([설정값](#설정값)). 켜져 있는데 서버를 주지 않으면 `bind`가 오류다.
+- 동기 API와 소유 런타임의 관계(블로킹 호출, 소유 스레드에서의 종료·회수, 비동기 작업 안에서 부르면 패닉 대신 오류)는 [전송 추상화](transport.md#동기비동기-경계)에 적힌 규칙을 이 크레이트가 자기 API에 지킨다. 어댑터는 그 위에 아무것도 더하지 않는다.
+- 같은 기기 키로 P2P endpoint는 하나만 연다. 서버는 같은 기기 ID의 등록을 하나만 두므로(새 등록이 옛 등록을 밀어낸다), 같은 키로 둘을 열면 서로를 밀어낸다. `bind`는 키 디렉터리의 잠금 파일을 배타로 잡고, 이미 잡혀 있으면 `P2pError::EndpointInUse`를 돌려준다. 독립 P2P endpoint가 필요한 인스턴스는 다른 키 디렉터리를 쓴다. SSH 경로는 이 제약 없이 같은 키를 함께 쓴다.
+- 자기 기기 ID로 거는 연결은 네트워크에 보내기 전에 `SelfAttach`로 끝낸다. 서버도 같은 요청을 `self`로 거절한다.
 
-## 주소와 페어링
+## 스트림과 연결 (어댑터와의 경계)
 
-- 기기 ID만 저장하면 사용자 relay 환경에서 상대를 찾는다는 보장이 없다. 페어링 때 양쪽이 `EndpointAddr`(endpoint ID, 홈 relay URL, 알려진 직접 주소)를 교환해 저장한다. 연결할 때는 저장한 주소로 건다.
-- 두 기기의 relay가 달라도 되는 조건: 상대 홈 relay가 이 기기를 클라이언트 토큰 없이 받아야 한다(`everyone`, allowlist·denylist, `access.http.url`처럼 endpoint ID로 판단하는 방식). iroh는 상대 relay의 토큰을 로컬 relay 목록에서만 찾기 때문이다. 상대 relay가 `shared_token`을 요구하면 그 relay를 토큰과 함께 자기 relay 목록에 넣어야 닿는데, 그러면 그 relay가 이 기기의 홈 relay 후보도 된다. 소비자는 이 대가를 알고 목록을 정한다. D4의 `different_relays_connect_with_pairing_address`는 토큰 없는 두 relay로 확인한다.
-- 페어링은 양쪽 사람이 승인한다. 이 레포는 페어링 메시지 형식(`PairingOffer{endpoint_addr, display_name}`, `PairingAccept{endpoint_addr, display_name}`)과 허용 목록 검사를 준다. 페어링 메시지를 어떤 경로(이미 있는 attach 링크, 사용자가 복사하는 문자열 등)로 나를지와 승인 화면은 tasty가 정한다.
-- 허용 목록에 없는 endpoint의 연결은 QUIC 연결을 받은 직후 닫는다. handshake와 소비자 콜백까지 가지 않는다([handshake v2](handshake.md) "흐름 (P2P 경로)").
+`tasty-net-p2p`는 전송 계약을 모른다. 바이트 스트림과 연결 수명만 준다. 링크·handshake·연결 공유 규칙은 transport 어댑터가 얹는다.
 
-## relay 정책과 직접 경로 감시 (1안)
+| `tasty-net-p2p`가 주는 것 | transport 어댑터가 하는 것 |
+|---|---|
+| `P2pEndpoint::connect(device_id)`·`accept()` → `P2pConnection` | `Transport`·`Listener` 구현, `AttemptCancel` 등록, 연결 공유 목록 |
+| `P2pConnection::open_bi()`·`accept_bi()` → `P2pStream`(동기 읽기·쓰기, 읽기·쓰기 시간 제한, `finish`, `reset`·`stop`, 막힌 호출 깨우기) | `RawChannel`로 감싸기, 프레임 읽기·쓰기, handshake v2 |
+| `P2pConnection::close(P2pCloseReason)`, `close_reason()`, `remote_device_id()`, `rtt()` | 링크·채널 닫기 범위, 마지막 채널 뒤 연결 닫기, 토폴로지 엣지의 `rtt_ms` |
+| QUIC 오류 → `std::io::ErrorKind` 분류 | `ReadFailure` 분류(전송과 무관한 같은 표) |
+| `P2pCloseReason`과 QUIC 종료 코드 표의 정의 | handshake 오류와 링크에 그 값을 싣는다 |
 
-사용자 결정(2026-11-26) 1+2안 중 (1)이 이 크레이트 몫이다.
+- 채널 대응(순서 채널 = `purpose = attach`로 연 양방향 스트림, bulk = 같은 연결의 추가 양방향 스트림, 요청 채널 = `purpose = request` 스트림)과 P2P의 닫기 범위는 QUIC 일반의 성질이라 iroh 설계의 내용을 그대로 쓴다([전송 추상화](transport.md#순서-계약과-채널), [전송 추상화](transport.md#p2p의-닫기-범위)).
+- `P2pCloseReason`은 이 크레이트가 정의한다(QUIC 종료 코드가 이 크레이트의 와이어 값이기 때문이다). transport는 그것을 다시 내보내 `HandshakeError::Closed`와 `Link::close_reason()`에 쓴다([handshake v2](handshake.md#quic-종료-코드)).
+- 스트림 수 상한: 연결마다 양방향 스트림 동시 `quic.max_bidi_streams`(기본 64), 단방향 0개([설정값](#설정값)).
 
-- relay 목록의 각 항목은 `RelayChoice { url, policy, auth_token, quic_addr_discovery }`이고 `policy`는 `DirectRequired` 또는 `RelayAllowed`다. `auth_token`은 relay가 `shared_token` 접속 허용을 쓸 때 iroh `RelayConfig::with_auth_token`으로 넘긴다. `quic_addr_discovery`는 `Off` 또는 `Port(u16)`이고 기본은 `Off`다. relay 서버의 QUIC 주소 확인은 기본 꺼짐인데, iroh의 URL → `RelayConfig` 기본 변환은 7842 포트로 주소 확인을 시도하므로(`iroh-relay/src/relay_map.rs`) 그대로 두지 않고 이 값으로 `RelayConfig.quic`을 정한다.
-  - `DirectRequired`: 정해 둔 시간(`direct_wait`) 안에 선택 경로가 직접(`is_ip`)이 되지 않으면 끊는다. 직접이었다가 relay로 되돌아가도 끊는다. 되돌아감은 `Selected` 이벤트나 스냅샷에서 relay 경로가 선택된 것을 본 때다. `Lagged`로 이벤트를 놓쳤으면 그동안의 이력은 복원하지 않고 스냅샷의 현재 상태로 판정한다. 지금 relay가 선택돼 있으면 되돌아감으로 끊고, 직접이면 유지하고 놓친 구간이 있었다고 로그에 남긴다. 끊을 때 사유는 `P2pCloseReason::DirectPathTimeout`(코드 2) 또는 `DirectPathLost`(코드 3)다.
-  - `RelayAllowed`: relay 경로로도 연결을 유지한다.
-- 정책은 양쪽이 각자 자기 목록으로 판단한다. 기준은 지금 선택된 relay 경로의 relay URL이다. 그 URL이 자기 목록에 있으면 그 항목의 정책, 없으면(페어링 주소로 받은 상대의 홈 relay 등) config의 `unknown_relay_policy`(기본 `DirectRequired`)를 쓴다. 그래서 두 기기가 서로 다른 사용자 relay를 하나씩 쓰면, 상대 홈 relay 경로가 선택됐을 때 기본값에서는 직접 경로가 없으면 끊긴다(사용자 relay는 끊지 않는다는 기본과 다르다). 소비자는 `unknown_relay_policy`를 바꿔 이 경우를 유지할 수 있다. tasty가 어떤 값을 쓸지는 [남은 결정](index.md#남은-결정)에 있다. 한쪽이 끊으면 그 QUIC 연결 전체를 두 사유 중 하나의 종료 코드로 닫는다([handshake v2](handshake.md) "QUIC 종료 코드"). 상대는 종료 프레임을 받은 경우에만 같은 사유를 보고, 받지 못하면 idle timeout으로 끝난다.
-- `DirectRequired`가 보장하는 것은 직접 경로를 시간 안에 얻지 못하거나 잃었을 때의 종료다. relay 중계가 0이라는 보장은 아니다. iroh는 선택 경로로 앱 데이터를 보내므로, `direct_wait` 동안과 직접 → relay로 되돌아간 뒤 끊기 전까지 handshake와 앱 프레임은 relay를 지날 수 있다. `punch-only` relay의 수신 상한이 그 양을 낮은 속도로 묶는다. 직접 경로가 확인될 때까지 앱 프레임을 보류하는 계약은 지금 두지 않았다([남은 결정](index.md#남은-결정)).
-- 기본 relay(tasty hub)는 `DirectRequired`, 사용자 relay는 `RelayAllowed`가 기본이다. 어떤 항목에 어떤 정책을 줄지는 소비자가 정한다([relay](relay.md) "클라이언트 기본 relay").
-- `direct_wait` 기본값은 임시로 10초다. [펀칭 실험](#펀칭-실험) 결과로 확정한다.
-- 끊긴 연결을 다시 걸지는 소비자가 정한다. `DirectPathTimeout`·`DirectPathLost`는 같은 네트워크 조건에서 다시 걸어도 같은 결과일 가능성이 높으므로 `is_retryable()`이 false다.
+## 페어링
+
+- 페어링은 양쪽 사람이 승인한다. 기기를 찾는 키는 기기 ID 하나이고, 주소는 저장하지 않는다(서버가 연결할 때마다 알려 준다). 그래서 페어링 메시지는 `PairingOffer{device_id, display_name}`, `PairingAccept{device_id, display_name}`이다. 이 레포는 형식과 허용 목록 검사를 준다. 메시지를 나르는 경로(이미 있는 attach 링크, 사용자가 복사하는 문자열 등)와 승인 화면은 tasty가 정한다.
+- 허용 목록은 두 곳에서 본다. `punch_offer`를 받을 때(없으면 거절, 주소를 내주지 않는다)와 QUIC 연결을 받은 직후(없으면 `not_paired`로 닫는다).
 
 ## 펀칭 실험
 
-목적: 1안의 `direct_wait` 기본값과 `punch-only` relay의 수신 상한(`[limits.client.rx]`)을 실측으로 정한다. 상한이 너무 낮으면 펀칭 자체가 실패하고, 너무 높으면 hub가 데이터를 중계하게 된다.
+목적: `punch_window`, `quic_handshake_timeout`, 프로브 간격의 기본값을 실측으로 정하고, 망 조합별 성공률을 기록한다.
 
-### 필요한 조건
+검증 범위(사용자 결정 2026-11-27, Q1): 펀칭 실험용 기기·망·공인 서버는 hub rendezvous 배포 때 함께 준비한다. 그 전에는 같은 망 안 기기와 로컬에서 띄운 서버로만 확인한다. CI는 프로세스 안 서버와 모의 NAT로 확인한다([CI와 시험 환경](testing.md#p2p-시험)).
+
+### 필요한 조건 (hub rendezvous 배포 때)
 
 | 항목 | 조건 |
 |---|---|
-| 기기 | 최소 2대. 각 기기에서 `punch-probe`를 실행할 수 있어야 한다(Linux·macOS·Windows 중 아무거나). UDP 차단 조합을 따로 하려면 방화벽 규칙을 바꿀 수 있는 기기 1대 |
-| 네트워크 A | 가정용 공유기 뒤. 보통 endpoint-independent mapping(주소·포트 유지형) NAT |
-| 네트워크 B | A와 다른 망. 모바일 테더링(이동통신사 CGNAT, endpoint-dependent mapping일 수 있음)을 1순위로 한다 |
-| 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 한쪽이 나가는 UDP를 막은 상태, (3) 가능하면 양쪽 모두 endpoint-dependent mapping(펀칭 실패가 예상되는 관측 조합. 포트 예측이나 포트 매핑(iroh 기본 feature의 portmapper)으로 직접 경로가 설 수도 있어 실패를 확정하는 조건은 아니다. 직접 경로를 확실히 막는 대조는 (2)와 CI의 `clear_ip_transports()`다) |
-| relay 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다 |
-| relay 포트 | TCP 443(HTTPS relay. 내장 Let's Encrypt의 TLS-ALPN-01 인증도 이 포트로 받는다)·80(TLS 구성에서는 captive portal용 평문 HTTP) 외부 개방. QUIC 주소 확인을 켜면 UDP 7842도. metrics 9090은 외부에 열지 않는다 |
-| relay 이름·인증서 | 그 공인 주소를 가리키는 DNS 이름과 TLS 인증서(Let's Encrypt 또는 운영자 인증서). iroh 클라이언트는 HTTP relay URL에도 접속할 수 있지만, 이 실험은 제품과 같은 조건을 재려는 것이라 운영 정책으로 `--dev`(평문 HTTP)를 쓰지 않는다 |
-| relay 설정 | `relay/punch-only.toml`(상한 값을 단계별로 바꿈. 상한을 낮춰도 0은 아니어서 낮은 속도의 중계는 남는다)과 `relay/relay-fallback.toml`(상한 없음) 두 가지로 번갈아 띄운다 |
+| 기기 | 최소 2대. 각 기기에서 `punch_probe` 예제를 실행할 수 있어야 한다(Linux·macOS·Windows 중 아무거나). UDP 차단 조합을 하려면 방화벽 규칙을 바꿀 수 있는 기기 1대 |
+| 네트워크 A | 가정용 공유기 뒤. 보통 EIM NAT |
+| 네트워크 B | A와 다른 망. 모바일 테더링(이동통신사 CGNAT, APDM일 수 있음)을 1순위로 한다 |
+| 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 한쪽이 나가는 UDP를 막은 상태, (3) 가능하면 양쪽 모두 `Dependent`(바로 `NatUnsupported`가 나는지 확인) |
+| 서버 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다. ADM 판별까지 보려면 공인 IP 2개 |
+| 서버 포트 | UDP P1·P2 외부 개방([rendezvous](rendezvous.md#포트와-전송)) |
 
-측정 항목: 연결 시작부터 선택 경로가 직접이 되기까지의 시간, 그동안 그 연결이 relay를 지난 바이트(클라이언트 경로 통계), 직접 → relay 되돌아감 발생 여부, RTT. relay metrics의 `bytes_recv`·`bytes_sent`는 서버 공용 카운터라 전체 부하로만 본다. 반복 횟수와 상한 값 단계는 실험 작업 지시로 정한다.
+측정 항목: 요청부터 성공 판정까지의 시간, 성공 판정부터 QUIC handshake 완료까지의 시간, 성공한 후보 종류(반사·호스트·peer reflexive), 두 기기의 `NatMapping`, 실패 사유. 반복 횟수는 실험 작업 지시로 정한다.
 
 공개 문서에 실험 기록을 적을 때 기기 이름, 공인 IP, 사설 경로를 쓰지 않는다. 네트워크 종류만 적는다.
 
 ### 결과 (실험 뒤 채운다)
 
-| 조합 | 상한 | 성공/시도 | 전환 시간 중앙값·최댓값 | relay 경유 바이트 |
+| 조합 | `NatMapping`(A/B) | 성공/시도 | 성공까지 시간 중앙값·최댓값 | 성공 후보 종류 |
 |---|---|---|---|---|
 | (미측정) | | | | |
 
-확정 값: `direct_wait` = (미정), `punch-only` 상한 = (미정). 확정 근거는 이 표의 행을 가리킨다.
+확정 값: `punch_window` = (미정), `quic_handshake_timeout` = (미정). 확정 근거는 이 표의 행을 가리킨다.
 
 ### 동작 수준 기준과의 관계
 
 펀칭 실험은 "제대로 동작하는 수준"([동작 수준 기준](done-criteria.md)) 기준에 넣지 않는다. 대신 "P2P를 사용자에게 내놓기 전 기준"(같은 문서 P1)에 넣는다. 근거:
 
 1. "제대로 동작하는 수준"은 tasty 본체에서 네트워크 코드를 걷어내기 시작해도 되는지 판단하는 기준이다. 걷어내기의 첫 대상은 지금 tasty에 있는 SSH attach다. P2P는 지금 tasty에 없는 새 기능이라, 펀칭 값이 정해지지 않아도 걷어내기를 시작할 수 있다.
-2. 1안 정책이 맞게 동작하는지(시간 안에 직접 경로가 안 서면 끊고, 사용자 relay에서는 유지)는 CI에서 `clear_ip_transports()`로 직접 경로를 막은 시험이 확인한다. 실험이 정하는 것은 정책의 코드가 아니라 두 설정 값이다.
-3. 실험은 사람이 서로 다른 두 네트워크의 기기와 공인 relay를 준비해야 한다. 일정을 이 레포가 정할 수 없다. 기준에 넣으면 SSH 쪽 준비가 끝나도 전환 판단이 그 일정에 묶인다.
-4. 값이 정해지지 않은 채 공개하면 문제가 되는 곳은 hub relay 배포와 P2P 사용자 공개다. 그래서 그 두 일의 선행 조건으로 둔다.
+2. 펀칭 절차와 정책이 맞게 동작하는지(성공, `NatUnsupported`, 막힌 UDP에서 시간 안의 실패, 꺼짐, 다른 서버)는 CI의 모의 NAT 시험이 확인한다. 실험이 정하는 것은 코드가 아니라 시간 값과 실제 망의 성공률이다.
+3. 실험은 사람이 서로 다른 두 네트워크의 기기와 공인 서버를 준비해야 한다. 일정은 hub rendezvous 배포에 묶여 있다(Q1).
+4. 값이 정해지지 않은 채 공개하면 문제가 되는 곳은 hub rendezvous 배포와 P2P 사용자 공개다. 그래서 그 두 일의 선행 조건으로 둔다.
