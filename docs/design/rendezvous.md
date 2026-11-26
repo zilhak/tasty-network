@@ -78,7 +78,9 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 
 - 기기가 연결을 연 뒤 양방향 스트림 하나(조정 스트림)를 연다. 연결마다 하나다.
 - 프레임: 4바이트 big-endian 부호 없는 길이 + 그 길이의 UTF-8 JSON 객체 하나. 길이 0은 `malformed`다.
-- 길이 상한은 서버 설정 `max_message_bytes`(기본 16 KiB)다. 설정값은 1 KiB 이상 1 MiB 이하만 받는다(u32와 모든 플랫폼의 `usize`에 들어간다). 읽는 쪽은 길이 4바이트를 다 받은 뒤 상한과 비교하고, 넘으면 본문을 읽거나 버퍼를 잡기 전에 `malformed`로 닫는다. 기기도 서버가 `welcome.limits`로 알린 값으로 같은 검사를 한다.
+- 길이 상한은 서버 설정 `max_message_bytes`(기본 16 KiB)다. 설정값은 1 KiB 이상 1 MiB 이하만 받는다(u32와 모든 플랫폼의 `usize`에 들어간다). 읽는 쪽은 길이 4바이트를 다 받은 뒤 상한과 비교하고, 넘으면 본문을 읽거나 버퍼를 잡기 전에 `malformed`로 닫는다.
+- 기기 쪽 수신 상한과 기한은 기기 설정이다. `welcome`을 받기 전에도 같은 값을 쓴다(첫 프레임을 읽기 전에는 서버 값을 알 수 없기 때문이다). 수신 상한은 `rendezvous.max_message_bytes`(기본 64 KiB, 1 KiB–1 MiB), 프레임 기한은 `rendezvous.frame_timeout`(기본 5 s, 서버 `frame_timeout`에 대응)이다. 넘으면 기기는 연결을 닫고 `io`(분류 `malformed`)로 backoff에 들어간다.
+- 협상 뒤: `welcome`을 받으면 기기는 서버에 보내는 프레임을 `welcome.limits.max_message_bytes` 이하로 만든다. 수신 상한은 기기 값 그대로다. 서버 `max_message_bytes`가 기기 `rendezvous.max_message_bytes`보다 크면 `server_limits_mismatch`(서버가 기기가 받지 못할 크기를 보낼 수 있다)다.
 - 부분 읽기: 한 번의 읽기에 프레임 일부만 오거나 여러 프레임이 붙어 와도 된다. 읽는 쪽은 프레임 경계로 다시 자른다. 첫 바이트를 받은 뒤 `frame_timeout`(서버 설정, 기본 5 s) 안에 그 프레임이 끝나지 않으면 `malformed`로 닫는다. 프레임 중간에 스트림이 끝나면 `malformed`로 본다.
 - 최상위 키 `type`으로 메시지를 가른다. 모르는 `type`은 `malformed`, 모르는 필드는 버린다.
 - 주소는 `"203.0.113.5:3478"`·`"[2001:db8::1]:3478"` 형식 문자열이다. 시간 값은 밀리초 정수(`*_ms`)다.
@@ -92,14 +94,18 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `reflexive_changed` | 서버 → 기기 | `reflexive` | 조정 연결의 원격 주소가 바뀐 것을 서버가 관측함. 기기는 NAT 판별을 다시 한다 |
 | `nat_report` | 기기 → 서버 | `mapping`(`independent`·`independent_port_only`·`dependent`·`unknown`), `stun_results`(질의한 서버 STUN 주소마다 받은 반사 주소, 응답 없으면 `null`), `host_candidates` | NAT 판별 결과와 바뀐 호스트 주소 |
 | `punch_request` | 기기 → 서버 | `request_id`, `peer` | 펀칭 요청 |
-| `punch_refused` | 서버 → 기기 | `request_id`, `reason`(`not_found`·`declined`·`nat_unsupported`·`busy`·`self`) | 요청 거절 |
+| `punch_refused` | 서버 → 기기 | `request_id`, `reason`(`not_found`·`declined`·`peer_limits_invalid`·`nat_unsupported`·`busy`·`self`) | 요청 거절 |
 | `punch_offer` | 서버 → 기기 | `punch_id`, `from` | 받는 쪽에게 요청을 알림 |
-| `punch_answer` | 기기 → 서버 | `punch_id`, `accept` | 받는 쪽의 답 |
+| `punch_answer` | 기기 → 서버 | `punch_id`, `accept`, `reason`(거절일 때 `not_paired`·`limits_invalid`) | 받는 쪽의 답. `not_paired`는 A에게 `declined`, `limits_invalid`는 `peer_limits_invalid`로 간다 |
 | `punch_go` | 서버 → 기기 | `punch_id`, `request_id`(A에게만), `peer`, `role`(`controlling`·`controlled`), `mode`(`all`·`host_only`), `candidates`(주소와 종류 `server_reflexive`·`reported_reflexive`·`host`), `peer_nat`(상대 `NatMapping`), `token_local`, `token_peer`(각 16바이트 hex), `start_after_ms`, `window_ms`, `handshake_ms` | 펀칭 시작 |
-| `punch_cancel` | 서버 → 기기 | `punch_id`, `reason`(`peer_gone`·`expired`) | 진행 중 펀칭 취소 |
-| `punch_result` | 기기 → 서버 | `punch_id`, `ok` | 끝 보고 |
+| `punch_cancel` | 서버 → 기기 | `punch_id`, `reason`(`peer_gone`·`expired`·`peer_limits_invalid`) | 진행 중 펀칭 취소 |
+| `punch_result` | 기기 → 서버 | `punch_id`, `ok`, `reason`(실패일 때 `limits_invalid`·`timeout`·`handshake_failed`) | 끝 보고. `limits_invalid`면 서버는 상대에게 `punch_cancel{peer_limits_invalid}`를 보낸다 |
 
 - `welcome.limits`: 기기가 자기 설정과의 관계를 검사할 서버 값이다. `offer_timeout_ms`, `start_delay_max_ms`, `punch_window_ms`, `quic_handshake_ms`, `punch_session_ttl_ms`, `max_host_candidates`, `max_reported_reflexive`, `max_message_bytes`. 기기는 이 값으로 `punch.request_timeout > offer_timeout_ms`, `punch_window_ms ≤ punch.window_max`, `quic_handshake_ms ≤ quic.handshake_timeout_max`, `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`([후보 주소 규칙](#후보-주소-규칙))를 검사하고, 어긋나면 endpoint 이벤트 `server_limits_mismatch`(어긋난 키와 두 값)를 내고 그 서버로의 펀칭 시도를 `ServerLimitsInvalid`로 끝낸다([P2P](p2p.md#재시도와-포기)).
+- 한계값 검사는 두 단계이고 A와 B가 똑같이 한다.
+  1. 등록 때(`welcome.limits`): 위 관계가 어긋나면 기기는 `server_limits_mismatch`를 낸다. 등록은 남는다(상대의 요청을 받아 거절 사유를 돌려줘야 하기 때문이다). A는 그 서버로 `punch_request`를 보내지 않고 바로 `ServerLimitsInvalid`로 끝낸다. B는 `punch_offer`를 받으면 `punch_answer{accept: false, reason: limits_invalid}`로 답하고, 서버는 A에게 `punch_refused{peer_limits_invalid}`를 보낸다. A의 공개 오류는 `PeerLimitsInvalid`다.
+  2. 펀칭 때(`punch_go`): 실린 값이 `welcome.limits`와 기기 상한을 벗어나면(`window_ms > punch.window_max`, `handshake_ms > quic.handshake_timeout_max`, `start_after_ms > start_delay_max_ms`, 후보가 상한 초과) 그 기기는 프로브를 보내지 않고 `punch_result{ok: false, reason: limits_invalid}`를 보낸다. 자기 쪽 공개 오류는 `ServerLimitsInvalid`(A)나 `Closed{server_limits_invalid}`(B)다. 서버는 상대에게 `punch_cancel{peer_limits_invalid}`를 보내고, A가 받는 쪽이면 A의 공개 오류는 `PeerLimitsInvalid`다.
+- 한 쌍에 세션 하나: 서버는 같은 두 기기(방향과 관계없이) 사이의 진행 중 펀칭을 하나만 둔다. 이미 있으면 새 `punch_request`는 `punch_refused{busy}`다. 그래서 B가 들어온 QUIC Initial을 세션에 묶을 때([P2P](p2p.md#펀칭-절차) 9) 맞는 세션은 언제나 많아야 하나다.
 - `punch_go.window_ms`·`handshake_ms`가 펀칭 창과 QUIC handshake 기한의 정본이다. 두 기기가 같은 값을 받으므로 양쪽 기한이 맞는다. 값은 서버 설정 `punch_window`·`quic_handshake_timeout`에서 온다.
 - `mode = host_only`는 두 기기가 모두 `dependent`일 때다. 서버는 반사 주소 후보를 빼고 호스트 주소만 싣는다. 어느 한쪽에도 호스트 후보가 없으면 `punch_go` 대신 `punch_refused{nat_unsupported}`를 보낸다([P2P](p2p.md#nat-판별) "시도 규칙").
 
@@ -131,8 +137,13 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | 상태 | 담는 것 | 지우는 때 |
 |---|---|---|
 | 등록 | 기기 ID, 조정 연결, 반사 주소(조정 연결의 원격 주소), 보고된 보조 반사 주소, 호스트 후보, `NatMapping`, 등록 시각, 마지막 수신 시각(keepalive 포함) | 연결이 닫힘, idle timeout(`idle_timeout`), 같은 기기 ID의 새 등록(옛 연결을 `superseded`로 닫는다), 서버 종료 |
-| 진행 중 펀칭 | `punch_id`, A·B 기기 ID, 상태(`offered`·`go_sent`), 두 토큰, 만든 시각, 만료 시각, 받은 `punch_result` | 두 기기의 `punch_result`를 모두 받음, `punch_refused`, `offer_timeout`, `punch_session_ttl` 만료(남은 쪽에 `punch_cancel{expired}`), A나 B의 등록이 지워짐(남은 쪽에 `punch_cancel{peer_gone}`) |
+| 진행 중 펀칭 | `punch_id`, A·B 기기 ID, 상태(`offered`·`go_sent`), 두 토큰, 만든 시각, `punch_go`를 보낸 시각, 만료 시각, 받은 `punch_result` | 두 기기의 `punch_result`를 모두 받음, `punch_refused`, `offer_timeout`, 아래 TTL 만료(남은 쪽에 `punch_cancel{expired}`), `limits_invalid` 보고(상대에게 `punch_cancel{peer_limits_invalid}`), A나 B의 등록이 지워짐(남은 쪽에 `punch_cancel{peer_gone}`) |
 
+- 세션 TTL: 두 단계로 잰다.
+  - `offered`: `punch_request`를 받은 때부터 `offer_timeout`. 지나면 A에게 `not_found`.
+  - `go_sent`: 서버가 `punch_go`를 보낸 때(두 기기에 같은 때 보낸다)부터 `start_delay_max + punch_window + 2 × quic_handshake_timeout + punch_session_grace`. 기본 1 + 5 + 10 + 5 = 21 s다. 앞의 세 항은 B의 기한 전체다: 시작 지연 뒤 창 동안 프로브, 그 뒤 `handshake_ms`까지 새 Initial을 받고, 마감 직전에 받은 handshake에 다시 `handshake_ms`([P2P](p2p.md#펀칭-절차) 10). `punch_session_grace`는 서버에서 각 기기까지의 한쪽 통지 지연(기기의 기한은 `punch_go`를 받은 때부터 재므로 늦게 받은 기기는 그만큼 늦게 끝난다)과 `punch_result`가 서버로 오는 시간을 덮는다. 그래서 통지 지연이 grace보다 짧으면 기기가 자기 기한 안에 `punch_cancel{expired}`를 받지 않는다. 받더라도 QUIC handshake 중이면 무시한다.
+  - TTL은 계산값이고 `welcome.limits.punch_session_ttl_ms`(`go_sent` 단계 값)와 조회에 보인다.
+- 설정 관계 검사: 서버는 시작할 때 `start_delay_margin ≤ start_delay_max`, `punch_session_grace ≥ 1 s`, `offer_timeout ≥ 100 ms`, `frame_timeout < idle_timeout`, `keepalive_interval < idle_timeout`, `1 + max_reported_reflexive + max_host_candidates ≤ 64`를 본다. 어긋나면 어긋난 키와 값을 찍고 시작하지 않는다.
 - 반사 주소 바뀜: 서버는 `reflexive_poll_interval`마다 조정 연결의 원격 주소(quinn `Connection::remote_address`)를 읽고, 바뀌었으면 등록을 고치고 `reflexive_changed`를 보낸다. 기기가 QUIC 클라이언트라 이 연결에서는 기기 쪽 NAT 재매핑이 QUIC 경로 이동으로 이어진다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9). 폴링 간격 안에 바뀌었다 돌아온 경우는 놓친다.
 - STUN 반사는 상태를 남기지 않는다(출발 주소별 속도 상한의 계수만 둔다).
 - 서버가 절대 갖지 않는 것: 기기 사이 데이터(중계 경로가 없다), 연결 토큰 원문(SSH 경로의 토큰이며 P2P와 서버에는 보내지 않는다, [기기 키·토큰](identity.md)), 페어링 목록, 기기 개인키, handshake v2 내용.
@@ -164,7 +175,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `start_delay_max` | 1 s | 시작 지연의 상한 |
 | `punch_window` | 5 s(임시) | 후보 최대 8개(1 + 3 + 4)를 50 ms씩 돌면 한 바퀴 400 ms라 후보마다 12번 넘게 보낸다. [펀칭 실험](p2p.md#펀칭-실험)으로 확정 |
 | `quic_handshake_timeout` | 5 s(임시) | 직접 경로 RTT 몇 번. 실험으로 확정 |
-| `punch_session_grace` | 5 s | 세션 TTL = `offer_timeout` + `start_delay_max` + `punch_window` + `quic_handshake_timeout` + 이 값(기본 18 s). 결과 보고가 오지 않은 펀칭을 치운다. TTL은 계산값이고 조회에 함께 보인다 |
+| `punch_session_grace` | 5 s | 한쪽 통지 지연과 결과 보고 시간을 덮는 여유. 느린 망의 한쪽 지연(수백 ms)에 손실 재전송 몇 번을 더해도 남는다. 세션 TTL 식은 위 "서버 상태"(기본 21 s) |
 | `max_devices` | 10000 | 등록 하나는 연결 상태 수 KB다. 작은 서버 한 대가 감당할 수 있는 수 |
 | `max_punches` | 1000 | 동시 펀칭 전체 상한 |
 | `max_punches_per_device` | 4 | 한 기기가 다른 기기들에게 거는 동시 시도 |
