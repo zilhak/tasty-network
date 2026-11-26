@@ -1191,6 +1191,21 @@ fn the_first_line_limit_counts_the_line_break() {
     }
 }
 
+/// The line break alone counts: with a limit of 0 an empty line is too long, with 1 it fits.
+#[test]
+fn the_line_break_alone_counts_toward_the_limit() {
+    for (max_len, fits) in [(0, false), (1, true)] {
+        let (mut a, mut b) = memory_channel_pair();
+        a.write_all(b"\n").expect("write");
+        let read = read_first_line(&mut b, max_len, Instant::now() + Duration::from_secs(5));
+        match (read, fits) {
+            (Ok(got), true) => assert!(got.is_empty()),
+            (Err(FirstLineError::TooLong), false) => {}
+            (other, _) => panic!("limit {max_len}: {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_dialer_does_not_send_a_line_over_the_limit() {
     let (transport, listener) = pair(Some(token('a')));

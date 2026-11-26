@@ -379,7 +379,13 @@ pub fn read_first_line(
             .map_err(FirstLineError::Io)?;
         match channel.read(&mut byte) {
             Ok(0) => return Err(FirstLineError::Closed),
-            Ok(_) if byte[0] == b'\n' => return Ok(line),
+            // The line break counts toward `max_len` too.
+            Ok(_) if byte[0] == b'\n' => {
+                if line.len() + 1 > max_len {
+                    return Err(FirstLineError::TooLong);
+                }
+                return Ok(line);
+            }
             Ok(_) => {
                 // This byte plus the line break still to come must fit in `max_len`.
                 if line.len() + 2 > max_len {
