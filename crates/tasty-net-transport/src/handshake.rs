@@ -20,7 +20,7 @@ use crate::bulk::{BulkParent, BulkRegistry};
 use crate::cancel::{AttemptCancel, Registration};
 use crate::channel::RawChannel;
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
-use crate::end::{EndReason, LinkCloser, shutdown_quietly};
+use crate::end::{EndReason, GuardSlot, LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
 use crate::hex::random_32;
 use crate::link::{BulkChannel, BulkDial, Link, LinkTimeouts, PeerInfo, deadline_after};
@@ -1037,13 +1037,10 @@ fn accept_on(
         Err(reason) => return Err(io.refuse(reason, None, linger)),
     };
     if open.purpose == Purpose::Bulk {
-        let (parent, accept, ext) = accept_bulk(&mut io, open, path, config)?;
+        let (parent, guard, ext) = accept_bulk(&mut io, open, path, config)?;
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(HandshakeError::Io)?;
-        // The parent's end drops the consumer's guard with the channel it closes.
-        let guard = Arc::new(std::sync::Mutex::new(accept.guard));
-        parent.closer.adopt_guard(&guard);
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
             writer: framed.writer,
@@ -1323,13 +1320,13 @@ fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeErro
 }
 
 /// Checks 8 and 9 of a bulk channel and writes its success ACK. Returns the parent, the
-/// consumer's acceptance and the request `ext`.
+/// consumer's guard (already held by the parent) and the request `ext`.
 fn accept_bulk(
     io: &mut Io<'_>,
     open: OpenIn,
     path: Path,
     config: &AcceptConfig,
-) -> Result<(BulkParent, DomainAccept, Option<String>), HandshakeError> {
+) -> Result<(BulkParent, Arc<GuardSlot>, Option<String>), HandshakeError> {
     let linger = config.timeouts.drain_cap;
     let credential = open.bulk_credential.ok_or(HandshakeError::Protocol(
         "a bulk channel without credential",
@@ -1359,15 +1356,20 @@ fn accept_bulk(
         Ok(accept) => accept,
         Err(reject) => return Err(io.refuse(RejectReason::Domain, Some(reject.ext()), linger)),
     };
+    // The consumer's guard goes to the parent before the ACK: the parent's end drops it
+    // whether it comes before or after the ACK. If the ACK fails, the slot drops here and the
+    // guard with it.
+    let guard: Arc<GuardSlot> = Arc::new(std::sync::Mutex::new(accept.guard));
+    parent.closer.adopt_guard(&guard);
     let ack = Ack {
         ok: true,
         proto: PROTO,
         client_id: accept.client_id,
-        ext: accept.ext.clone(),
+        ext: accept.ext,
         ..Ack::default()
     };
     io.write_control(&ack.encode())?;
-    Ok((parent, accept, open.ext))
+    Ok((parent, guard, open.ext))
 }
 
 #[cfg(test)]

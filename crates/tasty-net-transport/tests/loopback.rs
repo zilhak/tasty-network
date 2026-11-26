@@ -636,3 +636,130 @@ fn an_ack_written_past_the_deadline_times_out_and_revokes_its_credential() {
     );
     drop(dialer);
 }
+
+/// Sets its flag when dropped: a consumer's registration guard.
+struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Takes every attach link and gives every bulk channel a guard that marks its drop.
+struct GuardPolicy {
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DomainPolicy for GuardPolicy {
+    fn accept_attach(&self, _request: &AttachRequest<'_>) -> Result<DomainAccept, DomainReject> {
+        Ok(DomainAccept::default())
+    }
+
+    fn accept_bulk(&self, _request: &BulkRequest<'_>) -> Result<DomainAccept, DomainReject> {
+        Ok(DomainAccept {
+            guard: Some(Box::new(DropFlag(Arc::clone(&self.dropped)))),
+            ..DomainAccept::default()
+        })
+    }
+}
+
+/// A writer that stalls in its first flush, after the bytes went out.
+struct FlushStall {
+    inner: TcpStream,
+    stalled: bool,
+    delay: Duration,
+}
+
+impl io::Write for FlushStall {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.stalled {
+            self.stalled = true;
+            std::thread::sleep(self.delay);
+        }
+        self.inner.flush()
+    }
+}
+
+/// The bulk guard is the parent's before the success ACK goes out: a parent that ends while
+/// the accepting side is still held up right after writing that ACK drops the guard at once,
+/// not when the accepting side resumes.
+#[test]
+fn a_parent_that_ends_right_after_the_bulk_ack_drops_its_guard() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let config = AcceptConfig::new(
+        key(2),
+        "acceptor-1",
+        Some(token('a')),
+        Arc::new(GuardPolicy {
+            dropped: Arc::clone(&dropped),
+        }),
+    )
+    .with_timeouts(timeouts());
+    let (parent_tx, parent_rx) = std::sync::mpsc::channel();
+    let acceptor = std::thread::spawn(move || {
+        let accept = |channel: RawChannel| {
+            let mut channel = channel;
+            let line = read_first_line(
+                &mut channel,
+                MAX_HANDSHAKE_LINE,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("first line");
+            accept_handshake(channel, &line, Vec::new(), &config, &AttemptCancel::new())
+        };
+        let (stream, _) = listener.accept().expect("accept parent");
+        let parent = accept(RawChannel::from_tcp(stream).expect("channel"));
+        parent_tx.send(parent).expect("parent");
+        let (stream, _) = listener.accept().expect("accept bulk");
+        let control = Arc::new(CodedControl {
+            stream: stream.try_clone().expect("clone"),
+            reason: std::sync::Mutex::new(None),
+        });
+        let channel = RawChannel::new(
+            Box::new(stream.try_clone().expect("clone")),
+            Box::new(FlushStall {
+                inner: stream,
+                stalled: false,
+                delay: Duration::from_millis(1500),
+            }),
+            control,
+            TransportKind::Tcp,
+        );
+        accept(channel).map(drop)
+    });
+    let transport = Loopback {
+        addr,
+        token: token('a'),
+    };
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let dialer =
+        dial_handshake(conn, &client(), Holder::Dialer, None, &AttemptCancel::new()).expect("dial");
+    let parent = match parent_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("parent")
+    {
+        Ok(Accepted::Link(link)) => link,
+        other => panic!("{other:?}"),
+    };
+    // The dialer has the ACK while the accepting side is held in the flush after it.
+    let bulk = dialer.open_bulk(None).expect("bulk");
+    assert!(!dropped.load(Ordering::SeqCst));
+    let ended = Instant::now();
+    drop(parent);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the parent's end dropped the guard"
+    );
+    assert!(ended.elapsed() < Duration::from_millis(500));
+    drop(bulk);
+    drop(acceptor.join().expect("acceptor"));
+}
