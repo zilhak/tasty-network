@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use super::process::{children_of, log};
 use super::russh_server::RusshServer;
-use super::{TempDir, ssh_path};
+use super::{TempDir, ssh_option_path, ssh_path};
 
 /// How long sshd may take to listen.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -170,8 +170,11 @@ impl SshServer {
 
 fn client_options(known_hosts: &Path, global_known_hosts: &Path) -> Vec<String> {
     vec![
-        format!("UserKnownHostsFile={}", ssh_path(known_hosts)),
-        format!("GlobalKnownHostsFile={}", ssh_path(global_known_hosts)),
+        format!("UserKnownHostsFile={}", ssh_option_path(known_hosts)),
+        format!(
+            "GlobalKnownHostsFile={}",
+            ssh_option_path(global_known_hosts)
+        ),
         "StrictHostKeyChecking=accept-new".into(),
         "IdentitiesOnly=yes".into(),
         "PreferredAuthentications=publickey".into(),

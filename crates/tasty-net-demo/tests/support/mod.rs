@@ -67,3 +67,23 @@ pub fn ssh_path(path: &Path) -> String {
         text
     }
 }
+
+/// `path` as the value of an ssh `-o Key=Value` option. OpenSSH splits option values into
+/// words again (and reads the known hosts options as a list of files), so the path goes in
+/// double quotes, with `\` and `"` escaped, and stays one word even with spaces in it.
+pub fn ssh_option_path(path: &Path) -> String {
+    let text = ssh_path(path).replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{text}\"")
+}
+
+#[test]
+fn option_paths_with_spaces_stay_one_word() {
+    let path = Path::new("/tmp/with space/known hosts");
+    let option = format!("UserKnownHostsFile={}", ssh_option_path(path));
+    assert_eq!(option, "UserKnownHostsFile=\"/tmp/with space/known hosts\"");
+    assert_eq!(
+        ssh_option_path(Path::new("/a\"b")),
+        "\"/a\\\"b\"",
+        "a quote inside is escaped"
+    );
+}
