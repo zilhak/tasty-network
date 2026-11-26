@@ -701,6 +701,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tasty-net-topology"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "serde",
+ "serde_json",
+ "tasty-net-frame",
+ "tasty-net-identity",
+ "tracing",
+]
+
+[[package]]
 name = "tasty-net-transport"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,21 @@
+[package]
+name = "tasty-net-topology"
+description = "Node and edge model, query messages and depth exploration of the Tasty network topology"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tasty-net-frame = { path = "../tasty-net-frame" }
+tasty-net-identity = { path = "../tasty-net-identity" }
+# Request and branch IDs (docs/design/crates.md "외부 의존 원칙").
+getrandom = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[lints]
+workspace = true
