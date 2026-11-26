@@ -160,11 +160,26 @@ impl RawChannel {
         config: &ChannelConfig,
         closer: LinkCloser,
     ) -> io::Result<Framed> {
-        if Instant::now().checked_add(config.drain_cap).is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+        // Every timeout must make a deadline: one that does not is a configuration error,
+        // never a wait without a limit.
+        let now = Instant::now();
+        for (limit, what) in [
+            (
+                config.read_timeout,
+                "the read timeout is too large to make a deadline",
+            ),
+            (
+                config.write_timeout,
+                "the write timeout is too large to make a deadline",
+            ),
+            (
+                config.drain_cap,
                 "the drain cap is too large to make a deadline",
-            ));
+            ),
+        ] {
+            if now.checked_add(limit).is_none() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, what));
+            }
         }
         let read_timeout = nonzero(config.read_timeout);
         self.control.set_read_timeout(Some(read_timeout))?;
@@ -416,29 +431,22 @@ impl ChannelShared {
         true
     }
 
-    /// Waits until the reader ended or `limit` passed. True if the reader ended. A limit past
-    /// what an [`Instant`] holds waits without a deadline ([`RawChannel::framed`] refuses
-    /// such a drain cap).
+    /// Waits until the reader ended or `limit` passed. True if the reader ended.
+    /// ([`RawChannel::framed`] refuses a drain cap that cannot make a deadline.)
     fn wait_reader_end(&self, limit: Duration) -> bool {
-        let Some(deadline) = Instant::now().checked_add(limit) else {
-            let mut ended = lock(&self.reader_end);
-            while !*ended {
-                ended = self
-                    .reader_end_cv
-                    .wait(ended)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-            return true;
-        };
+        // Measured as time elapsed, so no deadline is added to an Instant.
+        let started = Instant::now();
         let mut ended = lock(&self.reader_end);
         while !*ended {
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(left) = limit
+                .checked_sub(started.elapsed())
+                .filter(|d| !d.is_zero())
+            else {
                 return false;
-            }
+            };
             ended = self
                 .reader_end_cv
-                .wait_timeout(ended, deadline - now)
+                .wait_timeout(ended, left)
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }

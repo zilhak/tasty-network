@@ -47,8 +47,9 @@ impl Read for PipeReader {
             return Ok(0);
         }
         let timeout = *lock(&self.timeouts.read);
-        // A timeout past what an Instant holds blocks without a deadline.
-        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
+        // Measured as time elapsed, so a timeout too large for an Instant still ends (the
+        // framed channel refuses such a timeout before it reads).
+        let started = Instant::now();
         let mut state = lock(&self.pipe.state);
         loop {
             if state.read_closed {
@@ -64,23 +65,25 @@ impl Read for PipeReader {
             if state.write_closed {
                 return Ok(0);
             }
-            state = match deadline {
+            state = match timeout {
                 None => self
                     .pipe
                     .cv
                     .wait(state)
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
-                Some(deadline) => {
-                    let now = Instant::now();
-                    if now >= deadline {
+                Some(timeout) => {
+                    let Some(left) = timeout
+                        .checked_sub(started.elapsed())
+                        .filter(|d| !d.is_zero())
+                    else {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
                             "memory channel read timed out",
                         ));
-                    }
+                    };
                     self.pipe
                         .cv
-                        .wait_timeout(state, deadline - now)
+                        .wait_timeout(state, left)
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .0
                 }

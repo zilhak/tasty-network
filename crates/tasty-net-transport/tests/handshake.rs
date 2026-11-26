@@ -1260,6 +1260,38 @@ fn a_timeout_too_large_for_a_deadline_is_a_configuration_error() {
     assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
 }
 
+/// A read timeout too large for a deadline is refused when the link or channel is set up,
+/// instead of turning into a read without a limit.
+#[test]
+fn a_read_timeout_too_large_for_a_deadline_is_a_configuration_error() {
+    let huge = LinkTimeouts {
+        read_timeout: Duration::MAX,
+        ..timeouts()
+    };
+    let (transport, _listener) = pair(Some(token('a')));
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let result = dial_handshake(
+        conn,
+        &client(1, "d").with_timeouts(huge),
+        Holder::Dialer,
+        None,
+        &AttemptCancel::new(),
+    );
+    assert!(
+        matches!(result, Err(HandshakeError::InvalidTimeouts)),
+        "{result:?}"
+    );
+    let (a, _b) = memory_channel_pair();
+    let config = ChannelConfig {
+        read_timeout: Duration::MAX,
+        ..ChannelConfig::default()
+    };
+    let refused = a.framed(&config).expect_err("read timeout too large");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 /// A proof that trickles in byte by byte completes after the deadline: the acceptor does not
 /// take it (each byte would renew a per-read socket timeout).
 #[test]

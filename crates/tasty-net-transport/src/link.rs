@@ -57,13 +57,15 @@ pub(crate) fn deadline_after(limit: Duration) -> Result<Instant, HandshakeError>
 
 impl LinkTimeouts {
     /// Checks that the deadlines these timeouts make can be computed: the handshake timeout
-    /// with the role proposal timeout added, and the drain cap.
+    /// with the role proposal timeout added, the read and write timeouts, and the drain cap.
     pub(crate) fn check(&self) -> Result<(), HandshakeError> {
         let longest = self
             .handshake_timeout
             .checked_add(self.role_proposal_timeout)
             .ok_or(HandshakeError::InvalidTimeouts)?;
         deadline_after(longest)?;
+        deadline_after(self.read_timeout)?;
+        deadline_after(self.write_timeout)?;
         deadline_after(self.drain_cap)?;
         Ok(())
     }
