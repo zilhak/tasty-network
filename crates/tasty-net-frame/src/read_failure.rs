@@ -86,6 +86,8 @@ impl fmt::Display for ReadFailure {
     }
 }
 
+impl Error for ReadFailure {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +163,13 @@ mod tests {
             ReadFailure::of_error(boxed.as_ref()),
             ReadFailure::HeartbeatTimeout
         );
+    }
+
+    #[test]
+    fn read_failure_is_a_std_error() {
+        let err: Box<dyn Error + Send + Sync> = Box::new(ReadFailure::PeerClosed);
+        assert_eq!(err.to_string(), "the peer closed the connection");
+        assert!(err.source().is_none());
     }
 
     #[test]
