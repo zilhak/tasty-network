@@ -60,6 +60,32 @@ jobs:
         run: bash scripts/install-toolchain.sh
       - name: clippy
         run: scripts/check.sh lint
+      # The SSH integration tests (crates/tasty-net-demo/tests/ssh_attach.rs) log in
+      # with the system ssh to an OpenSSH sshd they start themselves, or to a
+      # test-only Rust SSH server when that sshd cannot serve; with neither they fail
+      # (docs/design/testing.md). The next three steps only install and report sshd.
+      # A failed install does not fail the job: the tests then use the fallback.
+      - name: Install OpenSSH server (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q openssh-server
+          fi
+      - name: Install OpenSSH server (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $sshd = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'
+          if (-not (Test-Path $sshd)) {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-String | Write-Host
+          }
+      - name: Check sshd for the SSH tests
+        run: bash scripts/prepare-test-sshd.sh
       - name: test
         run: scripts/check.sh test --no-fail-fast
 
