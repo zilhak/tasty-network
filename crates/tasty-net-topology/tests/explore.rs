@@ -1213,3 +1213,36 @@ fn a_relay_that_fails_stops_the_rest_and_the_requester_sees_the_gap() {
                 && !matches!(m, Message::Done(d) if d.from == id(C))
     }));
 }
+
+#[test]
+fn a_first_hop_without_the_capability_stays_in_the_result() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    net.no_caps.insert(id(B));
+    // B is the origin.
+    let rid = net.explore(A, request(B, 1)).unwrap();
+    assert!(net.queue.is_empty());
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::NoCapability);
+    assert_eq!(x.node(&id(B)).unwrap().reported_by, Some(id(A)));
+
+    // B is the first route hop toward C.
+    let rid = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(C),
+                route: vec![id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::NoCapability);
+    let c = x.node(&id(C)).unwrap();
+    assert_eq!(c.status, NodeStatus::TimedOut);
+    assert_eq!(c.reason, Some(NodeReason::RouteNoCapability));
+}

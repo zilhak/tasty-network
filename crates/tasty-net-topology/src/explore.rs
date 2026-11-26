@@ -392,8 +392,10 @@ impl Agent {
     }
 
     /// Starts an exploration from this device and returns its request ID. The route is
-    /// checked first ([`TopologyError::InvalidRoute`]); a first hop that cannot be sent to
-    /// is [`TopologyError::FirstHop`]. This device's own part of the exploration is its
+    /// checked first ([`TopologyError::InvalidRoute`]); a first hop with no link or a
+    /// failed send is [`TopologyError::FirstHop`]. A first hop without the capability ends
+    /// the exploration at once with that node as [`NodeStatus::NoCapability`] (and, when it
+    /// is a route hop, the origin as timed out with [`NodeReason::RouteNoCapability`]). This device's own part of the exploration is its
     /// local view, merged directly; what it sends on links is its remote answer.
     pub fn explore(
         &mut self,
@@ -418,31 +420,62 @@ impl Agent {
             remaining_ms: millis(timeout.saturating_sub(self.config.hop_reserve)),
             branch,
         };
-        self.explorations.insert(
-            request_id.clone(),
-            Exploration {
-                request_id: request_id.clone(),
-                origin: request.origin,
-                route: request.route.clone(),
-                first_hop: (request.origin != me)
-                    .then(|| request.route.first().copied().unwrap_or(request.origin)),
-                me,
-                deadline: now.mono + timeout,
-                state: ExplorationState::Running,
-                nodes: Vec::new(),
-                node_index: HashMap::new(),
-                edges: Vec::new(),
-                edge_keys: HashSet::new(),
-                parts: HashMap::new(),
-            },
-        );
+        let mut exploration = Exploration {
+            request_id: request_id.clone(),
+            origin: request.origin,
+            route: request.route.clone(),
+            first_hop: (request.origin != me)
+                .then(|| request.route.first().copied().unwrap_or(request.origin)),
+            me,
+            deadline: now.mono + timeout,
+            state: ExplorationState::Running,
+            nodes: Vec::new(),
+            node_index: HashMap::new(),
+            edges: Vec::new(),
+            edge_keys: HashSet::new(),
+            parts: HashMap::new(),
+        };
         if request.origin == me {
+            self.explorations.insert(request_id.clone(), exploration);
             self.answer_query(None, query, local, out, now);
         } else {
             let first = request.route.first().copied().unwrap_or(request.origin);
-            if let Err(e) = out.send(&first, &Message::Query(query)) {
-                self.explorations.remove(&request_id);
-                return Err(TopologyError::FirstHop(e));
+            match out.send(&first, &Message::Query(query)) {
+                Ok(()) => {
+                    self.explorations.insert(request_id.clone(), exploration);
+                }
+                Err(SendError::NoCapability) => {
+                    // Nothing was sent: the first hop is a no_capability node, and a
+                    // route that cannot start leaves the origin timed out with that reason.
+                    let reported = |device, status, reason| Node {
+                        device_id: Some(device),
+                        display_name: None,
+                        status,
+                        reason,
+                        reported_by: Some(me),
+                        peer_hint: None,
+                        explored_at: now.unix_ms,
+                    };
+                    exploration.merge_node(
+                        reported(first, NodeStatus::NoCapability, None),
+                        &me,
+                        now.unix_ms,
+                    );
+                    if first != request.origin {
+                        exploration.merge_node(
+                            reported(
+                                request.origin,
+                                NodeStatus::TimedOut,
+                                Some(NodeReason::RouteNoCapability),
+                            ),
+                            &me,
+                            now.unix_ms,
+                        );
+                    }
+                    exploration.state = ExplorationState::Finished;
+                    self.explorations.insert(request_id.clone(), exploration);
+                }
+                Err(e) => return Err(TopologyError::FirstHop(e)),
             }
         }
         Ok(request_id)
