@@ -1313,6 +1313,10 @@ fn await_proposal(
         peer: peer.clone(),
         reply: tx,
     });
+    // Set once the deadline has passed: the reply is looked at once more before the refusal,
+    // so an approval given just before the deadline is not lost between the look and the
+    // deadline check.
+    let mut past_deadline = false;
     loop {
         if io.cancel.is_cancelled() {
             return Err(HandshakeError::Cancelled);
@@ -1336,9 +1340,13 @@ fn await_proposal(
             }
             Err(TryRecvError::Empty) => {}
         }
+        if past_deadline {
+            return Ok(RoleDecision::Refused);
+        }
         let now = Instant::now();
         if now >= deadline {
-            return Ok(RoleDecision::Refused);
+            past_deadline = true;
+            continue;
         }
         peer_still_there(io, (deadline - now).min(PROPOSAL_POLL))?;
     }
