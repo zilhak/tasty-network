@@ -179,8 +179,9 @@ impl MeshFrameAssembler {
     /// The received data length of a frame is checked on every chunk. If resending a
     /// chunk index makes the sum exceed `total_len` even once, the frame is dropped with
     /// [`MeshAssembleError::LengthMismatch`]. tasty checks the sum only after every index
-    /// has arrived; this crate checks earlier so that the memory one frame holds stays
-    /// bounded by `total_len` plus one chunk.
+    /// has arrived; this crate checks earlier so that the data an incomplete frame that
+    /// passed the length checks holds never exceeds `total_len` plus one chunk (when the
+    /// frame is assembled, the assembly buffer comes on top of that).
     pub fn push_chunk(
         &mut self,
         buf: &[u8],
