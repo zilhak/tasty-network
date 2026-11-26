@@ -1600,3 +1600,40 @@ fn an_approval_after_the_approval_deadline_registers_nothing() {
     ));
     assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
 }
+
+/// An approval given inside the last channel watch of the wait (less than 50 ms before the
+/// 500 ms approval deadline) counts: it is judged on when it was given, not on when the wait
+/// takes it after that watch.
+#[test]
+fn an_approval_given_in_the_last_watch_before_the_deadline_is_taken() {
+    let mut s = server(Some(token('a')));
+    let answers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
+    let started = Arc::clone(&answers);
+    s.config = s.config.with_role_proposals(move |proposal| {
+        let answering = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(460));
+            proposal.accept();
+        });
+        started.lock().expect("lock").push(answering);
+    });
+    let (transport, listener) = pair(Some(token('a')));
+    let acceptor = accept_one(listener, s.config.clone());
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let dialer = dial_handshake(
+        conn,
+        &client(1, "d"),
+        Holder::Acceptor,
+        None,
+        &AttemptCancel::new(),
+    )
+    .expect("the approval was in time");
+    let acc = link_of(acceptor.join().expect("acceptor"));
+    assert!(!dialer.peer().local_holds());
+    assert!(acc.peer().local_holds());
+    assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 1);
+    for thread in std::mem::take(&mut *answers.lock().expect("lock")) {
+        thread.join().expect("answering thread");
+    }
+}

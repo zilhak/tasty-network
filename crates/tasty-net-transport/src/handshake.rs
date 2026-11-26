@@ -144,7 +144,9 @@ impl DialConfig {
 #[derive(Debug)]
 pub struct RoleProposal {
     peer: PeerInfo,
-    reply: Sender<bool>,
+    /// The answer and when it was given: the approval deadline is judged on that time, not on
+    /// when the waiting handshake takes the answer.
+    reply: Sender<(bool, Instant)>,
 }
 
 impl RoleProposal {
@@ -154,11 +156,11 @@ impl RoleProposal {
     }
 
     pub fn accept(self) {
-        let _sent = self.reply.send(true).is_ok();
+        let _sent = self.reply.send((true, Instant::now())).is_ok();
     }
 
     pub fn refuse(self) {
-        let _sent = self.reply.send(false).is_ok();
+        let _sent = self.reply.send((false, Instant::now())).is_ok();
     }
 }
 
@@ -1302,10 +1304,11 @@ fn await_proposal(
             return Err(HandshakeError::Cancelled);
         }
         match rx.try_recv() {
-            Ok(true) => {
-                // An approval that came after the approval deadline is too late, even if it
-                // was already queued when the wait looked: it is refused like no answer.
-                if Instant::now() >= deadline {
+            Ok((true, given)) => {
+                // An approval given after the approval deadline is too late: it is refused
+                // like no answer. One given in time counts even when the wait takes it only
+                // after its last channel watch ran past the deadline.
+                if given >= deadline {
                     return Ok(RoleDecision::Refused);
                 }
                 peer_still_there(io, Duration::from_millis(1))?;
@@ -1314,7 +1317,9 @@ fn await_proposal(
                 }
                 return Ok(RoleDecision::Accepted);
             }
-            Ok(false) | Err(TryRecvError::Disconnected) => return Ok(RoleDecision::Refused),
+            Ok((false, _)) | Err(TryRecvError::Disconnected) => {
+                return Ok(RoleDecision::Refused);
+            }
             Err(TryRecvError::Empty) => {}
         }
         let now = Instant::now();
