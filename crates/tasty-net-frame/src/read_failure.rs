@@ -64,14 +64,31 @@ impl ReadFailure {
 
     /// The cause as one English sentence for a log line. `timeout` is the read timeout
     /// that was actually set on this stream; only the timeout cause mentions it.
+    ///
+    /// The timeout is written exactly, in the largest unit that has no fraction: `30 s`,
+    /// `250 ms`, `1500 ms`, `750 us`, `10 ns`.
     pub fn describe(self, timeout: Duration) -> String {
         match self {
             Self::HeartbeatTimeout => format!(
-                "heartbeat timeout: no complete frame arrived within the {}-second read timeout",
-                timeout.as_secs()
+                "heartbeat timeout: no complete frame arrived within the {} read timeout",
+                exact_duration(timeout)
             ),
             _ => self.to_string(),
         }
+    }
+}
+
+/// Writes `d` without losing precision, in the largest unit that divides it.
+fn exact_duration(d: Duration) -> String {
+    let nanos = d.as_nanos();
+    if nanos % 1_000_000_000 == 0 {
+        format!("{} s", nanos / 1_000_000_000)
+    } else if nanos % 1_000_000 == 0 {
+        format!("{} ms", nanos / 1_000_000)
+    } else if nanos % 1_000 == 0 {
+        format!("{} us", nanos / 1_000)
+    } else {
+        format!("{nanos} ns")
     }
 }
 
@@ -184,8 +201,27 @@ mod tests {
     #[test]
     fn the_timeout_cause_states_the_armed_seconds() {
         let text = ReadFailure::HeartbeatTimeout.describe(Duration::from_secs(45));
-        assert!(text.contains("45-second"), "{text}");
+        assert!(text.contains("within the 45 s read timeout"), "{text}");
         assert!(!text.contains("no frame"), "{text}");
+    }
+
+    /// A short per-link timeout (as tests use) must not read as 0 seconds.
+    #[test]
+    fn a_sub_second_timeout_is_stated_exactly() {
+        let cases = [
+            (Duration::from_millis(250), "within the 250 ms read timeout"),
+            (
+                Duration::from_millis(1500),
+                "within the 1500 ms read timeout",
+            ),
+            (Duration::from_micros(750), "within the 750 us read timeout"),
+            (Duration::from_nanos(10), "within the 10 ns read timeout"),
+            (Duration::ZERO, "within the 0 s read timeout"),
+        ];
+        for (timeout, expected) in cases {
+            let text = ReadFailure::HeartbeatTimeout.describe(timeout);
+            assert!(text.contains(expected), "{timeout:?}: {text}");
+        }
     }
 
     #[test]
