@@ -157,6 +157,11 @@ impl Net {
 
     fn enqueue(&mut self, from: DeviceId, sends: Vec<(DeviceId, Message)>) {
         for (to, message) in sends {
+            // A silent device never answers: keep its messages out of the queue.
+            if self.silent.contains(&to) {
+                self.log.push((from, to, message));
+                continue;
+            }
             let delay = self
                 .delay
                 .iter()
