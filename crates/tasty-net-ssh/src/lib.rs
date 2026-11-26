@@ -214,8 +214,8 @@ pub(crate) mod test_helper {
     /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
     /// - `stderr:<code>:<n>:<text>`: writes `n` times `x`, a space, and `<text>` to stderr and
     ///   exits with `<code>`.
-    /// - `flood:<bytes>`: writes `<bytes>` bytes to stdout and exits 0. `flood:forever` writes
-    ///   until the pipe closes.
+    /// - `flood:<bytes>[:<code>]`: writes `<bytes>` bytes to stdout (stopping at a write error)
+    ///   and exits with `<code>` (0 by default). `flood:forever` writes until the pipe closes.
     pub(crate) fn helper_command(mode: &str) -> Command {
         let mut c = Command::new(std::env::current_exe().expect("test binary path"));
         c.args([ENTRY, "--exact", "--nocapture", "--test-threads=1"])
@@ -277,10 +277,12 @@ pub(crate) mod test_helper {
                 std::process::exit(code);
             }
             "flood" => {
-                let n: usize = if arg == "forever" {
+                let (count, code) = arg.split_once(':').unwrap_or((arg, "0"));
+                let code: i32 = code.parse().expect("exit code");
+                let n: usize = if count == "forever" {
                     usize::MAX
                 } else {
-                    arg.parse().expect("byte count")
+                    count.parse().expect("byte count")
                 };
                 let chunk = [b'x'; 4096];
                 let mut out = std::io::stdout().lock();
@@ -293,7 +295,7 @@ pub(crate) mod test_helper {
                     left -= k;
                 }
                 let _flushed = out.flush();
-                std::process::exit(0);
+                std::process::exit(code);
             }
             other => panic!("unknown helper mode {other}"),
         }

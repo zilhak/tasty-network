@@ -6,7 +6,7 @@
 
 use std::fmt;
 use std::io::Read;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -472,7 +472,8 @@ enum WaitEnd {
     Ended,
     /// The child ran past the deadline (the caller kills it).
     Expired,
-    /// `stop` said to cut the child off (the caller kills it).
+    /// `stop` said to cut the child off. The caller still takes the child's own exit status if
+    /// it has one ([`exit_after_overflow`]) and kills it otherwise.
     Stopped,
 }
 
@@ -619,20 +620,48 @@ impl Stdout {
     }
 }
 
-/// Kills a child the wait gave up on and says why. When cancellation took the child or came
-/// meanwhile, the reason is `Cancelled`, not the timeout or the overflow.
-fn cut_off(owner: ChildOwner, end: &WaitEnd, what: &str, budget: Duration) -> PortDiscoveryError {
+/// Kills a child that ran past the deadline and says why. When cancellation took the child or
+/// came meanwhile, the reason is `Cancelled`, not the timeout.
+fn cut_off(owner: ChildOwner, what: &str, budget: Duration) -> PortDiscoveryError {
     let reclaimed = owner.kill_and_reap_now();
     if !reclaimed || cancel_requested() {
         cancelled_error(what)
-    } else if *end == WaitEnd::Stopped {
-        output_too_long(what)
     } else {
         PortDiscoveryError::new(
             PortDiscoveryFailureKind::TimedOut,
             format!("{what}: killed after not finishing within {budget:?}"),
         )
     }
+}
+
+/// How long a child whose stdout passed the limit may take to exit on its own (it usually fails
+/// writing to the pipe just closed) before it is killed.
+const OVERFLOW_EXIT_GRACE: Duration = Duration::from_millis(100);
+
+/// After stdout passed the limit: the child's own exit status if it has ended (or ends within
+/// [`OVERFLOW_EXIT_GRACE`], within the deadline), so an exit code such as 3 still decides the
+/// class. `None` means it still ran and was killed and reaped.
+fn exit_after_overflow(
+    owner: ChildOwner,
+    deadline: Instant,
+    what: &str,
+) -> Result<Option<ExitStatus>, PortDiscoveryError> {
+    let mut child = owner.finish(what)?;
+    let until = deadline.min(Instant::now() + OVERFLOW_EXIT_GRACE);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) if Instant::now() < until && !cancel_requested() => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => break,
+        }
+    }
+    kill_and_reap(&mut child);
+    if cancel_requested() {
+        return Err(cancelled_error(what));
+    }
+    Ok(None)
 }
 
 /// The refusal of an output past [`OUTPUT_LIMIT`].
@@ -744,23 +773,30 @@ fn run_capture_with_budget(
         early: None,
     };
     let mut owner = ChildOwner::adopt(child, what)?;
-    let end = wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed());
-    if end != WaitEnd::Ended {
-        return Err(cut_off(owner, &end, what, budget));
-    }
-    let mut child = owner.finish(what)?;
-    let status = child.wait().map_err(|e| {
-        PortDiscoveryError::new(
-            PortDiscoveryFailureKind::SshConnectionFailed,
-            format!("{what}: reaping the command failed: {e}"),
-        )
-    })?;
+    let status = match wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed()) {
+        WaitEnd::Expired => return Err(cut_off(owner, what, budget)),
+        WaitEnd::Stopped => match exit_after_overflow(owner, deadline, what)? {
+            Some(status) => status,
+            None => return Err(output_too_long(what)),
+        },
+        WaitEnd::Ended => {
+            let mut child = owner.finish(what)?;
+            child.wait().map_err(|e| {
+                PortDiscoveryError::new(
+                    PortDiscoveryFailureKind::SshConnectionFailed,
+                    format!("{what}: reaping the command failed: {e}"),
+                )
+            })?
+        }
+    };
     let wait_for = |rx: Option<mpsc::Receiver<Captured>>, until: Instant| match rx {
         Some(rx) => collect(&rx, until, what),
         None => Ok(Captured::default()),
     };
-    // A child that died writing to the closed stdout failed because of its output size.
-    if stdout.overflowed() {
+    // A child that succeeded with too much output, or was killed by a signal after its stdout
+    // closed (SIGPIPE), failed because of its output size. An exit code of its own (3: the
+    // instance exited) still decides the class below.
+    if stdout.overflowed() && (status.success() || status.code().is_none()) {
         return Err(output_too_long(what));
     }
     if !status.success() {
@@ -1870,6 +1906,25 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(15));
     }
 
+    /// A command that writes past the limit and then exits 3 keeps its exit code: the overflow
+    /// does not hide that the instance exited.
+    #[test]
+    fn an_overflow_does_not_hide_exit_3() {
+        let started = Instant::now();
+        let err = capture(
+            helper_command("flood:200000:3"),
+            Duration::from_secs(10),
+            "flood exit 3",
+        )
+        .expect_err("exit 3");
+        assert_eq!(err.exit_code(), Some(3), "{}", err.detail());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            refine_port_command_failure(err).kind(),
+            PortDiscoveryFailureKind::RemoteInstanceExited
+        );
+    }
+
     /// An output that never ends is cut off as soon as it passes the limit, long before the
     /// budget.
     #[test]
@@ -2007,19 +2062,14 @@ mod tests {
         let mut taken = handle.reclaim(id).expect("registered");
         kill_and_reap(&mut taken);
         let owner = ChildOwner::Scoped(handle, id);
-        let err = cut_off(owner, &WaitEnd::Expired, "taken", Duration::from_secs(1));
+        let err = cut_off(owner, "taken", Duration::from_secs(1));
         assert_eq!(err.kind(), PortDiscoveryFailureKind::Cancelled);
 
         let child = never_returns_command()
             .stdin(Stdio::null())
             .spawn()
             .expect("spawn");
-        let err = cut_off(
-            ChildOwner::Local(child),
-            &WaitEnd::Expired,
-            "expired",
-            Duration::from_secs(1),
-        );
+        let err = cut_off(ChildOwner::Local(child), "expired", Duration::from_secs(1));
         assert_eq!(err.kind(), PortDiscoveryFailureKind::TimedOut);
     }
 
@@ -2220,6 +2270,32 @@ mod tests {
 
         fn target() -> SshTarget {
             SshTarget::parse("fake-host")
+        }
+
+        /// An exit 3 after an output past the limit still stops Auto at the subcommand.
+        #[test]
+        fn auto_stops_at_an_exited_instance_after_a_long_output() {
+            let exited = FakeSsh::new(
+                "exited-long",
+                "head -c 200000 /dev/zero | tr '\\0' x; exit 3",
+                "echo 45123",
+            );
+            let err = discover_remote_port(
+                &exited.launcher(),
+                &target(),
+                PortMode::Auto,
+                &config(),
+                decode_port,
+            )
+            .expect_err("exited instance");
+            assert_eq!(
+                err.kind(),
+                PortDiscoveryFailureKind::RemoteInstanceExited,
+                "{}",
+                err.detail()
+            );
+            assert_eq!(err.exit_code(), Some(3));
+            assert_eq!(exited.calls(), ["netprog port"]);
         }
 
         /// An exit 3 whose stderr a descendant holds still stops Auto at the subcommand.
