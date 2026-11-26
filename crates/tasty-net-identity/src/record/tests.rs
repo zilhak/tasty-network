@@ -1,7 +1,10 @@
 use std::fs;
 
 use super::*;
-use crate::secret_file::fault;
+use crate::{
+    FileOp,
+    secret_file::{self, fault},
+};
 
 fn record(port: u16) -> ConnectionRecord {
     ConnectionRecord {
@@ -195,6 +198,111 @@ fn a_failed_cleanup_after_a_failed_publication_is_reported() {
     );
     assert!(leftover.exists());
     assert!(!path.exists());
+}
+
+fn assert_refused_and_kept(r: ConnectionRecord, problem: RecordProblem) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let kept = record(4242);
+    let publication = kept.publish(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let error = r.publish(&path).unwrap_err();
+    assert!(
+        matches!(&error, IdentityError::InvalidRecord(e) if e.problem == problem),
+        "{error:?}"
+    );
+    assert!(!format!("{error} {error:?}").contains(r.token.expose_hex()));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the existing record stays"
+    );
+    assert!(temps(dir.path()).is_empty());
+    assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
+}
+
+fn temps(dir: &Path) -> Vec<std::ffi::OsString> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().contains(".tmp-"))
+        .collect()
+}
+
+#[test]
+fn records_a_reader_would_refuse_are_not_published() {
+    assert_refused_and_kept(record(0), RecordProblem::BadPort);
+    let mut empty = record(1);
+    empty.instance_id.clear();
+    assert_refused_and_kept(empty, RecordProblem::BadInstanceId);
+    let mut long = record(1);
+    long.instance_id = "x".repeat(secret_file::MAX_SECRET_LEN);
+    assert_refused_and_kept(long, RecordProblem::TooLong);
+}
+
+#[test]
+fn the_longest_accepted_record_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let mut r = record(65535);
+    r.instance_id = String::new();
+    let overhead = {
+        let mut one = r.clone();
+        one.instance_id = "x".to_owned();
+        one.to_line().len() - 1
+    };
+    r.instance_id = "x".repeat(secret_file::MAX_SECRET_LEN - overhead);
+    assert_eq!(r.to_line().len(), secret_file::MAX_SECRET_LEN);
+    let publication = r.publish(&path).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(ConnectionRecord::parse(&text), Ok(ParsedRecord::Record(r)));
+    assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
+}
+
+#[test]
+fn a_failure_after_the_replacement_removes_the_new_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let r = record(1);
+    let error = {
+        let _fail = fault::fail_after_replace();
+        r.publish(&path).unwrap_err()
+    };
+    assert!(
+        matches!(
+            error,
+            IdentityError::Io {
+                op: FileOp::Read,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(
+        !path.exists(),
+        "no record without a publication handle stays"
+    );
+    assert!(temps(dir.path()).is_empty());
+}
+
+#[test]
+fn a_failed_removal_after_the_replacement_names_the_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let error = {
+        let _fail = fault::fail_after_replace();
+        let _discard = fault::fail_discard();
+        record(1).publish(&path).unwrap_err()
+    };
+    let IdentityError::Leftover {
+        leftover,
+        cause: Some(_),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(leftover.file_name(), path.file_name());
 }
 
 #[test]

@@ -66,12 +66,22 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<(), IdentityError> {
     os::narrow_dir(dir, &meta).map_err(|e| IdentityError::io(FileOp::CreateDir, dir, e))
 }
 
+/// A written private temporary file and the file ID read from its handle before it was closed.
+pub(crate) struct WrittenTemp {
+    pub(crate) path: PathBuf,
+    pub(crate) id: io::Result<FileId>,
+}
+
 /// Write `bytes` into a new private temporary file next to `name` in `dir` and return its path.
 /// The access restriction is set and verified before the first byte is written; when that
 /// fails, the temporary file is removed and nothing was written. When a later step fails, the
 /// temporary file is removed too; if that removal fails, the error is
 /// [`IdentityError::Leftover`].
-pub(crate) fn write_temp(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<PathBuf, IdentityError> {
+pub(crate) fn write_temp(
+    dir: &Path,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<WrittenTemp, IdentityError> {
     let (temp, mut file) = create_temp(dir, name)?;
     let result = (|| {
         protect(&file).map_err(|source| IdentityError::Protect {
@@ -82,9 +92,10 @@ pub(crate) fn write_temp(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<PathB
             .and_then(|()| file.sync_all())
             .map_err(|e| IdentityError::io(FileOp::Write, &temp, e))
     })();
+    let id = file_id(&file);
     drop(file);
     match result {
-        Ok(()) => Ok(temp),
+        Ok(()) => Ok(WrittenTemp { path: temp, id }),
         Err(error) => Err(fail_with_cleanup(&temp, error)),
     }
 }
@@ -186,6 +197,7 @@ pub(crate) mod fault {
     thread_local! {
         static PROTECT_FAILS: Cell<bool> = const { Cell::new(false) };
         static DISCARD_FAILS: Cell<bool> = const { Cell::new(false) };
+        static AFTER_REPLACE_FAILS: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) struct Guard(&'static LocalKey<Cell<bool>>);
@@ -207,6 +219,15 @@ pub(crate) mod fault {
 
     pub(crate) fn discard_fails() -> bool {
         DISCARD_FAILS.with(Cell::get)
+    }
+
+    pub(crate) fn after_replace_fails() -> bool {
+        AFTER_REPLACE_FAILS.with(Cell::get)
+    }
+
+    /// Make the step after a record replacement fail on this thread while the guard lives.
+    pub(crate) fn fail_after_replace() -> Guard {
+        set(&AFTER_REPLACE_FAILS)
     }
 
     /// Make the access restriction of new secret files fail on this thread while the guard lives.

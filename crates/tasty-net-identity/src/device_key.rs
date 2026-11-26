@@ -44,7 +44,7 @@ impl DeviceKey {
         text.push(b'\n');
         text.extend_from_slice(hex::encode(&os_random_32()).as_bytes());
         text.push(b'\n');
-        let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?;
+        let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?.path;
         match std::fs::hard_link(&temp, &path) {
             // AlreadyExists: another creator won; its file is complete because it was linked
             // after sync_all.

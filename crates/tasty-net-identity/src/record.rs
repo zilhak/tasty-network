@@ -84,6 +84,8 @@ pub enum RecordProblem {
     BadToken,
     /// `instance_id` is not a non-empty string.
     BadInstanceId,
+    /// The record line is longer than the 4096 bytes a reader takes (refused on publication).
+    TooLong,
 }
 
 /// A record text was refused. It names only the field or the kind of problem; the refused
@@ -102,6 +104,7 @@ impl fmt::Display for RecordParseError {
             RecordProblem::BadPort => f.write_str("port: not an integer from 1 to 65535"),
             RecordProblem::BadToken => f.write_str("token: not 64 lowercase hex"),
             RecordProblem::BadInstanceId => f.write_str("instance_id: not a non-empty string"),
+            RecordProblem::TooLong => f.write_str("record: longer than 4096 bytes"),
         }
     }
 }
@@ -113,6 +116,22 @@ fn refuse(problem: RecordProblem) -> RecordParseError {
 }
 
 impl ConnectionRecord {
+    /// The line [`ConnectionRecord::publish`] writes, after the checks `parse` applies on the
+    /// reading side: port not 0, non-empty instance ID, at most `MAX_SECRET_LEN` bytes.
+    fn checked_line(&self) -> Result<String, RecordParseError> {
+        if self.port == 0 {
+            return Err(refuse(RecordProblem::BadPort));
+        }
+        if self.instance_id.is_empty() {
+            return Err(refuse(RecordProblem::BadInstanceId));
+        }
+        let line = self.to_line();
+        if line.len() > secret_file::MAX_SECRET_LEN {
+            return Err(refuse(RecordProblem::TooLong));
+        }
+        Ok(line)
+    }
+
     /// The record as one JSON line with a final line break.
     pub fn to_line(&self) -> String {
         let id = serde_json::Value::String(self.instance_id.clone());
@@ -169,6 +188,11 @@ impl ConnectionRecord {
     /// the path, under the publication lock of the path. The directory is made private like
     /// the key directory. A link or non-regular file at `path` is refused.
     ///
+    /// A record that a reader would refuse (port 0, empty instance ID, a line longer than
+    /// 4096 bytes) is [`IdentityError::InvalidRecord`] before anything is written, and the
+    /// existing file stays. When a step after the replacement fails, the new file is removed
+    /// again under the lock before the error is returned.
+    ///
     /// The returned handle is the only way to remove the record again
     /// ([`RecordPublication::retire`]).
     pub fn publish(&self, path: &Path) -> Result<RecordPublication, IdentityError> {
@@ -184,39 +208,65 @@ impl ConnectionRecord {
         let target = target_of(path)?;
         let _lock = secret_file::lock(&target)?;
         refuse_non_regular(&target)?;
-        let contents = self.to_line();
+        let contents = self.checked_line().map_err(IdentityError::InvalidRecord)?;
         let temp = secret_file::write_temp(dir, name, contents.as_bytes())?;
-        if let Err(e) = std::fs::rename(&temp, &target) {
+        // The ID of the written file, taken from its own handle; a rename keeps it.
+        let id = match temp.id {
+            Ok(id) => id,
+            Err(e) => {
+                let cause = IdentityError::io(FileOp::Read, &temp.path, e);
+                return Err(secret_file::fail_with_cleanup(&temp.path, cause));
+            }
+        };
+        if let Err(e) = std::fs::rename(&temp.path, &target) {
             let cause = IdentityError::io(FileOp::Publish, &target, e);
-            return Err(secret_file::fail_with_cleanup(&temp, cause));
+            return Err(secret_file::fail_with_cleanup(&temp.path, cause));
         }
-        // Read back through the privacy checks while the lock is held; the open handle keeps
-        // this generation's file ID from being reused while the publication lives.
-        let published = secret_file::open_private(&target)?.ok_or_else(|| {
-            IdentityError::io(
-                FileOp::Read,
-                &target,
-                io::Error::new(io::ErrorKind::NotFound, "record vanished after publication"),
-            )
-        })?;
-        if published.contents != contents.as_bytes() {
-            return Err(IdentityError::io(
-                FileOp::Read,
-                &target,
-                io::Error::other("record changed during publication"),
-            ));
-        }
-        let id = secret_file::file_id(&published.file)
-            .map_err(|e| IdentityError::io(FileOp::Read, &target, e))?;
+        let published = match confirm(&target, &contents, id) {
+            Ok(file) => file,
+            // Still under the lock, the file at the target is the one just renamed there.
+            Err(cause) => return Err(secret_file::fail_with_cleanup(&target, cause)),
+        };
         tracing::info!(path = %path.display(), "published connection record");
         Ok(RecordPublication {
             path: path.to_path_buf(),
             target,
             contents,
             id,
-            _pin: published.file,
+            _pin: published,
         })
     }
+}
+
+/// Read the replaced target back through the privacy checks and return the open handle, which
+/// keeps this generation's file ID from being reused while the publication lives.
+fn confirm(target: &Path, contents: &str, id: FileId) -> Result<File, IdentityError> {
+    #[cfg(test)]
+    if secret_file::fault::after_replace_fails() {
+        return Err(IdentityError::io(
+            FileOp::Read,
+            target,
+            io::Error::other("injected failure after the replacement"),
+        ));
+    }
+    let published = secret_file::open_private(target)?.ok_or_else(|| {
+        IdentityError::io(
+            FileOp::Read,
+            target,
+            io::Error::new(io::ErrorKind::NotFound, "record vanished after publication"),
+        )
+    })?;
+    let same_id = secret_file::file_id(&published.file)
+        .map_err(|e| IdentityError::io(FileOp::Read, target, e))?
+        == id;
+    if !same_id || published.contents != contents.as_bytes() {
+        return Err(IdentityError::io(
+            FileOp::Read,
+            target,
+            io::Error::other("record changed during publication"),
+        ));
+    }
+    Ok(published.file)
 }
 
 /// The outcome of [`RecordPublication::retire`].

@@ -132,6 +132,8 @@ pub enum IdentityError {
         /// The OS error.
         source: io::Error,
     },
+    /// A connection record that a reader would refuse; nothing was written.
+    InvalidRecord(crate::RecordParseError),
     /// A file this crate wrote could not be removed. It can still hold the secret; the
     /// consumer can report or remove `leftover`.
     Leftover {
@@ -180,6 +182,9 @@ impl fmt::Display for IdentityError {
             Self::Protect { path, .. } => {
                 write!(f, "could not restrict access to {}", path.display())
             }
+            Self::InvalidRecord(problem) => {
+                write!(f, "connection record cannot be published ({problem})")
+            }
             Self::Leftover { leftover, .. } => {
                 write!(f, "could not remove the secret file {}", leftover.display())
             }
@@ -203,6 +208,7 @@ impl Error for IdentityError {
                 cleanup,
                 ..
             } => Some(cleanup),
+            Self::InvalidRecord(problem) => Some(problem),
             Self::Corrupt { .. } | Self::UnsafeFile { source: None, .. } => None,
         }
     }
