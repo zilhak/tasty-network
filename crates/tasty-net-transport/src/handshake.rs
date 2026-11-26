@@ -1208,8 +1208,13 @@ fn accept_on(
         io.write_control(&ack.encode())
     })();
     if let Err(e) = written {
-        // The ACK did not go out: no link, no credential, and the consumer's guard drops.
+        // No link stands (the ACK failed, or its bytes went out but too late): the credential
+        // is revoked so no bulk finds it any more, and the parent's closer ends, so a bulk
+        // channel another thread opened under the credential meanwhile is woken and its
+        // guard dropped, and a bulk that read the credential before the revoke is refused
+        // when it adopts. The consumer's guard drops with `accept`.
         config.bulk.revoke(&credential);
+        closer.force_close(EndReason::Forced);
         return Err(e);
     }
     let registry = config.bulk.clone();

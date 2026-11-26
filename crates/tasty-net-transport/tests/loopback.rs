@@ -670,10 +670,11 @@ impl DomainPolicy for GuardPolicy {
     }
 }
 
-/// A writer that stalls in its first flush, after the bytes went out.
+/// A writer that stalls in its `stall_at`-th flush (counted from 1), after the bytes went out.
 struct FlushStall {
     inner: TcpStream,
-    stalled: bool,
+    flushes: usize,
+    stall_at: usize,
     delay: Duration,
 }
 
@@ -683,8 +684,8 @@ impl io::Write for FlushStall {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if !self.stalled {
-            self.stalled = true;
+        self.flushes += 1;
+        if self.flushes == self.stall_at {
             std::thread::sleep(self.delay);
         }
         self.inner.flush()
@@ -729,7 +730,8 @@ fn a_parent_that_ends_right_after_the_bulk_ack_drops_its_guard() {
             Box::new(stream.try_clone().expect("clone")),
             Box::new(FlushStall {
                 inner: stream,
-                stalled: false,
+                flushes: 0,
+                stall_at: 1,
                 delay: Duration::from_millis(1500),
             }),
             control,
@@ -765,4 +767,142 @@ fn a_parent_that_ends_right_after_the_bulk_ack_drops_its_guard() {
     assert!(ended.elapsed() < Duration::from_millis(500));
     drop(bulk);
     drop(acceptor.join().expect("acceptor"));
+}
+
+/// An attach whose success ACK reached the dialer but whose flush ran past the deadline ends
+/// with `TimedOut` and ends the parent too: the bulk channel the dialer opened meanwhile under
+/// the credential is closed and its guard dropped, and the credential opens nothing more.
+#[test]
+fn a_late_attach_ack_ends_the_bulk_channels_opened_meanwhile() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let config = AcceptConfig::new(
+        key(2),
+        "acceptor-1",
+        Some(token('a')),
+        Arc::new(GuardPolicy {
+            dropped: Arc::clone(&dropped),
+        }),
+    )
+    .with_timeouts(LinkTimeouts {
+        handshake_timeout: Duration::from_millis(800),
+        ..timeouts()
+    });
+    let (stream, listener) = {
+        let dialing = std::thread::spawn(move || {
+            let transport = Loopback {
+                addr,
+                token: token('a'),
+            };
+            let conn = transport
+                .connect(&(), &AttemptCancel::new())
+                .expect("connect");
+            dial_handshake(conn, &client(), Holder::Dialer, None, &AttemptCancel::new())
+        });
+        let (stream, _) = listener.accept().expect("accept attach");
+        ((stream, dialing), listener)
+    };
+    let (stream, dialing) = stream;
+    let attach_config = config.clone();
+    let attach = std::thread::spawn(move || {
+        let channel = RawChannel::new(
+            Box::new(stream.try_clone().expect("clone")),
+            // Flush 1 is the challenge, flush 2 the success ACK: its bytes are out, then the
+            // acceptor is held past the 800 ms deadline.
+            Box::new(FlushStall {
+                inner: stream.try_clone().expect("clone"),
+                flushes: 0,
+                stall_at: 2,
+                delay: Duration::from_millis(1500),
+            }),
+            CodedControl::over(&stream),
+            TransportKind::Tcp,
+        );
+        let mut channel = channel;
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(
+            channel,
+            &line,
+            Vec::new(),
+            &attach_config,
+            &AttemptCancel::new(),
+        )
+    });
+    let dialer = dialing
+        .join()
+        .expect("dialer")
+        .expect("the dialer has the ACK");
+    // A bulk channel under the credential while the attach is still held.
+    let bulk_acceptor = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept bulk");
+        let mut channel = RawChannel::from_tcp(stream).expect("channel");
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        let bulk = accept_handshake(channel, &line, Vec::new(), &config, &AttemptCancel::new());
+        (bulk, listener, config)
+    });
+    let _dialer_bulk = dialer.open_bulk(None).expect("bulk under the credential");
+    let (bulk, listener, config) = bulk_acceptor.join().expect("bulk acceptor");
+    let mut bulk = match bulk {
+        Ok(Accepted::Bulk(bulk)) => bulk,
+        other => panic!("{other:?}"),
+    };
+    assert!(!dropped.load(Ordering::SeqCst));
+    let result = attach.join().expect("attach acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::TimedOut)),
+        "{result:?}"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the parent's end dropped the bulk guard"
+    );
+    let started = Instant::now();
+    assert!(
+        bulk.reader.read_frame().is_err(),
+        "the bulk channel was closed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(config.bulk_registry().live(), 0);
+    // The credential opens nothing more.
+    let late = std::thread::spawn(move || {
+        // Polled with a bound, so a dialer that never connects fails the test instead of
+        // hanging it.
+        listener.set_nonblocking(true).expect("nonblocking");
+        let until = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept late bulk: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).expect("blocking");
+        let mut channel = RawChannel::from_tcp(stream).expect("channel");
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(channel, &line, Vec::new(), &config, &AttemptCancel::new())
+    });
+    let refused = dialer.open_bulk(None);
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(matches!(
+        late.join().expect("late acceptor"),
+        Err(HandshakeError::Refused(RejectReason::BulkCredentialInvalid))
+    ));
 }
