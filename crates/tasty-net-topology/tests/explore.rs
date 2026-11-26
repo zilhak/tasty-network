@@ -1428,6 +1428,38 @@ fn the_requesters_own_edges_are_its_local_view_even_when_a_remote_copy_comes_fir
 }
 
 #[test]
+fn an_answer_that_failed_after_forwarding_is_not_answered_again() {
+    let mut net = Net::new(&[A, B, C, D, E]);
+    net.link(A, B).link(A, C).link(B, D).link(C, D).link(D, E);
+    // D gets the query through B first, then through C with the same depth.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(C) && to == id(D) && matches!(m, Message::Query(_))).then_some(20)
+    }));
+    // D forwards to E, then its first part to B fails.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(D) && to == id(B) && matches!(m, Message::Result(_))
+    }));
+    let rid = net.explore(A, request(A, 3)).unwrap();
+    net.run();
+    assert!(
+        net.log
+            .iter()
+            .any(|(f, t, m)| { *f == id(D) && *t == id(E) && matches!(m, Message::Query(_)) })
+    );
+    // The query through C is suppressed instead of answered without E.
+    assert!(
+        net.log
+            .iter()
+            .any(|(f, t, m)| { *f == id(D) && *t == id(C) && matches!(m, Message::Suppressed(_)) })
+    );
+    assert!(!net.log.iter().any(|(f, t, m)| {
+        *f == id(D) && *t == id(C) && matches!(m, Message::Result(p) if p.from == id(D))
+    }));
+    let x = net.result(A, &rid);
+    assert_eq!(status(x, D), NodeStatus::TimedOut);
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);

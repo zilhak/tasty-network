@@ -732,8 +732,12 @@ impl Agent {
         }
         if !self.send_view(&header, view, out, now) {
             // The branch failed: no done follows and the neighbors' answers are not
-            // waited for (their replies are dropped as unexpected).
-            self.undo_answered(&query.request_id, previous);
+            // waited for (their replies are dropped as unexpected). The record is undone
+            // only when no neighbor got the query: a neighbor that did would answer a
+            // retry with a suppression, hiding the answer this device dropped.
+            if pending.is_empty() {
+                self.undo_answered(&query.request_id, previous);
+            }
             return;
         }
         if pending.is_empty() {
