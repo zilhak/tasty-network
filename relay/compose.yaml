@@ -1,0 +1,35 @@
+# iroh-relay 운영 예시(Docker Compose). 안내: relay/README.md.
+#
+#   RELAY_CONFIG=punch-only.toml docker compose -f relay/compose.yaml up -d
+#
+# RELAY_CONFIG를 주지 않으면 relay-fallback.toml(사용자 relay의 기본)을 쓴다.
+# 설정 파일의 [tls] hostname·contact를 먼저 고친다.
+services:
+  iroh-relay:
+    # 태그는 옮겨질 수 있어 digest(multi-arch index)를 함께 고정한다. latest를 쓰지 않는다.
+    # 판을 올릴 때 relay/check-config.sh의 RELAY_IMAGE와 같이 바꾼다.
+    image: n0computer/iroh-relay:v1.5.0@sha256:50a2f5697d8f69537037503c81b989be17eeb694dbb2d3fdfd5418c9a71c8ec6
+    restart: unless-stopped
+    command: ["--config-path", "/config/relay.toml"]
+    environment:
+      # 로그 수준. 문제를 볼 때는 iroh_relay=debug.
+      RUST_LOG: "info"
+      # access.http.bearer_token 대신 쓸 수 있다(설정 파일보다 우선). shared_token은 IROH_RELAY_ACCESS_TOKEN.
+      # IROH_RELAY_HTTP_BEARER_TOKEN: "..."
+    volumes:
+      # iroh-relay는 설정 경로에 파일이 없으면 오류 없이 기본값으로 뜬다. 경로를 바꾸면 기동 로그로 확인한다.
+      - ./${RELAY_CONFIG:-relay-fallback.toml}:/config/relay.toml:ro
+      # Let's Encrypt 인증서와 계정(cert_dir). 지우면 다시 발급받는다.
+      - relay-certs:/data/certs
+    ports:
+      # HTTPS relay. 내장 Let's Encrypt의 TLS-ALPN-01 인증도 이 포트로 받는다.
+      - "443:443/tcp"
+      # TLS 구성에서는 captive portal 확인(/generate_204)만 평문으로 받는다.
+      - "80:80/tcp"
+      # QUIC 주소 확인. 설정의 enable_quic_addr_discovery = true일 때만 쓰인다.
+      - "7842:7842/udp"
+      # metrics는 외부에 열지 않는다. 같은 호스트의 수집기만 읽는다.
+      - "127.0.0.1:9090:9090/tcp"
+
+volumes:
+  relay-certs:
