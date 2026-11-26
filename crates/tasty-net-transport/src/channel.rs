@@ -153,12 +153,19 @@ impl RawChannel {
         self.framed_under(config, closer)
     }
 
-    /// [`RawChannel::framed`] with the closer of an existing link (a bulk channel).
+    /// [`RawChannel::framed`] with the closer of an existing link (a bulk channel). A drain
+    /// cap too large to add to the current time is refused with `InvalidInput`.
     pub(crate) fn framed_under(
         self,
         config: &ChannelConfig,
         closer: LinkCloser,
     ) -> io::Result<Framed> {
+        if Instant::now().checked_add(config.drain_cap).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the drain cap is too large to make a deadline",
+            ));
+        }
         let read_timeout = nonzero(config.read_timeout);
         self.control.set_read_timeout(Some(read_timeout))?;
         self.control
@@ -319,9 +326,20 @@ impl ChannelShared {
         }
     }
 
-    /// Waits until the reader ended or `limit` passed. True if the reader ended.
+    /// Waits until the reader ended or `limit` passed. True if the reader ended. A limit past
+    /// what an [`Instant`] holds waits without a deadline ([`RawChannel::framed`] refuses
+    /// such a drain cap).
     fn wait_reader_end(&self, limit: Duration) -> bool {
-        let deadline = Instant::now() + limit;
+        let Some(deadline) = Instant::now().checked_add(limit) else {
+            let mut ended = lock(&self.reader_end);
+            while !*ended {
+                ended = self
+                    .reader_end_cv
+                    .wait(ended)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            return true;
+        };
         let mut ended = lock(&self.reader_end);
         while !*ended {
             let now = Instant::now();

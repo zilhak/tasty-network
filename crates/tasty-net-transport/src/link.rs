@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tasty_net_frame::HEARTBEAT_TIMEOUT;
 use tasty_net_identity::DeviceId;
@@ -47,7 +47,27 @@ impl Default for LinkTimeouts {
     }
 }
 
+/// `now + limit`, or [`HandshakeError::InvalidTimeouts`] when that is past what an
+/// [`Instant`] holds.
+pub(crate) fn deadline_after(limit: Duration) -> Result<Instant, HandshakeError> {
+    Instant::now()
+        .checked_add(limit)
+        .ok_or(HandshakeError::InvalidTimeouts)
+}
+
 impl LinkTimeouts {
+    /// Checks that the deadlines these timeouts make can be computed: the handshake timeout
+    /// with the role proposal timeout added, and the drain cap.
+    pub(crate) fn check(&self) -> Result<(), HandshakeError> {
+        let longest = self
+            .handshake_timeout
+            .checked_add(self.role_proposal_timeout)
+            .ok_or(HandshakeError::InvalidTimeouts)?;
+        deadline_after(longest)?;
+        deadline_after(self.drain_cap)?;
+        Ok(())
+    }
+
     pub(crate) fn channel(&self, heartbeat: HeartbeatPolicy) -> ChannelConfig {
         ChannelConfig {
             read_timeout: self.read_timeout,

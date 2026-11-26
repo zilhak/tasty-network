@@ -224,6 +224,9 @@ pub enum HandshakeError {
     /// The channel through the SSH tunnel dropped and ssh reported that nothing listens on
     /// the remote port (the remote instance is not running, or its record is stale).
     RemoteListenerAbsent(RemoteListenerAbsent),
+    /// A timeout of the [`LinkTimeouts`](crate::LinkTimeouts) is too large to add to the
+    /// current time (such as [`std::time::Duration::MAX`]): a configuration error.
+    InvalidTimeouts,
     /// Message 1 would be longer than [`MAX_HANDSHAKE_LINE`](crate::MAX_HANDSHAKE_LINE) (a
     /// long `ext`); nothing was sent.
     MessageTooLong,
@@ -289,6 +292,7 @@ impl fmt::Display for HandshakeError {
             Self::RemoteListenerAbsent(_) => {
                 f.write_str("nothing listens on the remote port behind the SSH tunnel")
             }
+            Self::InvalidTimeouts => f.write_str("a link timeout is too large to make a deadline"),
             Self::MessageTooLong => {
                 f.write_str("message 1 is longer than the handshake line limit")
             }

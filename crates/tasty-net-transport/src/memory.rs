@@ -47,7 +47,8 @@ impl Read for PipeReader {
             return Ok(0);
         }
         let timeout = *lock(&self.timeouts.read);
-        let deadline = timeout.map(|t| Instant::now() + t);
+        // A timeout past what an Instant holds blocks without a deadline.
+        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         let mut state = lock(&self.pipe.state);
         loop {
             if state.read_closed {

@@ -14,8 +14,8 @@ use tasty_net_identity::{
     ConnectionToken, DeviceKey, MemoryPeerKeyStore, PeerKeyStore, PeerRef, PinOutcome,
 };
 use tasty_net_transport::{
-    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, DialAuth, DialConfig,
-    DomainAccept, DomainPolicy, DomainReject, FirstLineError, HandshakeError, Holder,
+    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelConfig, DialAuth,
+    DialConfig, DomainAccept, DomainPolicy, DomainReject, FirstLineError, HandshakeError, Holder,
     LEGACY_PROTOCOL_ERROR, Link, LinkTimeouts, Listener, MAX_HANDSHAKE_LINE, MemoryListener,
     MemoryTransport, PeerInfo, RawChannel, RejectReason, RequestError, RequestHandler, Side,
     TooOldEvidence, Transport, TransportKind, accept_handshake, accept_p2p_handshake,
@@ -1119,4 +1119,34 @@ fn a_dialer_does_not_send_a_line_over_the_limit() {
     // Nothing came: the dialer's channel closed without a byte.
     let mut byte = [0u8; 1];
     assert_eq!(accepted.read(&mut byte).expect("eof"), 0);
+}
+
+#[test]
+fn a_timeout_too_large_for_a_deadline_is_a_configuration_error() {
+    let huge = LinkTimeouts {
+        handshake_timeout: Duration::MAX,
+        ..timeouts()
+    };
+    let (transport, _listener) = pair(Some(token('a')));
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let result = dial_handshake(
+        conn,
+        &client(1, "d").with_timeouts(huge),
+        Holder::Acceptor,
+        None,
+        &AttemptCancel::new(),
+    );
+    assert!(
+        matches!(result, Err(HandshakeError::InvalidTimeouts)),
+        "{result:?}"
+    );
+    let (a, _b) = memory_channel_pair();
+    let config = ChannelConfig {
+        drain_cap: Duration::MAX,
+        ..ChannelConfig::default()
+    };
+    let refused = a.framed(&config).expect_err("drain cap too large");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
 }

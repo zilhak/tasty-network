@@ -23,7 +23,7 @@ use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
 use crate::end::{LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
 use crate::hex::random_32;
-use crate::link::{BulkChannel, BulkDial, Link, LinkTimeouts, PeerInfo};
+use crate::link::{BulkChannel, BulkDial, Link, LinkTimeouts, PeerInfo, deadline_after};
 use crate::reject::{HandshakeError, RejectReason, TooOldEvidence};
 use crate::request::{RequestClient, RequestServer};
 use crate::role::{Holder, Side};
@@ -500,7 +500,9 @@ fn linger_close(ch: &mut RawChannel, limit: Duration) {
         tracing::debug!(%error, "ending the sending direction failed");
         return;
     }
-    let deadline = Instant::now() + limit;
+    let Some(deadline) = Instant::now().checked_add(limit) else {
+        return;
+    };
     let mut sink = [0u8; 4096];
     loop {
         let now = Instant::now();
@@ -563,14 +565,17 @@ fn dial_open(
     let _registration = cancel
         .register_channel(ch.control())
         .map_err(|_| HandshakeError::Cancelled)?;
+    config.timeouts.check()?;
     let mut wait = config.timeouts.handshake_timeout;
     if holder == Some(Holder::Acceptor) {
-        wait += config.timeouts.role_proposal_timeout;
+        wait = wait
+            .checked_add(config.timeouts.role_proposal_timeout)
+            .ok_or(HandshakeError::InvalidTimeouts)?;
     }
     let kind = ch.kind();
     let mut io = Io {
         ch,
-        deadline: Instant::now() + wait,
+        deadline: deadline_after(wait)?,
         cancel,
     };
     let (token, nonce) = match auth {
@@ -800,7 +805,7 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
     let config = &bulk.config;
     let mut io = Io {
         ch: &mut ch,
-        deadline: Instant::now() + config.timeouts.handshake_timeout,
+        deadline: deadline_after(config.timeouts.handshake_timeout)?,
         cancel: &cancel,
     };
     let token = match &bulk.auth {
@@ -873,7 +878,8 @@ pub fn accept_p2p_handshake(
     config: &AcceptConfig,
     cancel: &AttemptCancel,
 ) -> Result<Accepted, HandshakeError> {
-    let deadline = Instant::now() + config.timeouts.handshake_timeout;
+    config.timeouts.check()?;
+    let deadline = deadline_after(config.timeouts.handshake_timeout)?;
     match read_first_line(&mut channel, MAX_HANDSHAKE_LINE, deadline) {
         Ok(line) => accept_on(
             channel,
@@ -912,12 +918,13 @@ fn accept_on(
     let _registration = cancel
         .register_channel(ch.control())
         .map_err(|_| HandshakeError::Cancelled)?;
+    config.timeouts.check()?;
     let linger = config.timeouts.drain_cap;
     let kind = ch.kind();
     let control = ch.control();
     let mut io = Io {
         ch: &mut ch,
-        deadline: Instant::now() + config.timeouts.handshake_timeout,
+        deadline: deadline_after(config.timeouts.handshake_timeout)?,
         cancel,
     };
     let Some(_permit) = config.limit.acquire() else {
@@ -1036,7 +1043,10 @@ fn accept_on(
                     cancel,
                 )?;
                 // The wait is not part of the handshake timeout.
-                io.deadline += started.elapsed();
+                io.deadline = io
+                    .deadline
+                    .checked_add(started.elapsed())
+                    .ok_or(HandshakeError::InvalidTimeouts)?;
                 decision
             }
         },
@@ -1153,7 +1163,7 @@ fn await_proposal(
         peer: peer.clone(),
         reply: tx,
     });
-    let deadline = Instant::now() + limit;
+    let deadline = deadline_after(limit)?;
     loop {
         if cancel.is_cancelled() {
             return Err(HandshakeError::Cancelled);
