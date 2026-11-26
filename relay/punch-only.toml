@@ -1,0 +1,43 @@
+# iroh-relay 1.5.0 설정 예시: punch-only 모드.
+#
+# relay를 켠 채 클라이언트별 수신 속도를 낮게 묶는다. 직접 경로(펀칭)를 맺는 데 필요한
+# 조정 패킷은 지나가고, 데이터 중계는 낮은 속도로만 된다. 0으로 막을 수는 없다.
+# hub relay가 쓰는 모드다. 설계: docs/design/relay.md "모드".
+#
+# 쓰기 전에 고칠 곳: [tls]의 hostname·contact.
+# 모르는 키는 iroh-relay가 오류 없이 무시한다. 키 이름을 바꿀 때는 relay/README.md의 확인 절차로 본다.
+
+# relay 기능. punch-only에서도 끄지 않는다(끄면 펀칭 조정이 relay를 지나지 못한다).
+enable_relay = true
+
+# 기본값을 쓴다: http_bind_addr = "[::]:80", metrics_bind_addr = http_bind_addr의 IP + 9090.
+# TLS가 있으면 80은 captive portal 확인(/generate_204)만 평문으로 받는다.
+
+# QUIC 주소 확인(UDP 7842, [tls].quic_bind_addr). TLS가 있어야 켤 수 있다.
+enable_quic_addr_discovery = true
+
+enable_metrics = true
+
+# 접속 허용. 기본은 everyone이다. 다른 방식(allowlist·denylist·shared_token·http)은
+# relay/README.md "접속 허용". 표 머리([tls] 등) 앞에 둬야 최상위 키가 된다.
+access = "everyone"
+
+[tls]
+# 내장 Let's Encrypt. TLS-ALPN-01이라 인증 요청이 HTTPS 리스너(443)로 온다.
+# 외부 TCP 443이 이 프로세스에 그대로 닿아야 하고, 앞에서 TLS를 끝내는 프록시를 두면 발급이 안 된다.
+# 운영자 인증서를 쓰려면 cert_mode = "Manual"과 manual_cert_path·manual_key_path(PEM)를 준다.
+cert_mode = "LetsEncrypt"
+hostname = "relay.example.com"
+contact = "admin@example.com"
+cert_dir = "/data/certs"
+https_bind_addr = "[::]:443"
+quic_bind_addr = "[::]:7842"
+
+# 클라이언트별 유입 token bucket. 두 값 모두 0이 아닌 u32다.
+# max_burst_bytes만 쓰고 bytes_per_second를 빼면 relay가 시작하지 않는다.
+#
+# 임시 값이다. 확정 값은 펀칭 실험 뒤 정한다(docs/design/p2p.md "펀칭 실험",
+# docs/design/done-criteria.md P1). 그 전에 이 파일로 hub relay를 공개하지 않는다.
+[limits.client.rx]
+bytes_per_second = 16384
+max_burst_bytes = 65536
