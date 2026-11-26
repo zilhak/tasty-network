@@ -45,6 +45,7 @@ iroh-relay `access` 설정: `everyone`(기본), allowlist, denylist, `shared_tok
 - relay가 접속을 받을 때 그 URL로 본문 없는 HTTP POST를 보낸다. 헤더 `X-Iroh-Endpoint-Id`에 접속한 endpoint ID가 소문자 hex 64자로 있다. 호환을 위해 같은 값이 deprecated 헤더 `X-Iroh-NodeId`에도 있다(iroh가 앞으로 뺀다고 적었으므로 hub는 `X-Iroh-Endpoint-Id`를 읽는다).
 - relay 설정에 `access.http.bearer_token`(또는 환경 변수 `IROH_RELAY_HTTP_BEARER_TOKEN`)이 있으면 `Authorization: Bearer <token>` 헤더가 붙는다. hub는 이 헤더로 요청이 자기 relay에서 왔는지 확인한다.
 - 응답 상태가 200이고 본문 텍스트가 정확히 `true`(앞뒤 공백·줄바꿈 없음)일 때만 허용, 그 밖은 모두 거절.
+- 콜백 요청은 reqwest 0.13.5의 기본 리디렉션 정책(최대 10번)을 따르므로, 200·`true` 판정은 리디렉션을 따라간 최종 응답의 상태와 본문으로 한다. 다른 호스트·포트·scheme으로 리디렉션되면 reqwest가 `Authorization` 헤더를 빼므로(`redirect.rs` `remove_sensitive_headers`) 콜백 URL은 리디렉션하지 않는 주소를 쓴다(iroh-relay v1.5.0 `main.rs` `HttpAccess`, reqwest 0.13.5 `src/redirect.rs`).
 - `shared_token` 방식을 쓰는 relay는 클라이언트도 토큰을 보내야 한다. 클라이언트 쪽은 `RelayChoice.auth_token`으로 지원한다. 토큰은 자기 relay 목록에 있는 relay에만 보낼 수 있으므로, `shared_token` relay를 홈으로 쓰는 상대에게는 그 relay를 목록에 넣은 기기만 relay로 닿는다([P2P](p2p.md) "주소와 페어링").
 
 hub가 누구를 허용할지(페어링된 기기만, 로그인 사용자만 등)는 hub 쪽 결정이다. 이 레포는 정하지 않는다([남은 결정](index.md#남은-결정)).

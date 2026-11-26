@@ -90,6 +90,7 @@ access.http.bearer_token = "<token>"   # 또는 환경 변수 IROH_RELAY_HTTP_BE
 - relay가 접속을 받을 때 그 URL로 본문 없는 HTTP POST를 보낸다. 헤더 `X-Iroh-Endpoint-Id`에 접속한 endpoint ID(소문자 hex 64자)가 있다. 같은 값이 deprecated 헤더 `X-Iroh-NodeId`에도 있지만 iroh가 앞으로 뺀다고 했으므로 `X-Iroh-Endpoint-Id`를 읽는다.
 - `bearer_token`이 있으면 `Authorization: Bearer <token>` 헤더가 붙는다. 받는 쪽은 이 헤더로 요청이 자기 relay에서 왔는지 확인한다.
 - 응답 상태가 200이고 본문이 정확히 `true`(앞뒤 공백·줄바꿈 없음)일 때만 허용한다. 그 밖(다른 상태, 다른 본문, 요청 실패)은 모두 거절이다.
+- 콜백 요청은 reqwest 0.13.5의 기본 리디렉션 정책(최대 10번)을 따르므로, 200·`true` 판정은 리디렉션을 따라간 최종 응답의 상태와 본문으로 한다. 다른 호스트·포트·scheme으로 리디렉션되면 reqwest가 `Authorization` 헤더를 빼므로(`redirect.rs` `remove_sensitive_headers`) 콜백 URL은 리디렉션하지 않는 주소를 쓴다(iroh-relay v1.5.0 `main.rs` `HttpAccess`, reqwest 0.13.5 `src/redirect.rs`).
 
 방식에 따른 클라이언트 쪽 차이:
 
