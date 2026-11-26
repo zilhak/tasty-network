@@ -147,9 +147,10 @@ pub struct Exploration {
     /// the local ones even when the exploration never comes back to this device.
     own_edges: Vec<Edge>,
     /// Devices known to have an incomplete answer → who reported it (`None` when this
-    /// device found it). Kept apart from the nodes so a later direct answer of the same
-    /// device does not erase it: it is applied again after each merge and at the end.
-    incomplete: HashMap<DeviceId, Option<DeviceId>>,
+    /// device found it) and when (Unix ms). Kept apart from the nodes so a later direct
+    /// answer of the same device does not erase it: it is applied again, with that
+    /// reporter and time, after each merge and at the end.
+    incomplete: HashMap<DeviceId, (Option<DeviceId>, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -316,7 +317,7 @@ impl Exploration {
             }
         }
         if let Some(device) = device {
-            self.apply_incomplete(device, unix_ms);
+            self.apply_incomplete(device);
         }
     }
 
@@ -380,25 +381,25 @@ impl Exploration {
         }
         let known: Vec<DeviceId> = self.incomplete.keys().copied().collect();
         for device in known {
-            self.apply_incomplete(device, unix_ms);
+            self.apply_incomplete(device);
         }
     }
 
     /// Records `device` as incomplete and marks its node timed out with reason incomplete,
     /// over any answer of its own, now and after any later merge.
     fn mark_incomplete(&mut self, device: DeviceId, reporter: Option<DeviceId>, unix_ms: u64) {
-        let entry = self.incomplete.entry(device).or_insert(reporter);
+        let entry = self.incomplete.entry(device).or_insert((reporter, unix_ms));
         if reporter.is_some() {
-            *entry = reporter;
+            *entry = (reporter, unix_ms);
         }
-        self.apply_incomplete(device, unix_ms);
+        self.apply_incomplete(device);
     }
 
-    /// Marks the node of `device` incomplete if `device` is recorded so. A reporter (a
-    /// parent that reported it) becomes the node's `reported_by`, on a new node or an
-    /// existing one.
-    fn apply_incomplete(&mut self, device: DeviceId, unix_ms: u64) {
-        let Some(&reporter) = self.incomplete.get(&device) else {
+    /// Marks the node of `device` incomplete if `device` is recorded so, at the time of
+    /// that record. A reporter (a parent that reported it) becomes the node's
+    /// `reported_by`, on a new node or an existing one.
+    fn apply_incomplete(&mut self, device: DeviceId) {
+        let Some(&(reporter, unix_ms)) = self.incomplete.get(&device) else {
             return;
         };
         let key = NodeKey::Id(device);

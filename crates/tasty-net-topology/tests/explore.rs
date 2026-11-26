@@ -1468,8 +1468,9 @@ fn an_answer_that_failed_after_forwarding_is_not_answered_again() {
 
 /// A explores itself at depth 1 with neighbors B and D. B's done reports D incomplete
 /// (B could not relay D's answer on a longer path) and D's own answer on its direct
-/// branch arrives whole; `report_first` puts B's done before D's answer.
-fn incomplete_report_against_a_direct_answer(report_first: bool) -> Exploration {
+/// branch arrives whole; `report_first` puts B's done before D's answer. The messages
+/// arrive 50 ms apart; also returns the Unix time B's done arrived at.
+fn incomplete_report_against_a_direct_answer(report_first: bool) -> (Exploration, u64) {
     let mut net = Net::new(&[A, B, D]);
     net.link(A, B).link(A, D);
     let rid = net.explore(A, request(A, 1)).unwrap();
@@ -1516,28 +1517,37 @@ fn incomplete_report_against_a_direct_answer(report_first: bool) -> Exploration 
     } else {
         direct.into_iter().chain(report).collect()
     };
-    for (link, message) in order {
+    let mut reported_at = 0;
+    for (i, (link, message)) in order.into_iter().enumerate() {
+        net.clock_ms = 100 + 50 * u64::try_from(i).unwrap();
+        if link == B && matches!(message, Message::Done(_)) {
+            reported_at = net.now().unix_ms;
+        }
         net.with_agent(id(A), |agent, local, out, now| {
             agent.on_message(&id(link), message, local, out, now)
         });
     }
     net.run();
-    net.agents
+    let x = net
+        .agents
         .get_mut(&id(A))
         .unwrap()
         .take_exploration(&rid)
-        .unwrap()
+        .unwrap();
+    (x, reported_at)
 }
 
 #[test]
 fn a_reported_incomplete_device_stays_incomplete_in_either_order() {
     for report_first in [true, false] {
-        let x = incomplete_report_against_a_direct_answer(report_first);
+        let (x, reported_at) = incomplete_report_against_a_direct_answer(report_first);
         assert_eq!(x.state(), ExplorationState::Incomplete, "{report_first}");
         let d = x.node(&id(D)).unwrap();
         assert_eq!(d.status, NodeStatus::TimedOut, "{report_first}");
         assert_eq!(d.reason, Some(NodeReason::Incomplete), "{report_first}");
         assert_eq!(d.reported_by, Some(id(B)), "{report_first}");
+        // The time of B's report, not of D's later answer or of the end.
+        assert_eq!(d.explored_at, reported_at, "{report_first}");
         assert_eq!(status(&x, B), NodeStatus::Online, "{report_first}");
     }
 }
