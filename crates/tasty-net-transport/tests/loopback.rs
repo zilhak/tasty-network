@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use tasty_net_frame::{ReadFailure, StreamTag};
 use tasty_net_identity::ConnectionToken;
 use tasty_net_transport::{
-    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ConnectError, Connection,
-    DialAuth, DomainAccept, DomainPolicy, DomainReject, Endpoint, EndpointHandle, HandshakeError,
-    Holder, LinkTimeouts, MAX_HANDSHAKE_LINE, RawChannel, RejectReason, Transport, TransportKind,
-    accept_handshake, dial_handshake, read_first_line,
+    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelControl,
+    ConnectError, Connection, DialAuth, DomainAccept, DomainPolicy, DomainReject, Endpoint,
+    EndpointHandle, HandshakeError, Holder, LinkTimeouts, MAX_HANDSHAKE_LINE, P2pCloseReason,
+    RawChannel, RejectReason, Transport, TransportKind, accept_handshake, accept_p2p_handshake,
+    dial_handshake, read_first_line,
 };
 
 use common::{client, echo_server, key, timeouts, token};
@@ -269,4 +270,140 @@ fn a_refused_bulk_attempt_does_not_hold_the_acceptor_for_the_drain_cap() {
         "the refusal took {took:?} with a {drain_cap:?} drain cap"
     );
     drop(link);
+}
+
+/// A P2P stream stand-in over loopback TCP: its control reports the close code the test sets,
+/// as a QUIC stream reports the code its connection was closed with.
+struct CodedControl {
+    stream: TcpStream,
+    reason: std::sync::Mutex<Option<P2pCloseReason>>,
+}
+
+impl ChannelControl for CodedControl {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.stream.set_write_timeout(timeout)
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.stream.shutdown(std::net::Shutdown::Write)
+    }
+
+    fn shutdown_and_wake(&self) -> io::Result<()> {
+        self.stream.shutdown(std::net::Shutdown::Both)
+    }
+
+    fn close_reason(&self) -> Option<P2pCloseReason> {
+        *self.reason.lock().expect("reason")
+    }
+}
+
+/// A P2P channel on the accepting side, its control, and the dialing socket.
+fn p2p_channel() -> (RawChannel, Arc<CodedControl>, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let peer = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+    let (stream, _) = listener.accept().expect("accept");
+    let control = Arc::new(CodedControl {
+        stream: stream.try_clone().expect("clone"),
+        reason: std::sync::Mutex::new(None),
+    });
+    let channel = RawChannel::new(
+        Box::new(stream.try_clone().expect("clone")),
+        Box::new(stream),
+        control.clone(),
+        TransportKind::P2p,
+    );
+    (channel, control, peer)
+}
+
+fn p2p_config(max_handshakes: usize) -> AcceptConfig {
+    AcceptConfig::new(
+        key(2),
+        "acceptor-1",
+        None,
+        Arc::new(BulkPolicy { take_bulk: true }),
+    )
+    .with_timeouts(timeouts())
+    .with_max_handshakes(max_handshakes)
+}
+
+/// A cancel ends a P2P handshake still waiting for the first line, long before its deadline.
+#[test]
+fn a_cancel_ends_the_p2p_first_line_wait() {
+    let (channel, _control, _peer) = p2p_channel();
+    let cancel = AttemptCancel::new();
+    let attempt = cancel.clone();
+    let config = p2p_config(4);
+    let started = Instant::now();
+    let acceptor = std::thread::spawn(move || {
+        accept_p2p_handshake(channel, key(1).id(), 1, &config, &attempt)
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    cancel.cancel();
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::Cancelled)),
+        "{result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The concurrent-handshake limit is checked before the first line: a stream over the limit
+/// is refused `busy` without waiting for a line it never sends.
+#[test]
+fn a_p2p_stream_over_the_limit_is_refused_before_its_first_line() {
+    let config = p2p_config(1);
+    let (first, _first_control, _first_peer) = p2p_channel();
+    let cancel = AttemptCancel::new();
+    let attempt = cancel.clone();
+    let holder_config = config.clone();
+    let holder = std::thread::spawn(move || {
+        accept_p2p_handshake(first, key(1).id(), 1, &holder_config, &attempt)
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let (second, _second_control, _second_peer) = p2p_channel();
+    let started = Instant::now();
+    let result = accept_p2p_handshake(second, key(1).id(), 1, &config, &AttemptCancel::new());
+    assert!(
+        matches!(result, Err(HandshakeError::Refused(RejectReason::Busy))),
+        "{result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    cancel.cancel();
+    let held = holder.join().expect("holder");
+    assert!(matches!(held, Err(HandshakeError::Cancelled)), "{held:?}");
+}
+
+/// A connection closed with a code while the first line is read ends the handshake with that
+/// code, not a bare `PeerClosed`.
+#[test]
+fn a_p2p_close_during_the_first_line_reports_its_code() {
+    let (channel, control, mut peer) = p2p_channel();
+    let config = p2p_config(4);
+    let acceptor = std::thread::spawn(move || {
+        accept_p2p_handshake(channel, key(1).id(), 1, &config, &AttemptCancel::new())
+    });
+    io::Write::write_all(&mut peer, b"{\"type\":\"stream.op").expect("partial line");
+    std::thread::sleep(Duration::from_millis(100));
+    *control.reason.lock().expect("reason") = Some(P2pCloseReason::NotPaired);
+    drop(peer);
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(
+            result,
+            Err(HandshakeError::Closed(P2pCloseReason::NotPaired))
+        ),
+        "{result:?}"
+    );
 }

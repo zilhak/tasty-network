@@ -17,7 +17,7 @@ use tasty_net_identity::{
 };
 
 use crate::bulk::{BulkParent, BulkRegistry};
-use crate::cancel::AttemptCancel;
+use crate::cancel::{AttemptCancel, Registration};
 use crate::channel::RawChannel;
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
 use crate::end::{EndReason, LinkCloser, shutdown_quietly};
@@ -866,13 +866,54 @@ pub fn accept_handshake(
     config: &AcceptConfig,
     cancel: &AttemptCancel,
 ) -> Result<Accepted, HandshakeError> {
+    let mut ch = channel.with_buffered(buffered);
+    let registration = cancel
+        .register_channel(ch.control())
+        .map_err(|_| HandshakeError::Cancelled)?;
+    config.timeouts.check()?;
+    let deadline = deadline_after(config.timeouts.handshake_timeout)?;
+    let permit = take_permit(&mut ch, deadline, config, cancel)?;
     accept_on(
-        channel.with_buffered(buffered),
+        ch,
         first_line,
         Path::Ssh,
         config,
-        cancel,
+        Started {
+            cancel,
+            deadline,
+            _registration: registration,
+            _permit: permit,
+        },
     )
+}
+
+/// What an accepting handshake holds from its start: the attempt, the deadline, the channel's
+/// cancel registration and the slot of the concurrent-handshake limit.
+struct Started<'a> {
+    cancel: &'a AttemptCancel,
+    deadline: Instant,
+    _registration: Registration,
+    _permit: Permit,
+}
+
+/// Takes a slot of the concurrent-handshake limit, or refuses the channel with `busy` at once.
+fn take_permit(
+    ch: &mut RawChannel,
+    deadline: Instant,
+    config: &AcceptConfig,
+    cancel: &AttemptCancel,
+) -> Result<Permit, HandshakeError> {
+    match config.limit.acquire() {
+        Some(permit) => Ok(permit),
+        None => {
+            let mut io = Io {
+                ch,
+                deadline,
+                cancel,
+            };
+            Err(io.refuse(RejectReason::Busy, None, config.timeouts.drain_cap))
+        }
+    }
 }
 
 /// The accepting side of handshake v2 on a P2P stream: this crate reads the first line
@@ -888,25 +929,55 @@ pub fn accept_p2p_handshake(
 ) -> Result<Accepted, HandshakeError> {
     config.timeouts.check()?;
     let deadline = deadline_after(config.timeouts.handshake_timeout)?;
-    match read_first_line(&mut channel, MAX_HANDSHAKE_LINE, deadline) {
-        Ok(line) => accept_on(
-            channel,
-            &line,
-            Path::P2p { remote_id, scope },
-            config,
-            cancel,
-        ),
+    // The first-line read is under the cancel and the concurrent-handshake limit too.
+    let registration = cancel
+        .register_channel(channel.control())
+        .map_err(|_| HandshakeError::Cancelled)?;
+    let permit = take_permit(&mut channel, deadline, config, cancel)?;
+    let line = match read_first_line(&mut channel, MAX_HANDSHAKE_LINE, deadline) {
+        Ok(line) => line,
         Err(FirstLineError::TooLong) => {
             let mut io = Io {
                 ch: &mut channel,
                 deadline,
                 cancel,
             };
-            Err(io.refuse(RejectReason::Malformed, None, config.timeouts.drain_cap))
+            return Err(io.refuse(RejectReason::Malformed, None, config.timeouts.drain_cap));
         }
-        Err(FirstLineError::TimedOut) => Err(HandshakeError::TimedOut),
-        Err(FirstLineError::Closed) => Err(HandshakeError::PeerClosed),
-        Err(FirstLineError::Io(e)) => Err(HandshakeError::Io(e)),
+        Err(error) => return Err(first_line_failure(&channel, cancel, error)),
+    };
+    accept_on(
+        channel,
+        &line,
+        Path::P2p { remote_id, scope },
+        config,
+        Started {
+            cancel,
+            deadline,
+            _registration: registration,
+            _permit: permit,
+        },
+    )
+}
+
+/// Why reading the first line of a P2P stream failed: the attempt's cancel, then the code the
+/// peer closed the connection with, then the read error itself.
+fn first_line_failure(
+    channel: &RawChannel,
+    cancel: &AttemptCancel,
+    error: FirstLineError,
+) -> HandshakeError {
+    if cancel.is_cancelled() {
+        return HandshakeError::Cancelled;
+    }
+    if let Some(reason) = channel.control().close_reason() {
+        return HandshakeError::Closed(reason);
+    }
+    match error {
+        FirstLineError::TimedOut => HandshakeError::TimedOut,
+        FirstLineError::Closed => HandshakeError::PeerClosed,
+        FirstLineError::Io(e) => HandshakeError::Io(e),
+        FirstLineError::TooLong => HandshakeError::Protocol("a first line over the limit"),
     }
 }
 
@@ -921,22 +992,16 @@ fn accept_on(
     line: &[u8],
     path: Path,
     config: &AcceptConfig,
-    cancel: &AttemptCancel,
+    started: Started<'_>,
 ) -> Result<Accepted, HandshakeError> {
-    let _registration = cancel
-        .register_channel(ch.control())
-        .map_err(|_| HandshakeError::Cancelled)?;
-    config.timeouts.check()?;
+    let cancel = started.cancel;
     let linger = config.timeouts.drain_cap;
     let kind = ch.kind();
     let control = ch.control();
     let mut io = Io {
         ch: &mut ch,
-        deadline: deadline_after(config.timeouts.handshake_timeout)?,
+        deadline: started.deadline,
         cancel,
-    };
-    let Some(_permit) = config.limit.acquire() else {
-        return Err(io.refuse(RejectReason::Busy, None, linger));
     };
     // 1. proto and format.
     let params = match parse_open_line(line) {
