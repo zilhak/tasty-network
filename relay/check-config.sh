@@ -118,70 +118,106 @@ rc_prepare() {
 
 # 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀
 # (shared_token 원소, http.bearer_token)을 시험값 RC_SECRET_PLACEHOLDER로, http.url을 자리표시 주소로
-# 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 최상위와 limits 아래 키는 iroh-relay Config의 키(아래 CONFIG_SCHEMA)만,
-# access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
+# 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 최상위와 limits 아래 키는 iroh-relay 설정 구조체의 키(아래 CONFIG_SCHEMA)만,
+# 그 값은 필드 타입에 맞는 종류만, access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
 # 표 머리·점 키·인라인 표·인용 키("tls") 어느 표기로 적었든 파싱 결과의 같은 키가 지워진다.
 # 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로 원래 토큰이 docker 로그 수집기에 닿지 않게 한다.
 # 쓰는 값 종류: 표, 배열(표 원소는 인라인 표), 문자열, 정수, 유한한 실수, 불리언. 날짜·시각 값과 inf·nan은
 # relay 설정에 쓰이지 않으므로 거절한다(rc 1). 다시 쓴 파일을 tomllib로 읽어 쓰려던 값과 같은지도 본다.
-# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 모르는 최상위 키나 허용 목록 밖의 access 값
-# (어느 쪽인지는 RC_CONFIG_REASON에 unknown-key·access-invalid로 둔다). 0이 아니면 $2를 남기지 않는다.
+# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 모르는 키, 필드 타입과 다른 값, 허용 목록 밖의 access 값
+# (어느 쪽인지는 RC_CONFIG_REASON에 unknown-key·bad-value·access-invalid로 둔다). 0이 아니면 $2를 남기지 않는다.
 RC_SECRET_PLACEHOLDER="check-config-placeholder"
 RC_CONFIG_REASON=""
-rc_make_ci_config() {
-    local src="$1" out="$2" rc
-    RC_CONFIG_REASON=""
-    rm -f "${out:?}"
-    python3 -I - "$src" "$out" "$RC_SECRET_PLACEHOLDER" <<'PY'
-import math, sys, tomllib
+# rc_make_ci_config(make)와 self-test의 rc_encode_toml(encode)이 같이 쓰는 파이썬. 인자: 모드 원본 출력 시험값.
+IFS= read -r -d '' RC_CI_PY <<'PY'
+import ipaddress, math, sys, tomllib
 
-src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
+mode, src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
-# iroh-relay v1.5.0 iroh-relay/src/main.rs의 설정 구조체 필드(serde rename 없음). 값이 dict면 표, None이면 표가 아닌 값.
+# iroh-relay v1.5.0 iroh-relay/src/main.rs의 설정 구조체 필드(serde rename 없음). 값이 dict면 표, 문자열이면 필드 타입.
 #   struct Config :95-158, struct Limits :511-518, struct PerClientRateLimitConfig :528-531, struct RateLimitConfig :534-539
 # iroh는 모르는 키를 무시하지만(오타, 인용 키 'access.http.url', [limits.client.rx] 아래 잘못 놓인 access 등) 검사는 거절한다.
+# 필드 타입과 다른 값(숫자 필드의 문자열 등)도 거절한다. 그 값이 변환 파일과 수신 상한 읽기·결과 줄로 가지 않게 한다.
 # "check"는 이 표 대신 따로 보는 키다: tls는 지우므로 보지 않고, access는 access_valid가 모양을 본다.
 CONFIG_SCHEMA = {
-    "enable_relay": None,
-    "http_bind_addr": None,
-    "tls": "check",
-    "enable_quic_addr_discovery": None,
-    "limits": {
-        "accept_conn_limit": None,
-        "accept_conn_burst": None,
-        "client": {
-            "rx": {
-                "bytes_per_second": None,
-                "max_burst_bytes": None,
+    "enable_relay": "bool",                  # :108 bool
+    "http_bind_addr": "socket_addr",         # :121 Option<SocketAddr>
+    "tls": "check",                          # :130 Option<TlsConfig>
+    "enable_quic_addr_discovery": "bool",    # :137 bool
+    "limits": {                              # :141 Option<Limits>
+        "accept_conn_limit": "f64",          # :513 Option<f64>
+        "accept_conn_burst": "usize",        # :515 Option<usize>
+        "client": {                          # :517 Option<PerClientRateLimitConfig>
+            "rx": {                          # :530 Option<RateLimitConfig>
+                "bytes_per_second": "u32",   # :536 Option<u32>
+                "max_burst_bytes": "u32",    # :538 Option<u32>
             },
         },
     },
-    "enable_metrics": None,
-    "metrics_bind_addr": None,
-    "key_cache_capacity": None,
-    "access": "check",
+    "enable_metrics": "bool",                # :146 bool
+    "metrics_bind_addr": "socket_addr",      # :151 Option<SocketAddr>
+    "key_cache_capacity": "usize",           # :153 Option<usize>
+    "access": "check",                       # :158 AccessConfig
+}
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+def port_ok(port):
+    # rc_toml_port와 같은 규칙: ASCII 숫자, 앞의 0을 뗀 길이 5 이하, 0~65535(0은 뒤에서 port-zero로 끝난다).
+    if not (port.isascii() and port.isdigit()):
+        return False
+    port = port.lstrip("0") or "0"
+    return len(port) <= 5 and int(port) <= 65535
+
+def socket_addr_ok(v):
+    # Rust SocketAddr의 문자열 모양: IPv4 "a.b.c.d:port" 또는 IPv6 "[addr]:port". 호스트 이름과 scope(%)는 받지 않는다.
+    if not isinstance(v, str) or not v.isascii() or "%" in v:
+        return False
+    try:
+        if v.startswith("["):
+            host, sep, port = v[1:].partition("]:")
+            if not sep:
+                return False
+            ipaddress.IPv6Address(host)
+        else:
+            host, sep, port = v.rpartition(":")
+            if not sep:
+                return False
+            ipaddress.IPv4Address(host)
+    except ValueError:
+        return False
+    return port_ok(port)
+
+KIND_OK = {
+    "bool": lambda v: isinstance(v, bool),
+    "u32": lambda v: is_int(v) and 0 <= v <= 0xFFFFFFFF,
+    "usize": lambda v: is_int(v) and 0 <= v <= 0xFFFFFFFFFFFFFFFF,
+    "f64": lambda v: is_int(v) or (isinstance(v, float) and math.isfinite(v)),
+    "socket_addr": socket_addr_ok,
 }
 
 def has_table(v):
     return isinstance(v, dict) or (isinstance(v, list) and any(has_table(x) for x in v))
 
-def unknown_paths(d, schema, path):
-    # 모르는 키, 표가 와야 할 자리에 표가 아닌 값, 표가 아닌 값 자리에 표(배열 안의 표 포함)를 키 경로로 모은다.
-    bad = []
+def schema_paths(d, schema, path, unknown, bad):
+    # unknown: 모르는 키, 표가 와야 할 자리에 표가 아닌 값, 표가 아닌 값 자리에 표(배열 안의 표 포함).
+    # bad: 필드 타입과 종류가 다른 값(키 경로와 기대 타입).
     for k, v in d.items():
         p = path + [k]
         if k not in schema:
-            bad.append(p)
+            unknown.append(p)
         elif schema[k] == "check":
             continue
         elif isinstance(schema[k], dict):
             if isinstance(v, dict):
-                bad.extend(unknown_paths(v, schema[k], p))
+                schema_paths(v, schema[k], p, unknown, bad)
             else:
-                bad.append(p)
+                unknown.append(p)
         elif has_table(v):
-            bad.append(p)
-    return bad
+            unknown.append(p)
+        elif not KIND_OK[schema[k]](v):
+            bad.append((p, schema[k]))
 ACCESS_KINDS = ("everyone", "allowlist", "denylist", "http", "shared_token")
 URL_PLACEHOLDER = "http://" + ph + ".invalid/"
 
@@ -276,17 +312,39 @@ def dump(d, prefix, lines):
             lines.append("[" + ".".join(tstr(x) for x in name) + "]")
             dump(v, name, lines)
 
+def keypath(p):
+    return ".".join(tstr(k) for k in p)
+
 try:
     with open(src, "rb") as f:
         a = tomllib.load(f)
 except (OSError, tomllib.TOMLDecodeError) as e:
     print(e, file=sys.stderr)
     sys.exit(1)
-unknown = unknown_paths(a, CONFIG_SCHEMA, [])
+if mode == "encode":
+    # self-test 전용(rc_encode_toml): 스키마·access 검사와 치환 없이 인코더만 시험한다.
+    lines = []
+    try:
+        dump(a, [], lines)
+    except Unsupported as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    text = "\n".join(lines) + "\n"
+    if tomllib.loads(text) != a:
+        sys.exit(1)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(text)
+    sys.exit(0)
+unknown, bad = [], []
+schema_paths(a, CONFIG_SCHEMA, [], unknown, bad)
 if unknown:
     # 키 경로만 쓴다(값은 토큰 원문일 수 있다).
-    print("unknown-key: " + ", ".join(".".join(tstr(k) for k in p) for p in unknown), file=sys.stderr)
+    print("unknown-key: " + ", ".join(keypath(p) for p in unknown), file=sys.stderr)
     sys.exit(7)
+if bad:
+    # 키 경로와 기대 타입만 쓴다(값은 토큰 원문일 수 있다).
+    print("bad-value: " + ", ".join(f"{keypath(p)} (expected {kind})" for p, kind in bad), file=sys.stderr)
+    sys.exit(8)
 if not access_valid(a):
     print("access-invalid: access must be absent, \"everyone\", or a table with one of everyone, allowlist, denylist, http, shared_token in the checked shape", file=sys.stderr)
     sys.exit(6)
@@ -306,6 +364,11 @@ if tomllib.loads(text) != a:
 with open(out, "w", encoding="utf-8") as f:
     f.write(text)
 PY
+rc_make_ci_config() {
+    local src="$1" out="$2" rc
+    RC_CONFIG_REASON=""
+    rm -f "${out:?}"
+    python3 -I -c "$RC_CI_PY" make "$src" "$out" "$RC_SECRET_PLACEHOLDER"
     rc=$?
     case $rc in
         0) return 0 ;;
@@ -317,10 +380,21 @@ PY
             RC_CONFIG_REASON=unknown-key rc=6
             rc_log "$src: iroh-relay 1.5.0 설정 구조체에 없는 키가 있다(위 키 경로. 값은 출력하지 않는다)."
             ;;
+        8)
+            RC_CONFIG_REASON=bad-value rc=6
+            rc_log "$src: 값의 종류가 iroh-relay 1.5.0 필드 타입과 다르다(위 키 경로. 값은 출력하지 않는다)."
+            ;;
         *) rc_log "$src: CI용 설정을 만들지 못했다."; rc=1 ;;
     esac
     rm -f "${out:?}"
     return "$rc"
+}
+
+# self-test 전용: TOML $1을 rc_make_ci_config와 같은 인코더로 $2에 다시 쓴다. 스키마·access 검사와 치환은 하지 않는다.
+# 종료 코드: 0 씀, 1 TOML 오류·지원하지 않는 값·다시 읽은 값이 다름.
+rc_encode_toml() {
+    rm -f "${2:?}"
+    python3 -I -c "$RC_CI_PY" encode "$1" "$2" "$RC_SECRET_PLACEHOLDER"
 }
 
 # TOML 파일 $1의 [limits.client.rx] 값을 "bytes_per_second max_burst_bytes"로 출력한다. 없는 값은 -.
@@ -821,6 +895,49 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
         st_expect "unknown-subkey-$n-path-shown" 0 "$?"
         st_expect "unknown-subkey-$n-ci-file-removed" no "$(if [[ -e "$t/ci-sub$n.toml" ]]; then echo yes; else echo no; fi)"
     done
+    # 알려진 키의 값도 iroh-relay 필드 타입(main.rs)과 종류가 맞아야 한다. 숫자 필드의 문자열 비밀이 변환 파일,
+    # 수신 상한 읽기(rc_toml_rx), 결과 줄의 실패 사유로 가지 않게 bad-value로 컨테이너 전에 끝난다.
+    local bv bvpaths=('"limits"."accept_conn_limit"' '"limits"."accept_conn_burst"' '"limits"."client"."rx"."bytes_per_second"' '"enable_relay"' '"http_bind_addr"')
+    n=0
+    for bv in 'limits.accept_conn_limit = "n10-conn-limit-secret"' 'limits.accept_conn_burst = ["n10-conn-burst-secret"]' \
+        '[limits.client.rx]\nbytes_per_second = "n10-bps-secret"' 'enable_relay = "n10-bool-secret"' \
+        'http_bind_addr = "n10-host-secret:3340"'; do
+        n=$((n + 1))
+        # shellcheck disable=SC2059 # 사례 문자열의 \n을 printf가 줄바꿈으로 바꾸게 형식 자리에 둔다
+        printf "$bv\n" > "$t/bv$n.toml"
+        rc_make_ci_config "$t/bv$n.toml" "$t/ci-bv$n.toml" > "$t/bv$n.out" 2>&1
+        st_expect "bad-value-$n" "6 bad-value" "$? $RC_CONFIG_REASON"
+        grep -q 'n10-' "$t/bv$n.out"
+        st_expect "bad-value-$n-value-hidden" 1 "$?"
+        grep -qF "${bvpaths[n - 1]}" "$t/bv$n.out"
+        st_expect "bad-value-$n-path-shown" 0 "$?"
+        st_expect "bad-value-$n-ci-file-removed" no "$(if [[ -e "$t/ci-bv$n.toml" ]]; then echo yes; else echo no; fi)"
+        # rc_start_relay의 결과 줄 사유도 bad-value이고 값이 없다(수신 상한 읽기 단계까지 가지 않는다).
+        (
+            docker() { echo called >> "$t/docker-calls-bv"; return 1; }
+            RC_TMP="$t"
+            rc_start_relay "bv$n" "$t/bv$n.toml" > "$t/start-bv$n.out" 2>&1
+            echo "$? $RC_LAST_FAIL"
+        ) > "$t/start-bv$n.res"
+        st_expect "bad-value-$n-start" "1 stage=config reason=bad-value" "$(cat "$t/start-bv$n.res")"
+        grep -q 'n10-' "$t/start-bv$n.out" "$t/start-bv$n.res"
+        st_expect "bad-value-$n-start-value-hidden" 1 "$?"
+    done
+    st_expect bad-value-no-docker no "$(if [[ -e "$t/docker-calls-bv" ]]; then echo yes; else echo no; fi)"
+    # 받는 쪽: 필드 타입에 맞는 값은 통과하고, 수신 상한 읽기는 정수만 본다.
+    printf 'enable_relay = false\nhttp_bind_addr = "[::]:8080"\nmetrics_bind_addr = "127.0.0.1:09090"\nkey_cache_capacity = 0\n[limits]\naccept_conn_limit = 2\naccept_conn_burst = 3\n[limits.client.rx]\nbytes_per_second = 4294967295\nmax_burst_bytes = 0\n' > "$t/kinds-ok.toml"
+    rc_make_ci_config "$t/kinds-ok.toml" "$t/ci-kinds-ok.toml"
+    st_expect field-kinds-accepted 0 "$?"
+    st_expect field-kinds-rx-int "4294967295 0" "$(rc_toml_rx "$t/ci-kinds-ok.toml")"
+    n=0
+    for bv in 'limits.client.rx.bytes_per_second = 4294967296' 'limits.client.rx.max_burst_bytes = -1' \
+        'limits.client.rx.bytes_per_second = true' 'limits.accept_conn_limit = inf' 'limits.accept_conn_limit = 2026-01-01T00:00:00Z' \
+        'http_bind_addr = "localhost:3340"' 'metrics_bind_addr = "[::1]"' 'http_bind_addr = "0.0.0.0:65536"'; do
+        n=$((n + 1))
+        printf '%s\n' "$bv" > "$t/bk$n.toml"
+        rc_make_ci_config "$t/bk$n.toml" "$t/ci-bk$n.toml" 2>/dev/null
+        st_expect "field-kind-rejected-$n" "6 bad-value" "$? $RC_CONFIG_REASON"
+    done
     # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다(url은 바뀌므로 allowlist 원소로 본다).
     printf 'access.allowlist = ["https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"]\n' > "$t/emoji.toml"
     rc_make_ci_config "$t/emoji.toml" "$t/ci-emoji.toml"
@@ -873,15 +990,16 @@ sys.exit(0 if "tls" not in d and "enable_quic_addr_discovery" not in d else 1)' 
     done
     st_no_tls "$t/ci-punch.toml"
     st_expect ci-config-punch-only-no-tls 0 "$?"
-    # 값 종류 사례는 limits의 실제 필드에 둔다(모르는 키는 unknown-key로 먼저 끝난다).
-    printf 'enable_relay = true\nlimits.accept_conn_limit = 2026-01-01T00:00:00Z\n' > "$t/datetime.toml"
-    rc_make_ci_config "$t/datetime.toml" "$t/ci-datetime.toml" 2>/dev/null
+    # 인코더 사례: 날짜·inf·음수·혼합 배열은 스키마 검사(bad-value)에 먼저 걸리므로, 같은 인코더를
+    # 스키마 검사 없이 부르는 rc_encode_toml로 본다(4회차 사례의 원래 내용).
+    printf 'enable_relay = true\nwhen = 2026-01-01T00:00:00Z\n' > "$t/datetime.toml"
+    rc_encode_toml "$t/datetime.toml" "$t/ci-datetime.toml" 2>/dev/null
     st_expect ci-config-datetime-rejected "1 no" "$? $(if [[ -e "$t/ci-datetime.toml" ]]; then echo yes; else echo no; fi)"
-    printf 'enable_relay = true\nlimits.accept_conn_limit = inf\n' > "$t/inf.toml"
-    rc_make_ci_config "$t/inf.toml" "$t/ci-inf.toml" 2>/dev/null
+    printf 'enable_relay = true\nratio = inf\n' > "$t/inf.toml"
+    rc_encode_toml "$t/inf.toml" "$t/ci-inf.toml" 2>/dev/null
     st_expect ci-config-inf-rejected 1 "$?"
-    printf 'enable_relay = true\n[limits]\naccept_conn_limit = 1.5e-3\naccept_conn_burst = [1, "a", [true]]\n["limits"."client"."rx"]\nbytes_per_second = -7\n' > "$t/kinds.toml"
-    rc_make_ci_config "$t/kinds.toml" "$t/ci-kinds.toml"
+    printf 'enable_relay = true\nf = 1.5e-3\nlist = [1, "a", [true], { k = 2 }]\n[t.\"q k\"]\nv = -7\n' > "$t/kinds.toml"
+    rc_encode_toml "$t/kinds.toml" "$t/ci-kinds.toml"
     st_expect ci-config-value-kinds 0 "$?"
     python3 -I -c 'import sys, tomllib
 sys.exit(0 if tomllib.load(open(sys.argv[1], "rb")) == tomllib.load(open(sys.argv[2], "rb")) else 1)' "$t/kinds.toml" "$t/ci-kinds.toml"
