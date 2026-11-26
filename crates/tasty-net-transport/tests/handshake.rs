@@ -604,12 +604,15 @@ fn a_reversal_waits_for_the_consumer_and_follows_its_answer() {
         let mut s = server(Some(token('a')));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
+        // The answering threads, joined at the end of the round.
+        let answers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
+        let started = Arc::clone(&answers);
         s.config = s.config.with_role_proposals(move |proposal| {
             record
                 .lock()
                 .expect("lock")
                 .push(proposal.peer().device_id());
-            match answer {
+            let answering = match answer {
                 Some(true) => std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(100));
                     proposal.accept();
@@ -621,6 +624,7 @@ fn a_reversal_waits_for_the_consumer_and_follows_its_answer() {
                     drop(proposal);
                 }),
             };
+            started.lock().expect("lock").push(answering);
         });
         let (transport, listener) = pair(Some(token('a')));
         let acceptor = accept_one(listener, s.config.clone());
@@ -650,6 +654,11 @@ fn a_reversal_waits_for_the_consumer_and_follows_its_answer() {
             );
             assert!(acceptor.join().expect("acceptor").is_err());
             assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
+        }
+        let answering = std::mem::take(&mut *answers.lock().expect("lock"));
+        assert_eq!(answering.len(), 1);
+        for thread in answering {
+            thread.join().expect("answering thread");
         }
     }
 }

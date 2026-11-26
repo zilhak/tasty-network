@@ -25,6 +25,8 @@ use common::{client, echo_server, token};
 
 const FAKE_ARGS_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_ARGS";
 const FORWARDER_TEST: &str = "fake_ssh_forwarder_entry";
+/// How long the fake forwarder waits before it binds its local port (the tunnel's readiness).
+const FAKE_DELAY_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_BIND_DELAY_MS";
 
 /// Writes `body` through a child shell, so no descriptor of the file stays open in this
 /// multi-threaded process when another test executes it.
@@ -55,6 +57,11 @@ struct FakeSsh {
 
 impl FakeSsh {
     fn new(name: &str) -> Self {
+        Self::with_bind_delay(name, Duration::ZERO)
+    }
+
+    /// A fake whose tunnels become ready only `delay` after they start.
+    fn with_bind_delay(name: &str, delay: Duration) -> Self {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
@@ -70,11 +77,13 @@ impl FakeSsh {
             &format!(
                 "#!/bin/sh\ncase \" $* \" in *\" -L \"*)\necho tunnel >> '{tunnels}'\n\
                  {FAKE_ARGS_ENV}=\"$*\"\nexport {FAKE_ARGS_ENV}\n\
+                 {FAKE_DELAY_ENV}={delay}\nexport {FAKE_DELAY_ENV}\n\
                  exec '{exe}' {FORWARDER_TEST} --exact --nocapture --test-threads=1 >/dev/null;;\n\
                  esac\ncat '{record}'\n",
                 tunnels = tunnels.display(),
                 record = record.display(),
                 exe = exe.display(),
+                delay = delay.as_millis(),
             ),
             "700",
         );
@@ -196,6 +205,12 @@ fn fake_ssh_forwarder_entry() {
     let parts: Vec<&str> = spec.split(':').collect();
     let local: u16 = parts[1].parse().expect("local port");
     let remote: u16 = parts[3].parse().expect("remote port");
+    if let Some(ms) = std::env::var(FAKE_DELAY_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     let listener = match TcpListener::bind(("127.0.0.1", local)) {
         Ok(l) => l,
         Err(e) => {
@@ -349,6 +364,47 @@ fn a_stale_record_is_reported_as_an_absent_remote_listener() {
         other => panic!("expected an absent listener: {other:?}"),
     }
     assert!(error.is_retryable());
+}
+
+/// A cancel while a new tunnel is still being prepared makes `connect` return `Cancelled`
+/// once the preparation ends, reaps that tunnel and shares nothing: the next attempt starts
+/// its own tunnel.
+#[test]
+fn a_cancel_during_tunnel_preparation_reaps_it_and_returns_cancelled() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::with_bind_delay("prepare", Duration::from_millis(1500));
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let transport = Arc::new(fake.transport());
+    let cancel = AttemptCancel::new();
+    let attempt = {
+        let transport = Arc::clone(&transport);
+        let cancel = cancel.clone();
+        std::thread::spawn(move || transport.connect(&target(), &cancel).map(drop))
+    };
+    // The attempt is still inside the preparation when the cancel comes.
+    wait_until("the tunnel to start", || {
+        fake.tunnels_started() == 1 || attempt.is_finished()
+    });
+    assert!(
+        !attempt.is_finished(),
+        "{:?}",
+        attempt.join().expect("attempt")
+    );
+    cancel.cancel();
+    let result = attempt.join().expect("attempt");
+    assert!(matches!(result, Err(ConnectError::Cancelled)), "{result:?}");
+    wait_until("the cancelled tunnel to be reaped", || {
+        fake.tunnel_pids().is_empty()
+    });
+    let conn = transport
+        .connect(&target(), &AttemptCancel::new())
+        .expect("a fresh attempt");
+    assert_eq!(
+        fake.tunnels_started(),
+        2,
+        "the cancelled tunnel was not shared"
+    );
+    drop(conn);
 }
 
 #[test]

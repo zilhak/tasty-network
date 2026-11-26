@@ -1,10 +1,11 @@
 //! A loopback TCP acceptor shared by the socket tests: it runs the accepting handshake on
 //! every connection and echoes every frame of the links and bulk channels it accepts.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tasty_net_identity::{ConnectionToken, DeviceKey};
@@ -56,10 +57,33 @@ impl DomainPolicy for EchoPolicy {
     }
 }
 
-/// The acceptor's address and policy. Its threads serve until the test process ends.
+/// What the accept thread started: each served socket (to close it at the end) and its thread.
+type Served = Arc<Mutex<Vec<(TcpStream, JoinHandle<()>)>>>;
+
+/// The acceptor's address and policy. Dropping it closes the listener and every served
+/// socket and joins the accept thread and every serving thread.
 pub struct EchoServer {
     pub addr: SocketAddr,
     pub policy: Arc<EchoPolicy>,
+    stop: Arc<AtomicBool>,
+    accept: Option<JoinHandle<()>>,
+    served: Served,
+}
+
+impl Drop for EchoServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake the blocked accept; it sees the flag and returns, dropping the listener.
+        drop(TcpStream::connect(self.addr));
+        if let Some(accept) = self.accept.take() {
+            accept.join().expect("accept thread");
+        }
+        let served = std::mem::take(&mut *self.served.lock().expect("served"));
+        for (stream, thread) in served {
+            drop(stream.shutdown(Shutdown::Both));
+            thread.join().expect("serving thread");
+        }
+    }
 }
 
 /// Starts an acceptor with `token` on a loopback port.
@@ -69,14 +93,34 @@ pub fn echo_server(token: ConnectionToken) -> EchoServer {
     let policy = Arc::new(EchoPolicy::default());
     let config = AcceptConfig::new(key(2), "acceptor-1", Some(token), policy.clone())
         .with_timeouts(timeouts());
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let config = config.clone();
-            std::thread::spawn(move || serve_one(RawChannel::from_tcp(stream), &config));
-        }
-    });
-    EchoServer { addr, policy }
+    let stop = Arc::new(AtomicBool::new(false));
+    let served: Served = Arc::default();
+    let accept = {
+        let stop = Arc::clone(&stop);
+        let served = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let Ok(stream) = stream else { continue };
+                let Ok(kept) = stream.try_clone() else {
+                    continue;
+                };
+                let config = config.clone();
+                let thread =
+                    std::thread::spawn(move || serve_one(RawChannel::from_tcp(stream), &config));
+                served.lock().expect("served").push((kept, thread));
+            }
+        })
+    };
+    EchoServer {
+        addr,
+        policy,
+        stop,
+        accept: Some(accept),
+        served,
+    }
 }
 
 fn serve_one(channel: std::io::Result<RawChannel>, config: &AcceptConfig) {
