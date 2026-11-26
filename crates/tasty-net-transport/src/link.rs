@@ -211,8 +211,13 @@ impl Link {
 }
 
 impl Drop for Link {
+    /// Force closes a link that is still open. A link that already ended normally is left
+    /// as it is: its ordered channel was half-closed both ways, and closing it again would
+    /// turn that end into a reset.
     fn drop(&mut self) {
-        self.closer.force_close(EndReason::Forced);
+        if !self.closer.ended_normally() {
+            self.closer.force_close(EndReason::Forced);
+        }
     }
 }
 

@@ -66,8 +66,9 @@ pub(crate) type GuardSlot = Mutex<Option<Box<dyn Any + Send>>>;
 
 struct CloserInner {
     end: EndState,
-    /// Every channel of the link: the ordered channel and the bulk channels opened under it.
-    /// The list holds them weakly: a channel whose halves (and handshake) are gone closes its
+    /// The link's first channel (the ordered channel of an attach link).
+    first: Weak<dyn ChannelControl>,
+    /// The bulk channels opened under the link. The list holds them weakly: a channel whose halves (and handshake) are gone closes its
     /// socket at once and drops out here, instead of living as long as the parent link.
     channels: Mutex<Vec<Weak<dyn ChannelControl>>>,
     /// The registration guards of the bulk channels under the link, dropped when it ends.
@@ -104,7 +105,8 @@ impl LinkCloser {
         Self {
             inner: Arc::new(CloserInner {
                 end: EndState::default(),
-                channels: Mutex::new(vec![Arc::downgrade(&first)]),
+                first: Arc::downgrade(&first),
+                channels: Mutex::new(Vec::new()),
                 guards: Mutex::new(Vec::new()),
                 hooks: Mutex::new(Vec::new()),
                 ended: AtomicBool::new(false),
@@ -156,16 +158,36 @@ impl LinkCloser {
         hooks.push(hook);
     }
 
+    /// Whether the link ended normally: it ended and no reason was raised.
+    pub(crate) fn ended_normally(&self) -> bool {
+        self.inner.ended.load(Ordering::Acquire) && !self.inner.end.is_ending()
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ChannelControl>> {
+        lock(&self.inner.channels)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
     fn has_ended(&self) -> bool {
         self.inner.ended.load(Ordering::Acquire) || self.inner.end.is_ending()
     }
 
-    /// The normal end of the link (both directions half-closed and the reader ended): closes
-    /// the remaining channels (the bulk channels under the link) and runs the end hooks,
-    /// without raising a reason.
+    /// The normal end of the link (both directions half-closed and the reader ended): ends the
+    /// first channel's sending direction only (TCP FIN, QUIC `finish`, so its last frames still
+    /// arrive), force closes the bulk channels still open under the link, and runs the end
+    /// hooks, without raising a reason (docs/design/transport.md "P2P의 닫기 범위").
     pub(crate) fn end_normally(&self) {
         let hooks = self.mark_ended(None);
-        self.wake();
+        if let Some(first) = self.inner.first.upgrade()
+            && let Err(error) = first.shutdown_write()
+        {
+            tracing::debug!(%error, "ending the sending direction of the first channel failed");
+        }
+        for child in self.children() {
+            shutdown_quietly(child.as_ref());
+        }
         self.drop_guards();
         for hook in hooks {
             hook();
@@ -223,12 +245,11 @@ impl LinkCloser {
 
     /// Closes every channel both ways and wakes blocked reads, without raising a reason.
     pub(crate) fn wake(&self) {
-        let channels: Vec<_> = lock(&self.inner.channels)
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for channel in channels {
-            shutdown_quietly(channel.as_ref());
+        if let Some(first) = self.inner.first.upgrade() {
+            shutdown_quietly(first.as_ref());
+        }
+        for child in self.children() {
+            shutdown_quietly(child.as_ref());
         }
     }
 }
@@ -317,8 +338,7 @@ mod tests {
         drop(control);
         let (kept, _peer2) = memory_channel_pair();
         assert!(c.adopt(&kept.control()));
-        // The test closer's first channel and the dropped one are gone; only the kept one is
-        // still held.
+        // The dropped bulk channel was pruned; only the kept one is still listed.
         assert_eq!(lock(&c.inner.channels).len(), 1);
         let dropped = Arc::new(AtomicU8::new(0));
         struct Guard(Arc<AtomicU8>);
@@ -337,5 +357,38 @@ mod tests {
             "the parent's end drops it"
         );
         assert!(lock(&slot).is_none());
+    }
+
+    /// A normal end only ends the first channel's sending direction, so its peer's last
+    /// bytes are still read; a bulk channel still open is closed both ways.
+    #[test]
+    fn a_normal_end_half_closes_the_first_channel_and_closes_the_bulk_ones() {
+        use std::io::{Read, Write};
+        let (mut first, mut first_peer) = memory_channel_pair();
+        let (mut bulk, mut bulk_peer) = memory_channel_pair();
+        let c = LinkCloser::new(first.control());
+        assert!(c.adopt(&bulk.control()));
+        first_peer.write_all(b"last").expect("write");
+        bulk_peer.write_all(b"lost").expect("write");
+        c.end_normally();
+        assert!(c.ended_normally());
+        let mut got = [0u8; 4];
+        first
+            .read_exact(&mut got)
+            .expect("the first channel still reads");
+        assert_eq!(&got, b"last");
+        let mut eof = [0u8; 1];
+        assert_eq!(
+            first_peer.read(&mut eof).expect("eof"),
+            0,
+            "the peer sees FIN"
+        );
+        assert_eq!(
+            bulk.read(&mut eof).expect("closed"),
+            0,
+            "the bulk bytes are dropped"
+        );
+        c.force_close(EndReason::Forced);
+        assert!(!c.ended_normally());
     }
 }
