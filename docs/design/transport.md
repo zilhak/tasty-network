@@ -103,8 +103,6 @@ tasty attach writer의 종료 순서(`tasty:crates/tasty-remote/src/transport.rs
 
 P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크와 채널이 함께 쓴다. 한 연결 위에 attach 링크 여럿과 요청 채널이 있을 수 있다.
 
-| 일어난 일 | 닫히는 것 | 남는 것 |
-|---|---|---|
 | 일어난 일 | 닫히는 것 | 닫는 방식 | 남는 것 |
 |---|---|---|---|
 | 한 스트림의 handshake 거절 ACK | 그 스트림 | 정상 종료 | 같은 연결의 다른 링크·채널 |

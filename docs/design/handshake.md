@@ -49,7 +49,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
   6. dialer nonce, acceptor nonce(각 32바이트 원본)
   7. dialer `caps`, acceptor `caps`. 각 목록은 이름 개수(u32 big-endian) 뒤에 이름마다 4바이트 big-endian 길이 + 바이트를 이은 것이다. 이름은 바이트 오름차순으로 정렬한다. 빈 목록은 개수 0 하나다. 이름 문법과 중복 처리는 아래 "capability"
   8. `ext`. 와이어의 `ext`는 JSON 문자열이고 그 안에 소비자의 JSON 텍스트가 들어 있다. 서명 대상은 그 문자열 값을 JSON 문자열로 풀어낸 UTF-8 바이트 그대로다. 다시 직렬화하지 않으므로 숫자 표기·키 순서가 양 끝의 `serde_json` feature(`arbitrary_precision` 등)에 따라 달라지지 않는다. 없으면 빈 바이트
-  
+
   그래서 두 기기 ID, 역할, capability 제안, 도메인 요청이 이 채널 하나에 묶인다. 이 인코딩을 바꾸면 `proto`를 올린다.
 - 받는 쪽은 토큰 검사를 통과하기 전에는 challenge를 보내지 않는다. 토큰 없는 상대는 기기 ID조차 받지 못한다.
 - 4번 ACK가 `ok:true`이면 양쪽이 일반 프레임 흐름으로 넘어간다. 그 뒤 첫 프레임은 목적마다 다르다(아래 "상태 표"의 "성공 ACK 뒤 첫 프레임").
