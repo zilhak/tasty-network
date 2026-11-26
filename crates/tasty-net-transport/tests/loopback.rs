@@ -272,40 +272,67 @@ fn a_refused_bulk_attempt_does_not_hold_the_acceptor_for_the_drain_cap() {
     drop(link);
 }
 
-/// A P2P stream stand-in over loopback TCP: the control of a real TCP channel (so a close
-/// wakes a blocked read on every OS, through this crate's own wake path), with the close code
-/// the test sets laid over it, as a QUIC stream reports the code its connection was closed
-/// with.
+/// One TCP socket handle shared by a test channel's halves and its [`CodedControl`]. The
+/// timeouts the control sets must be on the handle the halves read and write: on Windows a
+/// `try_clone` copy does not share them.
+#[derive(Clone)]
+struct SharedTcp(Arc<TcpStream>);
+
+impl io::Read for SharedTcp {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        io::Read::read(&mut &*self.0, buf)
+    }
+}
+
+impl io::Write for SharedTcp {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        io::Write::write(&mut &*self.0, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut &*self.0)
+    }
+}
+
+/// A P2P stream stand-in over loopback TCP: timeouts and the half close on the shared handle,
+/// the wake of a real TCP channel's control (so a close wakes a blocked read on every OS,
+/// through this crate's own wake path), with the close code the test sets laid over it, as a
+/// QUIC stream reports the code its connection was closed with.
 struct CodedControl {
-    inner: Arc<dyn ChannelControl>,
+    stream: SharedTcp,
+    wake: Arc<dyn ChannelControl>,
     reason: std::sync::Mutex<Option<P2pCloseReason>>,
 }
 
 impl CodedControl {
-    fn over(stream: &TcpStream) -> Arc<Self> {
+    /// The control and the shared handle for the channel's halves.
+    fn over(stream: TcpStream) -> (Arc<Self>, SharedTcp) {
         let tcp = RawChannel::from_tcp(stream.try_clone().expect("clone")).expect("channel");
-        Arc::new(Self {
-            inner: tcp.control(),
+        let shared = SharedTcp(Arc::new(stream));
+        let control = Arc::new(Self {
+            stream: shared.clone(),
+            wake: tcp.control(),
             reason: std::sync::Mutex::new(None),
-        })
+        });
+        (control, shared)
     }
 }
 
 impl ChannelControl for CodedControl {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.inner.set_read_timeout(timeout)
+        self.stream.0.set_read_timeout(timeout)
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.inner.set_write_timeout(timeout)
+        self.stream.0.set_write_timeout(timeout)
     }
 
     fn shutdown_write(&self) -> io::Result<()> {
-        self.inner.shutdown_write()
+        self.stream.0.shutdown(std::net::Shutdown::Write)
     }
 
     fn shutdown_and_wake(&self) -> io::Result<()> {
-        self.inner.shutdown_and_wake()
+        self.wake.shutdown_and_wake()
     }
 
     fn close_reason(&self) -> Option<P2pCloseReason> {
@@ -318,10 +345,10 @@ fn p2p_channel() -> (RawChannel, Arc<CodedControl>, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let peer = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
     let (stream, _) = listener.accept().expect("accept");
-    let control = CodedControl::over(&stream);
+    let (control, shared) = CodedControl::over(stream);
     let channel = RawChannel::new(
-        Box::new(stream.try_clone().expect("clone")),
-        Box::new(stream),
+        Box::new(shared.clone()),
+        Box::new(shared),
         control.clone(),
         TransportKind::P2p,
     );
@@ -561,7 +588,7 @@ fn a_cancel_during_the_approval_wait_is_cancelled_over_tcp() {
 
 /// A writer whose `slow_at`-th write call (counted from 1) waits `delay` first.
 struct SlowWriter {
-    inner: TcpStream,
+    inner: SharedTcp,
     calls: usize,
     slow_at: usize,
     delay: Duration,
@@ -596,12 +623,12 @@ fn an_ack_written_past_the_deadline_times_out_and_revokes_its_credential() {
     let registry = config.clone();
     let acceptor = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
-        let control = CodedControl::over(&stream);
+        let (control, shared) = CodedControl::over(stream);
         let mut channel = RawChannel::new(
-            Box::new(stream.try_clone().expect("clone")),
+            Box::new(shared.clone()),
             // Write 1 is the challenge, write 2 the success ACK.
             Box::new(SlowWriter {
-                inner: stream,
+                inner: shared,
                 calls: 0,
                 slow_at: 2,
                 delay: Duration::from_millis(1200),
@@ -672,7 +699,7 @@ impl DomainPolicy for GuardPolicy {
 
 /// A writer that stalls in its `stall_at`-th flush (counted from 1), after the bytes went out.
 struct FlushStall {
-    inner: TcpStream,
+    inner: SharedTcp,
     flushes: usize,
     stall_at: usize,
     delay: Duration,
@@ -725,11 +752,11 @@ fn a_parent_that_ends_right_after_the_bulk_ack_drops_its_guard() {
         let parent = accept(RawChannel::from_tcp(stream).expect("channel"));
         parent_tx.send(parent).expect("parent");
         let (stream, _) = listener.accept().expect("accept bulk");
-        let control = CodedControl::over(&stream);
+        let (control, shared) = CodedControl::over(stream);
         let channel = RawChannel::new(
-            Box::new(stream.try_clone().expect("clone")),
+            Box::new(shared.clone()),
             Box::new(FlushStall {
-                inner: stream,
+                inner: shared,
                 flushes: 0,
                 stall_at: 1,
                 delay: Duration::from_millis(1500),
@@ -806,17 +833,18 @@ fn a_late_attach_ack_ends_the_bulk_channels_opened_meanwhile() {
     let (stream, dialing) = stream;
     let attach_config = config.clone();
     let attach = std::thread::spawn(move || {
+        let (control, shared) = CodedControl::over(stream);
         let channel = RawChannel::new(
-            Box::new(stream.try_clone().expect("clone")),
+            Box::new(shared.clone()),
             // Flush 1 is the challenge, flush 2 the success ACK: its bytes are out, then the
             // acceptor is held past the 800 ms deadline.
             Box::new(FlushStall {
-                inner: stream.try_clone().expect("clone"),
+                inner: shared,
                 flushes: 0,
                 stall_at: 2,
                 delay: Duration::from_millis(1500),
             }),
-            CodedControl::over(&stream),
+            control,
             TransportKind::Tcp,
         );
         let mut channel = channel;
@@ -926,15 +954,16 @@ fn a_refusal_written_past_the_deadline_times_out() {
     });
     let acceptor = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
+        let (control, shared) = CodedControl::over(stream);
         let mut channel = RawChannel::new(
-            Box::new(stream.try_clone().expect("clone")),
+            Box::new(shared.clone()),
             Box::new(SlowWriter {
-                inner: stream.try_clone().expect("clone"),
+                inner: shared,
                 calls: 0,
                 slow_at: 1,
                 delay: Duration::from_millis(1200),
             }),
-            CodedControl::over(&stream),
+            control,
             TransportKind::Tcp,
         );
         let line = read_first_line(
