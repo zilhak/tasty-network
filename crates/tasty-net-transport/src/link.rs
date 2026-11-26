@@ -283,8 +283,8 @@ mod tests {
 
     /// The normal end of taken halves and the link's drop overlap: the end is decided (both
     /// directions done) but its hook has not yet marked the closer when the link drops. The
-    /// drop must not reset the ordered channel, so the peer still reads the last frame and
-    /// then EOF.
+    /// drop must not force close the ordered channel: the link ends normally with no reason
+    /// raised, and the peer reads the last frame and then EOF.
     #[test]
     fn a_link_dropped_while_its_normal_end_runs_does_not_reset_the_channel() {
         use std::sync::Barrier;
@@ -299,6 +299,7 @@ mod tests {
             .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::WhenIdle))
             .expect("peer framed");
         let closer = framed.closer.clone();
+        let watch = closer.clone();
         // The hook stops at the barrier before it marks the closer.
         let decided = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
@@ -332,6 +333,11 @@ mod tests {
         drop(link);
         resume.wait();
         ending.join().expect("reader thread");
+        // The end stayed the normal one: the drop raised no reason and forced nothing (the
+        // memory pair keeps queued bytes even on a forced close, so the reads below alone
+        // would not tell).
+        assert!(watch.ended_normally(), "the link ended normally");
+        assert!(!watch.is_ending(), "no end reason was raised");
         assert_eq!(
             peer_side
                 .reader
