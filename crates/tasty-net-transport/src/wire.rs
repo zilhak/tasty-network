@@ -901,4 +901,26 @@ mod tests {
             t.digest(Signer::Dialer)
         );
     }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A known answer: the digest of fixed fields, computed apart from this code (Python
+    /// `hashlib` over the layout handshake.md gives, with the caps list as a count and
+    /// length-prefixed names, not wrapped again in the list's total length).
+    #[test]
+    fn the_transcript_digest_matches_a_known_answer() {
+        assert_eq!(
+            hex(key(1).id().as_bytes()),
+            "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "the input device ID"
+        );
+        let ab = vec!["b".to_string(), "a".to_string()];
+        let none: Vec<String> = vec![];
+        assert_eq!(
+            hex(&transcript(&ab, &none).digest(Signer::Dialer)),
+            "688a0c7bf24b1213237c7219649b33924aa002f59b692432a6b4bc25a76fc266"
+        );
+    }
 }
