@@ -1523,3 +1523,33 @@ fn a_cancel_during_the_approval_wait_is_cancelled() {
     assert!(dialer.join().expect("dialer").is_err());
     assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
 }
+
+/// An approval sent after the approval deadline (500 ms from the handler's call) is refused
+/// like no answer, and no domain callback runs, even when it is already queued when the
+/// wait first looks.
+#[test]
+fn an_approval_after_the_approval_deadline_registers_nothing() {
+    let mut s = server(Some(token('a')));
+    s.config = s.config.with_role_proposals(|proposal| {
+        std::thread::sleep(Duration::from_millis(700));
+        proposal.accept();
+    });
+    let (transport, listener) = pair(Some(token('a')));
+    let acceptor = accept_one(listener, s.config.clone());
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let result = dial_handshake(
+        conn,
+        &client(1, "d"),
+        Holder::Acceptor,
+        None,
+        &AttemptCancel::new(),
+    );
+    assert_eq!(refused_reason(result).0, RejectReason::RoleRefused);
+    assert!(matches!(
+        acceptor.join().expect("acceptor"),
+        Err(HandshakeError::Refused(RejectReason::RoleRefused))
+    ));
+    assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
+}

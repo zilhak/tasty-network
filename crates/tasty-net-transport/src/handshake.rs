@@ -1278,6 +1278,11 @@ fn await_proposal(
         }
         match rx.try_recv() {
             Ok(true) => {
+                // An approval that came after the approval deadline is too late, even if it
+                // was already queued when the wait looked: it is refused like no answer.
+                if Instant::now() >= deadline {
+                    return Ok(RoleDecision::Refused);
+                }
                 peer_still_there(io, Duration::from_millis(1))?;
                 if io.cancel.is_cancelled() {
                     return Err(HandshakeError::Cancelled);
