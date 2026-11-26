@@ -332,6 +332,7 @@ rc_limit_matches() {
 
 # TOML 파일 $1의 최상위 주소 키 $2(http_bind_addr 등)의 포트. 키가 없으면 기본 $3.
 # tomllib로 읽으므로 작은따옴표 리터럴 문자열('[::]:8080')도 같게 읽는다. 포트를 못 읽으면 rc 1.
+# 포트 0(iroh-relay가 임의 포트에 바인딩)은 게시할 포트를 정할 수 없어 검사가 지원하지 않는다: port-zero를 출력하고 rc 1.
 rc_toml_port() {
     python3 -I - "$1" "$2" "$3" <<'PY'
 import sys, tomllib
@@ -349,8 +350,20 @@ if not (port.isascii() and port.isdigit()):
 port = port.lstrip("0") or "0"
 if len(port) > 5 or int(port) > 65535:
     sys.exit(1)
+if port == "0":
+    print("port-zero")
+    sys.exit(1)
 print(port)
 PY
+}
+
+# rc_toml_port가 실패했을 때 키 $1과 그 출력 $2로 실패 이유를 쓴다.
+rc_port_reason() {
+    if [[ "$2" == port-zero ]]; then
+        echo "reason=port-zero key=$1"
+    else
+        echo "reason=$1"
+    fi
 }
 
 # 로그 $1에 --dev 평문 리스너 줄 "[HTTP/WS] relay: serving on <주소>:<포트 $2>"가 있으면 0.
@@ -413,8 +426,8 @@ rc_start_relay() {
         return 1
     fi
     chmod 0644 "$cfg"
-    http_port=$(rc_toml_port "$cfg" http_bind_addr 3340) || { RC_LAST_FAIL="stage=config reason=http_bind_addr"; return 1; }
-    metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090) || { RC_LAST_FAIL="stage=config reason=metrics_bind_addr"; return 1; }
+    http_port=$(rc_toml_port "$cfg" http_bind_addr 3340) || { RC_LAST_FAIL="stage=config $(rc_port_reason http_bind_addr "$http_port")"; return 1; }
+    metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090) || { RC_LAST_FAIL="stage=config $(rc_port_reason metrics_bind_addr "$metrics_port")"; return 1; }
 
     # 환경 변수는 아래 두 개만 넘긴다. IROH_RELAY_HTTP_BEARER_TOKEN·IROH_RELAY_ACCESS_TOKEN은 넘기지 않는다
     # (넘기면 설정의 시험값 대신 실제 토큰이 쓰이고 시작 로그에 찍힌다).
@@ -596,7 +609,23 @@ rc_self_test() {
     got=$(rc_toml_port "$t/zeros.toml" http_bind_addr 3340 2>&1)
     st_expect port-4301-leading-zeros "3340 0" "$got $?"
     printf 'http_bind_addr = "0.0.0.0:000"\n' > "$t/allzero.toml"
-    st_expect port-all-zero 0 "$(rc_toml_port "$t/allzero.toml" http_bind_addr 3340)"
+    got=$(rc_toml_port "$t/allzero.toml" http_bind_addr 3340)
+    st_expect port-all-zero "port-zero 1" "$got $?"
+    printf 'metrics_bind_addr = "127.0.0.1:0"\n' > "$t/mzero.toml"
+    got=$(rc_toml_port "$t/mzero.toml" metrics_bind_addr 9090)
+    st_expect port-metrics-zero "port-zero 1" "$got $?"
+    # rc_start_relay도 컨테이너를 만들기 전에 port-zero로 끝난다.
+    for got in http_bind_addr metrics_bind_addr; do
+        printf 'enable_relay = true\n%s = "0.0.0.0:0"\n' "$got" > "$t/start-zero-$got.toml"
+        (
+            docker() { echo called >> "$t/docker-calls-zero"; return 1; }
+            RC_TMP="$t"
+            rc_start_relay "zero-$got" "$t/start-zero-$got.toml" >/dev/null 2>&1
+            echo "$? $RC_LAST_FAIL"
+        ) > "$t/start-zero.res"
+        st_expect "port-zero-start-$got" "1 stage=config reason=port-zero key=$got" "$(cat "$t/start-zero.res")"
+    done
+    st_expect port-zero-no-docker no "$(if [[ -e "$t/docker-calls-zero" ]]; then echo yes; else echo no; fi)"
     printf 'http_bind_addr = "0.0.0.0:65535"\n' > "$t/max.toml"
     st_expect port-65535 65535 "$(rc_toml_port "$t/max.toml" http_bind_addr 3340)"
     printf 'http_bind_addr = "0.0.0.0:65536"\n' > "$t/over.toml"
