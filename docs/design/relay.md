@@ -14,6 +14,7 @@ relay는 iroh-relay를 쓴다. 이 레포는 자체 relay 바이너리나 관리
 - `enable_relay = false`는 쓰지 않는다. 초기 피어 중계까지 없애고 QUIC 주소 확인만 남기므로 펀칭 조정이 relay를 지나지 못한다(사용자 결정 기록의 Codex 확인).
 - 수신 제한은 클라이언트별 유입 token bucket이다. `bytes_per_second`는 0이 아닌 u32여야 하고, `max_burst_bytes`(0이 아닌 u32)는 `bytes_per_second` 없이 쓰면 relay가 시작하지 않는다(`main.rs` limits 처리). 0으로 막을 수는 없으므로 낮은 속도의 중계는 언제나 남는다. 펀칭이 그 상한에서 성립하는지는 아직 재지 않았다([펀칭 실험](p2p.md#펀칭-실험)).
 - 상한은 연결마다의 유입 속도와 burst만 제한한다. relay metrics의 `bytes_recv`·`bytes_sent`는 서버 공용 카운터라 연결별 상한 확인에 쓰지 않는다(`iroh-relay/src/server/metrics.rs`).
+- 두 모드의 차이는 기동 상태에서 드러난다(2026-11-27, 원격 빌드 환경, 같은 머신 루프백). iroh v1.5.0 `examples/transfer`(`--relay-only`, 연결 하나, 내려받기 10초 요청)를 각 CI용 설정의 컨테이너에 붙였을 때 `punch-only`(임시 상한 16384 B/s, burst 65536)는 1,411,712 B를 87.2초에 받아 약 16.2 KB/s였고 `relayserver_conns_rx_ratelimited_total`이 1이 됐다. `relay-fallback`은 848,170,596 B를 10.0초에 받아 약 84.7 MB/s였고 상한 카운터는 0이었다. 보낸 쪽이 relay에 넣는 속도가 상한에 묶이므로, 요청한 10초가 지나도 쌓인 데이터를 받느라 전송이 길어졌다.
 - `punch-only`의 상한 값은 [펀칭 실험](p2p.md#펀칭-실험) 뒤에 확정한다. 그 전까지 `relay/punch-only.toml`의 값은 임시이고 파일에 그렇게 적는다.
 
 ## 배포 형태
