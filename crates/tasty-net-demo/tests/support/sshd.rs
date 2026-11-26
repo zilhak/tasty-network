@@ -627,8 +627,10 @@ fn verify(server: &SshServer) -> Result<(), String> {
 }
 
 /// The far end of the `-L` check: a loopback listener whose thread echoes the first
-/// connection it accepts. Dropping it, on every way out of the check, wakes the accept,
-/// bounds the echo's reads and joins the thread, so no listener or thread outlives the check.
+/// connection it accepts. The listener is nonblocking and the thread polls it, so it stops at
+/// a stop flag or a deadline without a new socket to wake it. Dropping it, on every way out of
+/// the check, sets the flag and joins the thread; the echo's reads are bounded too, so no
+/// listener or thread outlives the check.
 struct EchoEnd {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -637,19 +639,39 @@ struct EchoEnd {
 
 /// How long the echo thread waits for the next bytes of the forwarded connection.
 const ECHO_READ_LIMIT: Duration = Duration::from_secs(10);
+/// How long the echo thread waits for the forwarded connection (the check gives the tunnel 20
+/// seconds to open).
+const ECHO_ACCEPT_LIMIT: Duration = Duration::from_secs(30);
+/// How often the echo thread looks at the listener and the stop flag.
+const ECHO_POLL: Duration = Duration::from_millis(20);
 
 impl EchoEnd {
     fn start() -> Result<Self, String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("nonblocking echo listener: {e}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
+                let deadline = Instant::now() + ECHO_ACCEPT_LIMIT;
+                let mut stream = loop {
+                    if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(ECHO_POLL);
+                        }
+                        Err(_) => return,
+                    }
                 };
+                // Some platforms give the accepted socket the listener's nonblocking mode.
                 if stop.load(Ordering::SeqCst)
+                    || stream.set_nonblocking(false).is_err()
                     || stream.set_read_timeout(Some(ECHO_READ_LIMIT)).is_err()
                 {
                     return;
@@ -673,13 +695,9 @@ impl EchoEnd {
 
 impl Drop for EchoEnd {
     fn drop(&mut self) {
+        // A thread that still polls the listener sees the flag within one poll; a thread
+        // already echoing ends at EOF, at the flag after its next read, or at the read limit.
         self.stop.store(true, Ordering::SeqCst);
-        // Wakes an accept that still waits; a thread already echoing ends at EOF or at the
-        // read limit.
-        drop(TcpStream::connect_timeout(
-            &SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)),
-            Duration::from_secs(1),
-        ));
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
