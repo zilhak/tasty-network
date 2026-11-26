@@ -338,8 +338,15 @@ pub(crate) mod test_helper {
         }
 
         /// Kills the grandchild and returns whether it is gone. The grandchild is not our child,
-        /// so it cannot be waited for; this checks with the OS until it no longer runs.
+        /// so it cannot be waited for; this checks with the OS until it no longer runs. A failed
+        /// process lookup panics (the test fails).
         pub(crate) fn end(&mut self) -> bool {
+            self.end_checked(false)
+        }
+
+        /// [`Orphan::end`]. With `lenient`, a failed lookup ends the check instead of panicking:
+        /// the kill is still sent, and `false` says the end was not confirmed.
+        fn end_checked(&mut self, lenient: bool) -> bool {
             self.ended = true;
             let limit = Instant::now() + Duration::from_secs(5);
             let pid = loop {
@@ -354,8 +361,11 @@ pub(crate) mod test_helper {
             let _removed = std::fs::remove_file(&self.pid_file);
             kill_pid(&pid);
             while Instant::now() < limit {
-                if !pid_runs(&pid) {
-                    return true;
+                match lookup(&pid) {
+                    Ok(stat) if !runs_in(&stat) => return true,
+                    Ok(_) => {}
+                    Err(_) if lenient => return false,
+                    Err(e) => panic!("{e}"),
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -364,11 +374,23 @@ pub(crate) mod test_helper {
     }
 
     impl Drop for Orphan {
+        /// Ends the grandchild if the test did not. While a test is already panicking, a failed
+        /// lookup does not panic again (that would abort); the kill is still sent.
         fn drop(&mut self) {
             if !self.ended {
-                self.end();
+                self.end_checked(std::thread::panicking());
             }
         }
+    }
+
+    /// The process state of `pid` ([`lookup`]); a failed lookup panics.
+    fn pid_stat(pid: &str) -> String {
+        lookup(pid).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Whether `pid` still runs. A zombie waiting for its new parent to reap it does not run.
+    fn pid_runs(pid: &str) -> bool {
+        runs_in(&pid_stat(pid))
     }
 
     /// Whether process `pid` runs (a zombie does not).
@@ -388,31 +410,30 @@ pub(crate) mod test_helper {
     }
 
     /// The `ps` state of `pid`, empty when there is no such process. `ps -p` exits 1 with no
-    /// output for a PID it does not find; any other failure (no `ps`, another exit, an error
-    /// message) panics.
+    /// output for a PID it does not find. Any other result is a failed lookup: `ps` cannot run,
+    /// exits otherwise, or writes to stderr even with exit 0 (macOS `ps` can when sysctl fails).
     #[cfg(unix)]
-    fn pid_stat(pid: &str) -> String {
+    fn lookup(pid: &str) -> Result<String, String> {
         let out = Command::new("ps")
             .args(["-o", "stat=", "-p", pid])
             .output()
-            .unwrap_or_else(|e| panic!("ps could not run: {e}"));
+            .map_err(|e| format!("ps could not run: {e}"))?;
         let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let no_such_process =
-            out.status.code() == Some(1) && stat.is_empty() && out.stderr.is_empty();
-        if out.status.success() || no_such_process {
-            return stat;
+        let quiet = out.stderr.is_empty();
+        let no_such_process = out.status.code() == Some(1) && stat.is_empty() && quiet;
+        if (out.status.success() && quiet) || no_such_process {
+            return Ok(stat);
         }
-        panic!(
+        Err(format!(
             "ps -p {pid} failed ({}): {}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
-        );
+        ))
     }
 
-    /// Whether `pid` still runs. A zombie waiting for its new parent to reap it does not run.
+    /// Whether a `ps` state means the process runs (a zombie, `Z`, does not).
     #[cfg(unix)]
-    fn pid_runs(pid: &str) -> bool {
-        let stat = pid_stat(pid);
+    fn runs_in(stat: &str) -> bool {
         !stat.is_empty() && !stat.starts_with('Z')
     }
 
@@ -428,31 +449,32 @@ pub(crate) mod test_helper {
 
     /// The `tasklist` row of `pid`, empty when there is no such process. Windows has no zombies;
     /// an exited process whose handle is still open is not listed. `tasklist` exits 0 whether or
-    /// not it finds the PID, so a failure to run it or another exit panics.
+    /// not it finds the PID, so a failure to run it or another exit is a failed lookup.
     #[cfg(windows)]
-    fn pid_stat(pid: &str) -> String {
+    fn lookup(pid: &str) -> Result<String, String> {
         let filter = format!("PID eq {pid}");
         let out = Command::new("tasklist")
             .args(["/FI", &filter, "/NH", "/FO", "CSV"])
             .output()
-            .unwrap_or_else(|e| panic!("tasklist could not run: {e}"));
-        assert!(
-            out.status.success(),
-            "tasklist for {pid} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
+            .map_err(|e| format!("tasklist could not run: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "tasklist for {pid} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
         let rows = String::from_utf8_lossy(&out.stdout).into_owned();
-        if rows.contains(&format!("\"{pid}\"")) {
+        Ok(if rows.contains(&format!("\"{pid}\"")) {
             rows
         } else {
             String::new()
-        }
+        })
     }
 
     #[cfg(windows)]
-    fn pid_runs(pid: &str) -> bool {
-        !pid_stat(pid).is_empty()
+    fn runs_in(row: &str) -> bool {
+        !row.is_empty()
     }
 }
 
@@ -467,14 +489,24 @@ mod tests {
         use test_helper::{process_exists, process_runs};
         assert!(process_exists(std::process::id()));
         assert!(process_runs(std::process::id()));
-        let mut child = test_helper::helper_command("sleep")
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn");
-        let pid = child.id();
+        /// Kills and reaps the 60 s child even if a lookup below panics.
+        struct Reaped(std::process::Child);
+        impl Drop for Reaped {
+            fn drop(&mut self) {
+                let _killed = self.0.kill();
+                let _reaped = self.0.wait();
+            }
+        }
+        let mut child = Reaped(
+            test_helper::helper_command("sleep")
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn"),
+        );
+        let pid = child.0.id();
         assert!(process_runs(pid));
-        child.kill().expect("kill");
-        child.wait().expect("reap");
+        child.0.kill().expect("kill");
+        child.0.wait().expect("reap");
         assert!(!process_exists(pid), "a reaped child is gone");
     }
 
