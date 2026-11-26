@@ -16,6 +16,9 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::process::{children_of, log};
@@ -499,40 +502,100 @@ fn verify(server: &SshServer) -> Result<(), String> {
     check_forward(server)
 }
 
-fn check_forward(server: &SshServer) -> Result<(), String> {
-    let echo = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
-    let target = echo.local_addr().map_err(|e| e.to_string())?.port();
-    let echo_thread = std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = echo.accept() {
-            let mut buf = [0u8; 64];
-            while let Ok(n) = stream.read(&mut buf) {
-                if n == 0 || stream.write_all(&buf[..n]).is_err() {
-                    break;
+/// The far end of the `-L` check: a loopback listener whose thread echoes the first
+/// connection it accepts. Dropping it, on every way out of the check, wakes the accept,
+/// bounds the echo's reads and joins the thread, so no listener or thread outlives the check.
+struct EchoEnd {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// How long the echo thread waits for the next bytes of the forwarded connection.
+const ECHO_READ_LIMIT: Duration = Duration::from_secs(10);
+
+impl EchoEnd {
+    fn start() -> Result<Self, String> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                if stop.load(Ordering::SeqCst)
+                    || stream.set_read_timeout(Some(ECHO_READ_LIMIT)).is_err()
+                {
+                    return;
                 }
-            }
+                let mut buf = [0u8; 64];
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 || stop.load(Ordering::SeqCst) || stream.write_all(&buf[..n]).is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            port,
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for EchoEnd {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wakes an accept that still waits; a thread already echoing ends at EOF or at the
+        // read limit.
+        drop(TcpStream::connect_timeout(
+            &SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)),
+            Duration::from_secs(1),
+        ));
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            log("the -L check's echo thread panicked");
         }
-    });
+    }
+}
+
+/// An ssh child that is killed and reaped on every way out of the check.
+struct CheckChild(Child);
+
+impl Drop for CheckChild {
+    fn drop(&mut self) {
+        let _killed = self.0.kill().is_ok();
+        let _reaped = self.0.wait().is_ok();
+    }
+}
+
+fn check_forward(server: &SshServer) -> Result<(), String> {
+    // Declared first, dropped last: the ssh child below goes before the echo end.
+    let echo = EchoEnd::start()?;
     let local = free_port()?;
     let err_path = server.dir().join("check-forward.err");
     let err_file = File::create(&err_path).map_err(|e| e.to_string())?;
     let mut command = ssh_command(server);
     command
         .args(["-o", "ExitOnForwardFailure=yes", "-N", "-L"])
-        .arg(format!("127.0.0.1:{local}:127.0.0.1:{target}"))
+        .arg(format!("127.0.0.1:{local}:127.0.0.1:{}", echo.port))
         .arg(server.destination())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(err_file));
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("starting the forward check: {e}"))?;
-    let result = carry_through(&mut child, local);
-    let _killed = child.kill().is_ok();
-    let _reaped = child.wait().is_ok();
-    // The echo thread ends when the forwarded connection closes; when no connection came,
-    // waking its accept ends it.
-    drop(TcpStream::connect((Ipv4Addr::LOCALHOST, target)));
-    let _joined = echo_thread.join().is_ok();
+    let mut child = CheckChild(
+        command
+            .spawn()
+            .map_err(|e| format!("starting the forward check: {e}"))?,
+    );
+    let result = carry_through(&mut child.0, local);
+    drop(child);
+    drop(echo);
     result.map_err(|reason| {
         format!(
             "the -L forward check failed: {reason}; ssh stderr {:?}",
