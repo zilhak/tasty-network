@@ -391,8 +391,65 @@ fn a_cancel_ends_the_p2p_first_line_wait() {
     );
 }
 
+/// Collects this crate's tracing events of the current thread as lines with the time since
+/// the recorder was made, for a failure message to show the steps of a slow path.
+struct Recorder {
+    started: Instant,
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct Fields<'a>(&'a mut String);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!(" {}={value:?}", field.name()));
+    }
+}
+
+impl tracing::Subscriber for Recorder {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target().starts_with("tasty_net_transport")
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = format!(
+            "+{:?} {}:",
+            self.started.elapsed(),
+            event.metadata().target()
+        );
+        event.record(&mut Fields(&mut line));
+        self.lines.lock().expect("lines").push(line);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Runs `f` with this thread's tracing events recorded, and returns its result with the
+/// recorded lines.
+fn traced<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let recorder = Recorder {
+        started: Instant::now(),
+        lines: Arc::clone(&lines),
+    };
+    let result = tracing::subscriber::with_default(recorder, f);
+    let lines = std::mem::take(&mut *lines.lock().expect("lines"));
+    (result, lines)
+}
+
 /// The concurrent-handshake limit is checked before the first line: a stream over the limit
-/// is refused `busy` without waiting for a line it never sends.
+/// is refused `busy` without waiting for a line it never sends. A failure shows the steps of
+/// the refusal (the ACK written, the linger's start, its end and why) with their times.
 #[test]
 fn a_p2p_stream_over_the_limit_is_refused_before_its_first_line() {
     let config = p2p_config(1);
@@ -406,15 +463,21 @@ fn a_p2p_stream_over_the_limit_is_refused_before_its_first_line() {
     std::thread::sleep(Duration::from_millis(200));
     let (second, _second_control, _second_peer) = p2p_channel();
     let started = Instant::now();
-    let result = accept_p2p_handshake(second, key(1).id(), 1, &config, &AttemptCancel::new());
+    let (result, steps) =
+        traced(|| accept_p2p_handshake(second, key(1).id(), 1, &config, &AttemptCancel::new()));
+    let took = started.elapsed();
+    let steps = steps.join("\n");
     assert!(
         matches!(result, Err(HandshakeError::Refused(RejectReason::Busy))),
-        "{result:?}"
+        "{result:?}\nsteps:\n{steps}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
+        took < Duration::from_secs(3),
+        "the refusal took {took:?}\nsteps:\n{steps}"
+    );
+    assert!(
+        steps.contains("the linger after the refusal ends"),
+        "steps:\n{steps}"
     );
     cancel.cancel();
     let held = holder.join().expect("holder");

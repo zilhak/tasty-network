@@ -517,7 +517,10 @@ impl Io<'_> {
     ) -> HandshakeError {
         let ack = Ack::refusal(&reason, ext);
         match self.write_control(&ack.encode()) {
-            Ok(()) => linger_close(self.ch, linger),
+            Ok(()) => {
+                tracing::debug!(%reason, "the refusing ACK is written");
+                linger_close(self.ch, linger);
+            }
             // The refusal went past the handshake deadline: that is the local result, as for
             // any other message of the handshake.
             Err(HandshakeError::TimedOut) => {
@@ -533,27 +536,49 @@ impl Io<'_> {
 }
 
 /// Ends the sending direction, then reads and drops the peer's bytes until its EOF, at most
-/// `limit` long.
+/// `limit` long. Debug events mark the start and the end of the wait and why it ended.
 fn linger_close(ch: &mut RawChannel, limit: Duration) {
     let control = ch.control();
     if let Err(error) = control.shutdown_write() {
         tracing::debug!(%error, "ending the sending direction failed");
         return;
     }
-    let Some(deadline) = Instant::now().checked_add(limit) else {
+    let started = Instant::now();
+    let Some(deadline) = started.checked_add(limit) else {
         return;
     };
+    tracing::debug!(?limit, "the linger after the refusal starts");
     let mut sink = [0u8; 4096];
-    loop {
+    let end = loop {
         let now = Instant::now();
-        if now >= deadline || control.set_read_timeout(Some(deadline - now)).is_err() {
-            return;
+        if now >= deadline {
+            break "the drain cap passed".to_owned();
+        }
+        if let Err(error) = control.set_read_timeout(Some(deadline - now)) {
+            break format!("the read timeout could not be set: {error}");
         }
         match ch.read(&mut sink) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => break "EOF".to_owned(),
+            Err(error) => {
+                let what = if ReadFailure::of_io(&error) == ReadFailure::HeartbeatTimeout {
+                    "read timeout"
+                } else {
+                    "read error"
+                };
+                break format!(
+                    "{what}: {:?} (os error {:?}): {error}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+            }
             Ok(_) => {}
         }
-    }
+    };
+    tracing::debug!(
+        elapsed = ?started.elapsed(),
+        %end,
+        "the linger after the refusal ends"
+    );
 }
 
 /// A channel that closed during the handshake is explained by its SSH listener verdict.
