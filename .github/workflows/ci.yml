@@ -15,10 +15,11 @@ on:
 permissions:
   contents: read
 
-# Pushes and manual runs get one group per branch and commit, so every pushed
-# commit keeps its own run: a later push neither cancels it nor replaces it while
-# it waits. Pull requests share one group per pull request, and a new commit
-# cancels the run of the older one.
+# Pushes and manual runs get one group per branch and commit, so pushes of
+# different commits each keep their own run. A push and a manual run of the same
+# ref and commit share a group: a run that is still waiting there can be
+# cancelled by a newer request for the same ref and commit. Pull requests share
+# one group per pull request, and a new commit cancels the run of the older one.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

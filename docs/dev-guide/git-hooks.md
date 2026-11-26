@@ -30,7 +30,7 @@ push 전에 아래 단계를 `scripts/check.sh`로 돌린다. 앞 단계가 실�
 |---|---|
 | B.1 | `scripts/check.sh fmt` |
 | B.2 | `scripts/check.sh shell` |
-| B.3 | `scripts/check.sh no-tasty-deps` |
+| B.3 | `scripts/check.sh no-tasty-deps` (Python 3이 PATH에 있어야 한다: `python3` 또는 `python`) |
 | B.4 | `scripts/check.sh lint` |
 | B.5 | `scripts/check.sh check` |
 
