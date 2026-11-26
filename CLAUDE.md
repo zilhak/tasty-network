@@ -25,7 +25,7 @@
 | `bash scripts/check.sh test` | `cargo test --workspace --locked` |
 | `bash scripts/check.sh deny` | cargo deny의 licenses·bans·sources (`deny.toml`) |
 
-단계 목록의 정본은 `bash scripts/check.sh help`다. `Cargo.lock`은 커밋하고 cargo 명령은 `--locked`로 돌린다.
+단계 목록의 정본은 `bash scripts/check.sh help`다. `Cargo.lock`은 커밋한다. 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny·fetch)은 `--locked`로 돌린다. `cargo fmt`는 의존을 해석하지 않아 그 옵션이 없다.
 
 ## 버전·태그
 

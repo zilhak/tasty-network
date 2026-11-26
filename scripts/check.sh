@@ -10,7 +10,8 @@
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
-# cargo 명령은 모두 --locked라 Cargo.lock을 바꾸지 않는다.
+# 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
+# cargo fmt는 의존을 해석하지 않아 --locked가 없다.
 # Linux·macOS의 bash와 Windows의 Git Bash에서 돈다.
 # fmt·lint·test·check·all은 이 clone에서 .githooks가 돌지 않으면 stderr에 경고한다.
 set -euo pipefail
