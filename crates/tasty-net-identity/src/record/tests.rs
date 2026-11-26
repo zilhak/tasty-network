@@ -160,6 +160,16 @@ fn a_newer_instance_with_the_same_contents_is_kept() {
 }
 
 #[test]
+fn retire_without_the_lock_file_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let publication = record(1).publish(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(dir.path().join("record.lock")).unwrap();
+    assert_eq!(publication.retire().unwrap(), RetireOutcome::Missing);
+}
+
+#[test]
 fn retire_after_removal_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("record");
@@ -413,6 +423,18 @@ mod unix {
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(&dir), 0o700);
         publication.retire().unwrap();
+    }
+
+    /// Unix only: a Windows directory cannot be removed while the publication keeps the
+    /// record open.
+    #[test]
+    fn retire_after_the_directory_is_gone_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("home");
+        let publication = record(1).publish(&dir.join("record")).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(publication.retire().unwrap(), RetireOutcome::Missing);
+        assert!(!dir.exists(), "retire creates nothing");
     }
 
     #[test]

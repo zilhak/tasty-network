@@ -308,7 +308,15 @@ impl RecordPublication {
     /// identity and the same contents. Otherwise the file is left as it is.
     pub fn retire(self) -> Result<RetireOutcome, IdentityError> {
         record_name(&self.target)?;
-        let _lock = secret_file::lock(&self.target)?;
+        // The lock file is created when missing, so NotFound means the directory is gone, and
+        // with it the record.
+        let _lock = match secret_file::lock(&self.target) {
+            Ok(lock) => lock,
+            Err(IdentityError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(RetireOutcome::Missing);
+            }
+            Err(e) => return Err(e),
+        };
         match target_of(&self.path) {
             Ok(target) if target == self.target => {}
             Ok(_) => return Ok(RetireOutcome::Replaced),
