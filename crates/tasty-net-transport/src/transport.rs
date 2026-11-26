@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tasty_net_identity::{ConnectionToken, DeviceId};
 use tasty_net_ssh::{PortDiscoveryError, TunnelError};
 
-use crate::cancel::AttemptCancel;
+use crate::cancel::{AttemptCancel, Cancelled};
 use crate::channel::RawChannel;
 use crate::reject::TooOldEvidence;
 
@@ -74,8 +74,12 @@ pub trait EndpointHandle: Send + Sync {
 
     /// Called once the first channel to this endpoint finished its handshake: the endpoint
     /// (a new SSH tunnel, a new QUIC connection) may now be shared with other channels and
-    /// leaves the attempt that created it.
-    fn publish(&self) {}
+    /// leaves the attempt that created it. It is ordered against the attempt's cancel
+    /// ([`Registration::release`](crate::Registration::release)): when the cancel came first
+    /// it shares nothing and returns [`Cancelled`], and the handshake returns `Cancelled`.
+    fn publish(&self) -> Result<(), Cancelled> {
+        Ok(())
+    }
 }
 
 /// What a dialer proves itself with, from the endpoint it reached.
@@ -119,8 +123,8 @@ impl Endpoint {
         self.handle.auth()
     }
 
-    pub(crate) fn publish(&self) {
-        self.handle.publish();
+    pub(crate) fn publish(&self) -> Result<(), Cancelled> {
+        self.handle.publish()
     }
 }
 

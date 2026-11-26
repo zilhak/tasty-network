@@ -133,6 +133,24 @@ pub struct Registration {
     id: u64,
 }
 
+impl Registration {
+    /// Takes the resource out of the attempt for good, in one order with
+    /// [`AttemptCancel::cancel`]: if the cancel came first it returns [`Cancelled`] (the cancel
+    /// closes the resource); otherwise a later cancel no longer reaches the resource.
+    pub fn release(mut self) -> Result<(), Cancelled> {
+        let inner = std::mem::take(&mut self.inner);
+        let Some(inner) = inner.upgrade() else {
+            return Ok(());
+        };
+        let mut list = lock(&inner.resources);
+        if inner.cancelled.load(Ordering::SeqCst) {
+            return Err(Cancelled);
+        }
+        list.retain(|(id, _)| *id != self.id);
+        Ok(())
+    }
+}
+
 impl Drop for Registration {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.upgrade() {
@@ -200,5 +218,29 @@ mod tests {
         assert_eq!(blocked.join().expect("reader").expect("eof"), 0);
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(registration);
+    }
+
+    #[test]
+    fn a_release_after_the_cancel_fails_and_one_before_it_keeps_the_resource() {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let cancel = AttemptCancel::new();
+        let kept = cancel
+            .register(Arc::new(Count(Arc::clone(&closed))))
+            .expect("register");
+        assert_eq!(kept.release(), Ok(()));
+        cancel.cancel();
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            0,
+            "a released resource stays open"
+        );
+
+        let cancel = AttemptCancel::new();
+        let late = cancel
+            .register(Arc::new(Count(Arc::clone(&closed))))
+            .expect("register");
+        cancel.cancel();
+        assert_eq!(late.release(), Err(Cancelled));
+        assert_eq!(closed.load(Ordering::SeqCst), 1, "the cancel closed it");
     }
 }

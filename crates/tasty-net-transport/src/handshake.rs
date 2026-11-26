@@ -738,7 +738,7 @@ pub fn dial_handshake(
     let credential = dialed.ack.bulk_credential.ok_or(HandshakeError::Protocol(
         "an attach ACK without a bulk credential",
     ))?;
-    endpoint.publish();
+    endpoint.publish().map_err(|_| HandshakeError::Cancelled)?;
     let control = channel.control();
     let closer = LinkCloser::new(Arc::clone(&control));
     let framed = channel
@@ -786,7 +786,7 @@ pub fn dial_request(
         cancel,
     )
     .map_err(|e| explain(&channel, e))?;
-    endpoint.publish();
+    endpoint.publish().map_err(|_| HandshakeError::Cancelled)?;
     let framed = channel
         .framed(&config.timeouts.channel(config.heartbeat))
         .map_err(HandshakeError::Io)?;

@@ -15,7 +15,7 @@ use tasty_net_ssh::{
     discover_remote_port,
 };
 
-use crate::cancel::{AttemptCancel, Cancellable, Registration};
+use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 use crate::channel::RawChannel;
 use crate::lock::lock;
 use crate::reject::TooOldEvidence;
@@ -239,10 +239,13 @@ impl EndpointHandle for SshEndpoint {
         Some(DialAuth::Token(self.token.clone()))
     }
 
-    fn publish(&self) {
-        if lock(&self.owned).take().is_none() {
-            return;
-        }
+    fn publish(&self) -> Result<(), Cancelled> {
+        let Some(owned) = lock(&self.owned).take() else {
+            return Ok(());
+        };
+        // A cancel that came first closes the tunnel; it is not shared.
+        owned.release()?;
         lock(&self.published).insert(self.key.clone(), Arc::downgrade(&self.tunnel));
+        Ok(())
     }
 }
