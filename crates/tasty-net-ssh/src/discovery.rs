@@ -37,7 +37,7 @@ pub enum PortMode {
     Subcommand,
     /// Unix remote: `cat ~/<data_dir>/<port_file>`.
     FileUnix,
-    /// Windows remote: `type %USERPROFILE%\<data_dir>\<port_file>`.
+    /// Windows remote: `type "%USERPROFILE%\<data_dir>\<port_file>"`.
     FileWindows,
     /// Subcommand, then the Unix file, then the Windows file. Covers PowerShell, cmd, bash,
     /// and zsh as the remote default shell.
@@ -150,42 +150,43 @@ impl PortDiscoveryConfig {
     }
 }
 
-/// Whether `s` needs no quoting in sh, PowerShell, or cmd. Such values go to the remote shell
-/// unchanged, as tasty sent every value.
-fn is_plain(s: &str) -> bool {
+/// Whether `s` reads as one literal word, unquoted, in a POSIX shell and in PowerShell (the
+/// shells that run `cat` and the subcommand). Such values go to the remote shell unchanged, as
+/// tasty sent every value. Left out on purpose: `\` (an escape in sh), `,` (an array in
+/// PowerShell), `=` (an assignment as sh's first word), `~` (home expansion; only a path's
+/// leading `~/` is meant to expand, see [`sh_path`]), and `@` (splatting in PowerShell).
+fn sh_plain(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,~\\".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:%+".contains(c))
 }
 
-/// Quotes `s` for a POSIX shell: single quotes, with `'` written as `'\''`. A plain value is
-/// left as is. PowerShell reads single quotes too, but writes `'` inside them as `''`; a value
-/// with `'` is quoted for sh only.
+/// Quotes `s` for a POSIX shell: single quotes, with `'` written as `'\''`. A plain value
+/// ([`sh_plain`]) is left as is. PowerShell reads single quotes too, but writes `'` inside them
+/// as `''`; a value with `'` is quoted for sh only.
 fn sh_quote(s: &str) -> String {
-    if is_plain(s) {
+    if sh_plain(s) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
-/// [`sh_quote`] for a path, keeping a leading `~/` outside the quotes so the remote shell still
-/// expands it.
+/// [`sh_quote`] for a record path, keeping a leading `~/` outside the quotes so the remote shell
+/// still expands it. Only a path's leading `~/` expands; a `~` anywhere else is quoted.
 fn sh_path(path: &str) -> String {
     match path.strip_prefix("~/") {
-        Some(rest) if !is_plain(rest) => format!("~/{}", sh_quote(rest)),
-        _ => sh_quote(path),
+        Some(rest) => format!("~/{}", sh_quote(rest)),
+        None => sh_quote(path),
     }
 }
 
-/// Quotes `s` for cmd: double quotes, which keep `%VAR%` expansion. A plain value is left as
-/// is. cmd has no escape for `"` inside double quotes, so such a value cannot be read.
+/// Quotes `s` for cmd, always: double quotes keep one word through spaces, `,`, `=`, and `;`
+/// (cmd's built-ins split on all of them), and cmd still expands `%VAR%` inside them, whose
+/// value can itself hold a space (`%USERPROFILE%` of `C:\Users\Jane Doe`). cmd has no escape
+/// for `"` inside double quotes, so such a value cannot be read.
 fn cmd_quote(s: &str) -> String {
-    if is_plain(s) {
-        s.to_string()
-    } else {
-        format!("\"{s}\"")
-    }
+    format!("\"{s}\"")
 }
 
 /// Failure classes of port discovery. They come from exit codes and elapsed time, not from
@@ -1675,7 +1676,7 @@ mod tests {
     fn explicit_port_file_prefers_cat_then_type() {
         let cmds = explicit_file_commands("/data/x/net.port");
         assert_eq!(cmds[0], "cat /data/x/net.port");
-        assert_eq!(cmds[1], "type /data/x/net.port");
+        assert_eq!(cmds[1], "type \"/data/x/net.port\"");
     }
 
     #[test]
@@ -1687,7 +1688,7 @@ mod tests {
         assert_eq!(sh_path("~/.data/net.port"), "~/.data/net.port");
         assert_eq!(sh_path("~/my data/net.port"), "~/'my data/net.port'");
         assert_eq!(sh_path("/srv/my data/net.port"), "'/srv/my data/net.port'");
-        assert_eq!(cmd_quote("C:\\data\\net.port"), "C:\\data\\net.port");
+        assert_eq!(cmd_quote("C:\\data\\net.port"), "\"C:\\data\\net.port\"");
         assert_eq!(
             cmd_quote("C:\\my data\\net.port"),
             "\"C:\\my data\\net.port\""
@@ -1714,7 +1715,79 @@ mod tests {
         assert_eq!(c.file_command(false), "cat ~/.netprog-data/net.port");
         assert_eq!(
             c.file_command(true),
-            "type %USERPROFILE%\\.netprog-data\\net.port"
+            "type \"%USERPROFILE%\\.netprog-data\\net.port\""
+        );
+    }
+
+    /// The characters each shell reads differently are quoted for that shell.
+    #[test]
+    fn shell_specific_characters_are_quoted() {
+        // sh: `\` escapes, `=` assigns as the first word, `~` expands. PowerShell: `,` makes an
+        // array, `@` splats.
+        for word in ["/srv/a\\b", "a,b", "a=b", "~/x", "x~y", "@args"] {
+            assert_eq!(sh_quote(word), format!("'{word}'"), "{word}");
+        }
+        assert_eq!(sh_quote("--json"), "--json");
+        assert_eq!(sh_quote("/opt/net/bin/netprog"), "/opt/net/bin/netprog");
+        // A record path keeps only its leading `~/` outside the quotes.
+        assert_eq!(sh_path("~/a\\b/net.port"), "~/'a\\b/net.port'");
+        assert_eq!(sh_path("~/a,b/net.port"), "~/'a,b/net.port'");
+        assert_eq!(sh_path("/srv/a=b/net.port"), "'/srv/a=b/net.port'");
+        // cmd: every `type` path is quoted, so `,` `=` `;` and an expanded `%USERPROFILE%` with a
+        // space stay one word.
+        for path in [
+            "C:\\a,b\\net.port",
+            "C:\\a=b\\net.port",
+            "C:\\a;b\\net.port",
+        ] {
+            assert_eq!(cmd_quote(path), format!("\"{path}\""), "{path}");
+        }
+        let mut c = config();
+        c.data_dir = "a=b,c".into();
+        assert_eq!(c.file_command(false), "cat ~/'a=b,c/net.port'");
+        assert_eq!(
+            c.file_command(true),
+            "type \"%USERPROFILE%\\a=b,c\\net.port\""
+        );
+    }
+
+    /// The quoted words, run through a real `sh -c`, come out as the words that went in. The
+    /// subcommand words stay literal (`~/x` too); a record path's leading `~/` expands to HOME.
+    #[cfg(unix)]
+    #[test]
+    fn quoted_words_survive_a_real_shell() {
+        let words = [
+            "/srv/a\\b",
+            "a,b",
+            "a=b",
+            "~/x",
+            "it's",
+            "two words",
+            "%PATH%",
+            "$HOME",
+            "*",
+            "",
+        ];
+        let quoted: Vec<String> = words.iter().map(|w| sh_quote(w)).collect();
+        let script = format!("printf '%s\\n' {}", quoted.join(" "));
+        let out = Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .expect("sh");
+        assert!(out.status.success());
+        let got = String::from_utf8(out.stdout).expect("utf-8");
+        let expected: String = words.iter().map(|w| format!("{w}\n")).collect();
+        assert_eq!(got, expected);
+
+        let home = std::env::var("HOME").expect("HOME");
+        let path = sh_path("~/my dir/a\\b,c=d");
+        let out = Command::new("sh")
+            .args(["-c", &format!("printf '%s' {path}")])
+            .output()
+            .expect("sh");
+        assert_eq!(
+            String::from_utf8(out.stdout).expect("utf-8"),
+            format!("{home}/my dir/a\\b,c=d")
         );
     }
 
@@ -2279,7 +2352,7 @@ mod tests {
             assert_eq!(port, 45124);
             assert_eq!(
                 fake.calls(),
-                ["cat /srv/rec/net.port", "type /srv/rec/net.port"]
+                ["cat /srv/rec/net.port", "type \"/srv/rec/net.port\""]
             );
         }
 
