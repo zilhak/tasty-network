@@ -534,6 +534,19 @@ mod windows {
     }
 
     #[test]
+    fn a_key_directory_deeper_than_max_path_works() {
+        let root = tempfile::tempdir().unwrap();
+        let mut dir = root.path().to_path_buf();
+        while dir.as_os_str().len() <= 300 {
+            dir.push("d".repeat(40));
+        }
+        let key = DeviceKey::load_or_create(&dir).unwrap();
+        assert!(dir.join(DEVICE_KEY_FILE).as_os_str().len() > 260);
+        assert_private(&dir.join(DEVICE_KEY_FILE));
+        assert_eq!(DeviceKey::load_or_create(&dir).unwrap().id(), key.id());
+    }
+
+    #[test]
     fn a_widened_acl_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         DeviceKey::load_or_create(dir.path()).unwrap();

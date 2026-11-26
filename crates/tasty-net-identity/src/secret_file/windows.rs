@@ -97,13 +97,7 @@ pub(super) fn create_temp(path: &Path) -> io::Result<File> {
         lpSecurityDescriptor: sd,
         bInheritHandle: 0,
     };
-    let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    if name[..name.len() - 1].contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains a NUL character",
-        ));
-    }
+    let name = wide_path(path)?;
     // SAFETY: name is a NUL-terminated wide string; attributes and the descriptor, SID and DACL
     // it points to live until the call returns; no template handle is passed. CREATE_NEW does
     // not follow an existing link, and FILE_FLAG_OPEN_REPARSE_POINT keeps it that way.
@@ -123,6 +117,47 @@ pub(super) fn create_temp(path: &Path) -> io::Result<File> {
     }
     // SAFETY: CreateFileW returned a new open handle that nothing else owns; File takes it over.
     Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+/// Paths from this length on get the verbatim prefix, like std's own conversion (a directory
+/// path must leave room for an 8.3 file name below MAX_PATH).
+const LEGACY_MAX_PATH: usize = 248;
+
+/// The NUL-terminated wide path for CreateFileW. std's `OpenOptions::open` makes long paths
+/// absolute and verbatim; the direct call has to do the same, or a key directory deeper than
+/// MAX_PATH would fail only here.
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let absolute = std::path::absolute(path)?;
+    let wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL character",
+        ));
+    }
+    let mut out = with_verbatim_prefix(wide);
+    out.push(0);
+    Ok(out)
+}
+
+/// Add `\\?\` (or `\\?\UNC\` for `\\server\share`) to a long absolute path. Paths that
+/// already are verbatim or device paths (`\\?\`, `\\.\`) and short paths stay as they are.
+fn with_verbatim_prefix(path: Vec<u16>) -> Vec<u16> {
+    let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    if path.len() < LEGACY_MAX_PATH
+        || path.starts_with(&wide(r"\\?\"))
+        || path.starts_with(&wide(r"\\.\"))
+    {
+        return path;
+    }
+    if let Some(rest) = path.strip_prefix(wide(r"\\").as_slice()) {
+        let mut out = wide(r"\\?\UNC\");
+        out.extend_from_slice(rest);
+        return out;
+    }
+    let mut out = wide(r"\\?\");
+    out.extend_from_slice(&path);
+    out
 }
 
 pub(super) fn protect(file: &File) -> io::Result<()> {
@@ -430,7 +465,7 @@ impl Drop for LocalBox {
 /// Test helpers that read and change ACLs by path, separately from the handle-based code above.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::{os::windows::ffi::OsStrExt, path::Path, ptr};
+    use std::{path::Path, ptr};
 
     use windows_sys::Win32::{
         Foundation::ERROR_SUCCESS,
@@ -463,8 +498,9 @@ pub(crate) mod testing {
         pub(crate) entries: Vec<Entry>,
     }
 
+    /// The same long-path conversion as the product code, so deep test paths can be read.
     fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain([0]).collect()
+        super::wide_path(path).unwrap()
     }
 
     pub(crate) fn read_acl(path: &Path) -> AclSummary {
@@ -557,6 +593,24 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paths_get_the_verbatim_prefix() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let long = "a".repeat(LEGACY_MAX_PATH);
+        assert_eq!(with_verbatim_prefix(w(r"C:\x")), w(r"C:\x"));
+        assert_eq!(
+            with_verbatim_prefix(w(&format!(r"C:\{long}"))),
+            w(&format!(r"\\?\C:\{long}"))
+        );
+        assert_eq!(
+            with_verbatim_prefix(w(&format!(r"\\server\share\{long}"))),
+            w(&format!(r"\\?\UNC\server\share\{long}"))
+        );
+        for already in [format!(r"\\?\C:\{long}"), format!(r"\\.\C:\{long}")] {
+            assert_eq!(with_verbatim_prefix(w(&already)), w(&already));
+        }
+    }
 
     #[test]
     fn a_new_temporary_file_is_private_and_unshared_from_creation() {
