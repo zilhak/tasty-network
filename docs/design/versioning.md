@@ -38,7 +38,7 @@
 ## 의존 고정
 
 - P2P의 QUIC ALPN(`tasty-net/2`)은 `proto`와 같은 숫자를 쓴다. `proto`를 올리면 ALPN도 바꾼다. ALPN이 다르면 와이어 버전을 읽을 길이 없으므로 P2P 쪽 호환 판정은 위 표의 ALPN 행이다.
-- Rust 최소 판: workspace의 `rust-version`은 의존 그래프 전체의 최솟값보다 낮게 적지 않는다. 지금 값 1.91은 iroh 1.5.0의 선언에서 왔다. iroh 계열을 빼면 quinn 0.11(문서상 최소 1.74.1)·rustls 0.23(1.71)·`ed25519-dalek` 3.0.0의 선언으로 다시 잰다. 낮출 수 있어도 고정 툴체인(`rust-toolchain.toml`)을 바꾸는지는 레포 기반 작업이 정한다.
+- Rust 최소 판: workspace의 `rust-version`은 의존 그래프 전체의 최솟값보다 낮게 적지 않는다. 지금 값 1.91은 iroh 1.5.0의 선언에서 왔다. iroh 계열을 빼면 quinn 0.11.12(`rust-version = "1.85"`)·rustls 0.23.46(1.71)·`ed25519-dalek` 3.0.0(1.85)의 선언으로 다시 잰다. 그래서 workspace 값은 1.85 이상이어야 한다(quinn 문서의 "최소 1.74.1"은 옛 판의 값이라 쓰지 않는다). 낮출 수 있어도 고정 툴체인(`rust-toolchain.toml`)을 바꾸는지는 레포 기반 작업이 정한다.
 - iroh 계열 의존은 두지 않는다(사용자 결정 2026-11-27). 앞선 설계의 iroh `=1.5.0` 고정과 relay 이미지 `n0computer/iroh-relay:v1.5.0` 고정은 없앤다. 지금 develop의 `relay/`가 그 이미지를 digest와 함께 고정하고 있고, 그 패키지를 없애는 일은 후속 작업이다([rendezvous](rendezvous.md#relay-패키지와-relayyml의-처리-방침)).
 - `quinn`·`rustls`는 `=`로 정확히 고정한다. 둘 다 1.0 전 판(0.x)이라 minor 안에서도 API·동작이 바뀔 수 있고, raw public key처럼 쓰는 곳이 적은 경로에 기대기 때문이다. 올릴 때는 [P2P](p2p.md)의 API 서술(raw public key 설정, grease 설정, 경로 이동, keepalive)을 새 판으로 다시 확인하고 같은 커밋에서 고친다. `tokio`는 semver 범위로 둔다(`Cargo.lock`이 고정한다).
 - rendezvous 서버 이미지는 이 레포가 빌드한다. 서버와 기기 크레이트는 같은 workspace 버전이다. 외부 서버 이미지를 고정할 일은 없다.

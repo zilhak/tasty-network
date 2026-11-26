@@ -25,14 +25,14 @@
 
 | 의존 | 쓰는 크레이트 | 쓰는 것 |
 |---|---|---|
-| `quinn` | p2p, rendezvous | QUIC endpoint·연결·스트림. 기본 feature 대신 `runtime-tokio`·`rustls-ring`만 켠다(`platform-verifier`는 쓰지 않는다. 신뢰는 기기 키로 정한다) |
-| `rustls` | p2p, rendezvous | TLS 1.3과 RFC 7250 raw public key. crypto provider는 `ring` |
+| `quinn` | p2p, rendezvous | QUIC endpoint·연결·스트림. `default-features = false`로 두고 `runtime-tokio`·`rustls-ring`(과 로그용 `log`)만 켠다. 기본 feature의 `platform-verifier`·`bloom`은 빠진다(신뢰는 기기 키로 정하고, 0-RTT를 쓰지 않아 재전송 방지 필터가 필요 없다) |
+| `rustls` | p2p, rendezvous | TLS 1.3과 RFC 7250 raw public key. `default-features = false`, `features = ["ring", "std", "logging"]`. 기본 feature의 `aws_lc_rs`·`tls12`·`prefer-post-quantum`은 넣지 않는다. 설정을 만들 때 ring provider를 명시한다(`builder_with_provider`) |
 | `tokio` | p2p, rendezvous | 런타임, UDP 소켓, 타이머 |
 | `ed25519-dalek` | identity(간접으로 p2p, rendezvous) | 기기 키 서명·검증 |
 | `serde`·`serde_json` | rendezvous | 조정 메시지 |
 
-- 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다), rustls 0.23.46이다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
-- crypto provider를 `ring`으로 고르는 근거: `aws-lc-rs`는 Windows 빌드에 C 도구(cmake 등)를 더 요구한다. 세 OS 호스트 러너에서 추가 준비가 없는 쪽을 고른다.
+- 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다, `rust-version = "1.85"`), rustls 0.23.46(`rust-version = "1.71"`)이다. raw public key resolver가 0.23.16부터 있으므로 rustls는 그 이상이어야 한다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
+- crypto provider를 `ring`으로 고르는 근거: rustls 0.23의 기본 provider는 `aws_lc_rs`라 기본 feature를 그대로 두면 두 provider가 함께 들어온다. 하나만 두려면 고르고 기본 feature를 꺼야 한다. 둘 다 C 컴파일러가 필요하다. `aws-lc-rs`는 비 FIPS 빌드에 CMake가 필요 없지만, Windows x86·x86-64에서는 NASM이 필요하고 없으면 미리 빌드한 객체(`prebuilt-nasm`)에 기대야 한다([aws-lc-rs 빌드 안내](https://github.com/aws/aws-lc-rs/blob/main/aws-lc-rs/README.md#build)). quinn의 기본 TLS feature도 `rustls-ring`이다. 그래서 OS마다 조건이 갈리지 않는 ring으로 고른다. TLS 1.2는 QUIC에 쓰이지 않으므로 `tls12`를 뺀다.
 
 ## 소켓 하나와 패킷 나누기
 
@@ -151,41 +151,47 @@ A                         서버                          B
 - 켰을 때만 서버 연결을 유지한다. 연결을 거는 쪽도 켜져 있어야 한다. 거는 쪽의 펀칭 요청도 자기 서버 연결로 보내기 때문이다.
 - 같은 서버에 붙은 기기끼리만 연결된다. 같은 서버인지 비교하는 로직은 두지 않는다. 기기는 설정한 서버 하나에만 등록하고 그 서버에만 요청한다. 다른 서버에 등록한 상대는 이 서버에 없으므로 `not_found`로 끝난다(`P2pConnectError::PeerNotFound`). 서버끼리 연동하는 기능도 없다.
 - 전역 discovery는 없다. 상대를 찾는 길은 설정한 rendezvous 서버 하나뿐이다. DNS 기반 주소 게시나 공용 디렉터리를 쓰지 않는다.
-- 펀칭 실패는 연결 실패다. 양쪽 모두 `Dependent`인 NAT 조합을 포함한다. 중계로 넘어가지 않는다. 넘어갈 중계 경로가 이 구조에 없다.
+- 펀칭 실패는 연결 실패다. 양쪽 모두 `dependent`인 NAT 조합을 포함한다(호스트 후보로만 시도하고, 닿지 않으면 `NatUnsupported`). 중계로 넘어가지 않는다. 넘어갈 중계 경로가 이 구조에 없다.
 - 앞서 정한 Q3(직접 경로 확인 전 attach 데이터 보류, 2026-11-27)는 이 구조에서 저절로 충족된다. QUIC 연결은 펀칭으로 확인한 직접 주소 위에서만 서고, 서버는 기기 사이 패킷을 나르지 않는다. 그래서 handshake v2도 attach 데이터도 서버를 지나지 않는다. iroh 설계의 `hold_until_direct` 설정, `DirectRequired`·`RelayAllowed` 정책, `direct_wait`, `unknown_relay_policy`는 지킬 대상이 없어져 없앤다.
 - 서버 주소는 소비자(tasty) 설정이다. 라이브러리에 기본 서버 상수를 두지 않는다. tasty의 기본은 hub가 운영하는 rendezvous 서버(hub rendezvous)이고, 사용자가 자기 서버를 지정하면 그 서버 하나만 쓴다([rendezvous](rendezvous.md#클라이언트-설정)).
 
 ## 연결 유지
 
-| 대상 | keepalive | idle timeout | 근거 |
-|---|---|---|---|
-| 서버 QUIC 연결 | `rendezvous.keepalive_interval` 15 s(quinn `TransportConfig::keep_alive_interval`) | `rendezvous.idle_timeout` 45 s(`max_idle_timeout`. QUIC은 양쪽 값 중 작은 쪽을 쓴다, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1) | 아래 |
-| 펀칭된 경로의 QUIC 연결 | `quic.keepalive_interval` 15 s | `quic.idle_timeout` 45 s | 아래 |
+| 대상 | keepalive | idle timeout |
+|---|---|---|
+| 서버 QUIC 연결 | `rendezvous.keepalive_interval` 15 s(quinn `TransportConfig::keep_alive_interval`, quinn 기본은 꺼짐) | `rendezvous.idle_timeout` 45 s(`max_idle_timeout`, quinn 기본 30 s) |
+| 펀칭된 경로의 QUIC 연결 | `quic.keepalive_interval` 15 s | `quic.idle_timeout` 45 s |
 
-- NAT의 UDP 매핑 만료: [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3 REQ-5는 2분 미만으로 만료하지 말라고(권장 5분 이상) 하지만, 같은 절이 짧은 타이머의 NAT가 실제로 있다고 적는다. ICE는 이 사정으로 keepalive 기본을 15초로 둔다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11, Tr 기본 15 s, 15 s 미만 금지). 같은 값을 쓴다.
-- idle timeout은 keepalive의 세 배다. keepalive 패킷 두 개를 잃어도 끊지 않는다.
+- 주기 15 s의 근거: NAT의 UDP 매핑 만료 시간에 대해 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3 REQ-5는 2분 미만으로 만료하지 말라고(권장 5분 이상) 하고, NAT마다 쓰는 값의 차이가 크다고 적는다. [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1.2는 "experience shows that sending packets every 30 seconds is necessary to prevent the majority of middleboxes from losing state for UDP flows"라고 한다. ICE는 keepalive 기본을 15 s로 둔다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11, 15 s 미만 금지). 30 s보다 짧은 ICE 값을 그대로 빌린다.
+- idle timeout 45 s는 keepalive의 세 배다. 협상된 값은 양쪽 값 중 작은 쪽이다(RFC 9000 §10.1). keepalive PING은 확인 응답을 요구하는 패킷이라 잃으면 손실 복구(PTO)로 다시 보낸다. 그래서 보통은 PING 두 번을 잃어도 연결이 남지만, 실제 여유는 손실 양상과 PTO에 달렸고 보장은 아니다.
 - EIM NAT에서는 서버 연결의 keepalive가 같은 매핑을 살리지만, 상대 주소에 대한 필터 상태는 상대와 주고받는 패킷만 살린다. 그래서 펀칭된 경로에도 따로 keepalive를 둔다.
 - 링크의 heartbeat와의 관계: attach 링크는 프레임 heartbeat(`HEARTBEAT_INTERVAL` 5 s, `read_timeout` 기본 30 s, [전송 추상화](transport.md#heartbeat와-읽기-시간-제한))를 그대로 쓴다. 링크가 살아 있는 동안은 heartbeat가 먼저 끊김을 본다(기본값에서 30 s < 45 s. 설정을 바꿔 이 순서가 뒤집혀도 동작은 맞고, 끊김을 먼저 보는 쪽만 바뀐다). QUIC keepalive는 링크가 없거나 조용한 연결(요청 채널만 있는 연결, 다음 채널을 기다리는 연결)의 매핑을 살린다. QUIC idle timeout으로 끝난 연결의 읽기는 `TimedOut`으로 분류된다([전송 추상화](transport.md#읽기-실패-분류)).
 
 ## 재시도와 포기
 
-- 서버 재연결: 서버 연결이 끊기면 지수 backoff로 다시 붙는다. 처음 `rendezvous.reconnect.initial`(1 s), `multiplier`(2)배씩, 상한 `max_delay`(60 s), 각 간격에 `jitter`(±20%) 무작위 폭. 연결이 `reset_after`(60 s) 넘게 유지되면 간격을 처음으로 되돌린다. 횟수 상한 `max_attempts` 기본은 0(켜져 있는 동안 계속)이다. 상한을 주면 그 횟수 뒤 `Stopped{cause: reconnect_exhausted}`로 멈춘다. P2P를 끄면 재연결을 멈춘다. 서버가 `superseded`(같은 기기 ID의 새 등록, [rendezvous](rendezvous.md#서버-상태))나 `access_denied`로 닫으면 다시 붙지 않고 endpoint 상태로 알린다(소비자가 사용자에게 보인다).
-- 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 `punch.window`나 `quic.handshake_timeout`으로 실패하면 `punch.retry_delay`(기본 1 s) 뒤 새 `punch_request`로 다시 한다(그 사이 반사 주소를 다시 확인한다). 모두 실패하면 `P2pConnectError::PunchFailed`로 끝낸다.
-- 바로 끝내는 경우(재시도 없음): `nat_unsupported`, `declined`, `self`, P2P 꺼짐, 상대 키 불일치, ALPN 불일치.
-- 서버에 아직 붙지 못한 상태의 연결 시도는 `RendezvousUnavailable`로 바로 끝난다. 다음 시도를 언제 할지는 소비자가 정한다.
+- 서버 재연결: 서버 연결이 끊기면 지수 backoff로 다시 붙는다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 그래서 대기는 `max_delay`(기본 60 s)를 넘지 않는다. 대기 뒤의 접속·등록 시간(`rendezvous.connect_timeout`, `hello_timeout`)은 이 대기와 따로 걸린다. 연결이 `reset_after`(60 s) 넘게 유지되면 n을 1로 되돌린다. 횟수 상한 `max_attempts` 기본은 0(켜져 있는 동안 계속)이다. 상한을 주면 그 횟수 뒤 `Stopped{cause: reconnect_exhausted}`로 멈춘다. P2P를 끄면 재연결을 멈춘다. `superseded`, `access_denied`, `unsupported_proto`, ALPN 불일치, 서버 키 불일치면 다시 붙지 않고 `Stopped`로 알린다(소비자가 사용자에게 보인다, [rendezvous](rendezvous.md#메시지-표)).
+- 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 창이나 handshake 기한으로 실패하면 반사 주소 재확인(흐름 3)을 바로 시작하고, `punch.retry_delay`(기본 1 s)와 재확인 중 늦게 끝나는 쪽을 기다린 뒤 새 `punch_request`로 다시 한다. 모두 실패하면 `P2pConnectError::PunchFailed`로 끝낸다.
+- 연결 시도 하나의 전체 상한: 시도마다 `punch.request_timeout` + 서버 `start_delay_max` + `window_ms` + `handshake_ms`, 시도 사이마다 `max(punch.retry_delay, nat.stun_rto × nat.stun_attempts)`. 기본값이면 2 × (3 + 1 + 5 + 5) s + 1.5 s = 29.5 s다. 서버 값은 `welcome.limits`로 알고 계산해 연결 정보에 보인다.
+- 바로 끝내는 경우(재시도 없음): `nat_unsupported`, `declined`, `self`, P2P 꺼짐, 상대 키 불일치, ALPN 불일치, 서버 한계값 불일치.
+- 서버에 아직 붙지 못한 상태의 연결 시도는 `RendezvousUnavailable`로 바로 끝난다. 다음 시도를 언제 할지는 연결 목록의 재연결 도우미나 소비자가 정한다([전송 추상화](transport.md#연결-목록)).
 
 | `P2pConnectError` | 뜻 | `is_retryable` |
 |---|---|---|
 | `Disabled` | 이 기기의 P2P가 꺼져 있다. 네트워크에 아무것도 보내지 않았다 | 아니오 |
-| `RendezvousUnavailable` | 서버에 붙어 있지 않다 | 예 |
+| `RendezvousUnavailable` | 서버에 붙어 있지 않다(endpoint가 `Connecting`·`Backoff`·`Stopped`. `Stopped`면 원인을 함께 싣는다) | `Stopped`면 아니오, 그 밖은 예 |
+| `RendezvousLost` | `punch_go`를 받기 전에 조정 연결을 잃었다 | 예 |
+| `RequestTimeout` | `punch.request_timeout` 안에 서버 답이 없다 | 예 |
 | `PeerNotFound` | 서버에 상대가 없다(꺼져 있음, 다른 서버, 응답 없음) | 예 |
 | `Declined` | 상대가 이 기기를 페어링 목록에 두지 않았다 | 아니오 |
-| `NatUnsupported` | 두 기기 모두 `Dependent` 매핑 | 아니오 |
-| `PunchFailed` | 펀칭 두 번이 시간 안에 서지 않았다 | 아니오 |
+| `NatUnsupported` | 두 기기 모두 `dependent`이고 호스트 후보로도 닿지 않았다(또는 호스트 후보가 없다) | 아니오 |
+| `PunchCancelled{reason}` | 서버가 진행 중 펀칭을 취소했다(`peer_gone`·`expired`) | 예 |
+| `PunchFailed` | 펀칭 시도가 모두 시간 안에 서지 않았다 | 아니오 |
 | `Busy` | 서버 상한(동시 펀칭 수 등) | 예 |
+| `ServerLimitsInvalid{key}` | 서버가 알린 시간 값이 이 기기 설정의 상한과 맞지 않는다(`welcome.limits`) | 아니오 |
 | `PeerIdentityMismatch` | QUIC 상대 키가 요청한 기기 ID와 다르다 | 아니오 |
 | `SelfAttach` | 자기 기기 ID로 연결하려 했다 | 아니오 |
 | `AlpnMismatch` | 상대와 ALPN(`proto`)이 다르다([버전·호환](versioning.md)) | 아니오 |
+| `Cancelled` | 호출자가 시도를 취소했다 | 아니오 |
 
 `PunchFailed`의 `is_retryable`이 false인 것은 같은 망 조건에서 곧바로 다시 걸어도 같은 결과일 가능성이 높아서다. 소비자가 자동으로 되풀이하지 않고 사용자에게 알린다. 망이 바뀐 뒤 사용자가 다시 거는 것은 막지 않는다.
 
@@ -199,7 +205,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 |---|---|---|
 | `Off` | P2P 꺼짐. 소켓 없음 | 없음 |
 | `Connecting` | 서버 접속·등록 중(흐름 1~2) | 서버 주소, 시도 번호 |
-| `Registered` | 등록됨. 연결을 걸고 받을 수 있다 | 서버 주소, 로컬 소켓 주소, 반사 주소, `NatMapping`, 등록 시각 |
+| `Registered` | 등록됨. 연결을 걸고 받을 수 있다 | 서버 주소, 로컬 소켓 주소, 반사 주소, `NatMapping`, 서버 한계값(`welcome.limits`), 등록 시각 |
 | `Backoff` | 다음 재연결 대기 | 시도 번호, 다음 시도 시각, 직전 실패 원인 |
 | `Stopped` | 재연결하지 않고 멈춤 | 원인 |
 
@@ -207,11 +213,11 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 |---|---|
 | `Off` → `Connecting` | `enabled` |
 | `Connecting` → `Registered` | `registered` |
-| `Connecting` → `Backoff` | `connect_timeout`, `hello_timeout`, `io`(분류 포함), `server_closed`(코드 포함) |
-| `Registered` → `Registered` | `nat_changed`(반사 주소나 `NatMapping`이 바뀜. 상태는 같고 값만 바뀐다) |
+| `Connecting` → `Backoff` | `connect_timeout`, `hello_timeout`, `io`(분류 포함), `server_closed`(코드 0·4·5·6) |
+| `Registered` → `Registered` | `nat_changed`(반사 주소나 `NatMapping`이 바뀜. 상태는 같고 값만 바뀐다), `server_limits_mismatch`(서버 한계값이 이 기기 설정과 어긋남. 펀칭은 `ServerLimitsInvalid`로 끝난다) |
 | `Registered` → `Backoff` | `idle_timeout`, `server_closed`, `io` |
 | `Backoff` → `Connecting` | `backoff_elapsed` |
-| `Connecting`·`Registered`·`Backoff` → `Stopped` | `superseded`, `access_denied`, `unsupported_proto`(서버 종료 코드 1·2·3, [rendezvous](rendezvous.md#메시지)), `reconnect_exhausted` |
+| `Connecting`·`Registered`·`Backoff` → `Stopped` | `superseded`, `access_denied`, `unsupported_proto`(서버 종료 코드 1·2·3), `alpn_mismatch`, `server_key_mismatch`(TLS 단계, [rendezvous](rendezvous.md#메시지-표)), `reconnect_exhausted` |
 | 어느 상태든 → `Off` | `disabled` |
 
 ### 연결 시도와 연결
@@ -219,109 +225,185 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | 상태 | 쪽 | 뜻 |
 |---|---|---|
 | `Requesting` | A | `punch_request`를 보내고 `punch_go`·`punch_refused`를 기다림 |
-| `Offered` | B | `punch_offer`를 받고 페어링 목록 확인 |
-| `Punching` | 양쪽 | 프로브 송수신(흐름 8~9). 시도 번호와 후보 목록을 싣는다 |
-| `Handshaking` | 양쪽 | 성공한 주소로 QUIC handshake(흐름 10). 주소 쌍을 싣는다 |
+| `Offered` | B | `punch_offer`를 받아 페어링 목록을 보고 답함. 수락했으면 `punch_go`를 기다림 |
+| `Scheduled` | 양쪽 | `punch_go`를 받고 `start_after_ms`를 기다림 |
+| `Punching` | 양쪽 | 프로브 송수신(흐름 8~9). 시도 번호, 후보 목록, 창 끝 시각을 싣는다 |
+| `Handshaking` | 양쪽 | QUIC handshake(흐름 10). A는 성공한 주소로 건 연결, B는 세션에 묶인 주소에서 받은 연결. 주소 쌍과 기한을 싣는다 |
 | `RetryWait` | A | 다음 펀칭 시도 대기. 시도 번호, 다음 시도 시각, 직전 실패 원인 |
-| `Connected` | 양쪽 | QUIC 연결이 섰다. 로컬·원격 주소, 상대 기기 ID, 서버 |
+| `Connected` | 양쪽 | QUIC 연결이 섰다. 주소 쌍, 상대 기기 ID, 서버 |
 | `Closed` | 양쪽 | 끝. 원인 |
 
 | 전이 | 원인 |
 |---|---|
 | (시작) → `Requesting` | `connect_called` |
-| `Requesting` → `Punching` | `punch_go` |
-| `Requesting` → `Closed` | `not_found`, `declined`, `nat_unsupported`, `busy`, `self`, `request_timeout`, `rendezvous_lost` |
-| (시작) → `Offered` → `Punching` | `punch_offer` → `accepted` |
-| `Offered` → `Closed` | `not_paired`(B가 거절) |
-| `Punching` → `Handshaking` | `probe_succeeded`(주소 포함) |
-| `Punching` → `RetryWait` / `Closed` | `punch_window_elapsed`(남은 시도가 있으면 `RetryWait`, 없으면 `Closed`) |
+| `Requesting` → `Scheduled` | `punch_go` |
+| `Requesting` → `Closed` | `not_found`, `declined`, `nat_unsupported`, `busy`, `self`(서버 거절), `request_timeout`, `rendezvous_lost`, `server_limits_invalid` |
+| (시작) → `Offered` | `punch_offer` |
+| `Offered` → `Scheduled` | `punch_go`(수락 뒤) |
+| `Offered` → `Closed` | `not_paired`(B가 거절), `go_timeout`, `punch_cancelled(reason)`, `rendezvous_lost` |
+| `Scheduled` → `Punching` | `start_elapsed` |
+| `Scheduled`·`Punching` → `RetryWait` / `Closed` | `punch_cancelled(reason)`(A는 남은 시도가 있으면 `RetryWait`, B는 `Closed`) |
+| `Punching` → `Handshaking` | A: `probe_succeeded`(주소 포함). B: `quic_incoming`(세션에 묶인 주소에서 온 Initial) |
+| `Punching` → `RetryWait` / `Closed` | A: `punch_window_elapsed`(남은 시도가 있으면 `RetryWait`, 없으면 `Closed`). B: `accept_deadline_elapsed`(`Closed`) |
 | `Handshaking` → `Connected` | `quic_established` |
-| `Handshaking` → `RetryWait` / `Closed` | `quic_handshake_timeout`, `peer_identity_mismatch`(바로 `Closed`), `alpn_mismatch`(바로 `Closed`) |
+| `Handshaking` → `RetryWait` / `Closed` | `handshake_timeout`(A는 남은 시도가 있으면 `RetryWait`), `peer_identity_mismatch`(바로 `Closed`), `session_mismatch`(B, 바로 `Closed`), `alpn_mismatch`(바로 `Closed`) |
 | `RetryWait` → `Requesting` | `retry_elapsed` |
-| `Connected` → `Connected` | `remote_address_changed`(상대 NAT 재매핑으로 QUIC 경로가 옮겨짐. 이전·새 주소를 싣는다) |
+| `Connected` → `Connected` | `remote_address_observed_change`(B에서만, 아래) |
 | `Connected` → `Closed` | `closed_by_local(code)`, `closed_by_peer(code)`, `idle_timeout`, `endpoint_off` |
 | 어느 상태든 → `Closed` | `cancelled`, `disabled` |
 
-- `Connected`에서 끊긴 연결을 다시 맺는 일은 연결 목록을 가진 transport 쪽이 한다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 새 연결 시도로 받는다.
-- QUIC 경로 이동: quinn은 상대 주소가 바뀌면(NAT 재매핑) 경로 확인 뒤 연결을 새 주소로 옮긴다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9). 연결 유지를 위한 동작이라 켜 둔다(`quic.allow_migration`, 기본 켬). 옮겨진 것은 `remote_address_changed`로 드러난다. quinn에는 이 변화를 알리는 콜백이 없으므로 `path.poll_interval`(기본 1 s)마다 `Connection::remote_address()`를 읽어 비교한다.
+- `Connected`에서 끊긴 연결을 다시 맺는 일은 연결 목록을 가진 transport 쪽이 한다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 새 연결 시도(새 펀칭)로 받는다. 중계로 넘어가지 않는다.
+- transport 연결 목록의 네 상태와의 대응: `Requesting`·`Offered`·`Scheduled`·`Punching`·`Handshaking`·`RetryWait`는 `connecting`(재연결로 만든 항목이면 `reconnecting`), `Connected`는 `connected`, `Closed`는 `disconnected`다. 세부 상태는 항목의 `phase`에 그대로 보인다.
+
+### 주소 바뀜 (QUIC 경로 이동)
+
+- QUIC 연결은 언제나 A가 연다. 그래서 A가 QUIC 클라이언트, B가 서버다. QUIC의 연결 이동은 클라이언트 주소에만 허용된다. 클라이언트는 자기가 시작하지 않은 서버 주소 변화의 패킷을 버린다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9, §9.6).
+- A 쪽 NAT 재매핑: B가 새 주소에서 오는 A의 패킷을 받고, quinn이 경로 검증과 함께 그 주소로 옮긴다(B의 quinn `ServerConfig::migration`, 설정 `quic.allow_migration`, 기본 켬. 이 설정은 서버 쪽에서 클라이언트의 이동을 받을지만 정한다). B는 `Connection::remote_address()`의 변화를 `remote_address_observed_change{from, to}`로 기록한다.
+- B 쪽 NAT 재매핑: A는 새 주소에서 온 B의 패킷을 버린다. 연결은 `quic.idle_timeout` 뒤 `idle_timeout`으로 끊기고(양쪽 모두), transport가 새 펀칭으로 다시 맺는다. 이 경우를 따로 알아내지는 않는다. 끊긴 원인은 `idle_timeout`이다.
+- 이 기록은 "관측된 원격 주소 변화"다. 경로 검증이 끝났다는 뜻이 아니다. quinn은 이동을 시작할 때 현재 경로를 바꾸고, 검증이 실패하면 옛 경로로 되돌린다. 되돌림도 같은 사건으로 기록된다.
+- quinn에는 이 변화를 알리는 콜백이 없어 `path.poll_interval`(기본 1 s)마다 `remote_address()`를 읽어 비교한다. 한 간격 안에 바뀌었다 돌아온 변화와, 한 간격 안의 두 번째 이후 변화는 놓친다. 이력은 폴링 시점의 값만 담는다.
 
 ## 설정값
 
 모든 타이머·재시도 횟수·간격·타임아웃·keepalive 주기·상한은 설정값이다(사용자 결정 2026-11-27, 원문 "타이머, 재시도횟수 이런것은 전부 설정가능 및 보기 가능값이어야하지").
 
 - 바꾸기: `P2pConfig.settings`(`P2pSettings`)로 준다. 주지 않은 항목은 기본값이다. 값의 범위 검사(예: `idle_timeout > keepalive_interval`)는 `bind`가 하고 어긋나면 오류로 돌려준다.
-- 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default` 또는 `configured`다. 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
-- 코드 안 상수로만 있는 시간·횟수·상한은 두지 않는다. 와이어 형식 값(STUN magic cookie, 토큰 길이 16바이트, 속성 번호)은 시간·횟수가 아니므로 설정이 아니고 형식 모듈에 모은다. 정적 검사가 설정 모듈 밖의 시간·횟수 리터럴을 찾는다([CI와 시험 환경](testing.md#설정값-시험)).
-- 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh·identity의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖).
+- 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default`(이 표의 기본), `configured`(설정으로 줌), `os_default`(OS가 정한 값을 읽어 보임) 중 하나다. 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
+- 세 가지를 구분한다.
+  1. 설정 가능한 동작값: 아래 두 표(이 레포가 정하는 값, 의존성이 노출하는 값). 모두 설정·조회된다.
+  2. 의존성 내부 값: 의존성이 노출하지 않아 설정할 수 없는 값. 이름과 출처만 아래 표에 적는다.
+  3. 와이어 형식 상수: 프로토콜 형식의 정의라 동작값이 아니다(아래 표). 형식 모듈에 모은다.
+- 코드 안 상수로만 있는 동작값은 두지 않는다. 정적 검사와 기본값 대조 시험이 지킨다([CI와 시험 환경](testing.md#설정값-시험)).
+- 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh·identity의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖). transport에 이번에 새로 정한 연결 목록 값은 처음부터 따른다([전송 추상화](transport.md#연결-목록)).
+
+### 이 레포가 정하는 값
 
 | 키 | 기본 | 근거 |
 |---|---|---|
 | `rendezvous.connect_timeout` | 5 s | 서버까지 QUIC handshake는 RTT 두세 번이다. 먼 서버(RTT 300 ms)와 손실 몇 번을 덮는다 |
 | `rendezvous.hello_timeout` | 5 s | `hello` → `welcome` 한 번 왕복. 위와 같은 여유 |
-| `rendezvous.keepalive_interval` | 15 s | [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11 Tr 기본 15 s. NAT 매핑 만료가 짧은 망을 덮는다([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3) |
-| `rendezvous.idle_timeout` | 45 s | keepalive의 세 배. 두 번 잃어도 유지 |
+| `rendezvous.keepalive_interval` | 15 s | 위 "연결 유지" |
+| `rendezvous.idle_timeout` | 45 s | 위 "연결 유지" |
 | `rendezvous.reconnect.initial` | 1 s | 일시 끊김은 바로 복구 |
 | `rendezvous.reconnect.multiplier` | 2 | 서버 장애 때 접속 폭주를 줄이는 보통의 지수 backoff |
-| `rendezvous.reconnect.max_delay` | 60 s | 서버가 돌아온 뒤 1분 안에는 다시 등록 |
+| `rendezvous.reconnect.max_delay` | 60 s | 서버가 돌아온 뒤 1분 안에는 다시 등록. 무작위 폭을 더한 뒤에도 이 값으로 자른다 |
 | `rendezvous.reconnect.jitter` | 0.2 | 같은 때 끊긴 기기들이 같은 때 다시 붙지 않게 |
 | `rendezvous.reconnect.reset_after` | 60 s | 1분 유지되면 안정된 연결로 본다 |
 | `rendezvous.reconnect.max_attempts` | 0(무제한) | 켜 둔 동안은 계속 붙으려 한다. 끄는 것은 사용자가 P2P를 끄는 것이다 |
-| `nat.stun_rto` | 500 ms | [RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.2.1 RTO 권장 초깃값 500 ms |
-| `nat.stun_attempts` | 3 | RFC 8489의 Rc 기본 7보다 적다. 대상이 셋이고 응답 없음은 `Unknown`으로 두면 되므로 1.5 s 안에 끝낸다 |
-| `punch.request_timeout` | 3 s | 서버 `offer_timeout` 2 s + 서버 왕복 여유 |
+| `nat.stun_rto` | 500 ms | [RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.2.1 RTO 권장 초깃값 500 ms(두 배로 늘리지 않는 고정 간격으로 줄였다, 위 "NAT 판별") |
+| `nat.stun_attempts` | 3 | RFC 8489의 Rc 기본 7보다 적다. 응답 없음은 `unknown`으로 두면 되므로 1.5 s 안에 끝낸다 |
+| `punch.request_timeout` | 3 s | 서버 `offer_timeout` 2 s + 서버 왕복 여유. 서버 값보다 커야 한다(`welcome.limits`로 검사) |
+| `punch.go_timeout` | 3 s | B가 수락한 뒤 `punch_go`를 기다리는 시간. 서버 왕복 한 번에 여유 |
 | `punch.probe_interval` | 50 ms | [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §14.2 Ta 기본 50 ms |
-| `punch.window` | 5 s(임시) | 후보 8개에서 후보마다 열 번 넘게 보낸다. [펀칭 실험](#펀칭-실험)으로 확정 |
-| `punch.max_candidates` | 8 | 반사 2 + 호스트 6이면 보통의 기기(유선·무선·IPv6)를 덮는다. 프로브 한 바퀴 400 ms |
+| `punch.window_max` | 30 s | 서버가 주는 창(`punch_go.window_ms`, 서버 기본 5 s)의 상한 검사. 잘못된 서버 설정이 연결 시도를 몇 분씩 붙잡지 않게 |
+| `quic.handshake_timeout_max` | 30 s | 서버가 주는 handshake 기한(`handshake_ms`, 서버 기본 5 s)의 상한 검사 |
+| `punch.max_candidates` | 8 | 반사 2 + 호스트 6이면 보통의 기기(유선·무선·IPv6)를 덮는다. 프로브 한 바퀴 400 ms. peer reflexive를 더해도 넘지 않는다 |
 | `punch.attempts` | 2 | 일시 손실로 한 번 실패한 경우만 덮는다. 펀칭 실패는 연결 실패라는 결정에 맞춰 짧게 둔다 |
 | `punch.retry_delay` | 1 s | 반사 주소를 다시 확인할 시간 |
-| `quic.handshake_timeout` | 5 s(임시) | 직접 경로 RTT 몇 번. 실험으로 확정 |
-| `quic.keepalive_interval` | 15 s | 서버 연결과 같은 근거 |
-| `quic.idle_timeout` | 45 s | 서버 연결과 같은 근거 |
-| `quic.max_bidi_streams` | 64 | attach 링크 몇 개와 bulk·요청 채널을 넉넉히 덮는다 |
-| `quic.allow_migration` | 켬 | 상대 NAT 재매핑에도 연결을 유지한다(위 "QUIC 경로 이동") |
+| `quic.keepalive_interval` | 15 s | 위 "연결 유지" |
+| `quic.idle_timeout` | 45 s | 위 "연결 유지" |
+| `quic.max_bidi_streams` | 64 | attach 링크 몇 개와 bulk·요청 채널을 넉넉히 덮는다(quinn 기본 100) |
+| `quic.max_uni_streams` | 0 | 단방향 스트림을 쓰지 않는다(quinn 기본 100) |
+| `quic.allow_migration` | 켬 | B가 A의 NAT 재매핑에도 연결을 유지한다(위 "주소 바뀜") |
 | `path.poll_interval` | 1 s | 주소 바뀜을 1초 안에 연결 정보에 반영 |
-| `history.limit` | 32 | 연결마다 전이 이력 상한. 재연결 몇 번과 경로 바뀜을 담고, 넘치면 오래된 것부터 버리고 버린 수를 센다 |
+| `history.limit` | 32 | 연결마다 전이 이력 상한. 재연결 몇 번과 주소 바뀜을 담고, 넘치면 오래된 것부터 버리고 버린 수를 센다 |
 | `events.queue_limit` | 256 | 이벤트를 읽지 않는 호출자 때문에 메모리가 늘지 않게 |
+| `socket.recv_buffer`, `socket.send_buffer` | OS 값 | 따로 주지 않으면 OS 값을 쓰고 조회에 `os_default`로 보인다 |
 
-- 서버 쪽 값(`offer_timeout`, 시작 지연, 상한)은 서버 설정이다([rendezvous](rendezvous.md#서버-설정값)).
-- quinn·rustls·OS 소켓의 기본값 중 위 표에 걸리는 것은 기본값에 맡기지 않고 표의 값으로 명시해 넣는다. quinn `TransportConfig`의 `keep_alive_interval`(quinn 기본은 꺼짐), `max_idle_timeout`(quinn 기본 30 s), `max_concurrent_bidi_streams`(quinn 기본 100), `max_concurrent_uni_streams`(0으로 넣는다), `ServerConfig::migration`이다. quinn의 손실 복구·혼잡 제어 값(초기 RTT 등)은 QUIC 표준 값을 그대로 쓰고 이 표에 넣지 않는다. 그 값을 바꿀 필요가 생기면 이 표에 항목을 더한다.
+- 펀칭 창과 handshake 기한, 시작 지연, `offer_timeout`은 서버 설정이다([rendezvous](rendezvous.md#서버-설정값)). 기기는 `welcome.limits`와 `punch_go`로 받은 값을 쓰고 상한만 검사한다.
+
+### 의존성이 노출하는 값
+
+quinn·rustls가 설정 함수를 주는 시간·횟수·상한이다. 기본값은 quinn·rustls 기본을 그대로 두거나(근거는 그 표준) 이 설계가 바꾼다. 모두 `settings()`에 보인다. "quinn 0.11.12 기본"으로 적은 값은 구현이 고정한 판의 소스 값으로 이 표를 채우고, 기본값 대조 시험이 그 값을 지킨다.
+
+| 키 | 의존성 설정 | 기본 | 근거 |
+|---|---|---|---|
+| `quic.initial_rtt` | `TransportConfig::initial_rtt` | 333 ms | [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002) §6.2.2 kInitialRtt. 서버 접속의 Initial 재전송 간격이 이 값에서 시작한다 |
+| `quic.packet_threshold` | `TransportConfig::packet_threshold` | 3 | RFC 9002 §6.1.1 kPacketThreshold |
+| `quic.time_threshold` | `TransportConfig::time_threshold` | 9/8 | RFC 9002 §6.1.2 kTimeThreshold |
+| `quic.persistent_congestion_threshold` | `TransportConfig::persistent_congestion_threshold` | 3 | RFC 9002 §7.6.1 kPersistentCongestionThreshold |
+| `quic.stream_receive_window`, `quic.receive_window`, `quic.send_window` | `TransportConfig`의 같은 이름 | quinn 0.11.12 기본 | 흐름 제어 상한. bulk 전송 속도를 실측(D4 `bulk_transfer_matches_bytes`)으로 보고 바꾼다 |
+| `quic.initial_mtu`, `quic.min_mtu` | `TransportConfig::initial_mtu`·`min_mtu` | 1200 B | [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §14 최소 데이터그램 크기 |
+| `quic.mtu_discovery.interval`, `quic.mtu_discovery.upper_bound` | `MtuDiscoveryConfig` | quinn 0.11.12 기본 | 경로 MTU 탐색 주기·상한 |
+| `quic.crypto_buffer_size` | `TransportConfig::crypto_buffer_size` | quinn 0.11.12 기본 | handshake 메시지 버퍼 상한 |
+| `quic.datagrams` | `datagram_receive_buffer_size` | 끔(`None`) | QUIC datagram을 쓰지 않는다 |
+| `quic.max_udp_payload_size` | `EndpointConfig::max_udp_payload_size` | quinn 0.11.12 기본 | 받는 UDP 크기 상한 |
+| `quic.min_reset_interval` | `EndpointConfig::min_reset_interval` | quinn 0.11.12 기본 | stateless reset 송신 간격 하한 |
+| `quic.grease_quic_bit` | `EndpointConfig::grease_quic_bit` | 끔(quinn 기본 켬) | 위 "소켓 하나와 패킷 나누기" |
+| `quic.max_incoming`, `quic.incoming_buffer_size` | `ServerConfig::max_incoming`·`incoming_buffer_size` | quinn 0.11.12 기본 | 받는 쪽(B, 서버)의 handshake 대기 상한 |
+| `tls.resumption` | rustls `ClientConfig::resumption` | 끔(`Resumption::disabled()`) | 매 연결이 CertificateVerify를 거치게 한다(아래 "인증") |
+| `tls.early_data` | rustls `enable_early_data`, 서버 `max_early_data_size` | 끔(0) | 0-RTT를 쓰지 않는다 |
+| `tls.tickets` | rustls 서버 `send_tls13_tickets` | 0 | 세션 재개를 끄므로 티켓을 보내지 않는다 |
+
+### 의존성 내부 값 (설정 불가)
+
+quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 이름과 출처만 적는다. 구현이 고정한 판에서 이 중 설정 함수가 생긴 것이 있으면 위 표로 옮긴다.
+
+| 값 | 출처 |
+|---|---|
+| 손실 탐지 시간 단위 kGranularity(1 ms) | RFC 9002 §6.1.2, quinn-proto 내부 |
+| PTO 지수 backoff(두 배씩) | RFC 9002 §6.2.1, quinn-proto 내부 |
+| closing·draining 기간(PTO의 세 배) | RFC 9000 §10.2, quinn-proto 내부 |
+| 경로 검증 기한(PTO의 세 배 이상) | RFC 9000 §8.2.4, quinn-proto 내부 |
+| 혼잡 제어 알고리즘의 내부 계수 | quinn 혼잡 제어기(기본 Cubic). 알고리즘 선택은 `TransportConfig::congestion_controller_factory`로 바꿀 수 있으나 이 설계는 기본을 쓴다 |
+
+### 와이어 형식 상수 (설정 아님)
+
+| 상수 | 값 | 정의 |
+|---|---|---|
+| 첫 바이트 분류 | STUN 0–3, QUIC 64–127·192–255 | 위 "소켓 하나와 패킷 나누기" |
+| STUN magic cookie, 헤더 길이 | 0x2112A442, 20 B | RFC 8489 §5 |
+| `TASTY-PUNCH` 속성 번호, 토큰 길이 | 0xC0A1, 16 B | [rendezvous](rendezvous.md#펀칭-프로브) |
+| 조정 프레임 길이 접두 | 4 B big-endian | [rendezvous](rendezvous.md#프레임) |
+| ALPN | `tasty-net/2`, `tasty-rendezvous/1` | 아래 "인증", [버전·호환](versioning.md) |
+| QUIC 종료 코드 | 기기 사이 0·1·4, 조정 연결 0~6 | [handshake v2](handshake.md#quic-종료-코드), [rendezvous](rendezvous.md#메시지-표) |
+| ed25519 SPKI 앞머리 | 12 B | RFC 8410, 아래 "인증" |
 
 ## 연결 정보
 
 호출자가 "지금 이 기기가 어떤 기기와, 어떤 주소 쌍으로, 어느 서버를 통해 소개받아 연결돼 있는지"를 볼 수 있게 한다. 세 경로(P2P, SSH 정방향, SSH 역할 반전)를 한 목록에 모으는 것은 transport의 연결 목록이다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 자기 연결의 정보만 내보낸다.
 
-- `P2pEndpoint::status()`: endpoint 상태(위 표), 서버 주소와 서버 공개키, 로컬 소켓 주소, 반사 주소, `NatMapping`, 재연결 시도 번호와 다음 시도까지 남은 시간.
+- `P2pEndpoint::status()`: endpoint 상태(위 표), 서버 주소와 서버 공개키, 로컬 소켓 주소, 반사 주소, `NatMapping`, 서버 한계값, 재연결 시도 번호와 다음 시도까지 남은 시간.
 - `P2pEndpoint::connections()`: 연결과 진행 중 시도마다 `P2pConnectionInfo`.
 
 | 필드 | 뜻 |
 |---|---|
-| `id` | 이 endpoint 안에서 고유한 연결 번호 |
+| `id` | 이 endpoint 안에서 고유하고 바뀌지 않는 연결 번호. 시도 하나(그 안의 펀칭 재시도 포함)와 그 결과 연결 하나가 같은 번호다 |
 | `peer` | 상대 기기 ID |
 | `side` | `dialer`(A) · `acceptor`(B) |
 | `state` | 위 상태 기계의 상태와 그 상태의 값 |
-| `local_addr`, `remote_addr` | 지금 쓰는 주소 쌍. 로컬은 소켓 주소, 원격은 펀칭으로 얻은(또는 경로 이동 뒤의) 상대 주소 |
-| `candidate_kind` | 성공한 후보의 종류: `server_reflexive` · `host` · `peer_reflexive` |
+| `local_bind` | 소켓이 바인딩한 주소(예: `[::]:54321`). wildcard일 수 있다 |
+| `local_ip` | 이 연결에 실제로 쓰인 로컬 IP. quinn `Connection::local_ip()`가 주는 경우만 있고, OS가 알려 주지 않으면 `unknown` |
+| `local_reflexive` | 펀칭 때 서버가 본 이 기기의 반사 주소 |
+| `remote_addr` | quinn이 지금 쓰는 상대 주소(`Connection::remote_address()`). 연결 전에는 비어 있다 |
+| `remote_candidate` | 성공한 후보 주소와 종류(`server_reflexive` · `reported_reflexive` · `host` · `peer_reflexive`). 위 주소 바뀜이 있으면 `remote_addr`와 달라질 수 있다 |
 | `rendezvous` | 소개해 준 서버 주소와 서버 공개키 |
-| `nat` | 양쪽 `NatMapping`(펀칭 때의 값) |
-| `attempt` | 지금 몇 번째 펀칭 시도인지, `RetryWait`면 다음 시도까지 남은 시간 |
+| `nat` | 양쪽 `NatMapping`(이쪽은 판별 결과, 상대는 `punch_go.peer_nat`)과 `mode`(`all`·`host_only`) |
+| `attempt` | 지금 몇 번째 펀칭 시도인지, `RetryWait`면 다음 시도까지 남은 시간, 시도 전체 상한까지 남은 시간 |
 | `rtt` | quinn RTT 추정 |
 | `last_cause` | 마지막 전이의 원인 |
-| `history` | 전이 이력(최대 `history.limit`개, 버린 수 함께) |
-| `applied` | 이 연결에 적용된 설정값(위 표의 해당 항목, 값과 출처) |
+| `history` | 전이와 관측된 원격 주소 변화의 이력(최대 `history.limit`개, 버린 수 함께) |
+| `applied` | 이 연결에 적용된 설정값(위 표의 해당 항목과 서버에서 받은 창·기한, 값과 출처) |
 
 ## 인증
 
 고른 방식: RFC 7250 raw public key. 기기 키(ed25519)의 SubjectPublicKeyInfo를 TLS 인증서 대신 그대로 보낸다. 서버 연결과 기기 사이 연결이 같은 방식이다.
 
 - 근거:
-  1. rustls 0.23은 TLS 1.3에서 RFC 7250 raw public key를 지원한다(rustls 기능 목록 "RFC7250 raw public keys for TLS1.3", 클라이언트·서버 쪽 `AlwaysResolvesClientRawPublicKeys`·`AlwaysResolvesServerRawPublicKeys`). QUIC은 TLS 1.3만 쓰므로 제약이 걸리지 않는다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)).
+  1. rustls는 0.23.16부터 raw public key를 보내는 resolver(`client::AlwaysResolvesClientRawPublicKeys`, `server::AlwaysResolvesServerRawPublicKeys`)를 두고, 받는 쪽 검증기가 raw public key를 요구하는 길(`requires_raw_public_keys`)과 서명 검증 함수(`crypto::verify_tls13_signature_with_raw_key`)를 준다. 이 설계는 0.23.46(2026-11-27 최신)으로 고정한다. TLS 1.3에서만 되며 QUIC은 TLS 1.3만 쓴다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)).
   2. 자체 인증서 방식은 X.509 생성(`rcgen` 등)과 파싱이 더 들어온다. 확인할 것은 "상대가 이 ed25519 키를 가졌는가" 하나뿐이라 X.509의 이름·기간·확장은 쓸 데가 없다. 덜 들어오고 공격 면이 작은 쪽을 고른다.
   3. TLS 1.3의 CertificateVerify가 개인키 소유를 증명한다([RFC 8446](https://www.rfc-editor.org/rfc/rfc8446) §4.4.3). 그래서 그 위에서 서명 증명을 다시 하지 않는다.
-- 위험과 대체: rustls의 raw public key 경로는 X.509 경로보다 쓰는 곳이 적다. quinn이 그 설정을 그대로 받는지와 ed25519 서명 검증(ring provider)은 구현 첫 단계에서 시험으로 확인한다. 안 되면 기기 키로 만든 자체 서명 인증서와 SPKI만 보는 검증기로 바꾸고 이 절을 고친다. 바깥 계약(상대 기기 ID 확인)은 같다.
-- 키 변환: 기기 키 seed 32바이트로 PKCS#8 v1 DER(ed25519, [RFC 8410](https://www.rfc-editor.org/rfc/rfc8410))을 만들어 rustls 서명 키로 넣는다. 공개키 SPKI는 고정 앞머리 12바이트 + 공개키 32바이트다. 받은 SPKI는 이 길이와 앞머리(ed25519 OID)가 정확히 맞을 때만 받고, 그 32바이트를 기기 ID로 쓴다.
-- dialer: 검증기가 상대 SPKI의 키가 요청한 기기 ID와 같은지 TLS handshake 안에서 본다. 다르면 handshake를 실패시키고 `PeerIdentityMismatch`다. 서버 이름(SNI)은 고정값 `tasty-p2p`이고 검증에 쓰지 않는다.
-- acceptor: 검증기는 형식이 맞는 ed25519 raw public key면 받는다. 연결이 선 직후 그 기기 ID가 페어링 허용 목록에 있는지 보고, 없으면 스트림을 받지 않고 종료 코드 `not_paired`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 펀칭 단계의 `punch_offer` 확인이 이미 걸렀으므로 보통은 생기지 않는 경로다.
-- 연결이 확인한 상대 기기 ID는 `P2pConnection::remote_device_id()`로 읽는다. transport 어댑터는 이것을 iroh 설계의 `remote_id()` 자리에 쓴다.
+- 확인 범위와 대체: 위 API가 있다는 것과 구현 경로는 배포 소스로 확인했다. quinn이 그 rustls 설정을 그대로 받아 handshake가 서는지, ring provider로 ed25519 CertificateVerify가 검증되는지는 구현 첫 단계 시험으로 확인한다. 안 되면 기기 키로 만든 자체 서명 인증서와 SPKI만 보는 검증기로 바꾸고 이 절을 고친다. 바깥 계약(상대 기기 ID 확인)은 같다.
+- 키 변환: 기기 키 seed 32바이트로 PKCS#8 v1 DER(ed25519, [RFC 8410](https://www.rfc-editor.org/rfc/rfc8410))을 만들어 rustls 서명 키로 넣는다. 보내는 "인증서"는 SPKI DER 하나이고, SPKI는 고정 앞머리 12바이트 + 공개키 32바이트다. 받은 SPKI는 이 길이와 앞머리(ed25519 OID)가 정확히 맞을 때만 받고, 그 32바이트를 기기 ID로 쓴다.
+- 보내는 쪽(키 고르기): 클라이언트는 `AlwaysResolvesClientRawPublicKeys`, 서버는 `AlwaysResolvesServerRawPublicKeys`에 기기 키(서버는 서버 키)의 `CertifiedKey`를 넣는다. 키 고르기는 소유 증명이 아니다. 증명은 받는 쪽 검증기의 CertificateVerify 검증이다.
+- 받는 쪽(검증):
+  - 클라이언트 쪽 검증기(`rustls::client::danger::ServerCertVerifier` 구현): `requires_raw_public_keys`가 참, `verify_server_cert`가 SPKI 형식을 보고 그 연결의 기대 키와 비교, `verify_tls13_signature`가 `verify_tls13_signature_with_raw_key`로 CertificateVerify를 검증, `supported_verify_schemes`는 ED25519 하나, TLS 1.2 서명 검증은 항상 실패(TLS 1.2를 켜지 않는다).
+  - 서버 쪽 검증기(`rustls::server::danger::ClientCertVerifier` 구현): `requires_raw_public_keys`와 `client_auth_mandatory`가 참, SPKI 형식 검사, 같은 서명 검증. 받을 기기를 여기서 고르지 않는다(아래).
+  - 기대 키는 연결마다 다르다. dialer는 연결마다 그 기대 키(P2P는 상대 기기 ID, 서버 연결은 고정한 서버 공개키)를 담은 rustls 설정을 만들어 quinn `Endpoint::connect_with`로 건다.
+  - 세션 재개와 0-RTT는 끈다(위 "의존성이 노출하는 값"). 재개된 handshake는 CertificateVerify를 거치지 않기 때문이다.
+  - handshake 뒤 quinn `Connection::peer_identity()`는 rustls의 인증서 목록(`Vec<CertificateDer>`)을 주고, raw public key일 때 그 하나가 SPKI다. 이것으로 `remote_device_id()`를 만든다.
+- dialer: 검증기가 상대 키가 요청한 기기 ID와 다르면 handshake를 실패시키고 `PeerIdentityMismatch`다. 서버 이름(SNI)은 고정값 `tasty-p2p`이고 검증에 쓰지 않는다.
+- acceptor: 검증기는 형식이 맞고 서명이 맞는 ed25519 raw public key면 받는다. 연결이 선 직후 그 기기 ID가 펀칭 세션의 상대인지([펀칭 절차](#펀칭-절차) 9, 다르면 `session_mismatch`)와 페어링 허용 목록에 있는지(없으면 `not_paired`)를 본다([handshake v2](handshake.md#quic-종료-코드)). `punch_offer` 확인이 이미 걸렀으므로 보통은 생기지 않는 경로다.
 - handshake v2와의 정리: 지금 [handshake v2](handshake.md#흐름-p2p-경로)의 P2P 흐름(토큰·nonce·서명 없음, 메시지 1의 `device_id`가 연결의 상대 기기 ID와 같은지만 봄, hello → ACK)을 그대로 쓴다. 기기 확인은 TLS가 한 번만 하고, handshake v2는 그 결과와 메시지 필드가 맞는지만 본다. 인스턴스 ID 비교, 역할, `caps`, bulk 자격은 handshake v2 몫으로 남는다.
 - 서버 인증: 기기는 서버의 raw public key를 설정에서 받은 값과 비교한다(키 고정). 서버는 기기의 raw public key로 기기 ID를 정한다. 자세한 것은 [rendezvous](rendezvous.md#기기-인증).
 - ALPN: 기기 사이 연결은 `tasty-net/2`, 서버 연결은 `tasty-rendezvous/1`이다. 기기 사이 ALPN 숫자는 handshake `proto`와 같이 움직인다([버전·호환](versioning.md)).
@@ -356,7 +438,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 
 ## 펀칭 실험
 
-목적: `punch_window`, `quic_handshake_timeout`, 프로브 간격의 기본값을 실측으로 정하고, 망 조합별 성공률을 기록한다.
+목적: 서버 설정 `punch_window`·`quic_handshake_timeout`과 기기 설정 `punch.probe_interval`의 기본값을 실측으로 정하고, 망 조합별 성공률을 기록한다.
 
 검증 범위(사용자 결정 2026-11-27, Q1): 펀칭 실험용 기기·망·공인 서버는 hub rendezvous 배포 때 함께 준비한다. 그 전에는 같은 망 안 기기와 로컬에서 띄운 서버로만 확인한다. CI는 프로세스 안 서버와 모의 NAT로 확인한다([CI와 시험 환경](testing.md#p2p-시험)).
 
@@ -367,8 +449,8 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | 기기 | 최소 2대. 각 기기에서 `punch_probe` 예제를 실행할 수 있어야 한다(Linux·macOS·Windows 중 아무거나). UDP 차단 조합을 하려면 방화벽 규칙을 바꿀 수 있는 기기 1대 |
 | 네트워크 A | 가정용 공유기 뒤. 보통 EIM NAT |
 | 네트워크 B | A와 다른 망. 모바일 테더링(이동통신사 CGNAT, APDM일 수 있음)을 1순위로 한다 |
-| 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 한쪽이 나가는 UDP를 막은 상태, (3) 가능하면 양쪽 모두 `Dependent`(바로 `NatUnsupported`가 나는지 확인) |
-| 서버 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다. ADM 판별까지 보려면 공인 IP 2개 |
+| 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 서버에는 닿지만 기기 사이 UDP가 막힌 상태(방화벽으로 상대 주소만 막음), (3) 가능하면 양쪽 모두 `dependent`(호스트 후보만 시도하고 `NatUnsupported`가 나는지 확인) |
+| 서버 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다. 주소 의존 판별까지 보려면 공인 IP 2개 |
 | 서버 포트 | UDP P1·P2 외부 개방([rendezvous](rendezvous.md#포트와-전송)) |
 
 측정 항목: 요청부터 성공 판정까지의 시간, 성공 판정부터 QUIC handshake 완료까지의 시간, 성공한 후보 종류(반사·호스트·peer reflexive), 두 기기의 `NatMapping`, 실패 사유. 반복 횟수는 실험 작업 지시로 정한다.
@@ -381,7 +463,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 |---|---|---|---|---|
 | (미측정) | | | | |
 
-확정 값: `punch_window` = (미정), `quic_handshake_timeout` = (미정). 확정 근거는 이 표의 행을 가리킨다.
+확정 값: 서버 `punch_window` = (미정), 서버 `quic_handshake_timeout` = (미정). 확정 근거는 이 표의 행을 가리킨다.
 
 ### 동작 수준 기준과의 관계
 
