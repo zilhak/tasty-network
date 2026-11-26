@@ -305,10 +305,18 @@ impl Exploration {
                 self.nodes.push(node);
             }
             Some((at, was_direct)) => {
+                let old = &self.nodes[at];
+                // Among reports, the more specific state wins; at the same state, a
+                // device that got the query and sent no first part (`incomplete`) wins
+                // over an observation with no reason, such as an old connect timeout.
                 let replace = if direct {
                     true
                 } else {
-                    !was_direct && report_rank(node.status) > report_rank(self.nodes[at].status)
+                    !was_direct
+                        && (report_rank(node.status) > report_rank(old.status)
+                            || (node.status == old.status
+                                && node.reason == Some(NodeReason::Incomplete)
+                                && old.reason.is_none()))
                 };
                 if replace {
                     self.nodes[at] = node;

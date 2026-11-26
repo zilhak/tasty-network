@@ -1760,6 +1760,37 @@ fn two_attaches_of_one_link_stay_two_local_edges_when_not_visited_again() {
 }
 
 #[test]
+fn a_neighbor_that_never_answered_wins_over_an_old_connect_timeout() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(A, C);
+    // C once timed out connecting to B and reports that; B never answers A's query.
+    net.failures.insert(
+        id(C),
+        vec![ConnectFailure {
+            peer_hint: Some("b".into()),
+            device_id: Some(id(B)),
+            kind: FailureKind::TimedOut,
+            observed_at: 5,
+        }],
+    );
+    net.silent.insert(id(B));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run_until(1_000);
+    // C's observation came first.
+    let early = net.result(A, &rid).node(&id(B)).unwrap().clone();
+    assert_eq!(early.status, NodeStatus::TimedOut);
+    assert_eq!(early.reason, None);
+    assert_eq!(early.reported_by, Some(id(C)));
+    net.run();
+    let x = net.result(A, &rid);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+    assert_eq!(b.reported_by, Some(id(A)));
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);
