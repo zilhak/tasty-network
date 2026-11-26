@@ -379,14 +379,18 @@ impl Agent {
             return;
         }
         let is_origin = query.path.is_empty();
-        let return_path: Vec<DeviceId> = query
+        // Back along `path`, then `route`, then to the requester. When the requester is
+        // the origin, `path` already ends there.
+        let mut return_path: Vec<DeviceId> = query
             .path
             .iter()
             .rev()
             .chain(query.route.iter().rev())
             .copied()
-            .chain(std::iter::once(query.requester))
             .collect();
+        if return_path.last() != Some(&query.requester) {
+            return_path.push(query.requester);
+        }
 
         if let Some(seen) = self.answered.get(&query.request_id)
             && seen.depth >= query.depth
