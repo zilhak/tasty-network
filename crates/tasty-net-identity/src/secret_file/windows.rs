@@ -26,8 +26,9 @@ use windows_sys::Win32::{
         TokenUser,
     },
     Storage::FileSystem::{
-        FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-        FileIdInfo, GetFileInformationByHandleEx, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
     System::{
         SystemServices::ACCESS_ALLOWED_ACE_TYPE,
@@ -100,16 +101,17 @@ pub(super) fn protect(file: &File) -> io::Result<()> {
 }
 
 pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
-    // FILE_FLAG_OPEN_REPARSE_POINT opens a link itself instead of its target, so the handle
-    // below is the object at this path.
+    // FILE_FLAG_OPEN_REPARSE_POINT opens a link or junction itself instead of its target, and
+    // FILE_FLAG_BACKUP_SEMANTICS lets a directory open, so the handle below is the object at
+    // this path whatever it is, and the checks below classify it.
     let file = match OpenOptions::new()
         .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
     {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(OpenFailure::NotFound),
-        Err(e) => return Err(OpenFailure::Io(e)),
+        Err(e) => return Err(OpenFailure::Unsafe(UnsafeReason::CheckFailed, Some(e))),
     };
     let meta = file
         .metadata()

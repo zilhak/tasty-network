@@ -272,7 +272,7 @@ fn a_directory_at_the_key_path_is_refused() {
             IdentityError::UnsafeFile {
                 reason: UnsafeReason::NotRegular,
                 ..
-            } | IdentityError::Io { .. }
+            }
         ),
         "{error:?}"
     );
@@ -418,6 +418,30 @@ mod unix {
     }
 
     #[test]
+    fn an_unreadable_key_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        DeviceKey::load_or_create(dir.path()).unwrap();
+        let path = dir.path().join(DEVICE_KEY_FILE);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&path).is_ok() {
+            // Running with privileges that bypass the mode; the case cannot be made here.
+            return;
+        }
+        let error = DeviceKey::load_or_create(dir.path()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::UnsafeFile {
+                    reason: UnsafeReason::CheckFailed,
+                    source: Some(_),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn a_dangling_directory_link_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let link = root.path().join("link");
@@ -534,6 +558,33 @@ mod windows {
                 error,
                 IdentityError::UnsafeFile {
                     reason: UnsafeReason::Dacl,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_junction_at_the_key_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_KEY_FILE);
+        let output = std::process::Command::new("cmd.exe")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&path)
+            .arg(target.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let error = DeviceKey::load_or_create(dir.path()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::UnsafeFile {
+                    reason: UnsafeReason::Symlink,
                     ..
                 }
             ),

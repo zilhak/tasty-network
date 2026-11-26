@@ -62,7 +62,7 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
         }
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(OpenFailure::NotFound),
-        Err(e) => return Err(OpenFailure::Io(e)),
+        Err(e) => return Err(OpenFailure::Unsafe(UnsafeReason::CheckFailed, Some(e))),
     }
     // O_NOFOLLOW refuses a link swapped in after the prefilter; O_NONBLOCK keeps a FIFO swapped
     // in from blocking the open. The decision below uses the opened handle only.
@@ -76,7 +76,7 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             return Err(OpenFailure::Unsafe(UnsafeReason::Symlink, None));
         }
-        Err(e) => return Err(OpenFailure::Io(e)),
+        Err(e) => return Err(OpenFailure::Unsafe(UnsafeReason::CheckFailed, Some(e))),
     };
     let meta = file
         .metadata()

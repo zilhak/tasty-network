@@ -37,11 +37,11 @@ pub(crate) const MAX_SECRET_LEN: usize = 4096;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// The result of an OS-level open with the privacy checks.
+/// The result of an OS-level open with the privacy checks. An existing file that cannot be
+/// opened or examined is `Unsafe(CheckFailed)`: it could not be shown to be private.
 pub(crate) enum OpenFailure {
     NotFound,
     Unsafe(UnsafeReason, Option<io::Error>),
-    Io(io::Error),
 }
 
 /// An existing secret file opened after the privacy checks, and its contents.
@@ -175,7 +175,6 @@ pub(crate) fn open_private(path: &Path) -> Result<Option<PrivateFile>, IdentityE
                 source,
             });
         }
-        Err(OpenFailure::Io(e)) => return Err(IdentityError::io(FileOp::Read, path, e)),
     };
     let mut contents = Vec::new();
     (&file)
