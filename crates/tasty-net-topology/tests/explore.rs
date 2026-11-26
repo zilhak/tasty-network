@@ -1,0 +1,718 @@
+//! Explorations over fake neighbors (docs/design/topology.md "탐색 규칙").
+//!
+//! `Net` holds one `Agent` per device and a queue of messages in flight. Every message goes
+//! through its JSON form (and the size limit) on the way, and is delivered at a simulated
+//! time, so the order of arrival and the timeouts are fixed by the test.
+
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use tasty_net_identity::{DeviceId, DeviceKey};
+use tasty_net_topology::{
+    Agent, AgentConfig, ConnectFailure, Exploration, ExplorationState, ExploreRequest, FailureKind,
+    LinkKind, Local, LocalLink, MAX_MESSAGE_JSON, MAX_ROUTE_HOPS, Message, NodeReason, NodeStatus,
+    Now, Outbox, RouteError, SelfInfo, SendError, Sharing, Side, TopologyError, TransportKind,
+    WorkspaceExposure, WorkspaceRef,
+};
+
+fn id(n: u8) -> DeviceId {
+    DeviceKey::from_seed([n; 32]).id()
+}
+
+const A: u8 = 1;
+const B: u8 = 2;
+const C: u8 = 3;
+const D: u8 = 4;
+const E: u8 = 5;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+type DelayRule = Box<dyn Fn(DeviceId, DeviceId, &Message) -> Option<u64>>;
+
+struct InFlight {
+    at_ms: u64,
+    seq: u64,
+    from: DeviceId,
+    to: DeviceId,
+    message: Message,
+}
+
+struct Net {
+    base: Instant,
+    clock_ms: u64,
+    seq: u64,
+    agents: HashMap<DeviceId, Agent>,
+    links: HashMap<DeviceId, Vec<LocalLink>>,
+    failures: HashMap<DeviceId, Vec<ConnectFailure>>,
+    sharing: HashMap<DeviceId, Sharing>,
+    no_caps: HashSet<DeviceId>,
+    silent: HashSet<DeviceId>,
+    queue: Vec<InFlight>,
+    delay: Vec<DelayRule>,
+}
+
+struct Sends<'a> {
+    me: DeviceId,
+    links: &'a [LocalLink],
+    no_caps: &'a HashSet<DeviceId>,
+    out: Vec<(DeviceId, Message)>,
+}
+
+impl Outbox for Sends<'_> {
+    fn send(&mut self, to: &DeviceId, message: &Message) -> Result<(), SendError> {
+        if !self
+            .links
+            .iter()
+            .any(|l| l.peer == *to && l.kind == LinkKind::Attach)
+        {
+            return Err(SendError::NoLink);
+        }
+        if self.no_caps.contains(to) {
+            return Err(SendError::NoCapability);
+        }
+        assert_ne!(*to, self.me);
+        // Every message crosses its wire form.
+        let json = message.to_json().expect("message fits its frame limit");
+        assert!(json.len() <= MAX_MESSAGE_JSON);
+        let back = Message::from_json(&json).expect("message reads back");
+        assert_eq!(&back, message);
+        self.out.push((*to, back));
+        Ok(())
+    }
+}
+
+impl Net {
+    fn new(devices: &[u8]) -> Self {
+        let config = AgentConfig {
+            hop_timeout: Duration::from_secs(2),
+            hop_reserve: Duration::from_millis(100),
+        };
+        let mut net = Self {
+            base: Instant::now(),
+            clock_ms: 0,
+            seq: 0,
+            agents: HashMap::new(),
+            links: HashMap::new(),
+            failures: HashMap::new(),
+            sharing: HashMap::new(),
+            no_caps: HashSet::new(),
+            silent: HashSet::new(),
+            queue: Vec::new(),
+            delay: Vec::new(),
+        };
+        for &n in devices {
+            let me = SelfInfo {
+                device_id: id(n),
+                display_name: Some(format!("dev-{n}")),
+            };
+            net.agents.insert(id(n), Agent::new(me, config));
+            net.links.insert(id(n), Vec::new());
+        }
+        net
+    }
+
+    /// `a` dials `b`, forward SSH (holder = dialer).
+    fn link(&mut self, a: u8, b: u8) -> &mut Self {
+        self.link_on(a, b, None)
+    }
+
+    fn link_on(&mut self, a: u8, b: u8, workspace: Option<WorkspaceRef>) -> &mut Self {
+        let at = 1_000 + u64::from(a) * 10 + u64::from(b);
+        let make = |peer: u8, local_side: Side| LocalLink {
+            peer: id(peer),
+            local_side,
+            holder: Side::Dialer,
+            transport: TransportKind::SshForward,
+            rtt: Some(Duration::from_millis(7)),
+            connected_at: at,
+            workspace: workspace.clone(),
+            kind: LinkKind::Attach,
+        };
+        let to_b = make(b, Side::Dialer);
+        let to_a = make(a, Side::Acceptor);
+        self.links.get_mut(&id(a)).unwrap().push(to_b);
+        self.links.get_mut(&id(b)).unwrap().push(to_a);
+        self
+    }
+
+    fn now(&self) -> Now {
+        Now {
+            mono: self.base + Duration::from_millis(self.clock_ms),
+            unix_ms: 1_700_000_000_000 + self.clock_ms,
+        }
+    }
+
+    fn enqueue(&mut self, from: DeviceId, sends: Vec<(DeviceId, Message)>) {
+        for (to, message) in sends {
+            let delay = self
+                .delay
+                .iter()
+                .find_map(|rule| rule(from, to, &message))
+                .unwrap_or(1);
+            self.seq += 1;
+            self.queue.push(InFlight {
+                at_ms: self.clock_ms + delay,
+                seq: self.seq,
+                from,
+                to,
+                message,
+            });
+        }
+    }
+
+    /// Runs `f` on the agent of `device` with its local input and an outbox, then queues
+    /// what it sent.
+    fn with_agent<R>(
+        &mut self,
+        device: DeviceId,
+        f: impl FnOnce(&mut Agent, Local<'_>, &mut Sends<'_>, Now) -> R,
+    ) -> R {
+        let now = self.now();
+        let links = self.links[&device].clone();
+        let failures = self.failures.get(&device).cloned().unwrap_or_default();
+        let sharing = self.sharing.get(&device).copied().unwrap_or_default();
+        let no_caps = self.no_caps.clone();
+        let mut sends = Sends {
+            me: device,
+            links: &links,
+            no_caps: &no_caps,
+            out: Vec::new(),
+        };
+        let local = Local {
+            links: &links,
+            failures: &failures,
+            sharing,
+        };
+        let agent = self.agents.get_mut(&device).unwrap();
+        let result = f(agent, local, &mut sends, now);
+        let out = sends.out;
+        self.enqueue(device, out);
+        result
+    }
+
+    fn explore(&mut self, requester: u8, request: ExploreRequest) -> Result<String, TopologyError> {
+        self.with_agent(id(requester), |agent, local, out, now| {
+            agent.explore(request, local, out, now)
+        })
+    }
+
+    /// Delivers messages and applies deadlines until nothing is left.
+    fn run(&mut self) {
+        for _ in 0..100_000 {
+            let next_message = self
+                .queue
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, m)| (m.at_ms, m.seq))
+                .map(|(i, m)| (i, m.at_ms));
+            let next_deadline = self
+                .agents
+                .values()
+                .filter_map(|a| a.next_deadline())
+                .min()
+                .map(|at| {
+                    let ms = at.saturating_duration_since(self.base).as_millis();
+                    u64::try_from(ms).unwrap()
+                });
+            let message_first = match (next_message, next_deadline) {
+                (Some((_, at)), Some(deadline)) => at <= deadline,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            match (next_message, next_deadline) {
+                (Some((i, _)), _) if message_first => {
+                    let m = self.queue.remove(i);
+                    self.clock_ms = self.clock_ms.max(m.at_ms);
+                    if self.silent.contains(&m.to) {
+                        continue;
+                    }
+                    let from = m.from;
+                    self.with_agent(m.to, |agent, local, out, now| {
+                        agent.on_message(&from, m.message, local, out, now)
+                    });
+                }
+                (_, Some(deadline)) => {
+                    self.clock_ms = self.clock_ms.max(deadline);
+                    let devices: Vec<DeviceId> = self.agents.keys().copied().collect();
+                    for device in devices {
+                        self.with_agent(device, |agent, _, out, now| agent.poll(out, now));
+                    }
+                }
+                (_, None) => return,
+            }
+        }
+        panic!("the exploration did not settle");
+    }
+
+    fn result(&self, requester: u8, request_id: &str) -> &Exploration {
+        self.agents[&id(requester)]
+            .exploration(request_id)
+            .expect("exploration kept")
+    }
+}
+
+fn request(origin: u8, depth: u32) -> ExploreRequest {
+    ExploreRequest {
+        origin: id(origin),
+        route: Vec::new(),
+        depth,
+        timeout: TIMEOUT,
+    }
+}
+
+fn node_ids(exploration: &Exploration) -> Vec<DeviceId> {
+    let mut ids: Vec<DeviceId> = exploration
+        .nodes()
+        .iter()
+        .filter_map(|n| n.device_id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn sorted(devices: &[u8]) -> Vec<DeviceId> {
+    let mut ids: Vec<DeviceId> = devices.iter().map(|&n| id(n)).collect();
+    ids.sort();
+    ids
+}
+
+fn status(exploration: &Exploration, device: u8) -> NodeStatus {
+    exploration.node(&id(device)).expect("node present").status
+}
+
+#[test]
+fn a_chain_at_depth_two_has_three_nodes_and_two_edges() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+    assert_eq!(x.edges().len(), 2);
+    for n in [A, B, C] {
+        assert_eq!(status(x, n), NodeStatus::Online);
+    }
+}
+
+#[test]
+fn a_chain_at_depth_one_stops_after_the_first_neighbor() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B]));
+    // B at depth 0 still answers its own edges, B–C included.
+    assert_eq!(x.edges().len(), 2);
+}
+
+#[test]
+fn a_cycle_ends_without_duplicate_nodes() {
+    let mut net = Net::new(&[A, B, C]);
+    // A↔B both ways, and a triangle A–B–C.
+    net.link(A, B).link(B, A).link(B, C).link(C, A);
+    let rid = net.explore(A, request(A, 5)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(x.nodes().len(), 3);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+    assert_eq!(x.edges().len(), 4);
+}
+
+#[test]
+fn a_neighbor_with_sharing_off_is_a_leaf() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    net.sharing.insert(
+        id(B),
+        Sharing {
+            enabled: false,
+            workspace: WorkspaceExposure::ALL,
+        },
+    );
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B]));
+    assert_eq!(status(x, B), NodeStatus::SharingOff);
+    // Only A's own edge to B; nothing of B's.
+    assert_eq!(x.edges().len(), 1);
+    assert!(x.edges().iter().all(|e| !e.touches(&id(C))));
+}
+
+#[test]
+fn a_diamond_has_its_far_node_once_and_four_edges() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C).link(B, D).link(C, D);
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(
+        x.nodes()
+            .iter()
+            .filter(|n| n.device_id == Some(id(D)))
+            .count(),
+        1
+    );
+    assert_eq!(node_ids(x), sorted(&[A, B, C, D]));
+    assert_eq!(x.edges().len(), 4);
+}
+
+#[test]
+fn a_shorter_path_reached_later_continues_with_its_larger_depth() {
+    // A–B–D is the long path, A–D the short one; D's neighbor E is one hop past D.
+    let mut net = Net::new(&[A, B, D, E]);
+    net.link(A, B).link(B, D).link(A, D).link(D, E);
+    // The query on A–D arrives late, after the one through B.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(A) && to == id(D) && matches!(m, Message::Query(_))).then_some(500)
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, D, E]));
+    assert_eq!(status(x, E), NodeStatus::Online);
+    assert_eq!(x.edges().len(), 4);
+}
+
+#[test]
+fn a_reached_node_at_depth_zero_does_not_forward_without_a_shorter_path() {
+    // The control for the test above: without A–D, D is reached only at depth 0 and E
+    // stays out.
+    let mut net = Net::new(&[A, B, D, E]);
+    net.link(A, B).link(B, D).link(D, E);
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(node_ids(x), sorted(&[A, B, D]));
+}
+
+#[test]
+fn a_route_slower_than_the_whole_limit_ends_timed_out() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(B) && to == id(C) && matches!(m, Message::Query(_))).then_some(20_000)
+    }));
+    let rid = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(C),
+                route: vec![id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::TimedOut);
+    assert_eq!(status(x, C), NodeStatus::TimedOut);
+}
+
+#[test]
+fn a_route_through_a_hop_reaches_the_origin() {
+    // The control for the test above: the same route without the delay finishes.
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(B, C).link(C, D);
+    let rid = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(C),
+                route: vec![id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[B, C, D]));
+}
+
+#[test]
+fn the_origin_b_at_depth_one_gives_b_and_its_neighbors() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    let rid = net.explore(A, request(B, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+}
+
+#[test]
+fn a_silent_neighbor_times_out_and_the_rest_continues() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C).link(C, D);
+    net.silent.insert(id(B));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::TimedOut);
+    assert_eq!(x.node(&id(B)).unwrap().reported_by, Some(id(A)));
+    assert_eq!(status(x, C), NodeStatus::Online);
+    assert_eq!(status(x, D), NodeStatus::Online);
+}
+
+#[test]
+fn a_neighbor_without_the_capability_is_marked_and_not_queried() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(A, C);
+    net.no_caps.insert(id(B));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::NoCapability);
+    assert_eq!(status(x, C), NodeStatus::Online);
+}
+
+#[test]
+fn a_direct_answer_wins_over_a_timeout_seen_on_another_path() {
+    // D answers through C, but its query from B is dropped: B reports D as timed out.
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C).link(B, D).link(C, D);
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(B) && to == id(D) && matches!(m, Message::Query(_))).then_some(60_000)
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(status(x, D), NodeStatus::Online);
+}
+
+#[test]
+fn a_connect_failure_becomes_a_reported_node() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    net.failures.insert(
+        id(B),
+        vec![
+            ConnectFailure {
+                peer_hint: Some("old-box".into()),
+                device_id: None,
+                kind: FailureKind::AuthRejected,
+                observed_at: 5,
+            },
+            // A failure toward A, which also has a live edge with B: the edge wins.
+            ConnectFailure {
+                peer_hint: Some("a".into()),
+                device_id: Some(id(A)),
+                kind: FailureKind::TimedOut,
+                observed_at: 6,
+            },
+        ],
+    );
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    let old = x
+        .nodes()
+        .iter()
+        .find(|n| n.peer_hint.as_deref() == Some("old-box"))
+        .expect("failure node");
+    assert_eq!(old.status, NodeStatus::AuthRejected);
+    assert_eq!(old.device_id, None);
+    assert_eq!(old.reported_by, Some(id(B)));
+    assert_eq!(status(x, A), NodeStatus::Online);
+    assert_eq!(x.nodes().len(), 3);
+}
+
+#[test]
+fn a_remote_answer_drops_workspace_fields_outside_its_scope() {
+    let mut net = Net::new(&[A, B, C]);
+    let workspace = WorkspaceRef {
+        id: Some("ws-1".into()),
+        name: Some("secret project".into()),
+    };
+    net.link(A, B).link_on(B, C, Some(workspace));
+    net.sharing.insert(
+        id(B),
+        Sharing {
+            enabled: true,
+            workspace: WorkspaceExposure {
+                id: true,
+                name: false,
+            },
+        },
+    );
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    let bc = x
+        .edges()
+        .iter()
+        .find(|e| e.touches(&id(C)))
+        .expect("B–C edge");
+    let seen = bc.workspace.as_ref().expect("the ID stays");
+    assert_eq!(seen.id.as_deref(), Some("ws-1"));
+    assert_eq!(seen.name, None);
+
+    // B's own exploration is local: the name is there.
+    let rid = net.explore(B, request(B, 0)).unwrap();
+    net.run();
+    let x = net.result(B, &rid);
+    let bc = x.edges().iter().find(|e| e.touches(&id(C))).unwrap();
+    assert_eq!(
+        bc.workspace.as_ref().unwrap().name.as_deref(),
+        Some("secret project")
+    );
+}
+
+#[test]
+fn route_over_hop_limit_is_rejected() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    let route: Vec<DeviceId> = (10..10 + MAX_ROUTE_HOPS as u8 + 1).map(id).collect();
+    let err = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(B),
+                route,
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err, TopologyError::InvalidRoute(RouteError::TooLong));
+    assert!(net.queue.is_empty());
+
+    // The limit itself is allowed (the first hop is then simply missing).
+    let route: Vec<DeviceId> = (10..10 + MAX_ROUTE_HOPS as u8).map(id).collect();
+    let err = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(B),
+                route,
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err, TopologyError::FirstHop(SendError::NoLink));
+}
+
+#[test]
+fn route_with_repeated_device_is_rejected() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(B, C).link(C, D);
+    let err = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(D),
+                route: vec![id(B), id(C), id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err, TopologyError::InvalidRoute(RouteError::Repeated));
+    assert!(net.queue.is_empty());
+}
+
+#[test]
+fn a_route_hop_without_a_link_to_the_next_hop_reports_route_broken() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B);
+    let rid = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(C),
+                route: vec![id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    let c = x.node(&id(C)).unwrap();
+    assert_eq!(c.status, NodeStatus::TimedOut);
+    assert_eq!(c.reason, Some(NodeReason::RouteBroken));
+    assert_eq!(c.reported_by, Some(id(B)));
+}
+
+#[test]
+fn a_route_hop_with_sharing_off_answers_itself_and_stops() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    net.sharing.insert(
+        id(B),
+        Sharing {
+            enabled: false,
+            workspace: WorkspaceExposure::NONE,
+        },
+    );
+    let rid = net
+        .explore(
+            A,
+            ExploreRequest {
+                origin: id(C),
+                route: vec![id(B)],
+                depth: 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::SharingOff);
+    assert_eq!(
+        x.node(&id(C)).unwrap().reason,
+        Some(NodeReason::RouteSharingOff)
+    );
+}
+
+#[test]
+fn a_route_whose_first_hop_did_not_get_it_from_the_requester_is_invalid() {
+    // C claims to be the requester, but B received the query from A.
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(B, D).link(B, C);
+    let forged = tasty_net_topology::Query {
+        request_id: "r".into(),
+        requester: id(C),
+        origin: id(D),
+        route: vec![id(B)],
+        path: Vec::new(),
+        depth: 1,
+        remaining_ms: 5_000,
+        branch: "b".into(),
+    };
+    net.with_agent(id(B), |agent, local, out, now| {
+        agent.on_message(&id(A), Message::Query(forged), local, out, now)
+    });
+    // B stops it: nothing goes to D, and C gets the origin as timed out for route_invalid.
+    assert!(net.queue.iter().all(|m| m.to == id(C)));
+    let reasons: Vec<Option<NodeReason>> = net
+        .queue
+        .iter()
+        .filter_map(|m| match &m.message {
+            Message::Result(part) => Some(part.nodes.iter().map(|n| n.reason)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(reasons, vec![Some(NodeReason::RouteInvalid)]);
+    assert!(
+        net.queue
+            .iter()
+            .any(|m| matches!(&m.message, Message::Done(d) if d.is_final))
+    );
+}
