@@ -35,6 +35,9 @@ RC_TMP=""
 RC_PULLED=0
 RC_KEEP_IMAGE=0
 
+# --keep-image. relay/container-check.sh도 이 함수로 정한다.
+rc_keep_image() { RC_KEEP_IMAGE=1; }
+
 rc_cleanup() {
     local c
     for c in "${RC_CONTAINERS[@]}"; do
@@ -279,7 +282,7 @@ rc_main() {
     local configs=() src name failed=0 prep
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --keep-image) RC_KEEP_IMAGE=1 ;;
+            --keep-image) rc_keep_image ;;
             -h | --help)
                 sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
                 return 0
