@@ -193,7 +193,9 @@ KIND_OK = {
     "bool": lambda v: isinstance(v, bool),
     "u32": lambda v: is_int(v) and 0 <= v <= 0xFFFFFFFF,
     "usize": lambda v: is_int(v) and 0 <= v <= 0xFFFFFFFFFFFFFFFF,
-    "f64": lambda v: is_int(v) or (isinstance(v, float) and math.isfinite(v)),
+    # f64 잎의 정수는 i64 최소값~u64 최대값만 받는다. 그 밖의 정수는 toml 1.1.6이 i128로 읽어 f64로 바꾸지 못하고,
+    # iroh-relay가 값이 든 TOML 줄과 함께 오류를 찍는다(iroh-relay 1.5.0 바이너리는 18446744073709551615를 받았다).
+    "f64": lambda v: (is_int(v) and -(1 << 63) <= v <= (1 << 64) - 1) or (isinstance(v, float) and math.isfinite(v)),
     "socket_addr": socket_addr_ok,
 }
 
@@ -929,6 +931,21 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
     rc_make_ci_config "$t/kinds-ok.toml" "$t/ci-kinds-ok.toml"
     st_expect field-kinds-accepted 0 "$?"
     st_expect field-kinds-rx-int "4294967295 0" "$(rc_toml_rx "$t/ci-kinds-ok.toml")"
+    # f64 잎(accept_conn_limit)의 정수는 i64 최소값~u64 최대값만 받는다.
+    for bv in 18446744073709551615 -9223372036854775808; do
+        printf 'limits.accept_conn_limit = %s\n' "$bv" > "$t/f64-edge.toml"
+        rc_make_ci_config "$t/f64-edge.toml" "$t/ci-f64-edge.toml"
+        st_expect "f64-int-accepted-$bv" 0 "$?"
+    done
+    for bv in 18446744073709551616 -9223372036854775809; do
+        printf 'limits.accept_conn_limit = %s\n' "$bv" > "$t/f64-over.toml"
+        rc_make_ci_config "$t/f64-over.toml" "$t/ci-f64-over.toml" > "$t/f64-over.out" 2>&1
+        st_expect "f64-int-rejected-$bv" "6 bad-value no" "$? $RC_CONFIG_REASON $(if [[ -e "$t/ci-f64-over.toml" ]]; then echo yes; else echo no; fi)"
+        grep -qF -- "$bv" "$t/f64-over.out"
+        st_expect "f64-int-rejected-$bv-value-hidden" 1 "$?"
+        grep -qF '"limits"."accept_conn_limit"' "$t/f64-over.out"
+        st_expect "f64-int-rejected-$bv-path-shown" 0 "$?"
+    done
     n=0
     for bv in 'limits.client.rx.bytes_per_second = 4294967296' 'limits.client.rx.max_burst_bytes = -1' \
         'limits.client.rx.bytes_per_second = true' 'limits.accept_conn_limit = inf' 'limits.accept_conn_limit = 2026-01-01T00:00:00Z' \
