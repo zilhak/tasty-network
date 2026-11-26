@@ -1390,6 +1390,44 @@ fn a_remote_origin_that_fails_after_its_first_part_ends_incomplete_at_the_deadli
 }
 
 #[test]
+fn the_requesters_own_edges_are_its_local_view_even_when_a_remote_copy_comes_first() {
+    let mut net = Net::new(&[A, B]);
+    let workspace = WorkspaceRef {
+        id: Some("ws-1".into()),
+        name: Some("my project".into()),
+    };
+    net.link_on(A, B, Some(workspace));
+    // B shares no workspace field, and its query back to A arrives after its answer.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(B) && to == id(A) && matches!(m, Message::Query(_))).then_some(50)
+    }));
+    let rid = net.explore(A, request(B, 1)).unwrap();
+    net.run();
+    let order: Vec<bool> = net
+        .log
+        .iter()
+        .filter(|(f, t, _)| *f == id(B) && *t == id(A))
+        .filter_map(|(_, _, m)| match m {
+            Message::Result(p) if p.from == id(B) => Some(true),
+            Message::Query(_) => Some(false),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order.first(), Some(&true), "B's remote copy came first");
+    let x = net.result(A, &rid);
+    let ab: Vec<_> = x
+        .edges()
+        .iter()
+        .filter(|e| e.touches(&id(A)) && e.touches(&id(B)))
+        .collect();
+    assert_eq!(ab.len(), 1, "{ab:?}");
+    assert_eq!(
+        ab[0].workspace.as_ref().and_then(|w| w.name.as_deref()),
+        Some("my project")
+    );
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);

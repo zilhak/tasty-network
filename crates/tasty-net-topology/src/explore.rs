@@ -137,6 +137,8 @@ pub struct Exploration {
     parts: HashMap<(String, DeviceId), PartTrack>,
     /// The dones received per `(branch, from)`, counted like the parts.
     done_parts: HashMap<(String, DeviceId), PartTrack>,
+    /// This device's local view was merged: its own edges are the local view's.
+    local_merged: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,10 +195,18 @@ impl Exploration {
     }
 
     /// This device's own view, merged without crossing a link.
+    /// Merges this device's local view. Its own edges come from here only: remote copies
+    /// of them that arrived before are dropped and later ones are skipped (`merge_part`),
+    /// so its screen shows its own edges as the local view has them whatever the order.
     fn merge_view(&mut self, view: View, unix_ms: u64) {
         let me = self.me;
         for node in view.nodes {
             self.merge_node(node, &me, unix_ms);
+        }
+        if !self.local_merged {
+            self.local_merged = true;
+            self.edges.retain(|edge| !edge.touches(&me));
+            self.edge_keys = self.edges.iter().map(Edge::key).collect();
         }
         for edge in view.edges {
             if self.edge_keys.insert(edge.key()) {
@@ -222,6 +232,9 @@ impl Exploration {
             self.merge_node(node, &part.from, unix_ms);
         }
         for edge in part.edges {
+            if self.local_merged && edge.touches(&self.me) {
+                continue;
+            }
             if self.edge_keys.insert(edge.key()) {
                 self.edges.push(edge);
             }
@@ -477,6 +490,7 @@ impl Agent {
             edge_keys: HashSet::new(),
             parts: HashMap::new(),
             done_parts: HashMap::new(),
+            local_merged: false,
         };
         if request.origin == me {
             self.explorations.insert(request_id.clone(), exploration);
