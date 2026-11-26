@@ -18,9 +18,20 @@
   |---|---|
   | 상대 기기 ID | TLS가 확인한 기기 키(기기가 적은 값이 아니다) |
   | 서버가 본 반사 주소 | 조정 연결의 원격 주소(서버 관측) |
-  | 기기가 보고한 보조 반사 주소 | `nat_report.stun_results`의 주소를 IP·포트로 파싱한 값. 기기가 그 서버 STUN 주소에 질의했다고 보고한 것만, 개수 상한 안에서 |
-  | 기기가 보고한 호스트 주소 | `hello`·`nat_report`의 `host_candidates`를 IP·포트로 파싱한 값. 루프백·링크 로컬·미지정 주소는 버리고, 개수 상한 안에서 |
+  | 기기가 보고한 보조 반사 주소 | `nat_report.stun_results`의 주소를 IP·포트로 파싱한 값. 서버가 `welcome.stun`으로 알린 주소에 대한 결과만, 아래 "후보 주소 규칙"을 통과한 것만, 개수 상한 안에서 |
+  | 기기가 보고한 호스트 주소 | `hello`·`nat_report`의 `host_candidates`를 IP·포트로 파싱한 값. 아래 "후보 주소 규칙"을 통과한 것만, 개수 상한 안에서 |
   | 상대의 `NatMapping`, 펀칭 토큰, 시간 값 | 서버가 정한 열거값과 서버가 만든 난수·설정값 |
+
+### 후보 주소 규칙
+
+서버가 `punch_go.candidates`에 싣는 주소와 기기가 받은 후보에서 프로브 대상으로 쓰는 주소는 같은 규칙으로 거른다. 규칙의 정본은 이 크레이트의 와이어 형식 모듈이고 서버와 `tasty-net-p2p`가 같은 함수를 쓴다.
+
+- 허용 규칙(한 문장): 호스트 후보는 사설 IPv4([RFC 1918](https://www.rfc-editor.org/rfc/rfc1918))와 전역 유니캐스트 IPv6(`2000::/3`)만, 반사 후보(`server_reflexive`·`reported_reflexive`)는 미지정·멀티캐스트·브로드캐스트·링크 로컬이 아닌 주소만 받고, 모든 후보의 포트는 1–65535이며, 그 밖은 버리고 버린 수를 센다.
+- 반사 후보에 루프백을 막지 않는 것은 같은 머신의 루프백 서버로 도는 예제와 시험 때문이다. 서버 반사 주소는 서버가 관측한 값이다. 보고 반사 주소는 기기의 주장이므로 종류를 `reported_reflexive`로 따로 표시하고, 서버 반사 주소와 주소족이 같은 것만 받는다.
+- 중복 제거: 같은 주소·포트는 하나만 남기고, 앞선 종류를 남긴다.
+- 우선순위와 상한: 서버는 `server_reflexive`(1개) → `reported_reflexive`(최대 `max_reported_reflexive`) → `host`(기기가 보낸 순서로 최대 `max_host_candidates`) 순으로 싣는다. `mode = host_only`면 `host`만 싣는다. 그래서 `punch_go.candidates`는 `1 + max_reported_reflexive + max_host_candidates`개를 넘지 않는다.
+- 상한의 관계: `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`(기기 설정)여야 한다. 기기는 `welcome.limits`의 두 값으로 이것을 검사하고, 어긋나면 `server_limits_mismatch`를 낸다(아래). 그래도 기기 상한보다 많은 후보가 오면 기기는 받은 순서(위 우선순위)대로 `punch.max_candidates`개만 쓰고 버린 수를 센다.
+- 기기는 `host_candidates`를 자기 우선순위(사설 IPv4, 전역 IPv6 고정 주소, 전역 IPv6 임시 주소)로 정렬해 보낸다.
 
 - 기기가 보낸 메시지의 모르는 필드는 파싱할 때 버린다. 저장하지도 넘기지도 않는다. 조정 스트림은 연결마다 하나만 받고, 둘째 스트림은 연결을 `malformed`로 닫는다.
 - STUN 응답은 요청이 온 주소로만 보낸다. 다른 주소로 보내라는 요청(RFC 5780의 RESPONSE-PORT·CHANGE-REQUEST)은 받지 않는다.
@@ -88,7 +99,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `punch_cancel` | 서버 → 기기 | `punch_id`, `reason`(`peer_gone`·`expired`) | 진행 중 펀칭 취소 |
 | `punch_result` | 기기 → 서버 | `punch_id`, `ok` | 끝 보고 |
 
-- `welcome.limits`: 기기가 자기 설정과의 관계를 검사할 서버 값이다. `offer_timeout_ms`, `start_delay_max_ms`, `punch_window_ms`, `quic_handshake_ms`, `punch_session_ttl_ms`, `max_host_candidates`, `max_message_bytes`. 기기는 이 값으로 `punch.request_timeout > offer_timeout_ms`, `punch_window_ms ≤ punch.window_max`, `quic_handshake_ms ≤ quic.handshake_timeout_max`를 검사하고, 어긋나면 endpoint 이벤트 `server_limits_mismatch`(어긋난 키와 두 값)를 내고 그 서버로의 펀칭 시도를 `ServerLimitsInvalid`로 끝낸다([P2P](p2p.md#재시도와-포기)).
+- `welcome.limits`: 기기가 자기 설정과의 관계를 검사할 서버 값이다. `offer_timeout_ms`, `start_delay_max_ms`, `punch_window_ms`, `quic_handshake_ms`, `punch_session_ttl_ms`, `max_host_candidates`, `max_reported_reflexive`, `max_message_bytes`. 기기는 이 값으로 `punch.request_timeout > offer_timeout_ms`, `punch_window_ms ≤ punch.window_max`, `quic_handshake_ms ≤ quic.handshake_timeout_max`, `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`([후보 주소 규칙](#후보-주소-규칙))를 검사하고, 어긋나면 endpoint 이벤트 `server_limits_mismatch`(어긋난 키와 두 값)를 내고 그 서버로의 펀칭 시도를 `ServerLimitsInvalid`로 끝낸다([P2P](p2p.md#재시도와-포기)).
 - `punch_go.window_ms`·`handshake_ms`가 펀칭 창과 QUIC handshake 기한의 정본이다. 두 기기가 같은 값을 받으므로 양쪽 기한이 맞는다. 값은 서버 설정 `punch_window`·`quic_handshake_timeout`에서 온다.
 - `mode = host_only`는 두 기기가 모두 `dependent`일 때다. 서버는 반사 주소 후보를 빼고 호스트 주소만 싣는다. 어느 한쪽에도 호스트 후보가 없으면 `punch_go` 대신 `punch_refused{nat_unsupported}`를 보낸다([P2P](p2p.md#nat-판별) "시도 규칙").
 
@@ -151,14 +162,14 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `offer_timeout` | 2 s | 등록된 B의 답은 서버 왕복 한 번이면 된다. 기기 쪽 `punch.request_timeout`(3 s)보다 짧아야 한다 |
 | `start_delay_margin` | 100 ms | RTT 추정 오차를 덮는 여유 |
 | `start_delay_max` | 1 s | 시작 지연의 상한 |
-| `punch_window` | 5 s(임시) | 후보 8개를 50 ms씩 돌면 한 바퀴 400 ms라 후보마다 12번 넘게 보낸다. [펀칭 실험](p2p.md#펀칭-실험)으로 확정 |
+| `punch_window` | 5 s(임시) | 후보 최대 8개(1 + 3 + 4)를 50 ms씩 돌면 한 바퀴 400 ms라 후보마다 12번 넘게 보낸다. [펀칭 실험](p2p.md#펀칭-실험)으로 확정 |
 | `quic_handshake_timeout` | 5 s(임시) | 직접 경로 RTT 몇 번. 실험으로 확정 |
 | `punch_session_grace` | 5 s | 세션 TTL = `offer_timeout` + `start_delay_max` + `punch_window` + `quic_handshake_timeout` + 이 값(기본 18 s). 결과 보고가 오지 않은 펀칭을 치운다. TTL은 계산값이고 조회에 함께 보인다 |
 | `max_devices` | 10000 | 등록 하나는 연결 상태 수 KB다. 작은 서버 한 대가 감당할 수 있는 수 |
 | `max_punches` | 1000 | 동시 펀칭 전체 상한 |
 | `max_punches_per_device` | 4 | 한 기기가 다른 기기들에게 거는 동시 시도 |
 | `punch_requests_per_minute` | 20 | 기기마다. 남의 주소를 훑는 요청을 늦춘다 |
-| `max_host_candidates` | 6 | 기기 쪽 `punch.max_candidates`(8)에서 반사 2를 뺀 값 |
+| `max_host_candidates` | 4 | 사설 IPv4 하나둘과 전역 IPv6 고정·임시 주소면 보통의 기기를 덮는다. 기기 기본 `punch.max_candidates`(8)에서 서버 반사 1과 보고 반사 3을 뺀 값이다([후보 주소 규칙](#후보-주소-규칙)의 관계) |
 | `max_reported_reflexive` | 3 | 보조 STUN 주소 수(보조 포트, 두 번째 IP의 두 포트) |
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
