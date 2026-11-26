@@ -42,7 +42,7 @@ docker compose logs -f iroh-relay
 
 주의할 iroh-relay 동작:
 
-- 설정 경로(`--config-path`)에 파일이 없으면 오류 없이 기본값(TLS 없음, 평문 HTTP 80, 상한 없음)으로 뜬다. 볼륨 경로를 바꿨으면 기동 로그에 `[HTTPS] relay: serving on`이 있는지 본다.
+- 설정 경로(`--config-path`)에 파일이 없으면 오류 없이 기본값(TLS 없음, 평문 HTTP 80, 상한 없음)으로 뜬다. 볼륨 경로를 바꿨으면 기동 로그에 `[HTTPS/WSS] relay: serving on`이 있는지 본다(TLS 없이 뜨면 `[HTTP/WS] relay: serving on`이 찍힌다).
 - 설정의 모르는 키는 오류 없이 무시된다. 키 이름을 틀리면 그 설정이 빠진 채로 뜬다.
 - `[limits.client.rx]`의 `bytes_per_second`·`max_burst_bytes`는 0이 아닌 u32다. `max_burst_bytes`만 쓰고 `bytes_per_second`를 빼면 relay가 시작하지 않는다.
 - `enable_quic_addr_discovery = true`인데 `[tls]`가 없으면 relay가 시작하지 않는다.
@@ -113,7 +113,7 @@ echo | openssl s_client -connect relay.example.com:443 -servername relay.example
   | openssl x509 -noout -subject -issuer -enddate     # 인증서 이름·발급자·만료일
 ```
 
-- 기동 로그에 `[HTTPS] relay: serving on [::]:443`이 있어야 한다. QUIC 주소 확인을 켰으면 `QUIC server listening on`도 있어야 하고, 방화벽과 클라우드 보안 그룹에서 UDP 7842가 열렸는지 본다.
+- 기동 로그에 `[HTTPS/WSS] relay: serving on [::]:443`이 있어야 한다. QUIC 주소 확인을 켰으면 `QUIC server listening on`도 있어야 하고, 방화벽과 클라우드 보안 그룹에서 UDP 7842가 열렸는지 본다.
 - 수신 상한이 설정대로 들어갔는지는 `RUST_LOG=iroh_relay=debug`로 띄웠을 때 시작 로그의 `client_rx`에서 본다(`relay/check-config.sh`가 같은 방법으로 본다).
 - TLS와 QUIC 주소 확인은 이 레포의 CI와 컨테이너 확인이 판정하지 않는다. 배포할 때 위 절차로 본다.
 

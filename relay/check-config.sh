@@ -6,8 +6,9 @@
 # 설정을 주지 않으면 relay/punch-only.toml과 relay/relay-fallback.toml을 본다. 설정마다:
 #   1. 운영 예시에서 [tls] 절과 enable_quic_addr_discovery를 뺀 CI용 설정을 임시 폴더에 만든다.
 #   2. 고정 이미지(RELAY_IMAGE)를 --dev와 그 설정으로 띄운다. 호스트 쪽은 127.0.0.1의 빈 포트에 게시한다.
-#   3. HTTP(/healthz, /, /generate_204)와 metrics(/metrics) 응답, 시작 로그에 찍힌 수신 상한이
-#      설정 파일과 같은지(설정 파일을 실제로 읽었는지) 본다.
+#   3. HTTP(/healthz, /, /generate_204)와 metrics(/metrics) 응답, 시작 로그의 평문 리스너 줄
+#      ([HTTP/WS] relay: serving on), 시작 로그에 찍힌 수신 상한이 설정 파일과 같은지
+#      (설정 파일을 실제로 읽었는지) 본다.
 #   4. 결과를 한 줄로 쓴다: relay-check config=<이름> result=ok|fail ...
 # 띄운 컨테이너와 임시 폴더는 끝날 때 지운다. 이 스크립트가 받은 이미지도 지운다(--keep-image면 남긴다).
 # TLS와 QUIC 주소 확인은 판정하지 않는다(docs/design/relay.md "배포 형태").
@@ -234,6 +235,12 @@ rc_start_relay() {
     fi
     if ! grep -Fq "$want" <<<"$flat"; then
         RC_LAST_FAIL="stage=limits reason=log-without-$want"
+        rc_dump_logs "$cid"
+        return 1
+    fi
+    # TLS 없는 --dev 기동은 relay 리스너를 평문으로 연다(iroh-relay v1.5.0 server/http_server.rs:467-468).
+    if ! grep -Fq "[HTTP/WS] relay: serving on [::]:$http_port" <<<"$logs"; then
+        RC_LAST_FAIL="stage=log reason=no-http-listener-line"
         rc_dump_logs "$cid"
         return 1
     fi
