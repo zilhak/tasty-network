@@ -91,7 +91,7 @@
 |---|---|---|---|
 | `tasty-i18n` | `PortDiscoveryError`의 `Display`(`lib.rs:453`, 키 `ssh.port_discovery.*` :414-419), `RemoteListenerAbsent`(`listener.rs:180`), `detect_and_persist`(`lib.rs:1121`) | (a) `PortDiscoveryFailureKind`와 `RemoteListenerAbsent`를 공개 타입으로 두고 `Display`는 영어 고정 문구. `detect_and_persist`는 tasty에 남으므로 그 번역 호출도 tasty에 남는다 | enum 값으로 분기해 기존 키(`ssh.port_discovery.*`, `ssh.tunnel.listener_absent`, `cli.remote_profile.not_found`)를 고른다 |
 | `tasty-utils` | `process::hide_console`(`lib.rs:823`, `tunnel.rs:74`), `poison::recover_mutex`(`lib.rs:584`) | 이 레포에서 자체 구현. `hide_console`은 Windows에서 `CREATE_NO_WINDOW`(0x0800_0000)를 거는 몇 줄 함수이고 `std::os::windows::process::CommandExt::creation_flags`로 외부 의존 없이 쓴다. `recover_mutex`는 poison 복구와 첫 1회 보고다. 공용 크레이트를 둘 만큼 크지 않다 | 없음 |
-| `tasty-reaper` | `spawn_bound_to_host`(`tunnel.rs:76`) | (b) 자식 생성 훅 주입. ssh 크레이트는 `SpawnHook`(예: `Arc<dyn Fn(Command) -> io::Result<Child> + Send + Sync>`)을 받고, 주지 않으면 `Command::spawn`을 쓴다. 훅은 터널 ssh와 포트 발견 ssh 모두에 쓴다 | `spawn_bound_to_host`를 훅으로 넣는다. 아래 두 계약을 tasty가 지킨다 |
+| `tasty-reaper` | `spawn_bound_to_host`(`tunnel.rs:76`) | (b) 자식 생성 훅 주입. ssh 크레이트는 `SpawnHook`(`SpawnHook::new`로 `Fn(Command) -> io::Result<Child> + Send + Sync` 함수를 감싼 값)을 `SshLauncher::with_spawn_hook`으로 받고, 주지 않으면 `Command::spawn`을 쓴다. 훅은 터널 ssh와 포트 발견 ssh 모두에 쓴다 | `spawn_bound_to_host`를 훅으로 넣는다. 아래 두 계약을 tasty가 지킨다 |
 | `tasty-remote-profiles` | `SshTarget::from_remote_profile`(`lib.rs:100`)·`from_attach_inline`(:123), `resolve_attach_target`(:153), `apply_shell_to_profile`(:1070), `detect_for_profile`(:1095), `detect_and_persist`(:1115) | (c) `SshTarget`·`PortMode` 값 타입과 프로필 없이 도는 함수(`SshTarget::parse`, `discover_remote_port`, `detect_port_mode`)만 이 레포에 둔다. 위 여섯 함수는 tasty에 남긴다 | 여섯 함수를 tasty 크레이트로 옮기고 이 레포 값 타입을 쓴다. `SshTarget`이 이 레포 타입이 되므로 associated 생성자(`SshTarget::from_remote_profile`·`from_attach_inline`)는 tasty 쪽 자유 함수나 확장 trait로 바꾼다(외부 타입에 inherent 메서드를 더할 수 없다) |
 
 결과: 이 레포의 SSH 크레이트에 남는 tasty 의존은 0개다.
@@ -107,17 +107,19 @@
 
 ### 포트 발견의 tasty 관례
 
-포트 발견은 원격 명령 `<원격 tasty> port`(`lib.rs:859`), 포트 파일 `~/.tasty/tasty.port`·`~/.tasty-debug/tasty.port`(:845-914), Windows `type %USERPROFILE%\...`에 기댄다. 이 레포는 이 이름들을 상수로 두지 않고 `PortDiscoveryConfig`(가안 이름)로 받는다. 원격 실행 파일 이름, 데이터 디렉터리 이름, 포트 파일 이름이 필드다. 기본값은 두지 않는다. tasty가 자기 값을 넣고, 시험과 예제는 임시 값을 넣는다.
+포트 발견은 원격 명령 `<원격 tasty> port`(`lib.rs:859`), 포트 파일 `~/.tasty/tasty.port`·`~/.tasty-debug/tasty.port`(:845-914), Windows `type %USERPROFILE%\...`에 기댄다. 이 레포는 이 이름들을 상수로 두지 않고 `PortDiscoveryConfig`로 받는다. 원격 실행 파일 이름(`remote_program`), 그 뒤 인자(`remote_args`, tasty는 `port`), 데이터 디렉터리 이름(`data_dir`), 포트 파일 이름(`port_file`), 명시 파일 경로(`explicit_port_file`)가 필드다. 기본값은 두지 않는다. tasty가 자기 값을 넣고, 시험과 예제는 임시 값을 넣는다.
 
 포트 발견의 동작 규칙(지금 tasty와 같게 옮긴다):
 
-- 명시 경로가 우선한다. 호출 인자(또는 `PortDiscoveryConfig`)에 명시 파일 경로가 있으면 관례 경로와 모드 체인보다 먼저, 그것만 읽는다(`cat <경로>` → `type <경로>`, `lib.rs` `discover_via_explicit_file`). tasty는 프로필의 `port_file`을 여기에 넣는다(`tasty:crates/tasty-remote/src/browse.rs`).
+- 명시 경로가 우선한다. `PortDiscoveryConfig.explicit_port_file`에 명시 파일 경로가 있으면 관례 경로와 모드 체인보다 먼저, 그것만 읽는다(`cat <경로>` → `type <경로>`, `lib.rs` `discover_via_explicit_file`). tasty는 프로필의 `port_file`을 여기에 넣는다(`tasty:crates/tasty-remote/src/browse.rs`).
 - 명시 경로가 없으면 모드를 따른다. `Auto`는 subcommand → Unix 파일 → Windows 파일 순이다(`AUTO_FALLBACK_CHAIN`).
 - 취소와 원격 인스턴스 종료 확정(`RemoteInstanceExited`)은 다음 방식으로 넘어가지 않고 그 자리에서 끝난다(`stops_auto_chain`).
 - 새 연결 레코드(포트·토큰·인스턴스 ID, [기기 키·토큰](identity.md) "토큰 전달")도 같은 우선순위·체인·종료 분류로 읽는다. 레코드 하나를 읽으므로 포트와 토큰을 따로 찾는 단계가 없다.
-- 레코드 해석은 한 곳에 둔다. `tasty-net-ssh`의 발견 루프는 stdout을 해석하는 디코더를 주입받고(지금 tasty의 `parse_port` 자리), `tasty-net-transport`가 `tasty-net-identity`의 레코드 파서를 넘긴다. 그래서 게시와 SSH 발견이 같은 파서를 쓰고, ssh 크레이트는 이 레포 안 의존이 없는 채로 남는다([크레이트 구성](crates.md) "의존 방향"). 숫자 포트 하나를 읽는 경우(`Discovered::LegacyPort`)도 그 파서가 가른다.
+- 레코드 해석은 한 곳에 둔다. `tasty-net-ssh`의 발견 루프는 stdout을 해석하는 디코더를 주입받고(지금 tasty의 `parse_port` 자리. `discover_remote_port`와 `detect_port_mode`의 `decode` 인자. 숫자 포트 하나만 읽는 디코더는 `decode_port`다). 셸 감지도 디코더를 받는다. 셸 감지는 디코더가 받아들인 모드를 성공으로 보므로, 레코드를 출력하는 원격에 숫자 포트 디코더를 쓰면 subcommand 모드가 실패로 보인다, `tasty-net-transport`가 `tasty-net-identity`의 레코드 파서를 넘긴다. 그래서 게시와 SSH 발견이 같은 파서를 쓰고, ssh 크레이트는 이 레포 안 의존이 없는 채로 남는다([크레이트 구성](crates.md) "의존 방향"). 숫자 포트 하나를 읽는 경우(`Discovered::LegacyPort`)도 그 파서가 가른다.
 - 발견 실패의 진단 detail에는 stdout 원문을 넣지 않는다([기기 키·토큰](identity.md) "토큰 비교"의 원문 규칙).
 
-- 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227` `run_ssh_connect`, :1105 `detect_for_profile`, `tasty:crates/tasty-remote/src/browse.rs`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 인자로 받고, 환경 변수를 이 값으로 바꾸는 일은 tasty에 남는다.
+- 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227` `run_ssh_connect`, :1105 `detect_for_profile`, `tasty:crates/tasty-remote/src/browse.rs`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 값(`SshLauncher::with_verify`)으로 받고, 환경 변수를 이 값으로 바꾸는 일은 tasty에 남는다.
 - ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode=no`·`ServerAliveInterval`·`ServerAliveCountMax`는 언제나, `StrictHostKeyChecking=accept-new`는 `verify = true`일 때만 사용자 `extra_options`보다 먼저 넣는다(ssh는 같은 옵션의 첫 값을 쓰므로 이 값들이 이긴다). `verify = false`이면 이 레포는 `StrictHostKeyChecking`을 넣지 않고, 사용자 `extra_options`나 ssh 설정 파일·기본값이 정한다. `ConnectTimeout`은 맨 뒤에 기본값(`SSH_CONNECT_TIMEOUT` 10초)을 넣는다. ssh는 명령행 `-o`를 설정 파일보다 먼저 적용하므로, 이 기본값을 이기는 것은 그보다 앞에 들어간 사용자 `extra_options`의 `ConnectTimeout`뿐이다. ssh 설정 파일의 `ConnectTimeout`은 이 기본값에 진다.
-- 한국어 `anyhow!` 문자열(예: `PortMode::parse` :289)은 [오류 규칙](crates.md#오류-규칙)대로 enum + 영어 `Display`로 바꾼다.
+- 한국어 `anyhow!` 문자열(예: `PortMode::parse` :289)은 [오류 규칙](crates.md#오류-규칙)대로 enum + 영어 `Display`로 바꾼다. 터널 수립 실패는 `TunnelError` enum이다.
+- 리스너 판정(`is_dropped_connection`, `ListenerVerdict::remote_listener_absent`·`explain_failure`)은 `anyhow::Error` 대신 `&(dyn std::error::Error + 'static)`를 받아 `source()` 사슬을 본다(`ReadFailure::of_error`와 같은 방식). tasty의 `explain_failure`는 실패 위에 `RemoteListenerAbsent` 맥락을 붙여 돌려줬지만, 이 레포의 것은 판정 결과 `Option<RemoteListenerAbsent>`만 돌려주고 붙이는 일은 소비자가 한다. `connection_closed_error`는 `io::Error`를 돌려준다.
+- `SshTunnel`의 메서드는 모두 `&self`를 받는다. transport가 `Arc`로 한 터널을 여러 채널에 나눠 주고([전송 추상화](transport.md) "터널 수명과 재연결"), 마지막 참조가 drop될 때 자식을 끝내고 회수한다.
