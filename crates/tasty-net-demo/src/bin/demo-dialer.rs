@@ -8,6 +8,13 @@
 //! change (a wrong token, for example) ends the dialer with exit code 3. `quit` or the end of
 //! stdin detaches and ends with exit code 0.
 //!
+//! The link's channels hold the `-L` tunnel, and the tunnel's `ssh` child is ended when the
+//! last of them goes. On `quit` the stdin thread holds the writer while it detaches, so the
+//! dialer waits for that thread to finish (bounded by the write timeout and the drain cap)
+//! before it returns; otherwise the process could end first and leave the `ssh` running. A
+//! refusal ends the dialer without waiting for stdin: no link was up, and the main thread
+//! drops what is left of the attempt and the transport before it returns.
+//!
 //! ```text
 //! demo-dialer --destination <user@host> --record <remote path>
 //!             [--ssh-port <port>] [--identity <file>] [--option Key=Value]...
@@ -27,6 +34,8 @@
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
 //! | `dialer rejected reason=<wire reason or -> error=<text>` | it did not; the dialer ends |
+//! | `dialer stdin-thread-late limit_ms=<ms>` | after `quit`, the stdin thread's Detach did not end in time |
+//! | `dialer stdin-thread-panicked` | after `quit`, the stdin thread had panicked |
 //! | `dialer bye` | the dialer ends after `quit` |
 #![forbid(unsafe_code)]
 
@@ -35,7 +44,7 @@ use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tasty_net_demo::{Args, emit, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
@@ -52,6 +61,10 @@ const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remo
 
 /// Exit code when a refusal ends the dialer without another attempt.
 const EXIT_REJECTED: u8 = 3;
+
+/// Added to the write timeout and the drain cap when waiting for the stdin thread to finish
+/// its Detach after `quit`: the time to drop the writer and end the tunnel `ssh`.
+const DETACH_END_MARGIN: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     match run() {
@@ -128,14 +141,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     .with_timeouts(timeouts);
 
     emit(&format!("dialer pid={}", std::process::id()));
+    let detach_limit = timeouts
+        .write_timeout
+        .saturating_add(timeouts.drain_cap)
+        .saturating_add(DETACH_END_MARGIN);
     let shared = Arc::new(Shared::default());
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
-    {
+    let stdin_thread = {
         let shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("stdin".into())
-            .spawn(move || read_stdin(&shared, &wake_tx))?;
-    }
+            .spawn(move || read_stdin(&shared, &wake_tx))?
+    };
 
     let mut backoff = Backoff::new();
     let mut attempt = 0u32;
@@ -185,6 +202,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     "dialer rejected reason={reason} error={}",
                     error_chain(&error)
                 ));
+                // The stdin thread may still wait for a line, so it is not waited for. It
+                // holds no part of the link (none was up); what the attempt left goes here,
+                // in this thread, with the transport, so the tunnel `ssh` ends before exit.
+                drop(error);
+                drop(lock(&shared.link).take());
+                drop(transport);
                 return Ok(ExitCode::from(EXIT_REJECTED));
             }
             Err(error) => emit(&format!("dialer retry error={}", error_chain(&error))),
@@ -193,8 +216,30 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let _woken = wake_rx.recv_timeout(backoff.current()).is_ok();
         backoff.advance();
     }
+    // `quit` or the end of stdin: the stdin thread sets `quit` and then detaches, holding the
+    // writer, which keeps the tunnel. Its end means the writer is gone.
+    wait_for_stdin_thread(&stdin_thread, detach_limit);
+    if stdin_thread.is_finished() && stdin_thread.join().is_err() {
+        emit("dialer stdin-thread-panicked");
+    }
+    drop(transport);
     emit("dialer bye");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Waits up to `limit` for the stdin thread to end. Says so on stdout when it does not.
+fn wait_for_stdin_thread(thread: &std::thread::JoinHandle<()>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            emit(&format!(
+                "dialer stdin-thread-late limit_ms={}",
+                limit.as_millis()
+            ));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Creates every `ssh` child of the dialer and reports it. A tunnel child (`-L`) becomes the
