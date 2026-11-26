@@ -153,12 +153,20 @@ impl Cancellable for OwnedTunnel {
 }
 
 /// Opens one loopback TCP channel through `tunnel`. The listener verdict is taken right
-/// before connecting, so it judges only this channel.
-fn open_through(tunnel: &Arc<SshTunnel>) -> Result<RawChannel, ConnectError> {
+/// before connecting, so it judges only this channel. A cancel that arrived by the time the
+/// connect returns wins over its result: the socket is closed and `Cancelled` returned. A
+/// cancel after that reaches the channel when the handshake registers it.
+fn open_through(
+    tunnel: &Arc<SshTunnel>,
+    cancel: &AttemptCancel,
+) -> Result<RawChannel, ConnectError> {
     let verdict = tunnel.listener_verdict();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tunnel.local_port()));
-    let stream =
-        TcpStream::connect_timeout(&addr, LOCAL_CONNECT_TIMEOUT).map_err(ConnectError::Io)?;
+    let connected = TcpStream::connect_timeout(&addr, LOCAL_CONNECT_TIMEOUT);
+    if cancel.is_cancelled() {
+        return Err(ConnectError::Cancelled);
+    }
+    let stream = connected.map_err(ConnectError::Io)?;
     let channel = RawChannel::from_tcp_as(stream, TransportKind::Ssh).map_err(ConnectError::Io)?;
     Ok(channel
         .with_verdict(verdict)
@@ -170,7 +178,8 @@ impl Transport for SshTransport {
 
     /// Discovers the record, reuses or starts the tunnel, and opens the channel. Discovery
     /// stops on cancellation at once; starting a new tunnel blocks until it is ready or fails
-    /// (a few seconds) and the cancellation then reaps it.
+    /// (a few seconds). A cancel that arrived meanwhile then wins whichever way the start
+    /// went: a started tunnel is reaped and the call returns `Cancelled`.
     fn connect(
         &self,
         target: &SshTarget,
@@ -187,17 +196,23 @@ impl Transport for SshTransport {
                 if cancel.is_cancelled() {
                     return Err(ConnectError::Cancelled);
                 }
-                let tunnel = Arc::new(
-                    SshTunnel::establish(&self.launcher, target, record.port)
-                        .map_err(ConnectError::Tunnel)?,
-                );
+                let established = SshTunnel::establish(&self.launcher, target, record.port);
+                if cancel.is_cancelled() {
+                    if let Ok(tunnel) = established {
+                        OwnedTunnel(Arc::new(tunnel)).cancel();
+                    }
+                    return Err(ConnectError::Cancelled);
+                }
+                let tunnel = Arc::new(established.map_err(ConnectError::Tunnel)?);
+                // A cancel from here on finds the tunnel registered, or is refused by the
+                // registration, which reaps it.
                 let registration = cancel
                     .register(Arc::new(OwnedTunnel(Arc::clone(&tunnel))))
                     .map_err(|_| ConnectError::Cancelled)?;
                 (tunnel, Some(registration))
             }
         };
-        let channel = open_through(&tunnel)?;
+        let channel = open_through(&tunnel, cancel)?;
         Ok(Connection {
             channel,
             endpoint: Endpoint::new(Arc::new(SshEndpoint {
@@ -232,7 +247,7 @@ impl EndpointHandle for SshEndpoint {
                 "the SSH tunnel is gone",
             )));
         }
-        open_through(&self.tunnel)
+        open_through(&self.tunnel, cancel)
     }
 
     fn auth(&self) -> Option<DialAuth> {
