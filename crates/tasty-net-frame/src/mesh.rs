@@ -124,8 +124,8 @@ pub enum MeshAssembleError {
     Malformed,
     /// The lengths do not add up: `total_len` exceeds what `chunk_count` chunks can
     /// carry (rejected at once to avoid a large allocation), a chunk carries more than
-    /// [`MESH_CHUNK_MAX_PAYLOAD`] bytes, or the reassembled length differs from
-    /// `total_len`.
+    /// [`MESH_CHUNK_MAX_PAYLOAD`] bytes, or the received data of a frame is longer than
+    /// `total_len` or, once every chunk arrived, differs from it.
     LengthMismatch,
 }
 
@@ -148,6 +148,8 @@ struct InFlight {
     frame_seq: u64,
     full_textures: bool,
     received: HashMap<u32, Vec<u8>>,
+    /// Sum of the data lengths in `received`, kept in `u64` so it cannot wrap.
+    received_len: u64,
 }
 
 /// Reassembles chunks per `(surface_id, frame_id)`, so chunks of different surfaces and
@@ -195,6 +197,7 @@ impl MeshFrameAssembler {
             frame_seq: meta.frame_seq,
             full_textures: meta.full_textures,
             received: HashMap::new(),
+            received_len: 0,
         });
         // Every chunk of a frame carries the same header apart from chunk_index. A chunk
         // whose header disagrees (or a reused frame_id) is treated as corruption, so the
@@ -212,10 +215,23 @@ impl MeshFrameAssembler {
             self.inflight.remove(&key);
             return Err(MeshAssembleError::LengthMismatch);
         }
-        slot.received.insert(meta.chunk_index, payload.to_vec());
+        if let Some(old) = slot.received.insert(meta.chunk_index, payload.to_vec()) {
+            slot.received_len -= old.len() as u64;
+        }
+        slot.received_len += payload.len() as u64;
+        // More data than the header announced can never complete correctly.
+        if slot.received_len > u64::from(slot.total_len) {
+            self.inflight.remove(&key);
+            return Err(MeshAssembleError::LengthMismatch);
+        }
 
-        if slot.received.len() as u32 == slot.chunk_count {
+        if slot.received.len() as u64 == u64::from(slot.chunk_count) {
             let slot = self.inflight.remove(&key).expect("just inserted above");
+            // Check the received length before allocating, so a header with a large
+            // total_len and small chunks cannot cause an allocation of that size.
+            if slot.received_len != u64::from(slot.total_len) {
+                return Err(MeshAssembleError::LengthMismatch);
+            }
             let mut assembled = Vec::with_capacity(slot.total_len as usize);
             for i in 0..slot.chunk_count {
                 let Some(part) = slot.received.get(&i) else {
@@ -223,9 +239,6 @@ impl MeshFrameAssembler {
                     return Err(MeshAssembleError::Malformed);
                 };
                 assembled.extend_from_slice(part);
-            }
-            if assembled.len() as u32 != slot.total_len {
-                return Err(MeshAssembleError::LengthMismatch);
             }
             let out_meta = MeshChunkMeta {
                 surface_id: meta.surface_id,
@@ -534,6 +547,96 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    /// Every chunk arrived but the data is shorter than total_len: the frame is rejected
+    /// without building a total_len-sized buffer.
+    #[test]
+    fn a_short_frame_with_a_large_total_len_is_rejected_before_allocating() {
+        // Two chunks may announce up to 2 * MESH_CHUNK_MAX_PAYLOAD bytes; send 2 bytes.
+        let total_len = (2 * MESH_CHUNK_MAX_PAYLOAD) as u32;
+        let meta = |chunk_index| MeshChunkMeta {
+            surface_id: 1,
+            frame_id: 1,
+            chunk_index,
+            chunk_count: 2,
+            total_len,
+            generation: 0,
+            frame_seq: 0,
+            full_textures: false,
+        };
+        let mut assembler = MeshFrameAssembler::new();
+        assert!(
+            assembler
+                .push_chunk(&encode_mesh_chunk(&meta(0), b"a"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            assembler.push_chunk(&encode_mesh_chunk(&meta(1), b"b")),
+            Err(MeshAssembleError::LengthMismatch)
+        );
+        // The rejected frame left no state behind.
+        assert!(assembler.inflight.is_empty());
+    }
+
+    #[test]
+    fn more_data_than_total_len_is_rejected_as_soon_as_it_arrives() {
+        let meta = |chunk_index| MeshChunkMeta {
+            surface_id: 1,
+            frame_id: 1,
+            chunk_index,
+            chunk_count: 3,
+            total_len: 4,
+            generation: 0,
+            frame_seq: 0,
+            full_textures: false,
+        };
+        let mut assembler = MeshFrameAssembler::new();
+        assert!(
+            assembler
+                .push_chunk(&encode_mesh_chunk(&meta(0), b"abc"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            assembler.push_chunk(&encode_mesh_chunk(&meta(1), b"de")),
+            Err(MeshAssembleError::LengthMismatch)
+        );
+        assert!(assembler.inflight.is_empty());
+    }
+
+    /// A repeated chunk index replaces the earlier data; the length sum follows it.
+    #[test]
+    fn a_repeated_chunk_replaces_its_length() {
+        let meta = |chunk_index| MeshChunkMeta {
+            surface_id: 1,
+            frame_id: 1,
+            chunk_index,
+            chunk_count: 2,
+            total_len: 4,
+            generation: 0,
+            frame_seq: 0,
+            full_textures: false,
+        };
+        let mut assembler = MeshFrameAssembler::new();
+        assert!(
+            assembler
+                .push_chunk(&encode_mesh_chunk(&meta(0), b"xyz"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            assembler
+                .push_chunk(&encode_mesh_chunk(&meta(0), b"ab"))
+                .unwrap()
+                .is_none()
+        );
+        let (_, assembled) = assembler
+            .push_chunk(&encode_mesh_chunk(&meta(1), b"cd"))
+            .unwrap()
+            .expect("both chunks arrived");
+        assert_eq!(assembled, b"abcd");
     }
 
     #[test]
