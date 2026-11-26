@@ -116,13 +116,14 @@ rc_prepare() {
     return 0
 }
 
-# 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀을
-# 시험값 RC_SECRET_PLACEHOLDER로 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 원본 텍스트를 고치지 않으므로
+# 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀
+# (shared_token 원소, http.bearer_token)을 시험값 RC_SECRET_PLACEHOLDER로, http.url을 자리표시 주소로
+# 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
 # 표 머리·점 키·인라인 표·인용 키("tls") 어느 표기로 적었든 파싱 결과의 같은 키가 지워진다.
 # 검사 컨테이너는 debug 시작 로그에 ServerConfig 전체를 찍으므로 원래 토큰이 docker 로그 수집기에 닿지 않게 한다.
 # 쓰는 값 종류: 표, 배열(표 원소는 인라인 표), 문자열, 정수, 유한한 실수, 불리언. 날짜·시각 값과 inf·nan은
 # relay 설정에 쓰이지 않으므로 거절한다(rc 1). 다시 쓴 파일을 tomllib로 읽어 쓰려던 값과 같은지도 본다.
-# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 iroh-relay가 기동을 거절할 access 값. 0이 아니면 $2를 남기지 않는다.
+# 종료 코드: 0 만듦, 1 TOML 오류·지원하지 않는 값, 6 허용 목록 밖의 access 값. 0이 아니면 $2를 남기지 않는다.
 RC_SECRET_PLACEHOLDER="check-config-placeholder"
 rc_make_ci_config() {
     local src="$1" out="$2" rc
@@ -132,33 +133,53 @@ import math, sys, tomllib
 
 src, out, ph = sys.argv[1], sys.argv[2], sys.argv[3]
 
+ACCESS_KINDS = ("everyone", "allowlist", "denylist", "http", "shared_token")
+URL_PLACEHOLDER = "http://" + ph + ".invalid/"
+
+def is_str_list(v, nonempty):
+    return isinstance(v, list) and (v or not nonempty) and all(isinstance(x, str) and (x or not nonempty) for x in v)
+
 def access_valid(d):
-    # iroh-relay 1.5.0 main.rs TryFrom<AccessConfig>와 serde 역직렬화가 받아들이는 조건.
-    # shared_token: 비어 있지 않은 배열이고 원소가 모두 비어 있지 않은 문자열. http.bearer_token: 있으면 문자열.
+    # 허용 목록: access가 없음, 문자열 "everyone", 또는 키가 정확히 하나인 표(iroh-relay 1.5.0 main.rs AccessConfig).
+    # 표의 키와 값 모양:
+    #   everyone      빈 표 또는 빈 배열(toml 1.1.6 de/deserializer/table_enum.rs unit_variant가 받는 모양)
+    #   allowlist     문자열 배열(endpoint ID)        denylist  같음
+    #   http          표. url은 문자열(필수), bearer_token은 있으면 문자열, 다른 키 없음
+    #   shared_token  비어 있지 않은 문자열만 있는 비어 있지 않은 배열(main.rs TryFrom<AccessConfig>)
+    # 그 밖(배열, 오타 키, 키 두 개, 위치 기반 http 배열 표기 등)은 iroh가 받더라도 이 검사가 거절한다.
     # 어긋난 값은 출력하지 않는다(토큰 원문일 수 있다).
-    acc = d.get("access")
-    if not isinstance(acc, dict):
+    if "access" not in d:
         return True
-    if "shared_token" in acc:
-        t = acc["shared_token"]
-        if not isinstance(t, list) or not t or not all(isinstance(x, str) and x for x in t):
-            return False
-    if "http" in acc:
-        http = acc["http"]
-        if not isinstance(http, dict):
-            return False
-        if "bearer_token" in http and not isinstance(http["bearer_token"], str):
-            return False
-    return True
+    acc = d["access"]
+    if acc == "everyone":
+        return True
+    if not isinstance(acc, dict) or len(acc) != 1:
+        return False
+    (kind, v), = acc.items()
+    if kind not in ACCESS_KINDS:
+        return False
+    if kind == "everyone":
+        return v == {} or v == []
+    if kind in ("allowlist", "denylist"):
+        return is_str_list(v, nonempty=False)
+    if kind == "shared_token":
+        return is_str_list(v, nonempty=True)
+    return (isinstance(v, dict) and isinstance(v.get("url"), str)
+            and set(v) <= {"url", "bearer_token"}
+            and isinstance(v.get("bearer_token", ""), str))
 
 def scrub(d):
+    # shared_token 원소와 bearer_token은 시험값으로, http.url은 통째로 자리표시 주소로 바꾼다
+    # (쿼리·사용자 정보에 든 비밀이 시작 로그로 가지 않게. 콜백은 기동 검사에서 호출되지 않는다).
     acc = d.get("access")
     if isinstance(acc, dict):
-        if isinstance(acc.get("shared_token"), list):
+        if "shared_token" in acc:
             acc["shared_token"] = [ph for _ in acc["shared_token"]]
         http = acc.get("http")
-        if isinstance(http, dict) and "bearer_token" in http:
-            http["bearer_token"] = ph
+        if http is not None:
+            http["url"] = URL_PLACEHOLDER
+            if "bearer_token" in http:
+                http["bearer_token"] = ph
 
 class Unsupported(Exception):
     pass
@@ -213,7 +234,7 @@ except (OSError, tomllib.TOMLDecodeError) as e:
     print(e, file=sys.stderr)
     sys.exit(1)
 if not access_valid(a):
-    print("access-invalid: shared_token must be a non-empty array of non-empty strings, http.bearer_token a string", file=sys.stderr)
+    print("access-invalid: access must be absent, \"everyone\", or a table with one of everyone, allowlist, denylist, http, shared_token in the checked shape", file=sys.stderr)
     sys.exit(6)
 a.pop("tls", None)
 a.pop("enable_quic_addr_discovery", None)
@@ -234,7 +255,7 @@ PY
     rc=$?
     case $rc in
         0) return 0 ;;
-        6) rc_log "$src: access 설정이 iroh-relay 1.5.0의 조건에 맞지 않는다(값은 출력하지 않는다)." ;;
+        6) rc_log "$src: access 설정이 검사가 받는 표기가 아니다(relay/README.md 접속 허용. 값은 출력하지 않는다)." ;;
         *) rc_log "$src: CI용 설정을 만들지 못했다."; rc=1 ;;
     esac
     rm -f "${out:?}"
@@ -596,18 +617,42 @@ rc_self_test() {
     st_expect secret-bearer-converted 0 "$?"
     grep -q 'n10-secret' "$t/ci-bearer.toml"
     st_expect secret-bearer-absent 1 "$?"
-    grep -q 'auth.example.com/x' "$t/ci-bearer.toml"
-    st_expect secret-bearer-url-kept 0 "$?"
-    # iroh-relay가 기동을 거절할 access 값은 치환하지 않고 access-invalid로 끝나며, 원래 값을 출력하지 않는다.
-    local bad n=0
+    # http.url은 통째로 자리표시 주소로 바뀐다(쿼리·사용자 정보에 든 비밀도 남지 않는다).
+    st_expect secret-bearer-url-replaced "http://$RC_SECRET_PLACEHOLDER.invalid/" "$(python3 -I -c 'import sys, tomllib
+print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-bearer.toml")"
+    printf '[access.http]\nurl = "https://n10-user:n10-pass@auth.example.com/x?key=n10-query-secret"\n' > "$t/query.toml"
+    rc_make_ci_config "$t/query.toml" "$t/ci-query.toml"
+    st_expect secret-url-query-converted 0 "$?"
+    grep -q 'n10-' "$t/ci-query.toml"
+    st_expect secret-url-query-absent 1 "$?"
+    grep -q "$RC_SECRET_PLACEHOLDER.invalid" "$t/ci-query.toml"
+    st_expect secret-url-query-placeholder 0 "$?"
+    # 허용 목록 안의 access 표기는 받는다.
+    local ok n=0
+    for ok in 'access = "everyone"' 'access.everyone = {}' 'access = { everyone = [] }' \
+        'access.allowlist = ["ae58ff8833241ac82d6ff7611046ed67b5072d142c588d0063e942d9a75502b6"]' 'access.denylist = []'; do
+        n=$((n + 1))
+        printf 'enable_relay = true\n%s\n' "$ok" > "$t/acc-ok$n.toml"
+        rc_make_ci_config "$t/acc-ok$n.toml" "$t/ci-acc-ok$n.toml"
+        st_expect "access-valid-$n" 0 "$?"
+    done
+    # 허용 목록 밖의 access 값은 치환하지 않고 access-invalid로 끝나며, 원래 값을 출력하지 않는다.
+    # 1~5: iroh-relay가 기동을 거절하는 값. 6~: 오타 키 3종, 배열, 키 두 개, 위치 기반 http 표기, http의 다른 키·url 없음, everyone에 값.
+    local bad
+    n=0
     for bad in 'access.shared_token = []' 'access.shared_token = [""]' 'access.shared_token = [4242]' \
         "access.http = { url = \"https://auth.example.com/x\", bearer_token = 4243 }" \
-        "access.shared_token = 'n10-scalar-secret'"; do
+        "access.shared_token = 'n10-scalar-secret'" \
+        'access.sharedtoken = ["n10-typo-a"]' 'access.shared-token = ["n10-typo-b"]' 'access.Shared_Token = ["n10-typo-c"]' \
+        'access = ["n10-array"]' 'access = { shared_token = ["n10-two"], allowlist = [] }' \
+        'access.http = ["https://auth.example.com/n10-pos", "n10-pos-token"]' \
+        'access.http = { url = "https://auth.example.com/x", bearer_token = "n10-extra", timeout = 5 }' \
+        'access.http = { bearer_token = "n10-no-url" }' 'access.everyone = { n10-key = "n10-everyone" }'; do
         n=$((n + 1))
         printf 'enable_relay = true\n%s\n' "$bad" > "$t/acc$n.toml"
         rc_make_ci_config "$t/acc$n.toml" "$t/ci-acc$n.toml" > "$t/acc$n.out" 2>&1
         st_expect "access-invalid-$n" 6 "$?"
-        grep -Eq '4242|4243|n10-scalar-secret' "$t/acc$n.out"
+        grep -Eq '4242|4243|n10-' "$t/acc$n.out"
         st_expect "access-invalid-$n-value-hidden" 1 "$?"
         st_expect "access-invalid-$n-ci-file-removed" no "$(if [[ -e "$t/ci-acc$n.toml" ]]; then echo yes; else echo no; fi)"
     done
@@ -622,15 +667,15 @@ rc_self_test() {
     st_expect access-invalid-no-docker no "$(if [[ -e "$t/docker-calls" ]]; then echo yes; else echo no; fi)"
     grep -q 'n10-scalar-secret' "$t/start.out"
     st_expect access-invalid-start-value-hidden 1 "$?"
-    # 비밀을 바꿔 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다.
-    printf '[access.http]\nurl = "https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"\nbearer_token = "n10-tok"\n' > "$t/emoji.toml"
+    # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다(url은 바뀌므로 allowlist 원소로 본다).
+    printf 'access.allowlist = ["https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"]\n' > "$t/emoji.toml"
     rc_make_ci_config "$t/emoji.toml" "$t/ci-emoji.toml"
-    st_expect secret-emoji-url-converted 0 "$?"
+    st_expect encoder-emoji-converted 0 "$?"
     python3 -I -c 'import sys, tomllib
-a = tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"]
-b = tomllib.load(open(sys.argv[2], "rb"))["access"]["http"]["url"]
-sys.exit(0 if a == b and "\U0001F511" in b else 1)' "$t/emoji.toml" "$t/ci-emoji.toml"
-    st_expect secret-emoji-url-kept 0 "$?"
+a = tomllib.load(open(sys.argv[1], "rb"))["access"]["allowlist"][0]
+b = tomllib.load(open(sys.argv[2], "rb"))["access"]["allowlist"][0]
+sys.exit(0 if a == b and "\U0001F511" in b and "\t" in b else 1)' "$t/emoji.toml" "$t/ci-emoji.toml"
+    st_expect encoder-emoji-kept 0 "$?"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
