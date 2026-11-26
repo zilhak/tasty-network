@@ -164,7 +164,24 @@ impl Exploration {
             .map(|&(at, _)| &self.nodes[at])
     }
 
+    /// This device's own view, merged without crossing a link.
+    fn merge_view(&mut self, view: View, unix_ms: u64) {
+        let me = self.me;
+        for node in view.nodes {
+            self.merge_node(node, &me, unix_ms);
+        }
+        for edge in view.edges {
+            if self.edge_keys.insert(edge.key()) {
+                self.edges.push(edge);
+            }
+        }
+    }
+
     fn merge_part(&mut self, part: ResultPart, unix_ms: u64) {
+        // This device's own parts were merged as its local view already.
+        if part.from == self.me {
+            return;
+        }
         for node in part.nodes {
             self.merge_node(node, &part.from, unix_ms);
         }
@@ -283,8 +300,8 @@ impl Agent {
 
     /// Starts an exploration from this device and returns its request ID. The route is
     /// checked first ([`TopologyError::InvalidRoute`]); a first hop that cannot be sent to
-    /// is [`TopologyError::FirstHop`]. With this device as the origin, its own part is the
-    /// local view.
+    /// is [`TopologyError::FirstHop`]. This device's own part of the exploration is its
+    /// local view, merged directly; what it sends on links is its remote answer.
     pub fn explore(
         &mut self,
         request: ExploreRequest,
@@ -417,36 +434,39 @@ impl Agent {
             },
         );
 
+        // What goes on a link is always the remote answer. The requester's own screen gets
+        // the local view merged directly; its parts on the link are for the waiting parent
+        // only and are not merged again (`deliver`). An answer that does not leave this
+        // device (the requester is the origin) is not a remote answer, so sharing off does
+        // not stop the requester's own exploration.
         let is_local = query.requester == me;
+        let on_link = return_path.as_slice() != [me];
+        if is_local {
+            let view = local_view(&self.me, local.links, local.failures, now.unix_ms);
+            if let Some(exploration) = self.explorations.get_mut(&query.request_id)
+                && exploration.state == ExplorationState::Running
+            {
+                exploration.merge_view(view, now.unix_ms);
+            }
+        }
         let header = ResultHeader {
             request_id: query.request_id.clone(),
             branch: query.branch.clone(),
             from: me,
             return_path: return_path.clone(),
         };
-        if !is_local && !local.sharing.enabled {
-            let view = remote_answer(
-                &self.me,
-                local.links,
-                local.failures,
-                local.sharing,
-                now.unix_ms,
-            );
+        let mut view = remote_answer(
+            &self.me,
+            local.links,
+            local.failures,
+            local.sharing,
+            now.unix_ms,
+        );
+        if on_link && !local.sharing.enabled {
             self.send_view(&header, view, out, now);
             self.send_done(&header, Vec::new(), is_origin, out, now);
             return;
         }
-        let mut view = if is_local {
-            local_view(&self.me, local.links, local.failures, now.unix_ms)
-        } else {
-            remote_answer(
-                &self.me,
-                local.links,
-                local.failures,
-                local.sharing,
-                now.unix_ms,
-            )
-        };
 
         let mut pending = HashMap::new();
         let mut timed_out = Vec::new();
@@ -484,15 +504,24 @@ impl Agent {
                             },
                         );
                     }
-                    Err(SendError::NoCapability) => view.nodes.push(Node {
-                        device_id: Some(peer),
-                        display_name: None,
-                        status: NodeStatus::NoCapability,
-                        reason: None,
-                        reported_by: Some(me),
-                        peer_hint: None,
-                        explored_at: now.unix_ms,
-                    }),
+                    Err(SendError::NoCapability) => {
+                        let node = Node {
+                            device_id: Some(peer),
+                            display_name: None,
+                            status: NodeStatus::NoCapability,
+                            reason: None,
+                            reported_by: Some(me),
+                            peer_hint: None,
+                            explored_at: now.unix_ms,
+                        };
+                        if is_local
+                            && let Some(exploration) = self.explorations.get_mut(&query.request_id)
+                            && exploration.state == ExplorationState::Running
+                        {
+                            exploration.merge_node(node.clone(), &me, now.unix_ms);
+                        }
+                        view.nodes.push(node);
+                    }
                     Err(SendError::NoLink | SendError::Failed) => timed_out.push(peer),
                 }
             }

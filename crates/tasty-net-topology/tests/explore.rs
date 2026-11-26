@@ -50,6 +50,8 @@ struct Net {
     queue: Vec<InFlight>,
     delay: Vec<DelayRule>,
     max_part: u32,
+    /// Every delivered message: (link sender, receiver, message).
+    log: Vec<(DeviceId, DeviceId, Message)>,
 }
 
 struct Sends<'a> {
@@ -101,6 +103,7 @@ impl Net {
             queue: Vec::new(),
             delay: Vec::new(),
             max_part: 0,
+            log: Vec::new(),
         };
         for &n in devices {
             let me = SelfInfo {
@@ -241,6 +244,7 @@ impl Net {
                     if let Message::Result(part) = &m.message {
                         self.max_part = self.max_part.max(part.part);
                     }
+                    self.log.push((m.from, m.to, m.message.clone()));
                     if self.silent.contains(&m.to) {
                         continue;
                     }
@@ -786,4 +790,88 @@ fn results_show_up_before_the_exploration_ends() {
     assert_eq!(node_ids(x), sorted(&[A, B, C]));
     // Each node carries the time its answer arrived.
     assert!(x.node(&id(C)).unwrap().explored_at > b_seen);
+}
+
+/// The result parts `from` made that crossed the link into `to`.
+fn parts_into(net: &Net, from: u8, to: u8) -> Vec<tasty_net_topology::ResultPart> {
+    net.log
+        .iter()
+        .filter(|(_, t, _)| *t == id(to))
+        .filter_map(|(_, _, m)| match m {
+            Message::Result(part) if part.from == id(from) => Some(part.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_requester_visited_as_a_neighbor_sends_only_its_remote_answer() {
+    let mut net = Net::new(&[A, B]);
+    let workspace = WorkspaceRef {
+        id: Some("ws-a".into()),
+        name: Some("private name".into()),
+    };
+    net.link_on(A, B, Some(workspace));
+    net.sharing.insert(
+        id(A),
+        Sharing {
+            enabled: true,
+            workspace: WorkspaceExposure {
+                id: true,
+                name: false,
+            },
+        },
+    );
+    let rid = net.explore(A, request(B, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+
+    // What B received from A carries no workspace name.
+    let parts = parts_into(&net, A, B);
+    assert!(!parts.is_empty());
+    for part in &parts {
+        for edge in &part.edges {
+            assert_eq!(edge.workspace.as_ref().unwrap().name, None);
+        }
+    }
+    // A's own screen has the name, once.
+    let names: Vec<_> = x
+        .edges()
+        .iter()
+        .filter_map(|e| e.workspace.as_ref().and_then(|w| w.name.clone()))
+        .collect();
+    assert_eq!(names, vec!["private name".to_string()]);
+}
+
+#[test]
+fn the_requester_with_sharing_off_does_not_send_its_edges_or_forward() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(A, C);
+    net.sharing.insert(
+        id(A),
+        Sharing {
+            enabled: false,
+            workspace: WorkspaceExposure::ALL,
+        },
+    );
+    let rid = net.explore(A, request(B, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+
+    let parts = parts_into(&net, A, B);
+    assert!(!parts.is_empty());
+    assert!(parts.iter().all(|p| p.edges.is_empty()));
+    assert!(
+        parts
+            .iter()
+            .flat_map(|p| &p.nodes)
+            .all(|n| n.status == NodeStatus::SharingOff)
+    );
+    // A is a leaf on the link: C, reachable only through A, got nothing.
+    assert!(net.log.iter().all(|(_, to, _)| *to != id(C)));
+    // A's own screen still has all its edges and itself online.
+    assert_eq!(status(x, A), NodeStatus::Online);
+    assert!(x.edges().iter().any(|e| e.touches(&id(C))));
 }

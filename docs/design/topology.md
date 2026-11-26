@@ -66,7 +66,7 @@
 - 원격 ID를 확인할 수 없는 상태의 노드: `auth_rejected`·`timed_out`·`no_capability` 노드는 그 상대와 연결을 시도한 이웃이 만든다(`auth_rejected`는 위 "엣지 목록 입력"의 연결 실패 관측에서 나온다). 노드 식별자는 그 이웃이 아는 상대 기기 ID(링크의 `peer()`, 또는 TOFU 기록에 있는 기대값)다. 기기 ID를 모르면(인증 전에 거절돼 ID를 받지 못함) `device_id`가 비고 `reported_by`와 `peer_hint`로 구분한다. 요청자는 `device_id`가 있으면 그것으로, 없으면 `(reported_by, peer_hint)`로 합친다. `offline`은 정의 파일 방식에서 tasty만 만든다.
 - 결과는 도착하는 대로 점진적으로 낸다. 노드에는 응답 시각을 붙인다.
 - 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 상태 기계다. 그래서 전송 없이 가짜 이웃으로 시험한다. 크레이트에서는 기기마다 `Agent` 하나이고, 주입하는 함수는 `Outbox::send`다. `send`는 링크가 없으면 `SendError::NoLink`, 상대 `caps`에 `net.topology`가 없으면 보내지 않고 `SendError::NoCapability`를 돌려준다. 소비자는 받은 토폴로지 메시지를 `Agent::on_message`에 넘기고 `Agent::next_deadline` 때 `Agent::poll`을 부른다. 시험은 `crates/tasty-net-topology/tests/explore.rs`다.
-- 요청자가 탐색 중 이웃으로서 질의를 받으면(기준 머신이 다른 기기일 때) 자기 부분은 `local_view`로 답한다. 결과가 자기 화면으로 오기 때문이다.
+- 링크로 나가는 조각은 누가 질의했든 언제나 `remote_answer`로 만든다(공개 꺼짐 말단 처리와 workspace 공개 범위를 적용). 요청자가 탐색 중 이웃으로서 질의를 받으면(기준 머신이 다른 기기일 때) 그 조각도 돌아오는 길의 다른 기기를 거치기 때문이다. 요청자 자기 화면에는 자기 `local_view`를 탐색 결과에 바로 합치고, 링크로 돌아온 자기 조각은 합치지 않는다(부모의 대기 추적을 위해 조각은 그대로 보낸다). 요청자가 기준 머신이면 자기 조각은 링크로 나가지 않으므로 공개 꺼짐이어도 자기 탐색을 이웃에게 전달한다.
 
 ## 공개 범위
 
