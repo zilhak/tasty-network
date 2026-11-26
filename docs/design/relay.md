@@ -18,13 +18,17 @@ relay는 iroh-relay를 쓴다. 이 레포는 자체 relay 바이너리나 관리
 
 ## 배포 형태
 
-- 이미지: `n0computer/iroh-relay:v1.5.0`(Docker Hub). `latest`를 쓰지 않는다.
+- 이미지: `n0computer/iroh-relay:v1.5.0`(Docker Hub). `latest`를 쓰지 않는다. 태그는 옮겨질 수 있어 `relay/compose.yaml`과 검사 스크립트는 multi-arch index digest(`sha256:50a2f569…`, 2026-11-27 확인)를 함께 고정한다. 이미지는 alpine 위에 `/iroh-relay` 하나를 ENTRYPOINT로 두고 사용자를 정하지 않는다(root). `EXPOSE`는 80·443·3478/udp·9090이라 7842/udp가 없으므로 compose가 직접 게시한다(iroh v1.5.0 `docker/Dockerfile.ci`).
 - 이 레포에 둘 것: `relay/punch-only.toml`, `relay/relay-fallback.toml`, `relay/compose.yaml`, `relay/check-config.sh`, `relay/container-check.sh`, `relay/README.md`(자체 운영 안내).
 - 기본 포트: HTTP 80, metrics 9090(`http_bind_addr`의 IP + 9090). HTTPS 443과 QUIC 주소 확인 UDP 7842(`DEFAULT_RELAY_QUIC_PORT`)는 `[tls]`를 설정할 때의 기본이다. 기본 설정은 `tls`가 없다. TLS가 없으면 80이 relay 자체를 평문으로 서비스하고, TLS가 있으면 80은 captive portal 확인만 평문으로 받는다(`iroh-relay/src/server.rs`).
 - 내장 Let's Encrypt(`cert_mode = LetsEncrypt`)는 TLS-ALPN-01로 인증한다. 인증 요청은 TCP 80이 아니라 HTTPS 리스너(443)로 온다(`iroh-relay/src/server/http_server.rs` `tls_serve_connection`). 그래서 외부 TCP 443이 relay 프로세스의 TLS 리스너에 그대로 닿아야 하고, 그 앞에서 TLS를 끝내는 프록시를 두면 발급이 안 된다.
 - `enable_quic_addr_discovery` 기본값은 false다. 7842/UDP는 그 기능을 켤 때만 쓰인다. compose에 포트만 게시해서는 열리지 않는다. 운영 예시는 기능을 켜고 TLS를 갖추고, CI 예시는 끈다. 클라이언트도 relay마다 이 기능의 사용 여부와 포트를 따로 받는다([P2P](p2p.md) `RelayChoice.quic_addr_discovery`).
 - `--dev`: HTTPS 리스너를 끄고 평문 HTTP로 띄운다(TLS 설정이 있어도 `dangerous_http_only`). 그래도 `[tls]` 절이 있으면 시작할 때 인증서 설정을 먼저 읽는다. `Manual`이면 인증서·키 파일을 읽고, `LetsEncrypt`면 hostname과 contact가 있어야 한다. 어긋나면 `--dev`여도 시작하지 못한다(`main.rs` `build_relay_config`). `http_bind_addr`를 주지 않았을 때만 `[::]:3340`이고, 주면 그 주소를 쓴다. QUIC 주소 확인을 켜면 TLS 설정을 쓰며 그때 `cert_mode = LetsEncrypt`를 거절한다. iroh 클라이언트는 HTTP relay URL에도 붙을 수 있다. 이 레포가 `--dev`를 CI 기동 검사와 로컬 확인에만 쓰는 것은 운영 정책이다(평문 relay는 접속 메타데이터와 접속 허용 토큰을 보호하지 못한다).
-- CI 기동 검사(`relay-config-check`)는 운영 예시 두 개(`punch-only.toml`·`relay-fallback.toml`)에서 `[tls]`와 QUIC 주소 확인만 뺀 CI용 설정을 스크립트로 만들어 띄운다. 그래서 확인하는 공통 부분은 `enable_relay`, `[limits]`(수신 상한의 값 조합), `access`, metrics 설정이다. TLS와 QUIC 주소 확인은 CI에서도 D5 (b)의 컨테이너 확인(`relay/container-check.sh`, 같은 CI용 설정을 쓴다)에서도 판정하지 않는다. 직접 경로 전환은 QUIC 주소 확인이 꺼져 있어도 일어나므로 그 로그가 두 기능의 증거가 되지 않기 때문이다. 두 기능은 relay를 실제로 배포할 때 운영 안내(`relay/README.md`)의 확인 절차로 본다.
+- CI 기동 검사(`relay-config-check`)는 운영 예시 두 개(`punch-only.toml`·`relay-fallback.toml`)에서 `[tls]`와 QUIC 주소 확인만 뺀 CI용 설정을 스크립트로 만들어 띄운다. 그래서 확인하는 공통 부분은 `enable_relay`, `[limits]`(수신 상한의 값 조합), `access`, metrics 설정이다. TLS와 QUIC 주소 확인은 CI에서도 D5 (b)의 컨테이너 확인(`relay/container-check.sh`, 같은 CI용 설정을 쓴다)에서도 판정하지 않는다. 직접 경로 전환은 QUIC 주소 확인이 꺼져 있어도 일어나므로 그 로그가 두 기능의 증거가 되지 않기 때문이다. 두 기능은 relay를 실제로 배포할 때 운영 안내(`relay/README.md`)의 확인 절차로 본다. CI 잡은 GitHub 러너의 docker로 위 고정 이미지를 띄운다(컨테이너 확인과 같은 이미지).
+- `relay/container-check.sh`가 띄우는 `p2p-peer`의 옵션과 경로 바뀜 줄의 형식은 `p2p-peer`가 생기기 전에 스크립트가 가정한 것이다(스크립트의 `cc_run_peers` 주석). `p2p-peer`를 만드는 작업이 실제 옵션에 맞춰 그 함수를 고친다.
+- 설정 파일: `--config-path`에 파일이 없으면 오류 없이 기본 설정으로 뜬다(`main.rs` `Config::load`). 설정 구조체에 `deny_unknown_fields`가 없어 모르는 키도 무시된다. 그래서 `relay/check-config.sh`는 파일이 있는지 먼저 보고, `RUST_LOG=iroh_relay=debug`일 때 시작 로그에 찍히는 `ServerConfig`(`{:#?}`)의 `client_rx`가 파일의 수신 상한과 같은지로 설정을 읽었는지 판정한다.
+- HTTP 경로(`server.rs`): TLS가 없으면 `http_bind_addr` 한 곳에서 `/`·`/index.html`(200), `/healthz`(200, JSON `status`·`version`), `/ping`, `/robots.txt`, `/generate_204`(204), `/relay`(WebSocket 업그레이드. 일반 GET은 400)를 받는다. TLS가 있으면 이 경로들은 HTTPS로 가고 80은 `/generate_204`만 받는다. metrics 서버는 `/metrics`에서 Prometheus 텍스트를 내고, 이름은 `relayserver_` 접두에 카운터는 `_total`이 붙는다(예: `relayserver_accepts_total`).
+- 수신 상한에 걸린 양은 `relayserver_bytes_rx_ratelimited_total`(바이트)과 `relayserver_conns_rx_ratelimited_total`(한 번이라도 걸린 연결 수)로 보인다(`server/metrics.rs`). 이것도 서버 공용 카운터라 상한이 동작했다는 것만 보여 주고 연결별 값은 아니다.
 - 리버스 프록시가 TLS를 처리하는 구성은 공식 문서에 없다. `tls`를 끄면 `http_bind_addr`에서 평문 HTTP로 서비스한다는 설명만 있다. 운영 안내에 이 한계를 적는다.
 
 ## 접속 허용
