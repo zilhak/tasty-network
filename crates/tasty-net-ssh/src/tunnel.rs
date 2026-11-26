@@ -91,10 +91,13 @@ pub struct SshTunnel {
 ///   child die.
 /// - `ControlMaster=no`, `ControlPath=none`: no connection sharing. A multiplexed forward would
 ///   belong to the master process, not to this child.
-const TUNNEL_FORCED_OPTIONS: [&str; 3] = [
+/// - `ClearAllForwardings=no`: a `ClearAllForwardings=yes` in the target's options or the ssh
+///   config would drop the `-L` forward too (OpenSSH 9.6 `ssh -G` then shows no `localforward`).
+const TUNNEL_FORCED_OPTIONS: [&str; 4] = [
     "ExitOnForwardFailure=yes",
     "ControlMaster=no",
     "ControlPath=none",
+    "ClearAllForwardings=no",
 ];
 
 /// Keeps ssh in the foreground, so the forward lives in the child this tunnel owns and reaps.
@@ -481,6 +484,7 @@ mod tests {
             "ControlMaster=auto".into(),
             "ControlPath=~/.ssh/cm-%C".into(),
             "ForkAfterAuthentication=yes".into(),
+            "ClearAllForwardings=yes".into(),
         ];
         let launcher = SshLauncher::new("ssh");
         let args = args_of(&tunnel_command(&launcher, &target, 4001, 4002, true));
@@ -494,6 +498,7 @@ mod tests {
             ("ControlMaster=no", "ControlMaster=auto"),
             ("ControlPath=none", "ControlPath=~/.ssh/cm-%C"),
             (NO_FORK_OPTION, "ForkAfterAuthentication=yes"),
+            ("ClearAllForwardings=no", "ClearAllForwardings=yes"),
         ] {
             assert!(
                 at(forced) < at(user),
