@@ -212,7 +212,8 @@ pub(crate) mod test_helper {
     /// - `echo:<text>`: prints `<text>` on its own line and exits 0. The test harness prints its
     ///   own lines before it, so read the last line.
     /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
-    /// - `flood:<bytes>`: writes `<bytes>` bytes to stdout and exits 0.
+    /// - `flood:<bytes>`: writes `<bytes>` bytes to stdout and exits 0. `flood:forever` writes
+    ///   until the pipe closes.
     pub(crate) fn helper_command(mode: &str) -> Command {
         let mut c = Command::new(std::env::current_exe().expect("test binary path"));
         c.args([ENTRY, "--exact", "--nocapture", "--test-threads=1"])
@@ -264,7 +265,11 @@ pub(crate) mod test_helper {
                 std::process::exit(code.parse().expect("exit code"));
             }
             "flood" => {
-                let n: usize = arg.parse().expect("byte count");
+                let n: usize = if arg == "forever" {
+                    usize::MAX
+                } else {
+                    arg.parse().expect("byte count")
+                };
                 let chunk = [b'x'; 4096];
                 let mut out = std::io::stdout().lock();
                 let mut left = n;

@@ -14,13 +14,14 @@ use std::time::{Duration, Instant};
 use crate::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
 use crate::{SSH_CONNECT_TIMEOUT, SpawnHook, SshLauncher, SshTarget};
 
-/// Upper bound for polling one discovery child. When it expires the child is killed and
-/// reaped. It is not an absolute bound that includes spawning, reaping, and output collection.
+/// Upper bound for one discovery step: the spawn hook, the wait for the child, and output
+/// collection share it. When it expires the child is killed and reaped. Spawning itself and the
+/// reap after a kill have no bound of their own.
 pub const PORT_DISCOVERY_STEP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Time budget the steps of one discovery call share. Each step gets the smaller of the step
-/// bound and what is left. When the budget is used up no new child is started. Spawning,
-/// reaping, and output collection are not guaranteed to fit in it.
+/// bound and what is left. When the budget is used up no new child is started. Spawning itself
+/// and the reap after a kill are not guaranteed to fit in it.
 pub const PORT_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Exit code of the remote subcommand when the instance that wrote the record has exited.
@@ -458,26 +459,43 @@ impl ChildOwner {
     }
 }
 
-/// `true` if the child ended by `deadline`, `false` if it ran past it (the caller kills it).
-/// A child taken by cancellation also gives `true`: there is nothing left to wait for, and
-/// [`ChildOwner::finish`] settles the reason as [`PortDiscoveryFailureKind::Cancelled`].
+/// How [`wait_with_timeout`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitEnd {
+    /// The child ended, or cancellation took it or was requested. [`ChildOwner::finish`] settles
+    /// the cancelled case as [`PortDiscoveryFailureKind::Cancelled`].
+    Ended,
+    /// The child ran past the deadline (the caller kills it).
+    Expired,
+    /// `stop` said to cut the child off (the caller kills it).
+    Stopped,
+}
+
+/// Waits for the child until `deadline`, asking `stop` on every poll.
 ///
 /// The crate has no async runtime, so it polls `try_wait`. The interval starts at 5 ms and
 /// doubles up to 50 ms: little delay on the normal path (hundreds of ms), few wakeups on long
 /// waits.
-fn wait_with_timeout(owner: &mut ChildOwner, deadline: Instant) -> bool {
+fn wait_with_timeout(
+    owner: &mut ChildOwner,
+    deadline: Instant,
+    stop: &mut dyn FnMut() -> bool,
+) -> WaitEnd {
     let mut nap = Duration::from_millis(5);
     loop {
         if owner.is_cancelled() {
-            return true;
+            return WaitEnd::Ended;
+        }
+        if stop() {
+            return WaitEnd::Stopped;
         }
         match owner.try_exited() {
-            ChildPoll::Exited | ChildPoll::Taken => return true,
+            ChildPoll::Exited | ChildPoll::Taken => return WaitEnd::Ended,
             ChildPoll::Running => {}
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return false;
+            return WaitEnd::Expired;
         }
         std::thread::sleep(nap.min(left));
         nap = (nap * 2).min(Duration::from_millis(50));
@@ -497,13 +515,25 @@ struct Captured {
     overflowed: bool,
 }
 
-/// Reads `pipe` to its end on a thread, keeping the first `limit` bytes and dropping the rest so
-/// the writer never blocks on a full pipe. The result arrives on the returned channel when the
-/// pipe closes. A descendant that holds the pipe keeps the thread waiting; the caller stops
-/// waiting at its deadline and the thread ends when the pipe finally closes.
+/// What a reader does when more than its limit arrives.
+#[derive(Clone, Copy)]
+enum OnOverflow {
+    /// Report at once and close the pipe (stdout: the output is refused anyway).
+    Stop,
+    /// Keep reading and dropping to the end, so the writer never blocks (stderr: ssh writes its
+    /// own messages there and must not fail on a closed pipe).
+    Drain,
+}
+
+/// Reads `pipe` on a thread, keeping the first `limit` bytes. The result arrives on the returned
+/// channel when the pipe closes, or as soon as the limit is passed with [`OnOverflow::Stop`].
+/// With [`OnOverflow::Drain`] the rest is read and dropped so the writer never blocks. A
+/// descendant that holds the pipe keeps the thread waiting; the caller stops waiting at its
+/// deadline and the thread ends when the pipe finally closes.
 fn spawn_reader(
     mut pipe: impl Read + Send + 'static,
     limit: usize,
+    on_overflow: OnOverflow,
     name: &str,
 ) -> std::io::Result<mpsc::Receiver<Captured>> {
     let (tx, rx) = mpsc::channel();
@@ -519,6 +549,9 @@ fn spawn_reader(
                         let room = limit.saturating_sub(captured.bytes.len());
                         captured.bytes.extend_from_slice(&buf[..n.min(room)]);
                         captured.overflowed |= n > room;
+                        if captured.overflowed && matches!(on_overflow, OnOverflow::Stop) {
+                            break;
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(e) => {
@@ -543,14 +576,50 @@ fn start_readers(child: &mut Child) -> std::io::Result<Readers> {
     let stdout = child
         .stdout
         .take()
-        .map(|p| spawn_reader(p, OUTPUT_LIMIT, "ssh-discovery-stdout"))
+        .map(|p| spawn_reader(p, OUTPUT_LIMIT, OnOverflow::Stop, "ssh-discovery-stdout"))
         .transpose()?;
     let stderr = child
         .stderr
         .take()
-        .map(|p| spawn_reader(p, STDERR_LIMIT, "ssh-discovery-stderr"))
+        .map(|p| spawn_reader(p, STDERR_LIMIT, OnOverflow::Drain, "ssh-discovery-stderr"))
         .transpose()?;
     Ok((stdout, stderr))
+}
+
+/// The stdout reader's result, taken early when it is already there (an overflow is reported
+/// while the child still runs).
+struct Stdout {
+    rx: Option<mpsc::Receiver<Captured>>,
+    early: Option<Captured>,
+}
+
+impl Stdout {
+    /// Whether the output already passed [`OUTPUT_LIMIT`]. It does not wait.
+    fn overflowed(&mut self) -> bool {
+        if self.early.is_none()
+            && let Some(rx) = &self.rx
+            && let Ok(captured) = rx.try_recv()
+        {
+            self.early = Some(captured);
+        }
+        self.early.as_ref().is_some_and(|c| c.overflowed)
+    }
+
+    fn collect(self, deadline: Instant, what: &str) -> Result<Captured, PortDiscoveryError> {
+        match (self.early, self.rx) {
+            (Some(captured), _) => Ok(captured),
+            (None, Some(rx)) => collect(&rx, deadline, what),
+            (None, None) => Ok(Captured::default()),
+        }
+    }
+}
+
+/// The refusal of an output past [`OUTPUT_LIMIT`].
+fn output_too_long(what: &str) -> PortDiscoveryError {
+    PortDiscoveryError::new(
+        PortDiscoveryFailureKind::PortParseFailed,
+        format!("{what}: the output is longer than {OUTPUT_LIMIT} bytes"),
+    )
 }
 
 /// How long a failed command's stderr is waited for after the command exited. stderr only
@@ -587,7 +656,8 @@ fn collect(
 /// stdout on exit 0.
 ///
 /// stdout and stderr are read while the child runs, so a large output cannot block it. stdout
-/// over [`OUTPUT_LIMIT`] is refused as [`PortDiscoveryFailureKind::PortParseFailed`]. The
+/// over [`OUTPUT_LIMIT`] is refused as [`PortDiscoveryFailureKind::PortParseFailed`] as soon as
+/// it passes the limit: the child is cut off then, even if it would write forever. The
 /// bound and cancellation also cover the wait for the pipes to close after the child exits (a
 /// descendant can hold them). One deadline, taken before the spawn, covers the spawn hook, the
 /// wait for the child, and output collection; only spawning itself and reaping after a kill
@@ -625,7 +695,7 @@ fn run_capture_with_budget(
             format!("{what}: spawn failed: {e}"),
         )
     })?;
-    let (stdout_rx, stderr_rx) = match start_readers(&mut child) {
+    let (stdout, stderr_rx) = match start_readers(&mut child) {
         Ok(rx) => rx,
         Err(e) => {
             kill_and_reap(&mut child);
@@ -637,12 +707,19 @@ fn run_capture_with_budget(
     };
     // Hand the child to the cancel scope, so the bound watch and an outside cancel share it
     // and whichever comes first can cut it off.
+    let mut stdout = Stdout {
+        rx: stdout,
+        early: None,
+    };
     let mut owner = ChildOwner::adopt(child, what)?;
-    if !wait_with_timeout(&mut owner, deadline) {
+    let end = wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed());
+    if end != WaitEnd::Ended {
         let cancelled = owner.is_cancelled();
         owner.kill_and_reap_now();
         return Err(if cancelled {
             cancelled_error(what)
+        } else if end == WaitEnd::Stopped {
+            output_too_long(what)
         } else {
             PortDiscoveryError::new(
                 PortDiscoveryFailureKind::TimedOut,
@@ -661,6 +738,10 @@ fn run_capture_with_budget(
         Some(rx) => collect(&rx, until, what),
         None => Ok(Captured::default()),
     };
+    // A child that died writing to the closed stdout failed because of its output size.
+    if stdout.overflowed() {
+        return Err(output_too_long(what));
+    }
     if !status.success() {
         // The exit settles the class; stderr is only a diagnostic and cannot override it.
         let code = status.code();
@@ -676,12 +757,9 @@ fn run_capture_with_budget(
         error.exit_code = code;
         return Err(error);
     }
-    let stdout = wait_for(stdout_rx, deadline)?;
+    let stdout = stdout.collect(deadline, what)?;
     if stdout.overflowed {
-        return Err(PortDiscoveryError::new(
-            PortDiscoveryFailureKind::PortParseFailed,
-            format!("{what}: the output is longer than {OUTPUT_LIMIT} bytes"),
-        ));
+        return Err(output_too_long(what));
     }
     Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
@@ -919,8 +997,8 @@ fn pick_most_informative(mut errors: Vec<PortDiscoveryError>) -> PortDiscoveryEr
 /// returns the first success, stops at cancellation and at an exited instance, and otherwise
 /// returns the most telling failure. A command that succeeds with output the decoder refuses
 /// is a failure. The steps share [`PORT_DISCOVERY_TOTAL_TIMEOUT`] and each is polled for at
-/// most [`PORT_DISCOVERY_STEP_TIMEOUT`]. Spawning, reaping, and output collection have no
-/// bound of their own. It blocks; call it from a worker. A [`SshCancel`] installed on the
+/// most [`PORT_DISCOVERY_STEP_TIMEOUT`], output collection included. Only spawning itself and
+/// the reap after a kill have no bound of their own. It blocks; call it from a worker. A [`SshCancel`] installed on the
 /// calling thread with [`SshCancel::scope`] stops it.
 pub fn discover_remote_port<T, E>(
     launcher: &SshLauncher,
@@ -1638,6 +1716,28 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(15));
     }
 
+    /// An output that never ends is cut off as soon as it passes the limit, long before the
+    /// budget.
+    #[test]
+    fn an_endless_output_is_refused_at_the_limit() {
+        let started = Instant::now();
+        let err = capture(
+            helper_command("flood:forever"),
+            Duration::from_secs(20),
+            "endless",
+        )
+        .expect_err("too long");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::PortParseFailed,
+            "{}",
+            err.detail()
+        );
+        assert!(err.detail().contains("longer than"), "{}", err.detail());
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
     /// A descendant that keeps stdout open after the command exits is bounded by the budget.
     #[test]
     fn an_output_held_open_by_a_descendant_times_out_within_the_budget() {
@@ -1819,10 +1919,14 @@ mod tests {
             .expect("spawn");
         let mut owner = ChildOwner::adopt(child, "cancel vs timeout").expect("adopt");
         handle.cancel();
-        assert!(wait_with_timeout(
-            &mut owner,
-            Instant::now() + Duration::from_secs(5)
-        ));
+        assert_eq!(
+            wait_with_timeout(
+                &mut owner,
+                Instant::now() + Duration::from_secs(5),
+                &mut || false
+            ),
+            WaitEnd::Ended
+        );
         let err = owner
             .finish("cancel vs timeout")
             .expect_err("cancelled child");
