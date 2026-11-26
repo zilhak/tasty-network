@@ -1,0 +1,270 @@
+//! The device key, the device ID and signatures (docs/design/identity.md).
+
+use std::{ffi::OsStr, fmt, io, path::Path, str::FromStr};
+
+use iroh_base::{PublicKey, SecretKey};
+
+use crate::{
+    error::{CorruptKind, FileOp, IdentityError},
+    hex, secret_file,
+};
+
+/// The file name of the device key inside the directory given to [`DeviceKey::load_or_create`].
+pub const DEVICE_KEY_FILE: &str = "device_key";
+
+const HEADER: &[u8] = b"tasty-net-device-key-v1";
+
+/// The ed25519 secret key of this device. Its canonical form is the 32-byte seed, which
+/// `iroh_base::SecretKey::from_bytes` takes as is, so SSH and P2P see the same device ID.
+#[derive(Clone)]
+pub struct DeviceKey {
+    secret: SecretKey,
+}
+
+impl DeviceKey {
+    /// Load the key from `dir/device_key`, or create it when the file does not exist.
+    ///
+    /// Every instance that passes the same directory gets the same key, also when several
+    /// processes or threads create it at the same time: the new key is published with
+    /// `hard_link`, which never replaces an existing file, and every caller then reads the file
+    /// that won. A file in the wrong format is [`IdentityError::Corrupt`] and is left as it is;
+    /// a file that is not private is [`IdentityError::UnsafeFile`].
+    ///
+    /// # Panics
+    ///
+    /// When the OS random source fails.
+    pub fn load_or_create(dir: &Path) -> Result<Self, IdentityError> {
+        secret_file::prepare_dir(dir)?;
+        let path = dir.join(DEVICE_KEY_FILE);
+        if let Some(key) = read(&path)? {
+            return Ok(key);
+        }
+        let mut text = Vec::with_capacity(HEADER.len() + 66);
+        text.extend_from_slice(HEADER);
+        text.push(b'\n');
+        text.extend_from_slice(hex::encode(&os_random_32()).as_bytes());
+        text.push(b'\n');
+        let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?;
+        let linked = std::fs::hard_link(&temp, &path);
+        secret_file::remove_temp(&temp);
+        match linked {
+            Ok(()) => {}
+            // Another creator won; its file is complete because it was linked after sync_all.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(IdentityError::io(FileOp::Publish, &path, e)),
+        }
+        read(&path)?.ok_or_else(|| {
+            IdentityError::io(
+                FileOp::Read,
+                &path,
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "device key vanished after publication",
+                ),
+            )
+        })
+    }
+
+    /// A key from a 32-byte seed, without any file.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self {
+            secret: SecretKey::from_bytes(&seed),
+        }
+    }
+
+    /// A new random key, without any file.
+    ///
+    /// # Panics
+    ///
+    /// When the OS random source fails.
+    pub fn generate() -> Self {
+        Self::from_seed(os_random_32())
+    }
+
+    /// The 32-byte seed, for `iroh_base::SecretKey::from_bytes`.
+    pub fn to_seed(&self) -> [u8; 32] {
+        self.secret.to_bytes()
+    }
+
+    /// The device ID (the public key).
+    pub fn id(&self) -> DeviceId {
+        DeviceId(self.secret.public())
+    }
+
+    /// Sign `message` with this key.
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        Signature(self.secret.sign(message).to_bytes())
+    }
+}
+
+impl fmt::Debug for DeviceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceKey")
+            .field("id", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+
+fn read(path: &Path) -> Result<Option<DeviceKey>, IdentityError> {
+    let Some(file) = secret_file::open_private(path)? else {
+        return Ok(None);
+    };
+    let seed = parse(&file.contents).map_err(|kind| IdentityError::Corrupt {
+        path: path.to_path_buf(),
+        kind,
+    })?;
+    Ok(Some(DeviceKey::from_seed(seed)))
+}
+
+fn parse(bytes: &[u8]) -> Result<[u8; 32], CorruptKind> {
+    if bytes.len() > secret_file::MAX_SECRET_LEN {
+        return Err(CorruptKind::TooLarge);
+    }
+    let Some(rest) = bytes
+        .strip_prefix(HEADER)
+        .and_then(|rest| rest.strip_prefix(b"\n"))
+    else {
+        return Err(CorruptKind::Header);
+    };
+    let seed_len = rest.len().min(64);
+    let seed = hex::decode::<32>(&rest[..seed_len]).ok_or(CorruptKind::Seed)?;
+    match &rest[seed_len..] {
+        b"" | b"\n" => Ok(seed),
+        _ => Err(CorruptKind::TrailingData),
+    }
+}
+
+pub(crate) fn os_random_32() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    if let Err(error) = getrandom::fill(&mut bytes) {
+        panic!("the OS random source failed: {error}");
+    }
+    bytes
+}
+
+/// The device ID: the ed25519 public key of a [`DeviceKey`]. Its text form is 64 lowercase hex
+/// digits, the same string as the `Display` of the iroh endpoint ID of the same key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceId(PublicKey);
+
+impl DeviceId {
+    /// The ID from the 32 raw public key bytes. Bytes that are not a valid ed25519 point are
+    /// refused.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, DeviceIdParseError> {
+        PublicKey::from_bytes(bytes)
+            .map(Self)
+            .map_err(|_| DeviceIdParseError::InvalidKey)
+    }
+
+    /// The 32 raw public key bytes (the form signed into the handshake and taken by
+    /// `iroh_base::PublicKey::from_bytes`).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+
+    /// Whether `signature` is a valid signature of `message` by this device. Verification is
+    /// strict (`verify_strict`).
+    pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+        self.0
+            .verify(message, &iroh_base::Signature::from_bytes(&signature.0))
+            .is_ok()
+    }
+}
+
+impl fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(self.as_bytes()))
+    }
+}
+
+impl fmt::Debug for DeviceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DeviceId({self})")
+    }
+}
+
+impl FromStr for DeviceId {
+    type Err = DeviceIdParseError;
+
+    /// Only 64 lowercase hex digits. Unlike iroh's parser, base32 and uppercase are refused.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = hex::decode::<32>(s.as_bytes()).ok_or(DeviceIdParseError::Format)?;
+        Self::from_bytes(&bytes)
+    }
+}
+
+/// Why a device ID was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceIdParseError {
+    /// The text is not 64 lowercase hex digits.
+    Format,
+    /// The bytes are not a valid ed25519 public key.
+    InvalidKey,
+}
+
+impl fmt::Display for DeviceIdParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Format => "device ID is not 64 lowercase hex digits",
+            Self::InvalidKey => "device ID is not a valid ed25519 public key",
+        })
+    }
+}
+
+impl std::error::Error for DeviceIdParseError {}
+
+/// An ed25519 signature (64 bytes). Its text form is 128 lowercase hex digits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Signature([u8; 64]);
+
+impl Signature {
+    /// The signature from its 64 bytes.
+    pub fn from_bytes(bytes: [u8; 64]) -> Self {
+        Self(bytes)
+    }
+
+    /// The 64 signature bytes.
+    pub fn to_bytes(&self) -> [u8; 64] {
+        self.0
+    }
+}
+
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex::encode(&self.0))
+    }
+}
+
+impl fmt::Debug for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Signature({self})")
+    }
+}
+
+impl FromStr for Signature {
+    type Err = SignatureParseError;
+
+    /// Only 128 lowercase hex digits.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        hex::decode::<64>(s.as_bytes())
+            .map(Self)
+            .ok_or(SignatureParseError)
+    }
+}
+
+/// The text is not 128 lowercase hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignatureParseError;
+
+impl fmt::Display for SignatureParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("signature is not 128 lowercase hex digits")
+    }
+}
+
+impl std::error::Error for SignatureParseError {}
+
+#[cfg(test)]
+#[path = "device_key/tests.rs"]
+mod tests;

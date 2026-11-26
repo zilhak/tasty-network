@@ -1,0 +1,36 @@
+[package]
+name = "tasty-net-identity"
+description = "Device key, device ID, connection token, private secret files and TOFU of the Tasty network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The ed25519 implementation of the device key (docs/design/crates.md "외부 의존 원칙").
+iroh-base = { version = "=1.5.0", default-features = false, features = ["key"] }
+getrandom = "0.4"
+serde_json = "1"
+subtle = "2.6"
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
