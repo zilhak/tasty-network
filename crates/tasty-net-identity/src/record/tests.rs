@@ -317,6 +317,55 @@ fn a_failed_removal_after_the_replacement_names_the_record() {
 }
 
 #[test]
+fn a_lock_file_name_is_not_a_record_path() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["record.lock", "record.LOCK", ".lock"] {
+        let path = dir.path().join(name);
+        let error = record(1).publish(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::InvalidRecordPath {
+                    problem: RecordPathProblem::LockSuffix,
+                    ..
+                }
+            ),
+            "{name}: {error:?}"
+        );
+        assert!(!path.exists());
+    }
+    let error = record(1).publish(Path::new("/")).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            IdentityError::InvalidRecordPath {
+                problem: RecordPathProblem::NoFileName,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    // A record next to another record's lock file keeps working.
+    let path = dir.path().join("record");
+    let publication = record(1).publish(&path).unwrap();
+    assert!(dir.path().join("record.lock").exists());
+    let mut forged = record(2).publish(&dir.path().join("other")).unwrap();
+    forged.target = dir.path().join("record.lock");
+    forged.path = forged.target.clone();
+    let error = forged.retire().unwrap_err();
+    assert!(
+        matches!(error, IdentityError::InvalidRecordPath { .. }),
+        "{error:?}"
+    );
+    assert!(
+        dir.path().join("record.lock").exists(),
+        "retire touched no lock file"
+    );
+    assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
+}
+
+#[test]
 fn concurrent_publishers_leave_one_complete_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("record");

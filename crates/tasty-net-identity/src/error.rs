@@ -132,6 +132,13 @@ pub enum IdentityError {
         /// The OS error.
         source: io::Error,
     },
+    /// A connection record path this crate does not publish at.
+    InvalidRecordPath {
+        /// The refused path.
+        path: PathBuf,
+        /// What is wrong with it.
+        problem: crate::RecordPathProblem,
+    },
     /// A connection record that a reader would refuse; nothing was written.
     InvalidRecord(crate::RecordParseError),
     /// A file this crate wrote could not be removed. It can still hold the secret; the
@@ -182,6 +189,13 @@ impl fmt::Display for IdentityError {
             Self::Protect { path, .. } => {
                 write!(f, "could not restrict access to {}", path.display())
             }
+            Self::InvalidRecordPath { path, problem } => {
+                write!(
+                    f,
+                    "record path {} is refused because {problem}",
+                    path.display()
+                )
+            }
             Self::InvalidRecord(problem) => {
                 write!(f, "connection record cannot be published ({problem})")
             }
@@ -209,7 +223,9 @@ impl Error for IdentityError {
                 ..
             } => Some(cleanup),
             Self::InvalidRecord(problem) => Some(problem),
-            Self::Corrupt { .. } | Self::UnsafeFile { source: None, .. } => None,
+            Self::Corrupt { .. }
+            | Self::InvalidRecordPath { .. }
+            | Self::UnsafeFile { source: None, .. } => None,
         }
     }
 }

@@ -196,13 +196,7 @@ impl ConnectionRecord {
     /// The returned handle is the only way to remove the record again
     /// ([`RecordPublication::retire`]).
     pub fn publish(&self, path: &Path) -> Result<RecordPublication, IdentityError> {
-        let name = path.file_name().ok_or_else(|| {
-            IdentityError::io(
-                FileOp::Publish,
-                path,
-                io::Error::new(io::ErrorKind::InvalidInput, "record path has no file name"),
-            )
-        })?;
+        let name = record_name(path)?;
         let dir = parent_of(path);
         secret_file::prepare_dir(dir)?;
         let target = target_of(path)?;
@@ -313,6 +307,7 @@ impl RecordPublication {
     /// path must still lead to the same target, and the file there must have the same file
     /// identity and the same contents. Otherwise the file is left as it is.
     pub fn retire(self) -> Result<RetireOutcome, IdentityError> {
+        record_name(&self.target)?;
         let _lock = secret_file::lock(&self.target)?;
         match target_of(&self.path) {
             Ok(target) if target == self.target => {}
@@ -346,6 +341,44 @@ impl RecordPublication {
             Err(e) => Err(IdentityError::io(FileOp::Remove, &self.target, e)),
         }
     }
+}
+
+/// Why a record path is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordPathProblem {
+    /// The path has no file name.
+    NoFileName,
+    /// The file name ends with `.lock` (any case), the suffix of the publication lock files.
+    /// Such a record would share its name with the lock file of another record.
+    LockSuffix,
+}
+
+impl fmt::Display for RecordPathProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoFileName => "it has no file name",
+            Self::LockSuffix => "its name ends with .lock",
+        })
+    }
+}
+
+fn record_name(path: &Path) -> Result<&OsStr, IdentityError> {
+    let refuse = |problem| IdentityError::InvalidRecordPath {
+        path: path.to_path_buf(),
+        problem,
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| refuse(RecordPathProblem::NoFileName))?;
+    let bytes = name.as_encoded_bytes();
+    let suffix = b".lock";
+    if bytes.len() >= suffix.len()
+        && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    {
+        return Err(refuse(RecordPathProblem::LockSuffix));
+    }
+    Ok(name)
 }
 
 fn parent_of(path: &Path) -> &Path {

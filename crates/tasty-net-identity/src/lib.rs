@@ -22,8 +22,8 @@ pub use device_key::{
 };
 pub use error::{CorruptKind, FileOp, IdentityError, UnsafeReason};
 pub use record::{
-    ConnectionRecord, ParsedRecord, RecordField, RecordParseError, RecordProblem,
-    RecordPublication, RetireOutcome,
+    ConnectionRecord, ParsedRecord, RecordField, RecordParseError, RecordPathProblem,
+    RecordProblem, RecordPublication, RetireOutcome,
 };
 pub use tofu::{
     MemoryPeerKeyStore, PeerKeyStore, PeerRef, PinOutcome, StoreError, TofuVerdict, check_peer,
