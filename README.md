@@ -1,6 +1,6 @@
 # tasty-network
 
-Networking for [Tasty](https://github.com/zilhak/tasty): the stream protocol and its conventions, the transports that carry it (SSH tunnel and peer-to-peer), and the relay server package.
+Networking for [Tasty](https://github.com/zilhak/tasty): the stream protocol and its conventions, the transports that carry it (SSH tunnel and direct peer-to-peer QUIC over a hole-punched UDP path), and a rendezvous server that only reflects addresses and coordinates hole punching. It never relays data.
 
 This repository is meant to provide these pieces to Tasty and other Tasty services. It does not depend on the Tasty repository.
 
