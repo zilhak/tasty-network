@@ -6,6 +6,10 @@ Tasty and other Tasty services depend on this repository. It does not depend on 
 
 Status: under construction. Nothing here is used by a Tasty release yet.
 
+## Design
+
+See the [design documents](docs/design/index.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
