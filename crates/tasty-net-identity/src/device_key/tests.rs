@@ -57,7 +57,7 @@ fn final_line_break_is_optional() {
 
 #[test]
 fn parse_reports_the_kind() {
-    let seed_hex = hex::encode(&[1u8; 32]);
+    let seed_hex = hex::encode(&[0xabu8; 32]);
     assert_eq!(parse(b""), Err(CorruptKind::Header));
     assert_eq!(
         parse(format!("tasty-net-device-key-v2\n{seed_hex}\n").as_bytes()),
