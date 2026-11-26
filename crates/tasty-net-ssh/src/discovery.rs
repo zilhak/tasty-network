@@ -977,7 +977,7 @@ pub fn detect_port_mode<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helper::helper_command;
+    use crate::test_helper::{Orphan, helper_command};
 
     /// A command that fails if it is ever started. Tells an early return from a spawn.
     fn unspawnable_command() -> Command {
@@ -1631,13 +1631,12 @@ mod tests {
     /// A descendant that keeps stdout open after the command exits is bounded by the budget.
     #[test]
     fn an_output_held_open_by_a_descendant_times_out_within_the_budget() {
+        let mut orphan = Orphan::new("held-stdout");
         let started = Instant::now();
-        let err = capture(
-            helper_command("orphan:4"),
-            Duration::from_millis(1500),
-            "orphan",
-        )
-        .expect_err("held open");
+        let err = capture(orphan.command(30, 0), Duration::from_millis(1500), "orphan")
+            .expect_err("held open");
+        let elapsed = started.elapsed();
+        assert!(orphan.end(), "the grandchild is left running");
         assert_eq!(
             err.kind(),
             PortDiscoveryFailureKind::TimedOut,
@@ -1645,7 +1644,7 @@ mod tests {
             err.detail()
         );
         assert!(err.detail().contains("stayed open"), "{}", err.detail());
-        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
     }
 
     /// Cancellation also stops the wait for an output held open by a descendant.
@@ -1658,21 +1657,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(700));
             killer.cancel();
         });
+        let mut orphan = Orphan::new("cancel-held");
         let started = Instant::now();
         let err = capture(
-            helper_command("orphan:4"),
+            orphan.command(30, 0),
             Duration::from_secs(20),
             "orphan cancel",
         )
         .expect_err("cancelled");
+        let elapsed = started.elapsed();
         t.join().expect("killer thread");
+        assert!(orphan.end(), "the grandchild is left running");
         assert_eq!(
             err.kind(),
             PortDiscoveryFailureKind::Cancelled,
             "{}",
             err.detail()
         );
-        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
     }
 
     /// Two lookups under clones of one handle each get their own child's output, and one

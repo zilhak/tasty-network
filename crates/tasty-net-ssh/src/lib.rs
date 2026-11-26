@@ -193,20 +193,22 @@ pub(crate) fn write_test_script(path: &std::path::Path, script: &str) {
 }
 
 /// A test helper: this test binary run again in one mode, so the fakes behave the same on every
-/// OS and leave no descendants (the killed child is the helper itself).
+/// OS. Only the `orphan` mode leaves a descendant, and its test ends it ([`test_helper::Orphan`]).
 #[cfg(test)]
 pub(crate) mod test_helper {
     use std::io::Write;
-    use std::process::Command;
-    use std::time::Duration;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     const ENV: &str = "TASTY_NET_SSH_TEST_HELPER";
     const ENTRY: &str = "test_helper::helper_entry";
 
     /// The helper in `mode`:
     /// - `sleep` or `sleep:<secs>`: runs for 60 s (or `<secs>`).
-    /// - `orphan:<secs>`: starts `sleep:<secs>` sharing its stdout, prints a port line, and
-    ///   exits 0 at once, so the stdout pipe stays open after it exits.
+    /// - `orphan:<secs>:<code>:<pid file>`: starts `sleep:<secs>` sharing its stdout and stderr,
+    ///   writes the grandchild's PID to `<pid file>`, and exits with `<code>` at once (0 prints a
+    ///   port line first), so both pipes stay open after it exits. Build it with [`Orphan`].
     /// - `echo:<text>`: prints `<text>` on its own line and exits 0. The test harness prints its
     ///   own lines before it, so read the last line.
     /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
@@ -233,12 +235,24 @@ pub(crate) mod test_helper {
                 std::process::exit(0);
             }
             "orphan" => {
-                let _grandchild = helper_command(&format!("sleep:{arg}"))
-                    .stdin(std::process::Stdio::null())
+                let mut parts = arg.splitn(3, ':');
+                let secs = parts.next().expect("secs");
+                let code: i32 = parts.next().expect("code").parse().expect("exit code");
+                let pid_file = PathBuf::from(parts.next().expect("pid file"));
+                let grandchild = helper_command(&format!("sleep:{secs}"))
+                    .stdin(Stdio::null())
                     .spawn()
                     .expect("grandchild");
-                println!("\n45123");
-                std::process::exit(0);
+                // Write then rename, so the test never reads a partial PID.
+                let partial = pid_file.with_extension("partial");
+                std::fs::write(&partial, grandchild.id().to_string()).expect("pid file");
+                std::fs::rename(&partial, &pid_file).expect("pid file");
+                if code == 0 {
+                    println!("\n45123");
+                } else {
+                    eprint!("the instance has exited");
+                }
+                std::process::exit(code);
             }
             "echo" => {
                 println!("\n{arg}");
@@ -266,6 +280,103 @@ pub(crate) mod test_helper {
             }
             other => panic!("unknown helper mode {other}"),
         }
+    }
+
+    /// The grandchild an `orphan` helper leaves behind. [`Orphan::end`] (or drop) kills it by the
+    /// PID the helper wrote and waits until it is gone, so no test leaves a process behind.
+    pub(crate) struct Orphan {
+        pid_file: PathBuf,
+        ended: bool,
+    }
+
+    impl Orphan {
+        pub(crate) fn new(name: &str) -> Self {
+            let pid_file = std::env::temp_dir().join(format!(
+                "tasty-net-ssh-orphan-{}-{name}.pid",
+                std::process::id()
+            ));
+            let _stale = std::fs::remove_file(&pid_file);
+            Self {
+                pid_file,
+                ended: false,
+            }
+        }
+
+        /// The helper command: a grandchild sleeping `secs` seconds, the child exiting `code`.
+        pub(crate) fn command(&self, secs: u64, code: i32) -> Command {
+            helper_command(&format!("orphan:{secs}:{code}:{}", self.pid_file.display()))
+        }
+
+        /// Kills the grandchild and returns whether it is gone. The grandchild is not our child,
+        /// so it cannot be waited for; this checks with the OS until it no longer runs.
+        pub(crate) fn end(&mut self) -> bool {
+            self.ended = true;
+            let limit = Instant::now() + Duration::from_secs(5);
+            let pid = loop {
+                if let Ok(pid) = std::fs::read_to_string(&self.pid_file) {
+                    break pid.trim().to_string();
+                }
+                if Instant::now() > limit {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let _removed = std::fs::remove_file(&self.pid_file);
+            kill_pid(&pid);
+            while Instant::now() < limit {
+                if !pid_runs(&pid) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+    }
+
+    impl Drop for Orphan {
+        fn drop(&mut self) {
+            if !self.ended {
+                self.end();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_pid(pid: &str) {
+        let _status = Command::new("kill").args(["-KILL", pid]).status();
+    }
+
+    /// Whether `pid` still runs. A zombie waiting for its new parent to reap it does not run.
+    #[cfg(unix)]
+    fn pid_runs(pid: &str) -> bool {
+        let Ok(out) = Command::new("ps").args(["-o", "stat=", "-p", pid]).output() else {
+            return true;
+        };
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// `taskkill /F` ends the process with TerminateProcess.
+    #[cfg(windows)]
+    fn kill_pid(pid: &str) {
+        let _status = Command::new("taskkill")
+            .args(["/F", "/PID", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(windows)]
+    fn pid_runs(pid: &str) -> bool {
+        let filter = format!("PID eq {pid}");
+        let Ok(out) = Command::new("tasklist")
+            .args(["/FI", &filter, "/NH", "/FO", "CSV"])
+            .output()
+        else {
+            return true;
+        };
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
     }
 }
 
