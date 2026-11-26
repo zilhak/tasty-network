@@ -266,6 +266,29 @@ impl Net {
         panic!("the exploration did not settle");
     }
 
+    /// Delivers every message in time order without ever calling `poll`, as a consumer
+    /// whose timer fired late would.
+    fn deliver_without_polls(&mut self) {
+        while let Some(i) = self
+            .queue
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, m)| (m.at_ms, m.seq))
+            .map(|(i, _)| i)
+        {
+            let m = self.queue.remove(i);
+            self.clock_ms = self.clock_ms.max(m.at_ms);
+            self.log.push((m.from, m.to, m.message.clone()));
+            if self.silent.contains(&m.to) {
+                continue;
+            }
+            let from = m.from;
+            self.with_agent(m.to, |agent, local, out, now| {
+                agent.on_message(&from, m.message, local, out, now)
+            });
+        }
+    }
+
     fn result(&self, requester: u8, request_id: &str) -> &Exploration {
         self.agents[&id(requester)]
             .exploration(request_id)
@@ -996,4 +1019,45 @@ fn replies_from_unexpected_links_or_senders_are_dropped() {
     let x = net.result(A, &rid);
     assert_eq!(x.state(), ExplorationState::Finished);
     assert_eq!(node_ids(x), sorted(&[A, B, C]));
+}
+
+#[test]
+fn replies_after_the_requester_deadline_are_not_merged() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B's answer reaches A only after A's whole limit, and nobody polled in between.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(B) && to == id(A) && !matches!(m, Message::Query(_))).then_some(20_000)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.deliver_without_polls();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::TimedOut);
+    assert!(
+        x.node(&id(B))
+            .is_none_or(|n| n.status != NodeStatus::Online)
+    );
+}
+
+#[test]
+fn a_neighbor_given_up_is_not_relayed_later() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    // C answers B after B's per-neighbor limit (2 s).
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(C) && to == id(B) && !matches!(m, Message::Query(_))).then_some(3_000)
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, C), NodeStatus::TimedOut);
+    assert_eq!(x.node(&id(C)).unwrap().reported_by, Some(id(B)));
+    // The late answer of C reached B but went no further.
+    assert!(net.log.iter().any(|(f, t, _)| *f == id(C) && *t == id(B)));
+    assert!(
+        net.log.iter().all(|(_, t, m)| {
+            *t != id(A) || !matches!(m, Message::Result(p) if p.from == id(C))
+        })
+    );
 }

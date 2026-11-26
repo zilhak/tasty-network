@@ -379,7 +379,9 @@ impl Agent {
     }
 
     /// Handles one topology message received from the authenticated attach link with
-    /// `from`.
+    /// `from`. Every deadline that passed by `now` is applied first ([`Agent::poll`]), so a
+    /// reply that arrives after the requester's deadline, its branch's deadline or its
+    /// neighbor's first-answer deadline is dropped instead of merged or relayed.
     pub fn on_message(
         &mut self,
         from: &DeviceId,
@@ -388,6 +390,7 @@ impl Agent {
         out: &mut dyn Outbox,
         now: Now,
     ) {
+        self.poll(out, now);
         match message {
             Message::Query(query) => self.answer_query(Some(from), query, local, out, now),
             reply => self.receive_reply(Some(from), reply, out, now),
@@ -906,6 +909,18 @@ impl Agent {
     /// in [`AgentConfig::hop_timeout`], ends branches whose deadline passed, forgets
     /// expired answer records, and ends explorations past the requester's deadline.
     pub fn poll(&mut self, out: &mut dyn Outbox, now: Now) {
+        // The requester's whole deadline first: a late poll must not let this device's own
+        // branch finish an exploration whose deadline already passed.
+        for exploration in self.explorations.values_mut() {
+            if exploration.state == ExplorationState::Running && now.mono >= exploration.deadline {
+                exploration.state = ExplorationState::TimedOut;
+                let origin = exploration.origin;
+                if exploration.node(&origin).is_none() {
+                    let me = exploration.me;
+                    exploration.report_timed_out(origin, &me, now.unix_ms);
+                }
+            }
+        }
         let mut ended = Vec::new();
         for (key, wait) in &mut self.waits {
             let past_deadline = now.mono >= wait.deadline;
@@ -932,16 +947,6 @@ impl Agent {
         }
         self.answered.retain(|_, seen| seen.expires > now.mono);
         self.routes.retain(|_, r| r.expires > now.mono);
-        for exploration in self.explorations.values_mut() {
-            if exploration.state == ExplorationState::Running && now.mono >= exploration.deadline {
-                exploration.state = ExplorationState::TimedOut;
-                let origin = exploration.origin;
-                if exploration.node(&origin).is_none() {
-                    let me = exploration.me;
-                    exploration.report_timed_out(origin, &me, now.unix_ms);
-                }
-            }
-        }
     }
 
     /// The earliest deadline [`Agent::poll`] has to see, if any.
