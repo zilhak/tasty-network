@@ -3,7 +3,9 @@
 
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
-use tasty_net_identity::{ConnectionRecord, ConnectionToken, DEVICE_KEY_FILE, DeviceKey};
+use tasty_net_identity::{
+    ConnectionRecord, ConnectionToken, DEVICE_KEY_FILE, DeviceKey, RetireOutcome,
+};
 
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o7777
@@ -27,7 +29,7 @@ impl Drop for Umask {
 }
 
 #[test]
-fn new_secret_directories_are_0700_under_a_umask_that_removes_owner_bits() {
+fn new_secret_files_and_directories_are_private_under_a_umask_that_removes_owner_bits() {
     let root = tempfile::tempdir().unwrap();
     let key_dir = root.path().join("keys");
     let record_dir = root.path().join("home");
@@ -40,11 +42,13 @@ fn new_secret_directories_are_0700_under_a_umask_that_removes_owner_bits() {
             token: ConnectionToken::issue().unwrap(),
             instance_id: "i".to_owned(),
         };
-        // Only the publication is checked here: under this mask the lock file is created 0400,
-        // which retire cannot reopen for writing (reported, outside this fix).
-        let _publication = record.publish(&record_dir.join("record")).unwrap();
+        let publication = record.publish(&record_dir.join("record")).unwrap();
         assert_eq!(mode(&record_dir), 0o700);
         assert_eq!(mode(&record_dir.join("record")), 0o600);
+        // 0600 & !0277 = 0400: without the explicit chmod retire could not reopen the lock file.
+        assert_eq!(publication.retire().unwrap(), RetireOutcome::Removed);
+        assert!(!record_dir.join("record").exists());
+        assert_eq!(mode(&record_dir.join("record.lock")), 0o600);
     }
     assert_eq!(mode(&key_dir), 0o700);
     assert_eq!(mode(&key_dir.join(DEVICE_KEY_FILE)), 0o600);

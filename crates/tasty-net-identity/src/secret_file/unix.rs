@@ -136,13 +136,34 @@ pub(super) fn open_for_id(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Open the lock file, creating it when missing. A lock file this call creates is set to 0600
+/// explicitly, because the creation mode is reduced by the umask (0400 under 0277 would keep a
+/// later call from reopening it for writing). An existing lock file keeps its mode.
 pub(super) fn open_lock(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+    let options = |create_new: bool| {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(create_new)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        options
+    };
+    loop {
+        match options(true).open(path) {
+            Ok(file) => {
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                return Ok(file);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        match options(false).open(path) {
+            Ok(file) => return Ok(file),
+            // Removed between the two opens: try to create it again.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
