@@ -376,6 +376,31 @@ fn a_lock_file_name_is_not_a_record_path() {
 }
 
 #[test]
+fn a_target_replaced_by_someone_else_is_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record");
+    let error = {
+        let _foreign = fault::foreign_replace();
+        record(1).publish(&path).unwrap_err()
+    };
+    assert!(
+        matches!(
+            error,
+            IdentityError::Io {
+                op: FileOp::Read,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"foreign\n",
+        "the other file with another ID stays"
+    );
+}
+
+#[test]
 fn concurrent_publishers_leave_one_complete_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("record");

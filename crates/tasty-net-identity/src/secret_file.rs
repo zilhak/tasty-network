@@ -198,6 +198,14 @@ pub(crate) fn is_delete_pending(pinned: &File, error: &io::Error) -> bool {
     os::is_delete_pending(pinned, error)
 }
 
+/// Whether the file at `path` (not following a link) has the file ID `id`. Any failure to tell
+/// is false.
+pub(crate) fn has_id(path: &Path, id: FileId) -> bool {
+    os::open_for_id(path)
+        .and_then(|file| file_id(&file))
+        .is_ok_and(|found| found == id)
+}
+
 /// The identity of an open file: Unix device and inode, Windows volume and file ID.
 pub(crate) fn file_id(file: &File) -> io::Result<FileId> {
     os::file_id(file)
@@ -255,6 +263,28 @@ pub(crate) mod fault {
     /// Make the step after a record replacement fail on this thread while the guard lives.
     pub(crate) fn fail_after_replace() -> Guard {
         set(&AFTER_REPLACE_FAILS)
+    }
+
+    thread_local! {
+        static FOREIGN_REPLACE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make a record publication on this thread see its target replaced by another private file
+    /// right after its own rename, while the guard lives.
+    pub(crate) fn foreign_replace() -> Guard {
+        set(&FOREIGN_REPLACE)
+    }
+
+    /// The injected replacement: a private file with other contents and another file ID.
+    pub(crate) fn replace_foreign(
+        dir: &std::path::Path,
+        name: &std::ffi::OsStr,
+        target: &std::path::Path,
+    ) {
+        if FOREIGN_REPLACE.with(Cell::get) {
+            let foreign = super::write_temp(dir, name, b"foreign\n").unwrap();
+            std::fs::rename(&foreign.path, target).unwrap();
+        }
     }
 
     /// Make the access restriction of new secret files fail on this thread while the guard lives.

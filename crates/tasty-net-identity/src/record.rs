@@ -216,10 +216,16 @@ impl ConnectionRecord {
             let cause = IdentityError::io(FileOp::Publish, &target, e);
             return Err(secret_file::fail_with_cleanup(&temp.path, cause));
         }
+        #[cfg(test)]
+        secret_file::fault::replace_foreign(dir, name, &target);
         let published = match confirm(&target, &contents, id) {
             Ok(file) => file,
-            // Still under the lock, the file at the target is the one just renamed there.
-            Err(cause) => return Err(secret_file::fail_with_cleanup(&target, cause)),
+            // Remove only this publication's own file. The lock serializes this crate's
+            // publishers only; a file with another ID was put there by someone else.
+            Err(cause) if secret_file::has_id(&target, id) => {
+                return Err(secret_file::fail_with_cleanup(&target, cause));
+            }
+            Err(cause) => return Err(cause),
         };
         tracing::info!(path = %path.display(), "published connection record");
         Ok(RecordPublication {

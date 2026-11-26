@@ -286,6 +286,13 @@ pub(super) fn file_id(file: &File) -> io::Result<FileId> {
     })
 }
 
+pub(super) fn open_for_id(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
 pub(super) fn open_lock(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
