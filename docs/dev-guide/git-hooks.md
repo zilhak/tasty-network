@@ -20,7 +20,7 @@
 
 ## merge 커밋 판정
 
-허용하는 방향은 [브랜치](branching.md#merge-커밋을-허용하는-경우)의 표다. 판정은 `scripts/lib/merge-policy.sh`의 `merge_commit_allowed`가 한다(tasty와 같은 파일). 합치는 커밋을 포함하는 장기 브랜치(로컬 브랜치나 `origin/<이름>`)를 출처로 보므로, 어느 장기 브랜치에도 없는 작업 브랜치 커밋은 merge 커밋으로 합칠 수 없다.
+허용하는 방향은 tasty [브랜치 전략](https://github.com/zilhak/tasty/blob/develop/docs/dev-guide/branching.md)의 "merge 커밋을 허용하는 경우"다. 판정 조건의 정본은 `scripts/lib/merge-policy.sh`의 `merge_commit_allowed`다(tasty와 같은 파일). CI는 merge 커밋을 보지 않는다.
 
 ## pre-push
 
