@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# 커밋 전에 merge 커밋, 코드 형식, 셸 자산을 검사한다. 무거운 검사는 pre-push와 CI가 한다.
+# 설치: bash scripts/dev-setup.sh (core.hooksPath = .githooks)
+# 검사별 범위: docs/dev-guide/git-hooks.md
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACMR || true)
+STAGED_RS=$(printf '%s\n' "$STAGED_ALL" | grep -E '\.rs$' || true)
+
+red()    { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+
+# ─
+# M.1  merge 커밋 차단
+# develop·release·main 사이의 역병합과 승격만 허용한다. 판정은 pre-merge-commit과 같은 함수다.
+# 허용 범위: docs/dev-guide/git-hooks.md#merge-커밋-판정
+merge_commit_permitted() {
+    [ -f scripts/lib/merge-policy.sh ] || return 1
+    # shellcheck source=../scripts/lib/merge-policy.sh
+    . scripts/lib/merge-policy.sh
+    merge_commit_allowed
+}
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && ! merge_commit_permitted; then
+    red "✘ merge 커밋을 만들 수 없습니다. rebase와 fast-forward merge를 사용해 주세요."
+    echo
+    yellow "▸ merge 커밋은 develop·release·main 사이의 역병합과 승격에만 만듭니다."
+    yellow "  진행 중인 merge를 취소한 뒤 아래 순서로 다시 시도해 주세요."
+    echo
+    yellow "    git merge --abort"
+    yellow "    git rebase <대상-브랜치>"
+    yellow "    # 대상 브랜치로 전환한 뒤 실행"
+    yellow "    git merge --ff-only <작업-브랜치>"
+    echo
+    exit 1
+fi
+
+FAIL=0
+fail() { red "  ✘ $*"; FAIL=1; }
+
+# ─
+# A.2  cargo fmt --check (커밋 대상에 .rs가 있을 때)
+check_cargo_fmt() {
+    if [ -z "$STAGED_RS" ]; then return; fi
+    if ! bash scripts/check.sh fmt; then
+        fail "[A.2 cargo fmt] 코드 형식이 맞지 않습니다. \`cargo fmt --all\` 실행 후 다시 git add해 주세요."
+    fi
+}
+
+# ─
+# A.3  셸 자산 정적 검사 (커밋 대상 중 셸 자산만)
+# 도구가 없거나 실행하지 못해도 통과가 아니라 커밋을 막는다.
+check_shell_assets() {
+    local rc
+    if [ -z "$STAGED_ALL" ]; then return; fi
+    set +e
+    # 단어 분리가 목적이다 — 경로 목록을 가변 인자로 넘긴다.
+    # shellcheck disable=SC2086
+    bash scripts/check-shell-assets.sh $STAGED_ALL
+    rc=$?
+    set -e
+    case "$rc" in
+        0) ;;
+        1) fail "[A.3 shell-assets] 셸 스크립트 검사에 실패했습니다. 위에 표시된 내용을 수정해 주세요." ;;
+        *) fail "[A.3 shell-assets] 검사 도구를 실행하지 못했습니다 (종료 코드 $rc). 위의 설치 안내를 확인해 주세요." ;;
+    esac
+}
+
+CHECKS=(
+    check_cargo_fmt
+    check_shell_assets
+)
+
+# 검사 함수를 더하고 CHECKS에 넣지 않으면 그 검사가 조용히 빠지므로 수를 맞춰 본다.
+defined=$(grep -cE '^check_[a-z_]+\(\) \{' "$0" || true)
+if [ "${#CHECKS[@]}" -eq 0 ] || [ "$defined" -ne "${#CHECKS[@]}" ]; then
+    red "▸ [훅] 검사 함수 수($defined)와 실행 목록 수(${#CHECKS[@]})가 다릅니다. CHECKS 배열을 확인해 주세요."
+    exit 1
+fi
+
+for _check in "${CHECKS[@]}"; do
+    "$_check"
+done
+
+if [ "$FAIL" -ne 0 ]; then
+    echo >&2
+    red "✘ 커밋 전 검사에 실패했습니다. 위 항목을 수정한 뒤 다시 커밋해 주세요."
+    exit 1
+fi
+
+count() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l | tr -d ' '; }
+green "✓ pre-commit 검사 통과 (검사 ${#CHECKS[@]}개 · 커밋 대상 Rust 파일 $(count "$STAGED_RS") · 전체 파일 $(count "$STAGED_ALL"))"
+exit 0

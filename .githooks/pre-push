@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# push 전에 형식, 셸 자산, tasty 의존 없음, Clippy, workspace 컴파일을 검사한다.
+# 시험(cargo test)은 실제 ssh·포트를 쓰는 것이 있어 여기서 돌리지 않는다. CI가 세 OS에서 돌린다.
+# 설치: bash scripts/dev-setup.sh (core.hooksPath = .githooks)
+# 검사별 범위: docs/dev-guide/git-hooks.md
+set -e -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+# git이 훅에 넘기는 저장소 경로 변수(GIT_DIR 등)를 검사 명령에 넘기지 않는다.
+# 넘기면 검사가 만드는 임시 저장소가 이 저장소의 설정을 바꿀 수 있다.
+GIT_LOCAL_ENV_VARS="$(git rev-parse --local-env-vars)"
+red()    { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+
+FAIL=0
+STARTED=$SECONDS
+LOG_ROOT="$(git rev-parse --git-path hook-logs)"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/pre-push.XXXXXX")"
+SUMMARY="$LOG_DIR/summary.log"
+: > "$SUMMARY"
+printf 'push 전 검사를 시작합니다. 전체 로그: %s\n' "$LOG_DIR"
+
+# git이 넘기는 ref 목록(stdin)은 쓰지 않는다. 직접 실행할 때 stdin을 기다리지 않도록 읽지도 않는다.
+
+# 명령의 종료 코드를 직접 확인한다. 출력은 검사별로 저장하고 실패하면 마지막 60줄을 보여 준다.
+run_check() {
+    local id="$1" title="$2" started=$SECONDS rc=0
+    shift 2
+    yellow "시작: $title"
+    if (
+        while IFS= read -r name; do
+            [ -z "$name" ] || unset "$name"
+        done <<< "$GIT_LOCAL_ENV_VARS"
+        cd "$REPO_ROOT" || exit 1
+        "$@"
+    ) > "$LOG_DIR/$id.log" 2>&1; then
+        green "통과: $title ($((SECONDS - started))초)"
+        printf '통과: %s (%s초)\n' "$title" "$((SECONDS - started))" >> "$SUMMARY"
+    else
+        rc=$?
+        tail -60 "$LOG_DIR/$id.log" >&2
+        red "실패: $title ($((SECONDS - started))초, 종료 코드 $rc). 전체 로그: $LOG_DIR/$id.log"
+        printf '실패: %s (%s초)\n' "$title" "$((SECONDS - started))" >> "$SUMMARY"
+        FAIL=1
+    fi
+}
+
+# 앞 검사가 실패해도 뒤 검사를 모두 돌려 한 번에 보여 준다.
+run_check B.1 'cargo fmt --all --check' bash scripts/check.sh fmt
+run_check B.2 '셸 자산 shellcheck' bash scripts/check.sh shell
+run_check B.3 'tasty 의존 없음' bash scripts/check.sh no-tasty-deps
+run_check B.4 'cargo clippy --workspace --all-targets -- -D warnings' bash scripts/check.sh lint
+run_check B.5 'cargo check --workspace --all-targets --locked' bash scripts/check.sh check
+
+printf '\npush 전 검사 결과 (총 %s초)\n' "$((SECONDS - STARTED))"
+cat "$SUMMARY"
+if [ "$FAIL" -ne 0 ]; then
+    red "push를 중단했습니다. 실패한 항목을 고쳐 커밋한 뒤 다시 push해 주세요."
+    exit 1
+fi
+green "push 전 검사를 모두 통과했습니다."
