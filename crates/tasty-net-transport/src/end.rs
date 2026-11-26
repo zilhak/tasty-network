@@ -159,6 +159,7 @@ impl LinkCloser {
     }
 
     /// Whether the link ended normally: it ended and no reason was raised.
+    #[cfg(test)]
     pub(crate) fn ended_normally(&self) -> bool {
         self.inner.ended.load(Ordering::Acquire) && !self.inner.end.is_ending()
     }

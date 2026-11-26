@@ -214,11 +214,12 @@ impl Link {
 }
 
 impl Drop for Link {
-    /// Force closes a link that is still open. A link that already ended normally is left
-    /// as it is: its ordered channel was half-closed both ways, and closing it again would
-    /// turn that end into a reset.
+    /// Force closes a link that is still open. A link whose normal end was already decided
+    /// (even if its end hook is still on the way) is left as it is: its ordered channel was
+    /// half-closed both ways, and closing it again would turn that end into a reset. The
+    /// decision and this check share one lock in the channel's state.
     fn drop(&mut self) {
-        if !self.closer.ended_normally() {
+        if self.ordered_shared.claim_forced_end() {
             self.closer.force_close(EndReason::Forced);
         }
         self.ordered_shared.stop_heartbeat();
@@ -266,6 +267,80 @@ mod tests {
     use super::*;
     use crate::memory::memory_channel_pair;
     use tasty_net_identity::DeviceKey;
+
+    fn peer() -> PeerInfo {
+        PeerInfo {
+            device_id: DeviceKey::from_seed([1; 32]).id(),
+            instance_id: "peer".into(),
+            holder: Some(Holder::Dialer),
+            caps: Vec::new(),
+            transport: TransportKind::Memory,
+            local_side: Side::Dialer,
+        }
+    }
+
+    /// The normal end of taken halves and the link's drop overlap: the end is decided (both
+    /// directions done) but its hook has not yet marked the closer when the link drops. The
+    /// drop must not reset the ordered channel, so the peer still reads the last frame and
+    /// then EOF.
+    #[test]
+    fn a_link_dropped_while_its_normal_end_runs_does_not_reset_the_channel() {
+        use std::sync::Barrier;
+        use tasty_net_frame::StreamTag;
+
+        let (a, b) = memory_channel_pair();
+        let control = a.control();
+        let framed = a
+            .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::WhenIdle))
+            .expect("framed");
+        let mut peer_side = b
+            .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::WhenIdle))
+            .expect("peer framed");
+        let closer = framed.closer.clone();
+        // The hook stops at the barrier before it marks the closer.
+        let decided = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let (hook_decided, hook_resume, normal) =
+            (Arc::clone(&decided), Arc::clone(&resume), closer.clone());
+        framed.on_normal_end(Box::new(move || {
+            hook_decided.wait();
+            hook_resume.wait();
+            normal.end_normally();
+        }));
+        let mut link = Link {
+            ordered_shared: framed.shared(),
+            ordered: Some((framed.reader, framed.writer)),
+            closer,
+            control,
+            peer: peer(),
+            client_id: None,
+            ext: None,
+            bulk: None,
+            _guard: None,
+        };
+        let (mut reader, mut writer) = link.take_ordered().expect("ordered");
+        writer.write_frame(StreamTag::Data, b"last").expect("write");
+        writer.half_close().expect("half close");
+        // The peer ends its side; our reader sees EOF and the normal end is decided.
+        peer_side.writer.half_close().expect("peer half close");
+        let ending = std::thread::spawn(move || {
+            assert!(reader.read_frame().is_err(), "EOF");
+        });
+        decided.wait();
+        drop(link);
+        resume.wait();
+        ending.join().expect("reader thread");
+        assert_eq!(
+            peer_side
+                .reader
+                .read_frame()
+                .expect("the last frame")
+                .payload,
+            b"last"
+        );
+        assert!(peer_side.reader.read_frame().is_err(), "then EOF");
+        drop(writer);
+    }
 
     /// Dropping the link stops and joins the ordered channel's heartbeat even though the
     /// consumer still holds the writer it took.

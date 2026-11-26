@@ -176,7 +176,7 @@ impl RawChannel {
             reader_end: Mutex::new(false),
             reader_end_cv: Condvar::new(),
             writer_closed: AtomicBool::new(false),
-            on_normal_end: Mutex::new(None),
+            on_normal_end: Mutex::new(NormalEnd::default()),
             heartbeat: Mutex::new(None),
         });
         let out = Arc::new(Outbox {
@@ -287,7 +287,7 @@ pub struct Framed {
 impl Framed {
     /// Runs `hook` once when the reader ended and the write half was closed.
     pub(crate) fn on_normal_end(&self, hook: NormalEndHook) {
-        *lock(&self.writer.shared.on_normal_end) = Some(hook);
+        lock(&self.writer.shared.on_normal_end).hook = Some(hook);
         self.writer.shared.check_normal_end();
     }
 
@@ -304,14 +304,24 @@ pub(crate) struct ChannelShared {
     reader_end: Mutex<bool>,
     reader_end_cv: Condvar,
     writer_closed: AtomicBool,
-    /// Run once when the reader ended and the write half is closed (the normal end).
-    on_normal_end: Mutex<Option<NormalEndHook>>,
+    /// The normal end: run once when the reader ended and the write half is closed, unless
+    /// the link's drop claimed the end first. The one lock decides which of the two wins.
+    on_normal_end: Mutex<NormalEnd>,
     /// The heartbeat thread, stopped and joined by whoever comes first: the writer's half
     /// close, the writer's drop, or the link's drop.
     heartbeat: Mutex<Option<Heartbeat>>,
 }
 
 type NormalEndHook = Box<dyn FnOnce() + Send>;
+
+/// Who claimed the end of the channel: the normal end (both directions done) or the link's
+/// drop (a forced close). The first to claim it under the lock wins.
+#[derive(Default)]
+pub(crate) struct NormalEnd {
+    hook: Option<NormalEndHook>,
+    claimed_normal: bool,
+    claimed_forced: bool,
+}
 
 impl ChannelShared {
     /// Stops and joins the heartbeat thread, once. The join runs outside the lock, so a second
@@ -342,10 +352,29 @@ impl ChannelShared {
         if !ended {
             return;
         }
-        let hook = lock(&self.on_normal_end).take();
+        let hook = {
+            let mut end = lock(&self.on_normal_end);
+            if end.claimed_forced || end.hook.is_none() {
+                return;
+            }
+            end.claimed_normal = true;
+            end.hook.take()
+        };
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    /// Claims the end for a forced close (the link's drop). False if the normal end already
+    /// claimed it: its hook runs (or ran) and the channel must not be reset on top of it.
+    pub(crate) fn claim_forced_end(&self) -> bool {
+        let mut end = lock(&self.on_normal_end);
+        if end.claimed_normal {
+            return false;
+        }
+        end.claimed_forced = true;
+        end.hook = None;
+        true
     }
 
     /// Waits until the reader ended or `limit` passed. True if the reader ended. A limit past
