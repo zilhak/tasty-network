@@ -146,7 +146,7 @@ RC_LAST_FAIL=""
 RC_LAST_LIMIT=""
 rc_start_relay() {
     local name="$1" src="$2" dir cfg cid http_port metrics_port http metrics waited body code_root code_204 code_metrics
-    local bps burst logs
+    local bps burst logs flat want
     RC_LAST_CONTAINER="" RC_LAST_HTTP="" RC_LAST_METRICS="" RC_LAST_FAIL="" RC_LAST_LIMIT=""
     dir="$RC_TMP/$name"
     mkdir -p "$dir" || { RC_LAST_FAIL="stage=prepare"; return 1; }
@@ -214,23 +214,23 @@ rc_start_relay() {
         return 1
     fi
 
-    # 시작 로그(debug의 ServerConfig 출력)에 설정 파일의 수신 상한이 그대로 있어야 한다.
+    # 시작 로그(debug의 ServerConfig {:#?} 출력)에 설정 파일의 수신 상한이 그대로 있어야 한다.
+    # 여러 줄로 찍히므로 공백과 줄바꿈을 지운 뒤 비교한다.
     bps=$(rc_toml_rx_value "$cfg" bytes_per_second)
     burst=$(rc_toml_rx_value "$cfg" max_burst_bytes)
     logs=$(docker logs "$cid" 2>&1)
+    flat=$(tr -d ' \t\n' <<<"$logs")
     if [[ -n "$bps" ]]; then
-        if ! grep -Eq "bytes_per_second: ${bps}([^0-9]|\$)" <<<"$logs"; then
-            RC_LAST_FAIL="stage=limits reason=bytes_per_second-$bps-not-in-log"
-            rc_dump_logs "$cid"
-            return 1
+        if [[ -n "$burst" ]]; then
+            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:Some($burst),"
+        else
+            want="client_rx:Some(ClientRateLimit{bytes_per_second:$bps,max_burst_bytes:None,"
         fi
-        if [[ -n "$burst" ]] && ! grep -Fq "max_burst_bytes: Some($burst)" <<<"$logs"; then
-            RC_LAST_FAIL="stage=limits reason=max_burst_bytes-$burst-not-in-log"
-            rc_dump_logs "$cid"
-            return 1
-        fi
-    elif ! grep -q 'client_rx: None' <<<"$logs"; then
-        RC_LAST_FAIL="stage=limits reason=unexpected-client-rx"
+    else
+        want="client_rx:None,"
+    fi
+    if ! grep -Fq "$want" <<<"$flat"; then
+        RC_LAST_FAIL="stage=limits reason=log-without-$want"
         rc_dump_logs "$cid"
         return 1
     fi
