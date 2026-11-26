@@ -25,7 +25,7 @@
 //! | [`dial_handshake`] · [`dial_request`] · [`DialConfig`] · [`Link`] · [`BulkChannel`] · [`PeerInfo`] | the dialing end |
 //! | [`read_first_line`] · [`FirstLineError`] · [`accept_handshake`] · [`accept_p2p_handshake`] · [`AcceptConfig`] · [`Accepted`] · [`RoleProposal`] · [`BulkRegistry`] · [`DEFAULT_MAX_HANDSHAKES`] | the accepting end |
 //! | [`DomainPolicy`] · [`AttachRequest`] · [`BulkRequest`] · [`DomainAccept`] · [`DomainReject`] · [`domain_code`] | the consumer's domain check (occupation and registration happen in it) |
-//! | [`RequestClient`] · [`RequestServer`] · [`RequestHandler`] · [`RequestError`] | request channels (port-based lookup, creation, status) |
+//! | [`RequestClient`] · [`RequestServer`] · [`RequestHandler`] · [`RequestError`] · [`ServeError`] · [`RESPONSE_TOO_LARGE`] | request channels (port-based lookup, creation, status) |
 //! | [`RejectReason`] · [`HandshakeError`] · [`TooOldEvidence`] · [`P2pCloseReason`] | consumers that branch on why a handshake ended (`is_retryable`) |
 //! | [`Holder`] · [`Side`] · [`Roles`] · [`roles`] | consumers that act on the roles of a link |
 //! | [`Purpose`] · [`PROTO`] · [`STREAM_OPEN_METHOD`] · [`MAX_HANDSHAKE_LINE`] · [`LEGACY_PROTOCOL_ERROR`] · [`is_valid_capability`] · [`InvalidCapabilities`] | the wire constants |
@@ -71,7 +71,9 @@ pub use heartbeat::HeartbeatPolicy;
 pub use link::{BulkChannel, Link, LinkTimeouts, PeerInfo};
 pub use memory::{MemoryListener, MemoryTransport, memory_channel_pair, memory_transport};
 pub use reject::{HandshakeError, P2pCloseReason, RejectReason, TooOldEvidence};
-pub use request::{RequestClient, RequestError, RequestHandler, RequestServer};
+pub use request::{
+    RESPONSE_TOO_LARGE, RequestClient, RequestError, RequestHandler, RequestServer, ServeError,
+};
 pub use role::{Holder, Roles, Side, roles};
 pub use ssh::{LOCAL_CONNECT_TIMEOUT, SshTransport};
 pub use transport::{
