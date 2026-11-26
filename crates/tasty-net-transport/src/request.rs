@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tasty_net_frame::{ReadFailure, StreamTag};
+use tasty_net_frame::{MAX_FRAME_LEN, ReadFailure, StreamTag};
 
 use crate::channel::{ChannelReader, ChannelWriter, ReadError};
 use crate::end::LinkCloser;
@@ -300,21 +300,16 @@ impl RequestServer {
                         }
                         None => json!({ "id": id, "error": { "code": "invalid_request" } }),
                     };
-                    match self
-                        .writer
-                        .write_frame(StreamTag::Control, answer.to_string().as_bytes())
-                    {
-                        Ok(()) => {}
-                        // Refused before any byte went out: the answer is longer than a frame.
-                        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                            let instead =
-                                json!({ "id": id, "error": { "code": RESPONSE_TOO_LARGE } });
-                            self.writer
-                                .write_frame(StreamTag::Control, instead.to_string().as_bytes())
-                                .map_err(ServeError::Write)?;
-                        }
-                        Err(e) => return Err(ServeError::Write(e)),
+                    // The size is judged on the serialized answer before anything is written,
+                    // so the answer goes out in one write and a write error is only that.
+                    let mut payload = answer.to_string();
+                    if usize::try_from(MAX_FRAME_LEN).is_ok_and(|max| payload.len() > max) {
+                        payload = json!({ "id": id, "error": { "code": RESPONSE_TOO_LARGE } })
+                            .to_string();
                     }
+                    self.writer
+                        .write_frame(StreamTag::Control, payload.as_bytes())
+                        .map_err(ServeError::Write)?;
                 }
                 Ok(frame) if frame.tag == StreamTag::Detach => break,
                 Ok(_) => {}
@@ -431,5 +426,68 @@ mod tests {
         // The peer goes away entirely: the request is buffered, the answer has nowhere to go.
         drop(a);
         assert!(matches!(server.serve(&Big), Err(ServeError::Write(_))));
+    }
+
+    struct Small;
+
+    impl RequestHandler for Small {
+        fn handle(&self, _peer: &PeerInfo, _method: &str, _params: Value) -> Result<Value, Value> {
+            Ok(json!("ok"))
+        }
+    }
+
+    /// Takes writes and refuses each with `InvalidInput`, counting the attempts.
+    struct RefusingWriter(Arc<AtomicU64>);
+
+    impl io::Write for RefusingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refused by the writer",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A normal-size answer whose write fails, even with `InvalidInput`, ends `serve` with
+    /// that write error; no replacement answer follows it.
+    #[test]
+    fn a_failed_write_of_a_normal_answer_is_a_write_error_without_a_second_answer() {
+        let mut request = Vec::new();
+        let line = json!({"id": 1, "method": "m", "params": null});
+        write_frame(
+            &mut request,
+            StreamTag::Control,
+            line.to_string().as_bytes(),
+        )
+        .expect("request");
+        let attempts = Arc::new(AtomicU64::new(0));
+        let (dummy, _other) = memory_channel_pair();
+        let channel = RawChannel::new(
+            Box::new(io::Cursor::new(request)),
+            Box::new(RefusingWriter(Arc::clone(&attempts))),
+            dummy.control(),
+            TransportKind::Memory,
+        );
+        let framed = channel.framed(&ChannelConfig::default()).expect("framed");
+        let server = RequestServer {
+            reader: framed.reader,
+            writer: framed.writer,
+            closer: framed.closer,
+            peer: peer(),
+        };
+        match server.serve(&Small) {
+            Err(ServeError::Write(e)) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "one answer, written once"
+        );
     }
 }
