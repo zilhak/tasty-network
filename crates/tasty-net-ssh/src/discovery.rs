@@ -128,13 +128,54 @@ pub struct PortDiscoveryConfig {
 }
 
 impl PortDiscoveryConfig {
-    /// The remote command that reads the record file at the conventional place.
+    /// The remote command that reads the record file at the conventional place, quoted for
+    /// the shell that runs it ([`sh_path`] for `cat`, [`cmd_quote`] for `type`).
     fn file_command(&self, windows: bool) -> String {
         if windows {
-            format!("type %USERPROFILE%\\{}\\{}", self.data_dir, self.port_file)
+            let path = format!("%USERPROFILE%\\{}\\{}", self.data_dir, self.port_file);
+            format!("type {}", cmd_quote(&path))
         } else {
-            format!("cat ~/{}/{}", self.data_dir, self.port_file)
+            let path = format!("~/{}/{}", self.data_dir, self.port_file);
+            format!("cat {}", sh_path(&path))
         }
+    }
+}
+
+/// Whether `s` needs no quoting in sh, PowerShell, or cmd. Such values go to the remote shell
+/// unchanged, as tasty sent every value.
+fn is_plain(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,~\\".contains(c))
+}
+
+/// Quotes `s` for a POSIX shell: single quotes, with `'` written as `'\''`. A plain value is
+/// left as is. PowerShell reads single quotes too, but writes `'` inside them as `''`; a value
+/// with `'` is quoted for sh only.
+fn sh_quote(s: &str) -> String {
+    if is_plain(s) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// [`sh_quote`] for a path, keeping a leading `~/` outside the quotes so the remote shell still
+/// expands it.
+fn sh_path(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) if !is_plain(rest) => format!("~/{}", sh_quote(rest)),
+        _ => sh_quote(path),
+    }
+}
+
+/// Quotes `s` for cmd: double quotes, which keep `%VAR%` expansion. A plain value is left as
+/// is. cmd has no escape for `"` inside double quotes, so such a value cannot be read.
+fn cmd_quote(s: &str) -> String {
+    if is_plain(s) {
+        s.to_string()
+    } else {
+        format!("\"{s}\"")
     }
 }
 
@@ -707,8 +748,13 @@ impl Probe<'_> {
         &self,
         decode: &impl Fn(&str) -> Result<T, E>,
     ) -> Result<T, PortDiscoveryError> {
-        let mut argv: Vec<&str> = vec![&self.config.remote_program];
-        argv.extend(self.config.remote_args.iter().map(String::as_str));
+        // ssh joins the words with spaces into one command line for the remote shell, so each
+        // word is quoted for sh (see `sh_quote` for other shells).
+        let words: Vec<String> = std::iter::once(&self.config.remote_program)
+            .chain(&self.config.remote_args)
+            .map(|w| sh_quote(w))
+            .collect();
+        let argv: Vec<&str> = words.iter().map(String::as_str).collect();
         self.run(&argv, decode).map_err(refine_port_command_failure)
     }
 
@@ -784,7 +830,10 @@ fn refine_port_command_failure(mut error: PortDiscoveryError) -> PortDiscoveryEr
 
 /// Remote commands for an explicit record path, in the order they are tried.
 fn explicit_file_commands(port_file: &str) -> [String; 2] {
-    [format!("cat {port_file}"), format!("type {port_file}")]
+    [
+        format!("cat {}", sh_path(port_file)),
+        format!("type {}", cmd_quote(port_file)),
+    ]
 }
 
 /// Auto tries the subcommand, then the Unix file command, then the Windows file command. An
@@ -1385,6 +1434,36 @@ mod tests {
     }
 
     #[test]
+    fn values_with_spaces_or_quotes_are_quoted_for_the_remote_shell() {
+        assert_eq!(sh_quote("netprog"), "netprog");
+        assert_eq!(sh_quote("/opt/app dir/netprog"), "'/opt/app dir/netprog'");
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote(""), "''");
+        assert_eq!(sh_path("~/.data/net.port"), "~/.data/net.port");
+        assert_eq!(sh_path("~/my data/net.port"), "~/'my data/net.port'");
+        assert_eq!(sh_path("/srv/my data/net.port"), "'/srv/my data/net.port'");
+        assert_eq!(cmd_quote("C:\\data\\net.port"), "C:\\data\\net.port");
+        assert_eq!(
+            cmd_quote("C:\\my data\\net.port"),
+            "\"C:\\my data\\net.port\""
+        );
+        assert_eq!(
+            explicit_file_commands("/srv/my data/net.port"),
+            [
+                "cat '/srv/my data/net.port'".to_string(),
+                "type \"/srv/my data/net.port\"".to_string()
+            ]
+        );
+        let mut c = config();
+        c.data_dir = "App Data".into();
+        assert_eq!(c.file_command(false), "cat ~/'App Data/net.port'");
+        assert_eq!(
+            c.file_command(true),
+            "type \"%USERPROFILE%\\App Data\\net.port\""
+        );
+    }
+
+    #[test]
     fn file_commands_use_the_configured_names() {
         let c = config();
         assert_eq!(c.file_command(false), "cat ~/.netprog-data/net.port");
@@ -1757,6 +1836,27 @@ mod tests {
                 fake.calls(),
                 ["cat /srv/rec/net.port", "type /srv/rec/net.port"]
             );
+        }
+
+        /// A remote shell reads a quoted explicit path with a space as one path.
+        #[test]
+        fn an_explicit_path_with_a_space_reaches_the_remote_shell_as_one_path() {
+            let dir =
+                std::env::temp_dir().join(format!("tasty-net-ssh-quoted {}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let file = dir.join("net.port");
+            std::fs::write(&file, "45127\n").expect("record");
+            // The fake runs the remote command line with sh, as sshd hands it to the shell.
+            let fake = FakeSsh::new("quoted", "exit 1", "exec sh -c \"$tail\"");
+            let mut c = config();
+            c.explicit_port_file = Some(file.display().to_string());
+            let found =
+                discover_remote_port(&fake.launcher(), &target(), PortMode::Auto, &c, decode_port);
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                tracing::warn!("quoted test cleanup failed: {e}");
+            }
+            assert_eq!(found.expect("cat reads the quoted path"), 45127);
+            assert_eq!(fake.calls(), [format!("cat '{}'", file.display())]);
         }
 
         /// The subcommand runs `remote_program` with `remote_args`, right after the destination.
