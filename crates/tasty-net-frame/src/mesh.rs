@@ -174,7 +174,8 @@ impl MeshFrameAssembler {
     ///
     /// A [`MeshAssembleError`] for a corrupt or hostile header. The caller drops the
     /// chunk; when the error comes from a mismatch with earlier chunks, the progress of
-    /// that frame is dropped too.
+    /// that frame is dropped too. A chunk whose header matches the frame in progress but
+    /// whose index is out of range also drops that frame.
     ///
     /// The received data length of a frame is checked on every chunk. If resending a
     /// chunk index makes the sum exceed `total_len` even once, the frame is dropped with
@@ -750,6 +751,28 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// A chunk that agrees with the frame in progress except for an out-of-range index is
+    /// Malformed and drops the frame, so the remaining real chunks do not complete it.
+    #[test]
+    fn a_matching_header_with_an_out_of_range_index_drops_the_frame() {
+        let bytes = vec![8u8; MESH_CHUNK_MAX_PAYLOAD * 2 + 1];
+        let chunks = split_mesh_frame(1, 1, 0, 0, false, &bytes);
+        assert_eq!(chunks.len(), 3);
+        let (mut meta, data) = decode_mesh_chunk(&chunks[2]).unwrap();
+        meta.chunk_index = 3;
+
+        let mut assembler = MeshFrameAssembler::new();
+        assert!(assembler.push_chunk(&chunks[0]).unwrap().is_none());
+        assert_eq!(
+            assembler.push_chunk(&encode_mesh_chunk(&meta, data)),
+            Err(MeshAssembleError::Malformed)
+        );
+        assert!(assembler.inflight.is_empty(), "frame state is dropped");
+        // Index 1 and 2 now start a new frame that still lacks index 0.
+        assert!(assembler.push_chunk(&chunks[1]).unwrap().is_none());
+        assert!(assembler.push_chunk(&chunks[2]).unwrap().is_none());
     }
 
     #[test]
