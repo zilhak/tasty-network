@@ -130,7 +130,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 
 ## 배포 형태
 
-- 이 레포에 둘 것: `rendezvous/`(지금의 `relay/`를 바꾼다). `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 두 번째 IP).
+- 이 레포에 둘 것: `rendezvous/`(지금의 `relay/`를 바꾼다). `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인), `container-check.sh`(이미지로 띄운 서버에 같은 망의 기기 두 대를 붙이는 확인, D5 (b)), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 두 번째 IP).
 - 외부 이미지를 쓰지 않는다. 바이너리는 이 workspace의 `tasty-rendezvous`이고, 판은 workspace 버전을 따른다([버전·호환](versioning.md)).
 - 서버 키 파일은 설정한 경로에 둔다. 파일 권한은 기기 키와 같은 규칙을 쓴다([기기 키·토큰](identity.md)).
 - hub rendezvous는 hub가 이 패키지(또는 라이브러리)를 가져다 운영한다. hub 쪽 배포 방식은 이 레포에 적지 않는다.
