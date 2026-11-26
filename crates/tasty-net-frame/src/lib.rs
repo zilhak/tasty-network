@@ -12,12 +12,17 @@
 #![forbid(unsafe_code)]
 
 mod bulk;
+mod mesh;
 mod read_failure;
 
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
 pub use bulk::{BULK_CHUNK_HEADER_LEN, decode_bulk_chunk, encode_bulk_chunk};
+pub use mesh::{
+    MESH_CHUNK_HEADER_LEN, MESH_CHUNK_MAX_PAYLOAD, MeshAssembleError, MeshChunkMeta,
+    MeshFrameAssembler, decode_mesh_chunk, encode_mesh_chunk, split_mesh_frame,
+};
 pub use read_failure::ReadFailure;
 
 /// Frame header length: a 1-byte tag and a 4-byte big-endian payload length.
