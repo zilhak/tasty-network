@@ -59,10 +59,34 @@ rc_cleanup() {
     return 0
 }
 
-# 컨테이너 $1(이름 또는 ID)을 지우고, 없어졌는지 확인한다. 남았으면 1.
+# 컨테이너 $1(ID)을 지우고 없어졌는지 확인한다. 0 없어짐, 1 남음, 2 확인 불가(데몬 통신 오류 등).
+# inspect 실패를 곧 부재로 보지 않는다. 오류 문구가 "No such container"일 때만 없어진 것으로 본다.
 rc_remove_container() {
+    local err
     docker rm -f "$1" >/dev/null 2>&1 || true
-    ! docker container inspect "$1" >/dev/null 2>&1
+    if err=$(docker container inspect "$1" 2>&1 >/dev/null); then
+        return 1
+    fi
+    if grep -qi 'no such container' <<<"$err"; then
+        return 0
+    fi
+    rc_log "컨테이너 상태를 확인하지 못했다: $1 ($(head -1 <<<"$err"))"
+    return 2
+}
+
+# docker create 인자로 컨테이너를 만든다. 성공하면 그 ID를 RC_NEW_ID에 두고 정리 목록에 넣는다.
+# 실패하면 아무것도 등록하지 않는다(같은 이름의 남의 컨테이너가 있어 실패한 경우 그것을 지우지 않는다).
+# 만든 뒤 start가 실패해도 ID가 목록에 있으므로 EXIT 정리가 지운다.
+RC_NEW_ID=""
+rc_create_container() {
+    local id
+    RC_NEW_ID=""
+    id=$(docker create "$@") || return 1
+    id=$(tail -1 <<<"$id")
+    [[ -n "$id" ]] || return 1
+    RC_CONTAINERS+=("$id")
+    RC_NEW_ID="$id"
+    return 0
 }
 
 # docker와 이미지를 준비한다. 이미지가 없을 때만 받고, 받았으면 끝에 지운다.
@@ -254,12 +278,9 @@ rc_start_relay() {
     http_port=$(rc_toml_port "$cfg" http_bind_addr 3340) || { RC_LAST_FAIL="stage=config reason=http_bind_addr"; return 1; }
     metrics_port=$(rc_toml_port "$cfg" metrics_bind_addr 9090) || { RC_LAST_FAIL="stage=config reason=metrics_bind_addr"; return 1; }
 
-    # 이름을 먼저 정리 목록에 넣는다. create가 컨테이너를 만든 뒤 실패해도, start가 실패해도 EXIT 정리가 지운다.
-    cid="relay-check-$name-$$"
-    RC_CONTAINERS+=("$cid")
-    RC_LAST_CONTAINER="$cid"
-    if ! docker create \
-        --name "$cid" \
+    # 이름은 실행마다 고유하게 만든다(PID와 난수). create가 성공한 ID만 정리 목록에 들어간다.
+    if ! rc_create_container \
+        --name "relay-check-$name-$$-$RANDOM$RANDOM" \
         -e RUST_LOG=iroh_relay=debug -e NO_COLOR=1 \
         -v "$cfg:/config/relay.toml:ro" \
         -p "127.0.0.1::$http_port" -p "127.0.0.1::$metrics_port" \
@@ -267,6 +288,8 @@ rc_start_relay() {
         RC_LAST_FAIL="stage=start reason=docker-create"
         return 1
     fi
+    cid="$RC_NEW_ID"
+    RC_LAST_CONTAINER="$cid"
     if ! docker start "$cid" >/dev/null; then
         RC_LAST_FAIL="stage=start reason=docker-start"
         rc_dump_logs "$cid"
@@ -374,7 +397,7 @@ rc_stop_relay() {
     local cid="$1" i
     [[ -n "$cid" ]] || return 0
     if ! rc_remove_container "$cid"; then
-        rc_log "컨테이너가 남았다: $cid (끝날 때 다시 지운다)"
+        rc_log "컨테이너가 남았거나 확인하지 못했다: $cid (끝날 때 다시 지운다)"
         return 1
     fi
     for i in "${!RC_CONTAINERS[@]}"; do
@@ -424,6 +447,43 @@ rc_self_test() {
     printf "http_bind_addr = '[::]:8080'\n" > "$t/literal.toml"
     st_expect port-literal-string 8080 "$(rc_toml_port "$t/literal.toml" http_bind_addr 3340)"
     st_expect port-default 9090 "$(rc_toml_port "$t/literal.toml" metrics_bind_addr 9090)"
+    # 정리 소유권: docker를 흉내 내는 함수로 응답을 바꿔 본다(서브셸 안에서만).
+    (
+        docker() { if [[ $1 == create ]]; then echo 'Error: Conflict. The container name is already in use' >&2; return 1; fi; return 0; }
+        RC_CONTAINERS=()
+        rc_create_container --name taken img >/dev/null 2>&1
+        echo "$? ${#RC_CONTAINERS[@]}"
+    ) > "$t/own"
+    st_expect create-fail-not-registered "1 0" "$(cat "$t/own")"
+    (
+        docker() { if [[ $1 == create ]]; then echo 0123abcd; fi; return 0; }
+        RC_CONTAINERS=()
+        rc_create_container --name mine img >/dev/null 2>&1
+        echo "$? ${RC_CONTAINERS[*]}"
+    ) > "$t/own"
+    st_expect create-ok-registered "0 0123abcd" "$(cat "$t/own")"
+    (
+        docker() { if [[ $1 == container ]]; then echo 'Error: No such container: x' >&2; return 1; fi; return 0; }
+        rc_remove_container x
+    )
+    st_expect remove-gone 0 "$?"
+    (
+        docker() { if [[ $1 == container ]]; then echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' >&2; return 1; fi; return 1; }
+        rc_remove_container x 2>/dev/null
+    )
+    st_expect remove-daemon-error-unknown 2 "$?"
+    (
+        docker() { return 0; }
+        rc_remove_container x
+    )
+    st_expect remove-still-there 1 "$?"
+    (
+        docker() { if [[ $1 == container ]]; then echo 'Cannot connect to the Docker daemon' >&2; return 1; fi; return 1; }
+        RC_CONTAINERS=(x)
+        rc_stop_relay x 2>/dev/null
+        echo "$? ${RC_CONTAINERS[*]}"
+    ) > "$t/own"
+    st_expect stop-keeps-unconfirmed "1 x" "$(cat "$t/own")"
     printf '[limits\n' > "$t/bad.toml"
     rc_toml_rx "$t/bad.toml" >/dev/null 2>&1
     st_expect toml-error-rc 3 "$?"
