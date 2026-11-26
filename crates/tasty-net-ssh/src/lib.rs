@@ -212,6 +212,8 @@ pub(crate) mod test_helper {
     /// - `echo:<text>`: prints `<text>` on its own line and exits 0. The test harness prints its
     ///   own lines before it, so read the last line.
     /// - `fail:<code>:<text>`: writes `<text>` to stderr and exits with `<code>`.
+    /// - `stderr:<code>:<n>:<text>`: writes `n` times `x`, a space, and `<text>` to stderr and
+    ///   exits with `<code>`.
     /// - `flood:<bytes>`: writes `<bytes>` bytes to stdout and exits 0. `flood:forever` writes
     ///   until the pipe closes.
     pub(crate) fn helper_command(mode: &str) -> Command {
@@ -263,6 +265,16 @@ pub(crate) mod test_helper {
                 let (code, text) = arg.split_once(':').unwrap_or((arg, ""));
                 eprint!("{text}");
                 std::process::exit(code.parse().expect("exit code"));
+            }
+            "stderr" => {
+                let mut parts = arg.splitn(3, ':');
+                let code: i32 = parts.next().expect("code").parse().expect("exit code");
+                let n: usize = parts.next().expect("count").parse().expect("count");
+                let text = parts.next().unwrap_or("");
+                let mut err = std::io::stderr().lock();
+                let _written = write!(err, "{} {text}", "x".repeat(n));
+                let _flushed = err.flush();
+                std::process::exit(code);
             }
             "flood" => {
                 let n: usize = if arg == "forever" {

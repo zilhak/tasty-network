@@ -767,7 +767,9 @@ fn run_capture_with_budget(
         let code = status.code();
         let elapsed = started.elapsed();
         let stderr = match wait_for(stderr_rx, deadline.min(Instant::now() + STDERR_GRACE)) {
-            Ok(stderr) => sanitize_stderr(&String::from_utf8_lossy(&stderr.bytes)),
+            Ok(stderr) => {
+                sanitize_stderr(&String::from_utf8_lossy(&stderr.bytes), stderr.overflowed)
+            }
             Err(e) => format!("(stderr not collected: {})", e.kind()),
         };
         let mut error = PortDiscoveryError::new(
@@ -805,14 +807,17 @@ fn decode_output<T, E>(
 
 /// Runs of at least this many token-like characters are removed from stderr.
 const SECRET_RUN: usize = 32;
-/// The stderr kept in a detail is cut to this many characters.
+/// The stderr kept in a detail is at most this many characters, the `...` of a cut included.
 const STDERR_DETAIL_LIMIT: usize = 512;
 
-/// The stderr text a detail may keep: trimmed, cut to [`STDERR_DETAIL_LIMIT`] characters, and
-/// with every run of [`SECRET_RUN`] or more ASCII letters, digits, `+`, `=`, `_`, or `-` replaced
-/// by `<redacted N chars>`. A failing remote command could print a record (and its token) to
-/// stderr; ordinary messages (paths, "Permission denied") have no such runs.
-fn sanitize_stderr(stderr: &str) -> String {
+/// The stderr text a detail may keep: trimmed, with every run of [`SECRET_RUN`] or more ASCII
+/// letters, digits, `+`, `=`, `_`, or `-` replaced by `<redacted N chars>`, and cut to
+/// [`STDERR_DETAIL_LIMIT`] characters. A failing remote command could print a record (and its
+/// token) to stderr; ordinary messages (paths, "Permission denied") have no such runs.
+///
+/// `cut` says the text is the start of a longer stderr ([`STDERR_LIMIT`]). A run at its end may
+/// then be the first part of a token, so it is redacted whatever its length.
+fn sanitize_stderr(stderr: &str, cut: bool) -> String {
     fn token_like(c: char) -> bool {
         c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-')
     }
@@ -824,9 +829,15 @@ fn sanitize_stderr(stderr: &str) -> String {
         }
         run.clear();
     }
+    let cut_run = cut && stderr.chars().next_back().is_some_and(token_like);
+    let text = if cut_run {
+        stderr.trim_start()
+    } else {
+        stderr.trim()
+    };
     let mut out = String::new();
     let mut run = String::new();
-    for c in stderr.trim().chars() {
+    for c in text.chars() {
         if token_like(c) {
             run.push(c);
         } else {
@@ -834,9 +845,18 @@ fn sanitize_stderr(stderr: &str) -> String {
             out.push(c);
         }
     }
-    flush(&mut out, &mut run);
-    match out.char_indices().nth(STDERR_DETAIL_LIMIT) {
-        Some((cut, _)) => format!("{}...", &out[..cut]),
+    if cut_run && !run.is_empty() {
+        out.push_str(&format!("<redacted {} chars>", run.len()));
+    } else {
+        flush(&mut out, &mut run);
+    }
+    const ELLIPSIS: &str = "...";
+    if out.chars().count() <= STDERR_DETAIL_LIMIT {
+        return out;
+    }
+    let keep = STDERR_DETAIL_LIMIT - ELLIPSIS.len();
+    match out.char_indices().nth(keep) {
+        Some((at, _)) => format!("{}{ELLIPSIS}", &out[..at]),
         None => out,
     }
 }
@@ -1217,7 +1237,7 @@ mod tests {
     #[test]
     fn stderr_details_drop_token_like_runs_and_keep_messages() {
         let stderr = format!("cat: /home/u/.data/net.port: No such file\ntoken: {TOKEN}\n");
-        let kept = sanitize_stderr(&stderr);
+        let kept = sanitize_stderr(&stderr, false);
         assert!(!kept.contains(TOKEN), "{kept}");
         assert!(kept.contains("<redacted 64 chars>"), "{kept}");
         assert!(
@@ -1225,14 +1245,55 @@ mod tests {
             "{kept}"
         );
         assert_eq!(
-            sanitize_stderr("  Permission denied (publickey).\n"),
+            sanitize_stderr("  Permission denied (publickey).\n", false),
             "Permission denied (publickey)."
         );
         let long = "x ".repeat(STDERR_DETAIL_LIMIT);
-        assert_eq!(
-            sanitize_stderr(&long).chars().count(),
-            STDERR_DETAIL_LIMIT + 3
+        let kept = sanitize_stderr(&long, false);
+        assert_eq!(kept.chars().count(), STDERR_DETAIL_LIMIT);
+        assert!(kept.ends_with("..."), "{kept}");
+        let exact = "x".repeat(STDERR_DETAIL_LIMIT).replace("xx", "x ");
+        assert_eq!(sanitize_stderr(&exact, false), exact.trim());
+    }
+
+    /// A stderr cut at the kept limit may end in the first part of a token: that part is
+    /// redacted even though it is short.
+    #[test]
+    fn a_token_cut_at_the_stderr_limit_is_redacted() {
+        let head = &TOKEN[..20];
+        let cut = format!("no such file\ntoken: {head}");
+        let kept = sanitize_stderr(&cut, true);
+        assert!(!kept.contains(head), "{kept}");
+        assert!(kept.ends_with("<redacted 20 chars>"), "{kept}");
+        // Not cut: a short word at the end is an ordinary word.
+        assert!(sanitize_stderr("exit code abc", false).ends_with("abc"));
+        // Cut in whitespace: nothing to redact at the end.
+        assert!(sanitize_stderr("exit code abc ", true).ends_with("abc"));
+    }
+
+    /// Through a real child: a long run fills the kept stderr and a token starts right before
+    /// the cut. Neither part shows in the detail or the debug output, and the detail stays short.
+    #[test]
+    fn a_failing_command_keeps_no_token_part_at_the_stderr_cut() {
+        // The filler, a space, then 20 token characters fill the kept bytes exactly.
+        let filler = STDERR_LIMIT - 1 - 20;
+        let err = capture(
+            helper_command(&format!("stderr:3:{filler}:{TOKEN}")),
+            Duration::from_secs(10),
+            "stderr cut",
+        )
+        .expect_err("exit 3");
+        let head = &TOKEN[..20];
+        assert_eq!(err.exit_code(), Some(3));
+        assert!(!err.detail().contains(head), "{}", err.detail());
+        assert!(!format!("{err:?}").contains(head));
+        assert!(
+            err.detail().contains("<redacted 20 chars>"),
+            "{}",
+            err.detail()
         );
+        let stderr_part = err.detail().rsplit(": ").next().expect("stderr part");
+        assert!(stderr_part.chars().count() <= STDERR_DETAIL_LIMIT);
     }
 
     #[test]
