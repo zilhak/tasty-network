@@ -638,7 +638,7 @@ impl Agent {
                             branch,
                             Child {
                                 peer,
-                                answer_by: (now.mono + self.config.hop_timeout).min(deadline),
+                                answer_by: answer_by(now.mono, self.config.hop_timeout, deadline),
                                 answered: false,
                             },
                         );
@@ -1190,6 +1190,14 @@ fn neighbors(me: &DeviceId, links: &[LocalLink], skip: &[DeviceId]) -> Vec<Devic
         .collect()
 }
 
+/// When a neighbor's first answer is due: `hop_timeout` from `now`, but never past the
+/// branch `deadline`. The timeout is cut to the time left first, so no value of it can
+/// overflow an `Instant`.
+fn answer_by(now: Instant, hop_timeout: Duration, deadline: Instant) -> Instant {
+    let left = deadline.saturating_duration_since(now);
+    now.checked_add(hop_timeout.min(left)).unwrap_or(deadline)
+}
+
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
@@ -1250,6 +1258,18 @@ mod tests {
             remaining_ms: 1_000,
             branch: "b".into(),
         }
+    }
+
+    #[test]
+    fn the_largest_hop_timeout_is_cut_to_the_branch_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(3);
+        assert_eq!(answer_by(now, Duration::MAX, deadline), deadline);
+        assert_eq!(
+            answer_by(now, Duration::from_secs(1), deadline),
+            now + Duration::from_secs(1)
+        );
+        assert_eq!(answer_by(deadline, Duration::MAX, deadline), deadline);
     }
 
     #[test]

@@ -1246,3 +1246,27 @@ fn a_first_hop_without_the_capability_stays_in_the_result() {
     assert_eq!(c.status, NodeStatus::TimedOut);
     assert_eq!(c.reason, Some(NodeReason::RouteNoCapability));
 }
+
+#[test]
+fn a_hop_timeout_of_duration_max_does_not_panic() {
+    let mut net = Net::new(&[A, B, C]);
+    let config = AgentConfig {
+        hop_timeout: Duration::MAX,
+        hop_reserve: Duration::from_millis(100),
+    };
+    for n in [A, B, C] {
+        let me = SelfInfo {
+            device_id: id(n),
+            display_name: None,
+        };
+        net.agents.insert(id(n), Agent::new(me, config));
+    }
+    net.link(A, B).link(B, C);
+    net.silent.insert(id(C));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    // C never answers; B gives it up at its branch deadline and the exploration finishes.
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, C), NodeStatus::TimedOut);
+}
