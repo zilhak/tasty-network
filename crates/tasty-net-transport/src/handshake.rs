@@ -1356,11 +1356,15 @@ fn await_proposal(
     }
 }
 
+/// A hook given the approval deadline.
+#[cfg(test)]
+type DeadlineHook = Box<dyn FnOnce(Instant)>;
+
 #[cfg(test)]
 thread_local! {
     /// Runs once on this thread when the approval wait enters its last channel watch, with
     /// the approval deadline.
-    static BEFORE_LAST_WATCH: std::cell::RefCell<Option<Box<dyn FnOnce(Instant)>>> =
+    static BEFORE_LAST_WATCH: std::cell::RefCell<Option<DeadlineHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
