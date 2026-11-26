@@ -11,7 +11,7 @@ use tasty_net_identity::DeviceId;
 use crate::channel::{
     ChannelConfig, ChannelControl, ChannelReader, ChannelWriter, DEFAULT_DRAIN_CAP,
 };
-use crate::end::{EndReason, LinkCloser};
+use crate::end::{EndReason, GuardSlot, LinkCloser};
 use crate::handshake::{DialConfig, dial_bulk};
 use crate::heartbeat::HeartbeatPolicy;
 use crate::reject::{HandshakeError, P2pCloseReason};
@@ -227,7 +227,8 @@ pub struct BulkChannel {
     pub closer: LinkCloser,
     pub(crate) peer: PeerInfo,
     pub(crate) ext: Option<String>,
-    pub(crate) _guard: Option<Box<dyn Any + Send>>,
+    /// The consumer's registration guard; the parent's end drops it too.
+    pub(crate) _guard: Arc<GuardSlot>,
 }
 
 impl fmt::Debug for BulkChannel {

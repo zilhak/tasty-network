@@ -801,7 +801,7 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         .connect_more(&cancel)
         .map_err(HandshakeError::Connect)?;
     // Adopted before the handshake: a parent that ends meanwhile closes this channel too.
-    if !link.closer.adopt(ch.control()) {
+    if !link.closer.adopt(&ch.control()) {
         shutdown_quietly(ch.control().as_ref());
         return Err(HandshakeError::ParentEnded);
     }
@@ -842,7 +842,7 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         closer: framed.closer,
         peer: link.peer.clone(),
         ext: ack.ext,
-        _guard: None,
+        _guard: Arc::new(std::sync::Mutex::new(None)),
     })
 }
 
@@ -957,13 +957,16 @@ fn accept_on(
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(HandshakeError::Io)?;
+        // The parent's end drops the consumer's guard with the channel it closes.
+        let guard = Arc::new(std::sync::Mutex::new(accept.guard));
+        parent.closer.adopt_guard(&guard);
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
             writer: framed.writer,
             closer: framed.closer,
             peer: parent.peer,
             ext,
-            _guard: accept.guard,
+            _guard: guard,
         }));
     }
     // 4. signature (SSH path).
@@ -1249,7 +1252,7 @@ fn accept_bulk(
         return Err(io.refuse(RejectReason::BulkCredentialInvalid, None, linger));
     };
     // Registering as the parent's child is the point that decides against the parent's end.
-    if !parent.closer.adopt(io.ch.control()) {
+    if !parent.closer.adopt(&io.ch.control()) {
         return Err(io.refuse(RejectReason::BulkCredentialInvalid, None, linger));
     }
     // 9. domain, only while the handshake is still in time.

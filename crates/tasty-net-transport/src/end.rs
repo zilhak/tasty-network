@@ -1,8 +1,9 @@
 //! The end of a link: a reason that only rises, one settle point, and the forced close that
 //! wakes every blocked read (docs/design/transport.md "시도 취소, 닫기, 회수").
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::channel::ChannelControl;
 use crate::lock::lock;
@@ -59,10 +60,18 @@ impl EndState {
 
 type CloseHook = Box<dyn Fn() + Send + Sync>;
 
+/// The consumer's registration guard of a bulk channel, shared by the channel and its parent:
+/// whichever ends first drops it.
+pub(crate) type GuardSlot = Mutex<Option<Box<dyn Any + Send>>>;
+
 struct CloserInner {
     end: EndState,
     /// Every channel of the link: the ordered channel and the bulk channels opened under it.
-    channels: Mutex<Vec<Arc<dyn ChannelControl>>>,
+    /// The list holds them weakly: a channel whose halves (and handshake) are gone closes its
+    /// socket at once and drops out here, instead of living as long as the parent link.
+    channels: Mutex<Vec<Weak<dyn ChannelControl>>>,
+    /// The registration guards of the bulk channels under the link, dropped when it ends.
+    guards: Mutex<Vec<Weak<GuardSlot>>>,
     /// Run once when the link ends: the first forced close or the normal end (the bulk
     /// credential revocation of an attach link).
     hooks: Mutex<Vec<CloseHook>>,
@@ -95,7 +104,8 @@ impl LinkCloser {
         Self {
             inner: Arc::new(CloserInner {
                 end: EndState::default(),
-                channels: Mutex::new(vec![first]),
+                channels: Mutex::new(vec![Arc::downgrade(&first)]),
+                guards: Mutex::new(Vec::new()),
                 hooks: Mutex::new(Vec::new()),
                 ended: AtomicBool::new(false),
             }),
@@ -104,13 +114,35 @@ impl LinkCloser {
 
     /// Adds a channel that the end of this link also closes. Returns false, adding nothing, when
     /// the link already ended or is ending.
-    pub(crate) fn adopt(&self, channel: Arc<dyn ChannelControl>) -> bool {
+    pub(crate) fn adopt(&self, channel: &Arc<dyn ChannelControl>) -> bool {
         let mut channels = lock(&self.inner.channels);
         if self.has_ended() {
             return false;
         }
-        channels.push(channel);
+        channels.retain(|c| c.strong_count() > 0);
+        channels.push(Arc::downgrade(channel));
         true
+    }
+
+    /// Drops the guard in `slot` when this link ends, unless the bulk channel that holds the
+    /// slot dropped it first. A link that already ended drops it at once.
+    pub(crate) fn adopt_guard(&self, slot: &Arc<GuardSlot>) {
+        let mut guards = lock(&self.inner.guards);
+        if self.has_ended() {
+            drop(guards);
+            drop(lock(slot).take());
+            return;
+        }
+        guards.retain(|g| g.strong_count() > 0);
+        guards.push(Arc::downgrade(slot));
+    }
+
+    /// Drops the guards of the bulk channels still alive under the link.
+    fn drop_guards(&self) {
+        let guards = std::mem::take(&mut *lock(&self.inner.guards));
+        for slot in guards.iter().filter_map(Weak::upgrade) {
+            drop(lock(&slot).take());
+        }
     }
 
     /// Runs `hook` once when the link ends. A link that already ended runs it at once.
@@ -134,6 +166,7 @@ impl LinkCloser {
     pub(crate) fn end_normally(&self) {
         let hooks = self.mark_ended(None);
         self.wake();
+        self.drop_guards();
         for hook in hooks {
             hook();
         }
@@ -144,11 +177,13 @@ impl LinkCloser {
     /// in the lists or handled by its caller.
     fn mark_ended(&self, reason: Option<EndReason>) -> Vec<CloseHook> {
         let channels = lock(&self.inner.channels);
+        let guards = lock(&self.inner.guards);
         let mut hooks = lock(&self.inner.hooks);
         if let Some(reason) = reason {
             self.inner.end.raise(reason);
         }
         self.inner.ended.store(true, Ordering::Release);
+        drop(guards);
         drop(channels);
         std::mem::take(&mut *hooks)
     }
@@ -180,6 +215,7 @@ impl LinkCloser {
     pub fn force_close(&self, reason: EndReason) {
         let hooks = self.mark_ended(Some(reason));
         self.wake();
+        self.drop_guards();
         for hook in hooks {
             hook();
         }
@@ -187,7 +223,10 @@ impl LinkCloser {
 
     /// Closes every channel both ways and wakes blocked reads, without raising a reason.
     pub(crate) fn wake(&self) {
-        let channels: Vec<_> = lock(&self.inner.channels).clone();
+        let channels: Vec<_> = lock(&self.inner.channels)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
         for channel in channels {
             shutdown_quietly(channel.as_ref());
         }
@@ -261,10 +300,42 @@ mod tests {
     fn an_ended_link_adopts_nothing() {
         let c = closer();
         let (extra, _peer) = memory_channel_pair();
-        assert!(c.adopt(extra.control()));
+        assert!(c.adopt(&extra.control()));
         c.end_normally();
         assert!(!c.is_ending(), "a normal end raises no reason");
         let (late, _peer2) = memory_channel_pair();
-        assert!(!c.adopt(late.control()));
+        assert!(!c.adopt(&late.control()));
+    }
+
+    #[test]
+    fn a_dropped_channel_leaves_the_list_and_a_live_guard_drops_with_the_link() {
+        let c = closer();
+        let (gone, _peer) = memory_channel_pair();
+        let control = gone.control();
+        assert!(c.adopt(&control));
+        drop(gone);
+        drop(control);
+        let (kept, _peer2) = memory_channel_pair();
+        assert!(c.adopt(&kept.control()));
+        // The test closer's first channel and the dropped one are gone; only the kept one is
+        // still held.
+        assert_eq!(lock(&c.inner.channels).len(), 1);
+        let dropped = Arc::new(AtomicU8::new(0));
+        struct Guard(Arc<AtomicU8>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let slot: Arc<GuardSlot> =
+            Arc::new(Mutex::new(Some(Box::new(Guard(Arc::clone(&dropped))))));
+        c.adopt_guard(&slot);
+        c.force_close(EndReason::Forced);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the parent's end drops it"
+        );
+        assert!(lock(&slot).is_none());
     }
 }
