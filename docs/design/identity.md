@@ -25,6 +25,8 @@ API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`
 
 토큰을 포트와 따로 게시하지 않고 인스턴스 하나의 연결 레코드로 한 번에 게시한다. 포트와 토큰을 따로 읽으면 그 사이 인스턴스가 다시 시작했을 때 서로 다른 세대의 값이 묶일 수 있기 때문이다(포트 파일은 인스턴스가 게시·회수하는 수명 객체다, `tasty:crates/tasty-ipc/src/port_file.rs`). 게시는 `ConnectionRecord::publish(path)`가 권한 걸린 임시 파일 → 교체로 하고 게시 핸들 `RecordPublication`을 돌려준다. 핸들은 게시한 경로, 실제 대상, 파일 정체성(Unix 장치·inode, Windows 볼륨·파일 ID), 내용을 기억한다. 정리는 `RecordPublication::retire()` 하나뿐이다. 같은 경로의 게시와 정리가 함께 잡는 잠금 아래에서 대상의 정체성과 내용이 자기 게시분과 같을 때만 지우고, 다르면(새 인스턴스가 이미 교체함) 그대로 둔다. tasty `PortFilePublication`과 같은 방식이다(`tasty:crates/tasty-ipc/src/port_file.rs`). 소비자는 인스턴스가 끝날 때 핸들로 정리를 부른다. 경로를 받아 지우는 함수는 두지 않는다. 위 표의 "연결 토큰" 행도 이 레코드 안의 토큰을 뜻한다.
 
+- 연결 레코드 경로의 마지막 이름이 심볼릭 링크이거나 일반 파일이 아니면 게시하지 않고 `IdentityError::UnsafeFile`을 돌려준다(위 "파일 권한"의 읽기 검사가 링크를 거절하므로 링크를 따라가 게시하면 그 레코드를 다시 읽을 수 없다). 핸들이 기억하는 "실제 대상"은 정규화한 부모 디렉터리에 파일 이름을 붙인 경로다. 레코드의 부모 디렉터리도 기기 키 디렉터리와 같은 권한 계약(아래 "파일 권한")을 받는다. 게시·정리 잠금은 `<실제 대상>.lock` 파일의 배타 잠금이고, 잠금 파일은 정리 뒤에도 남는다.
+- `ConnectionRecord::parse(text)`는 레코드 파서 하나다. 앞뒤 공백을 무시하고, 십진 숫자만 있으면 `ParsedRecord::LegacyPort(port)`, JSON 객체면 `ParsedRecord::Record(..)`를 돌려준다. 모르는 필드는 무시한다. 실패는 `RecordParseError`이고 필드 이름이나 형식 종류만 담는다(아래 "토큰 비교"). `RecordPublication::retire()`는 `RetireOutcome::{Removed, Replaced, Missing}`을 돌려준다.
 - 형식이 맞지 않는 파일은 손상으로 본다. `load_or_create`는 손상 파일을 만나면 `IdentityError::Corrupt`를 돌려주고 파일을 그대로 둔다. 새 키로 덮지 않는다. 덮으면 모든 상대가 이 기기를 다른 기기로 본다.
 - 키의 정본 표현은 32바이트 seed다. `iroh-base` 1.5.0의 `SecretKey::from_bytes(&[u8; 32])`로 그대로 iroh endpoint에 넘긴다(P2P와 SSH에서 같은 기기 ID).
 
@@ -42,6 +44,8 @@ API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`
 - Windows 계약은 tasty의 `tasty:crates/tasty-remote-profiles/src/secret_file.rs`와 같다. 구현은 PowerShell 대신 `windows-sys`의 보안 API로 한다. 외부 프로세스를 띄우지 않으므로 PowerShell 실행 정책·경로에 기대지 않고, 같은 프로세스 안에서 시험으로 다시 읽어 확인할 수 있다.
 - 읽기 검사는 이 레포가 로컬에서 비밀 파일을 여는 모든 경우에 같다. 기기 키와 연결 레코드(게시 확인, 정리 때 내용 비교) 모두다. 원격의 연결 레코드는 원격 `ssh` 명령이 읽으므로 이 검사 밖이고, 원격 쪽 권한은 그 레코드를 게시한 원격 인스턴스의 이 레포가 건다.
 - 소비자가 임의 디렉터리를 줄 수 있으므로 "사용자 프로필 아래라서 안전하다"는 가정을 하지 않는다.
+- 기기 키 디렉터리와 연결 레코드의 부모 디렉터리는 없으면 만든다(Unix 0700). 그 경로의 마지막 이름이 심볼릭 링크이거나 디렉터리가 아니면 `IdentityError::UnsafeFile`이다. Windows는 디렉터리 권한을 바꾸지 않고 파일에만 위 계약을 건다.
+- 새 비밀 파일의 권한 설정이나 확인이 실패하면 `IdentityError::Protect`(임시 파일은 지움, 내용 없음)다.
 
 ## 동시 첫 생성
 
@@ -54,12 +58,14 @@ API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`
 
 ## 서명
 
-- `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`.
+- `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`. 검증은 `verify_strict`다(`iroh-base` `PublicKey::verify`).
+- `Signature`는 64바이트이고 문자열 표현은 소문자 hex 128자다(handshake `sig`). `FromStr`은 그 형식만 받는다.
+- 파일 없이 키를 만드는 `DeviceKey::from_seed([u8; 32])`·`DeviceKey::generate()`와 iroh에 넘길 `DeviceKey::to_seed()`를 둔다. `DeviceKey`의 `Debug`는 seed를 찍지 않는다.
 - handshake는 서명 대상의 SHA-256에 서명한다([handshake v2](handshake.md) "흐름 (SSH 경로)").
 
 ## 토큰 비교
 
-- 받은 토큰과 자기 토큰은 상수 시간으로 비교한다. 길이가 다르면 바로 false, 같으면 바이트 XOR을 모두 누적해 비교한다(또는 `subtle`).
+- 받은 토큰과 자기 토큰은 상수 시간으로 비교한다. 길이가 다르면 바로 false, 같으면 바이트 XOR을 모두 누적해 비교한다(또는 `subtle`). 구현은 `subtle`이고, 받은 와이어 바이트와 비교하는 `ConnectionToken::matches(&[u8]) -> bool`과 `constant_time_eq(&[u8], &[u8])`를 둔다. 값은 `ConnectionToken::expose_hex()`로만 꺼낸다.
 - 토큰은 로그에 쓰지 않는다. `Debug`·`Display`는 값을 가린다.
 - 토큰 타입으로 바뀌기 전의 원문도 같다. 연결 레코드 파싱이 실패하면 오류와 로그에는 실패한 필드 이름이나 형식 종류(예: `token: not 64 lowercase hex`)만 남기고 레코드 원문(발견 명령의 stdout)은 넣지 않는다. 지금 tasty의 포트 발견은 파싱 실패 때 stdout 전체를 진단 detail에 넣고 debug 로그에 쓰는데(`tasty:crates/tasty-ssh/src/lib.rs` `parse_port`·`PortDiscoveryError::new`), 숫자 포트에서는 진단 자료였지만 레코드에는 토큰이 있으므로 옮기지 않는다. 실패 분류 enum과 체인은 그대로 둔다.
 
@@ -71,7 +77,7 @@ API를 나눈다: `DeviceKey::load_or_create(dir)`와 `ConnectionToken::issue()`
 
 처음 본 상대 기기 ID를 기록하고, 다음부터 다른 키면 멈춘다.
 
-- 판정 로직은 이 레포, 기록 저장소는 소비자가 trait로 준다: `PeerKeyStore { fn get(&self, peer: &PeerRef) -> Result<Option<DeviceId>>; fn pin_if_absent(&self, peer: &PeerRef, id: &DeviceId) -> Result<PinOutcome>; fn replace(&self, peer: &PeerRef, id: &DeviceId) -> Result<()> }`. `PeerRef`는 소비자가 정하는 상대 이름(tasty는 원격 프로필 이름)이다.
+- 판정 로직은 이 레포, 기록 저장소는 소비자가 trait로 준다: `PeerKeyStore { fn get(&self, peer: &PeerRef) -> Result<Option<DeviceId>, StoreError>; fn pin_if_absent(&self, peer: &PeerRef, id: &DeviceId) -> Result<PinOutcome, StoreError>; fn replace(&self, peer: &PeerRef, id: &DeviceId) -> Result<(), StoreError> }`. `PeerRef`는 소비자가 정하는 상대 이름(tasty는 원격 프로필 이름)이다. `StoreError`는 소비자 저장소의 오류를 그대로 담아 넘긴다. 판정 함수는 `check_peer(store, peer, id) -> Result<TofuVerdict, StoreError>`다.
 - 첫 기록은 `pin_if_absent` 한 번으로 원자적으로 정한다. 결과 `PinOutcome::{Inserted, Existing(DeviceId)}`는 이 호출이 기록했는지와 확정된 값을 함께 준다. 기록이 없으면 받은 ID를 기록하고 `Inserted`, 이미 있으면 기록을 바꾸지 않고 `Existing(기존 값)`을 돌려준다. 판정은 `get`을 앞에 부르지 않고 이 결과 하나로 한다. 그래서 같은 상대에게 첫 연결 두 개가 겹쳐도 `Inserted`는 하나뿐이다.
 - 결과: `TofuVerdict::{New, Match, Mismatch { expected, got }}`. `Inserted` → `New`(통과), `Existing`이 받은 ID와 같으면 `Match`(통과), 다르면 `Mismatch`이고 기록을 바꾸지 않고 handshake를 `peer_key_mismatch`로 끝낸다. `get`은 표시용이다.
 - 기존 기록을 바꾸는 길은 사용자가 명시적으로 다시 등록하는 경로 하나다: `reregister(store, peer, id)`가 `replace`를 부른다. handshake는 `replace`를 부르지 않는다. 경고 화면과 확인은 tasty 몫이다.

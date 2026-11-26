@@ -45,8 +45,8 @@ demo ─> (transport, p2p, ssh, identity, frame)
 
 ## 외부 의존 원칙
 
-- 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(identity의 연결 레코드와 그 파서, transport·topology·p2p), `iroh-base` 키 기능(identity, 아래), `iroh`(p2p, `=1.5.0` 고정, [버전·호환](versioning.md)), `tokio`(p2p), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기).
-- 기기 키의 ed25519 구현은 `iroh-base` 1.5.0의 `SecretKey`·`PublicKey`를 쓴다. 의존 선언은 `iroh-base = { version = "=1.5.0", default-features = false, features = ["key"] }`다. `key` feature는 `relay` feature도 켜지만(`url` 등) manifest에 tokio가 없다(`iroh-base` 1.5.0 `Cargo.toml`). 같은 트리에 ed25519 구현이 두 판 들어가지 않고, 기기 ID 문자열이 iroh endpoint ID 표시와 저절로 같아진다. 구현 때 `cargo tree -p tasty-net-identity`로 무거운 의존이 없는지 다시 보고, 있으면 같은 판의 `ed25519-dalek`을 직접 쓰고 표시 형식을 맞춘다.
+- 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(identity의 연결 레코드와 그 파서, transport·topology·p2p), `iroh-base` 키 기능(identity, 아래), `iroh`(p2p, `=1.5.0` 고정, [버전·호환](versioning.md)), `tokio`(p2p), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기). identity는 이 밖에 OS 난수 `getrandom`(기기 키 seed와 토큰), 상수 시간 비교 `subtle`, Unix의 `libc`(유효 사용자 ID와 `O_NOFOLLOW`)를 쓴다. 셋 다 `iroh-base`가 이미 끌어오는 판이다.
+- 기기 키의 ed25519 구현은 `iroh-base` 1.5.0의 `SecretKey`·`PublicKey`를 쓴다. 의존 선언은 `iroh-base = { version = "=1.5.0", default-features = false, features = ["key"] }`다. `key` feature는 `relay` feature도 켜지만(`url` 등) manifest에 tokio가 없다(`iroh-base` 1.5.0 `Cargo.toml`). 같은 트리에 ed25519 구현이 두 판 들어가지 않고, 기기 ID 문자열이 iroh endpoint ID 표시와 저절로 같아진다. 구현 때 `cargo tree -p tasty-net-identity`로 다시 봤다(2026-11-27). tokio는 없고 `ed25519-dalek` 3.0.0 한 판이며, `relay` feature 몫으로 `url`·`idna`·`icu_*`가 들어온다. 그래서 `iroh-base`를 그대로 쓴다.
 
 ## 오류 규칙
 
