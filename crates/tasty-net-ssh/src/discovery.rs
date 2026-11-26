@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn stderr_details_drop_token_like_runs_and_keep_messages() {
-        let stderr = format!("cat: /home/u/.data/net.port: No such file\ntoken={TOKEN}\n");
+        let stderr = format!("cat: /home/u/.data/net.port: No such file\ntoken: {TOKEN}\n");
         let kept = sanitize_stderr(&stderr);
         assert!(!kept.contains(TOKEN), "{kept}");
         assert!(kept.contains("<redacted 64 chars>"), "{kept}");
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn a_failing_command_keeps_no_token_from_stderr() {
         let err = capture(
-            helper_command(&format!("fail:3:token={TOKEN}")),
+            helper_command(&format!("fail:3:token: {TOKEN}")),
             Duration::from_secs(10),
             "stderr",
         )
