@@ -26,7 +26,8 @@ use crate::transport::TransportKind;
 /// Control of one channel, shared by its reader, its writer and whoever closes it.
 ///
 /// A transport implements it for its channel type. Timeouts apply to every half of the
-/// channel. A read that times out returns `WouldBlock` or `TimedOut`, the kinds
+/// channel, so they are set on the handle the halves read and write: on Windows a socket
+/// copy made with `try_clone` does not share them. A read that times out returns `WouldBlock` or `TimedOut`, the kinds
 /// [`ReadFailure::HeartbeatTimeout`] stands for.
 pub trait ChannelControl: Send + Sync {
     /// Sets the timeout of every later read on this channel. `None` blocks without a limit.
@@ -94,14 +95,16 @@ impl RawChannel {
         Self::from_tcp_as(stream, TransportKind::Tcp)
     }
 
+    /// The reader, the writer and the control share one socket handle. A `try_clone` copy
+    /// would not do: on Windows the timeouts set on one handle do not reach a read or write
+    /// on another, so a read waited past the timeout the control set.
     pub(crate) fn from_tcp_as(stream: TcpStream, kind: TransportKind) -> io::Result<Self> {
         stream.set_nodelay(true)?;
-        let reader = stream.try_clone()?;
-        let control = stream.try_clone()?;
+        let stream = Arc::new(stream);
         Ok(Self::new(
-            Box::new(reader),
-            Box::new(stream),
-            Arc::new(TcpControl { stream: control }),
+            Box::new(SharedTcp(Arc::clone(&stream))),
+            Box::new(SharedTcp(Arc::clone(&stream))),
+            Arc::new(TcpControl { stream }),
             kind,
         ))
     }
@@ -723,7 +726,26 @@ impl Drop for ChannelWriter {
 
 /// Control of a TCP channel.
 pub(crate) struct TcpControl {
-    stream: TcpStream,
+    stream: Arc<TcpStream>,
+}
+
+/// A half of a TCP channel on the handle its [`TcpControl`] sets the timeouts of.
+struct SharedTcp(Arc<TcpStream>);
+
+impl Read for SharedTcp {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Write for SharedTcp {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
 }
 
 impl ChannelControl for TcpControl {
@@ -808,6 +830,25 @@ mod tests {
         check_mixed_tag_order(a, b);
         let (a, b) = tcp_pair();
         check_mixed_tag_order(a, b);
+    }
+
+    /// A read on a TCP channel whose peer stays open and silent ends on the timeout set
+    /// through the channel's control alone: nothing wakes it.
+    #[test]
+    fn a_tcp_read_ends_on_the_timeout_its_control_set() {
+        let (mut a, _b) = tcp_pair();
+        a.control()
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("read timeout");
+        let started = Instant::now();
+        let mut byte = [0u8; 1];
+        let error = a.read(&mut byte).expect_err("the peer sends nothing");
+        assert_eq!(ReadFailure::of_io(&error), ReadFailure::HeartbeatTimeout);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
