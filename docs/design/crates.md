@@ -40,13 +40,13 @@ demo ─> (transport, p2p, ssh, identity, frame)
 ```
 
 - 화살표 반대 방향 의존은 만들지 않는다. topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
-- tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다.
+- tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
 - feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다. P2P가 필요 없는 소비자는 `tasty-net-p2p`를 의존에 넣지 않으면 iroh·tokio가 들어오지 않는다.
 
 ## 외부 의존 원칙
 
 - 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(transport·topology·p2p), `iroh-base` 키 기능(identity, 아래), `iroh`(p2p, `=1.5.0` 고정, [버전·호환](versioning.md)), `tokio`(p2p), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기).
-- 기기 키의 ed25519 구현은 `iroh-base`의 `SecretKey`·`PublicKey`를 쓴다. 같은 트리에 ed25519 구현이 두 판 들어가지 않고, 기기 ID 문자열이 iroh endpoint ID 표시와 저절로 같아진다. `iroh-base`를 기본 feature 없이 키 기능만으로 넣었을 때 tokio 같은 무거운 의존이 따라오면, `iroh-base`와 같은 판의 `ed25519-dalek`을 직접 쓰고 표시 형식을 맞춘다. 어느 쪽인지는 [기기 키·토큰](identity.md) 구현 때 `cargo tree -p tasty-net-identity`로 확인해 그 문서에 적는다.
+- 기기 키의 ed25519 구현은 `iroh-base` 1.5.0의 `SecretKey`·`PublicKey`를 쓴다. 의존 선언은 `iroh-base = { version = "=1.5.0", default-features = false, features = ["key"] }`다. `key` feature는 `relay` feature도 켜지만(`url` 등) manifest에 tokio가 없다(`iroh-base` 1.5.0 `Cargo.toml`). 같은 트리에 ed25519 구현이 두 판 들어가지 않고, 기기 ID 문자열이 iroh endpoint ID 표시와 저절로 같아진다. 구현 때 `cargo tree -p tasty-net-identity`로 무거운 의존이 없는지 다시 보고, 있으면 같은 판의 `ed25519-dalek`을 직접 쓰고 표시 형식을 맞춘다.
 
 ## 오류 규칙
 
@@ -57,7 +57,7 @@ demo ─> (transport, p2p, ssh, identity, frame)
 
 ## 동기·비동기 규칙
 
-- 소비자에게 보이는 API는 동기(std 스레드·블로킹 I/O)다. tasty의 attach 경로가 전부 동기 스레드 코드이기 때문이다(`tasty:crates/tasty-ipc/src/client/stream.rs`, `tasty:crates/tasty-remote/src/transport.rs`).
+- 소비자에게 보이는 API는 동기(std 스레드·블로킹 I/O)다. tasty의 attach 호출 경로가 동기 스레드 코드이기 때문이다(`tasty:crates/tasty-ipc/src/client/stream.rs`, `tasty:crates/tasty-remote/src/transport.rs`). tasty가 tokio를 전혀 안 쓰는 것은 아니다(다른 경로에서 쓴다). tokio 쪽 코드에서 부를 때는 블로킹 경계를 거친다([전송 추상화](transport.md) "동기·비동기 경계").
 - iroh는 tokio 위에서 돈다. `tasty-net-p2p`가 자기 tokio 런타임을 소유하고 동기 trait 뒤로 숨긴다. 자세한 경계는 [전송 추상화](transport.md) "동기·비동기 경계".
 
 ## unsafe 규칙

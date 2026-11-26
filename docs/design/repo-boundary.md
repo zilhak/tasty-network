@@ -40,10 +40,10 @@
 | `tasty:crates/tasty-ipc/src/stream/inherit_cwd.rs` | — | 전부 |
 | `tasty:crates/tasty-ipc/src/mesh_stream.rs` | 전부 → frame | — |
 | `tasty:crates/tasty-ipc/src/client/stream.rs` | 소켓 열기, `stream.open` 송신, ACK 읽기, 읽기·쓰기 분리 → transport | Control 해석, bulk 파일 흐름 |
-| `tasty:crates/tasty-ipc/src/stream_hub.rs` | bulk 연결 결속의 자격 검사 → transport bulk 자격 | 연결 등록, push sink, 입력 분류, Loss 통지 |
+| `tasty:crates/tasty-ipc/src/stream_hub.rs` | — (bulk 자격 검사는 transport에 새로 생기는 검사다. 지금 hub에는 없다) | 연결 등록, `bulk_workspace` 결속 기록(`register_bulk`), push sink, 입력 분류, Loss 통지. bulk 시작·완료 인가는 도메인(`tasty:src/remote/server.rs`)에 그대로 남는다 |
 | `tasty:crates/tasty-ipc/src/instance.rs` | — (handshake가 값을 실어 나름) | 인스턴스 ID 생성 |
 | `tasty:crates/tasty-ipc/src/caller.rs` | 토큰 생성 방식(32바이트 OS 난수 → 64자 hex)을 참고해 identity에 새로 씀 | 요청 라벨 `SessionToken` |
-| `tasty:crates/tasty-ipc/src/port_file.rs` | — | 포트 파일 게시. 토큰 파일 게시는 identity의 권한 걸린 파일 함수를 씀 |
+| `tasty:crates/tasty-ipc/src/port_file.rs` | 포트·토큰·인스턴스 ID를 묶은 연결 레코드 형식과 권한 걸린 게시 함수 → identity([기기 키·토큰](identity.md) "파일 형식") | 레코드 게시 시점·위치와 회수 |
 | `tasty:src/adapters/production/tcp_ipc_server.rs` | `handle_stream_connection`의 handshake 파싱·검증·거절 ACK(`validate_stream_proto`, `parse_stream_handshake`) → transport 받는 쪽 함수 | listener, 첫 줄 분기, 요청·응답 루프, attach dispatch |
 | `tasty:crates/tasty-remote/src/transport.rs` | handshake, 읽기·쓰기 스레드의 소켓 부분, heartbeat 송신, half-close·강제 종료·워커 회수 → transport | 도메인 프레임 해석, mirror 이벤트, 재연결 판단 |
 | `tasty:crates/tasty-remote/src/transport_end.rs` | "끝 사유는 올라가기만 하고 한 곳에서 한 번 확정" 계약 → transport `LinkCloser` | 도메인 끝 사유 |
@@ -58,7 +58,7 @@
 | `tasty:crates/tasty-remote/src/resize_sync.rs` | — | 전부 |
 | `tasty:crates/tasty-remote/src/input_receipts.rs` | — | 전부 |
 | `tasty:crates/tasty-remote/src/refusal.rs` | — | 전부(거절 사유 표시는 transport 거절 enum으로 분기) |
-| `tasty:crates/tasty-remote/src/profile_detection/jobs.rs` | — | 전부(`detect_port_mode`를 ssh 크레이트에서 부름) |
+| `tasty:crates/tasty-remote/src/profile_detection/jobs.rs` | — | 전부. 지금은 jobs → `detect_for_profile`(tasty-ssh) → `detect_port_mode`(내부 함수)다. 전환 뒤에는 jobs → tasty로 옮긴 `detect_for_profile` → 이 레포의 공개 `detect_port_mode`다 |
 | `tasty:crates/tasty-ssh/src/lib.rs` | 프로필 함수를 뺀 전부 → ssh | `SshTarget::from_remote_profile`·`from_attach_inline`, `resolve_attach_target`, `run_ssh_connect`, `apply_shell_to_profile`, `detect_for_profile`, `detect_and_persist` |
 | `tasty:crates/tasty-ssh/src/tunnel.rs` | 전부 → ssh | — |
 | `tasty:crates/tasty-ssh/src/listener.rs` | 전부 → ssh(번역 키 대신 enum) | 번역 문구 |
@@ -92,7 +92,7 @@
 | `tasty-i18n` | `PortDiscoveryError`의 `Display`(`lib.rs:453`, 키 `ssh.port_discovery.*` :414-419), `RemoteListenerAbsent`(`listener.rs:180`), `detect_and_persist`(`lib.rs:1121`) | (a) `PortDiscoveryFailureKind`와 `RemoteListenerAbsent`를 공개 타입으로 두고 `Display`는 영어 고정 문구. `detect_and_persist`는 tasty에 남으므로 그 번역 호출도 tasty에 남는다 | enum 값으로 분기해 기존 키(`ssh.port_discovery.*`, `ssh.tunnel.listener_absent`, `cli.remote_profile.not_found`)를 고른다 |
 | `tasty-utils` | `process::hide_console`(`lib.rs:823`, `tunnel.rs:74`), `poison::recover_mutex`(`lib.rs:584`) | 이 레포에서 자체 구현. `hide_console`은 Windows에서 `CREATE_NO_WINDOW`(0x0800_0000)를 거는 몇 줄 함수이고 `std::os::windows::process::CommandExt::creation_flags`로 외부 의존 없이 쓴다. `recover_mutex`는 poison 복구와 첫 1회 보고다. 공용 크레이트를 둘 만큼 크지 않다 | 없음 |
 | `tasty-reaper` | `spawn_bound_to_host`(`tunnel.rs:76`) | (b) 자식 생성 훅 주입. ssh 크레이트는 `SpawnHook`(예: `Arc<dyn Fn(Command) -> io::Result<Child> + Send + Sync>`)을 받고, 주지 않으면 `Command::spawn`을 쓴다. 훅은 터널 ssh와 포트 발견 ssh 모두에 쓴다 | `spawn_bound_to_host`를 훅으로 넣는다. 아래 두 계약을 tasty가 지킨다 |
-| `tasty-remote-profiles` | `SshTarget::from_remote_profile`(`lib.rs:100`)·`from_attach_inline`(:123), `resolve_attach_target`(:153), `apply_shell_to_profile`(:1070), `detect_for_profile`(:1095), `detect_and_persist`(:1115) | (c) `SshTarget`·`PortMode` 값 타입과 프로필 없이 도는 함수(`SshTarget::parse`, `discover_remote_port`, `detect_port_mode`)만 이 레포에 둔다. 위 여섯 함수는 tasty에 남긴다 | 여섯 함수를 tasty 크레이트로 옮기고 이 레포 값 타입을 쓴다 |
+| `tasty-remote-profiles` | `SshTarget::from_remote_profile`(`lib.rs:100`)·`from_attach_inline`(:123), `resolve_attach_target`(:153), `apply_shell_to_profile`(:1070), `detect_for_profile`(:1095), `detect_and_persist`(:1115) | (c) `SshTarget`·`PortMode` 값 타입과 프로필 없이 도는 함수(`SshTarget::parse`, `discover_remote_port`, `detect_port_mode`)만 이 레포에 둔다. 위 여섯 함수는 tasty에 남긴다 | 여섯 함수를 tasty 크레이트로 옮기고 이 레포 값 타입을 쓴다. `SshTarget`이 이 레포 타입이 되므로 associated 생성자(`SshTarget::from_remote_profile`·`from_attach_inline`)는 tasty 쪽 자유 함수나 확장 trait로 바꾼다(외부 타입에 inherent 메서드를 더할 수 없다) |
 
 결과: 이 레포의 SSH 크레이트에 남는 tasty 의존은 0개다.
 
@@ -109,6 +109,13 @@
 
 포트 발견은 원격 명령 `<원격 tasty> port`(`lib.rs:859`), 포트 파일 `~/.tasty/tasty.port`·`~/.tasty-debug/tasty.port`(:845-914), Windows `type %USERPROFILE%\...`에 기댄다. 이 레포는 이 이름들을 상수로 두지 않고 `PortDiscoveryConfig`(가안 이름)로 받는다. 원격 실행 파일 이름, 데이터 디렉터리 이름, 포트 파일 이름이 필드다. 기본값은 두지 않는다. tasty가 자기 값을 넣고, 시험과 예제는 임시 값을 넣는다.
 
-- 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 인자로 받는다.
-- ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode`·`ServerAlive*`·확인 모드의 `StrictHostKeyChecking`은 사용자 `extra_options`보다 먼저 넣는다. 사용자 값이 이기는 것은 `ConnectTimeout`뿐이다(ssh는 같은 옵션의 첫 값을 쓴다).
+포트 발견의 동작 규칙(지금 tasty와 같게 옮긴다):
+
+- 명시 경로가 우선한다. 호출 인자(또는 `PortDiscoveryConfig`)에 명시 파일 경로가 있으면 관례 경로와 모드 체인보다 먼저, 그것만 읽는다(`cat <경로>` → `type <경로>`, `lib.rs` `discover_via_explicit_file`). tasty는 프로필의 `port_file`을 여기에 넣는다(`tasty:crates/tasty-remote/src/browse.rs`).
+- 명시 경로가 없으면 모드를 따른다. `Auto`는 subcommand → Unix 파일 → Windows 파일 순이다(`AUTO_FALLBACK_CHAIN`).
+- 취소와 원격 인스턴스 종료 확정(`RemoteInstanceExited`)은 다음 방식으로 넘어가지 않고 그 자리에서 끝난다(`stops_auto_chain`).
+- 새 연결 레코드(포트·토큰·인스턴스 ID, [기기 키·토큰](identity.md) "토큰 전달")도 같은 우선순위·체인·종료 분류로 읽는다. 레코드 하나를 읽으므로 포트와 토큰을 따로 찾는 단계가 없다.
+
+- 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227` `run_ssh_connect`, :1105 `detect_for_profile`, `tasty:crates/tasty-remote/src/browse.rs`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 인자로 받고, 환경 변수를 이 값으로 바꾸는 일은 tasty에 남는다.
+- ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode=no`·`ServerAliveInterval`·`ServerAliveCountMax`는 언제나, `StrictHostKeyChecking=accept-new`는 `verify = true`일 때만 사용자 `extra_options`보다 먼저 넣는다(ssh는 같은 옵션의 첫 값을 쓰므로 이 값들이 이긴다). `verify = false`이면 이 레포는 `StrictHostKeyChecking`을 넣지 않고, 사용자 `extra_options`나 ssh 설정 파일·기본값이 정한다. `ConnectTimeout`은 맨 뒤에 기본값(`SSH_CONNECT_TIMEOUT` 10초)을 넣으므로 사용자가 `extra_options`나 ssh 설정에 준 값이 있으면 그 값이 이기고, 없을 때만 기본값이 쓰인다.
 - 한국어 `anyhow!` 문자열(예: `PortMode::parse` :289)은 [오류 규칙](crates.md#오류-규칙)대로 enum + 영어 `Display`로 바꾼다.

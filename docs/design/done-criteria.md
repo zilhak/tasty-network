@@ -14,7 +14,7 @@
 | D4 | P2P(iroh) 직접 연결 | `crates/tasty-net-demo/tests/p2p_attach.rs`의 `direct_path_on_loopback`, `required_direct_path_times_out`, `direct_path_lost_closes_link`, `relay_allowed_keeps_relayed_link`, `unpaired_peer_is_closed_before_handshake`, `different_relays_connect_with_pairing_address`, `bulk_transfer_matches_bytes` (세 OS) | 별도 OS 프로세스 두 개가 relay를 거쳐 직접 경로로 바뀌고, 1안 정책과 페어링 거절이 동작함 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
 | D5 | relay 서버 동작 | (a) `.github/workflows/relay.yml`의 `relay-config-check` 잡. (b) 원격 빌드 환경 기록: `n0computer/iroh-relay:v1.5.0` 컨테이너를 `relay/` 설정 두 개로 각각 띄우고 `p2p-peer` 두 개를 붙임 | (a) 두 설정으로 relay가 뜨고 HTTP·metrics가 응답함. (b) 실제 relay 프로세스를 거쳐 연결되고 선택 경로가 직접으로 바뀜 | (a) CI 실행 ID. (b) `p2p-peer` 로그 발췌(경로 바뀜 줄)와 실행 sha |
 | D6 | 원격 빌드 환경 전체 시험 | 같은 sha에서 `cargo test --workspace --locked` | CI와 다른 환경에서도 전체 시험 통과 | 종료 코드, 로그 위치(판정 기록에) |
-| D7 | tasty 의존 없음 | CI 단계 `no-tasty-deps`(`scripts/check-no-tasty-deps.sh`, 레포 기반 작업이 만든다) | `cargo metadata`에 tasty 레포 출처의 패키지가 0개 | D1 실행의 단계 결론 |
+| D7 | tasty 의존 없음 | CI 단계 `no-tasty-deps`(`scripts/check-no-tasty-deps.sh`, 레포 기반 작업이 만든다) | `cargo metadata`에서 tasty 레포를 가리키는 git 의존과, `manifest_path`가 이 workspace 루트 밖인 path 의존이 모두 0개(이 workspace 안의 path 의존은 제외) | D1 실행의 단계 결론 |
 
 기준에 넣지 않은 것과 이유:
 

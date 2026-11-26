@@ -23,6 +23,8 @@ CI 밖에서 돌리는 시험(컨테이너 relay, 무거운 반복 측정)은 �
 
 ### 기본: 비특권 OpenSSH sshd (Linux·macOS)
 
+전제: root가 아닌 sshd는 privilege separation과 다른 사용자로의 전환을 하지 못하므로, sshd를 띄운 사용자 자신으로만 로그인할 수 있다. 시험은 그 사용자의 키로 같은 사용자에게 로그인하고 `-L` 포워딩만 쓴다. 러너 이미지에 sshd가 없으면 준비 단계에서 설치한다(Linux 패키지, macOS는 기본 `/usr/sbin/sshd`). 이 전제가 성립하지 않는 이미지에서는 시험이 실패로 끝나며 미실행·통과로 바꾸지 않는다. 성립 여부는 CI 첫 실행으로 확인하고 결과를 이 절에 적는다.
+
 시험 도우미(`crates/tasty-net-demo/tests/support/`)가 임시 디렉터리에 아래를 만들고 `sshd -D -e -f <설정>`을 띄운다.
 
 - 호스트 키: `ssh-keygen -t ed25519 -N ''`

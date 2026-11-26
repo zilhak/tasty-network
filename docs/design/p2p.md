@@ -8,14 +8,15 @@
 
 | API | 쓰는 곳 |
 |---|---|
-| `Endpoint::builder()` + `Builder::secret_key` | 기기 키 seed로 endpoint를 만든다. endpoint ID = 기기 ID |
-| `RelayMode::Custom(RelayMap)` | 소비자가 준 relay만 쓴다. `RelayMode::Default`(n0 운영 relay)는 쓰지 않는다 |
+| `Endpoint::builder(presets::Minimal)` + `Builder::secret_key` + `Builder::relay_mode` + `Builder::alpns` | 기기 키 seed로 endpoint를 만든다. endpoint ID = 기기 ID. preset은 `Minimal`(crypto provider만 정함, `tls-ring` feature 필요)이다. `N0` preset은 n0 DNS 주소 조회와 n0 relay를 켜므로 쓰지 않는다 |
+| `RelayMode::Custom(RelayMap)` | 이 endpoint의 홈 relay 후보를 소비자가 준 relay로 한정한다. `RelayMode::Default`(n0 운영 relay)는 쓰지 않는다. 상대 주소에 다른 relay URL이 있으면 iroh는 로컬 map에 없어도 그 relay에 접속한다(map은 그 URL의 인증 토큰을 찾는 데만 쓴다, `src/socket/transports/relay/actor.rs`) |
 | `EndpointAddr` | 상대 주소: endpoint ID, relay URL, 직접 주소 |
 | `Connection::remote_id()` | TLS로 확인된 상대 ID. 서명 증명을 다시 하지 않는다 |
-| `Connection::paths_stream`, `Path::{is_selected, is_ip, is_relay, rtt}` | 선택 경로가 직접인지 relay인지, RTT |
+| `Connection::path_events`(`PathEvent`: 열림·닫힘·선택 경로 바뀜·`Lagged`), `Connection::paths`·`paths_stream`(스냅샷), `Path::{is_selected, is_ip, is_relay, rtt}` | 선택 경로가 직접인지 relay인지, RTT. 정책은 이벤트로 바뀜을 받고, 시작 때와 `Lagged` 뒤에는 `paths()` 스냅샷으로 현재 상태를 다시 맞춘다 |
 | `Path::stats()`, `PathEvent::Closed` | 경로별 바이트(펀칭 실험의 relay 경유 바이트) |
 | `iroh-base` `SecretKey::from_bytes`·`to_bytes`·`public`, `PublicKey::from_bytes`·`as_bytes`·`Display` | 기기 키와 같은 32바이트 |
 | feature `test-utils`의 `run_relay_server`·`run_relay_server_with`·`run_relay_server_with_access`(async, `Result<(RelayMap, RelayUrl, Server), _>`) | 시험 안 relay. 자체 서명 인증서라 시험용 TLS 신뢰 설정을 함께 넘긴다 |
+| `ConnectWithOptsError::SelfConnect` | 같은 endpoint ID(같은 기기 키)로 연결하면 iroh가 스트림 전에 거절한다. 로컬 오류 `SelfAttach`로 분류한다 |
 | `clear_ip_transports()` | 직접 경로를 실제로 막는 시험. 상대 주소에서 IP만 빼는 방법은 iroh가 직접 경로로 바꾸므로 막지 못한다 |
 
 - 시험용 TLS 신뢰 설정과 `test-utils`는 dev-dependency로만 넣는다. 제품 경로에는 들어가지 않는다.
@@ -25,7 +26,9 @@
 
 - `P2pEndpoint::bind(config)`가 tokio 런타임을 만들고 endpoint를 연다. config: 기기 키, relay 목록과 정책(아래), 직접 경로 대기 시간, 페어링 허용 목록 저장소.
 - 동기 API와 런타임의 관계는 [전송 추상화](transport.md) "동기·비동기 경계".
-- 순서 채널 = dialer가 연 첫 양방향 스트림, bulk·요청 채널 = 같은 연결의 추가 양방향 스트림. 한 스트림 안에서 프레임 순서가 지켜진다.
+- ALPN은 `tasty-net/2` 하나다. 받는 쪽은 `Builder::alpns`로 등록하고 dialer는 연결할 때 같은 값을 넘긴다. 숫자는 handshake `proto`와 같이 움직인다. `proto`를 올리면 ALPN도 새 값을 쓰고, 다른 ALPN의 연결은 iroh가 받지 않는다([버전·호환](versioning.md)).
+- QUIC 연결 하나 위의 스트림마다 handshake 메시지 1의 `purpose`로 용도를 정한다. 연결 뒤 첫 스트림이 `request`여도 된다(attach 전에 목록·상태를 묻는 경우). 순서 채널은 `purpose = attach`로 연 스트림이고, bulk 스트림은 같은 QUIC 연결 위의 attach 링크를 부모로 가진다. 한 스트림 안에서 프레임 순서가 지켜진다.
+- 같은 기기 키를 쓰는 두 인스턴스(같은 키 디렉터리)끼리는 endpoint ID가 같아 iroh가 `SelfConnect`로 거절한다. 다른 인스턴스끼리 P2P로 붙으려면 키 디렉터리가 달라야 한다. endpoint ID가 다를 때만 handshake의 인스턴스 ID 비교가 의미를 가진다.
 
 ## 주소와 페어링
 
@@ -37,9 +40,10 @@
 
 사용자 결정(2026-11-26) 1+2안 중 (1)이 이 크레이트 몫이다.
 
-- relay 목록의 각 항목은 `RelayChoice { url, policy }`이고 `policy`는 `DirectRequired` 또는 `RelayAllowed`다.
+- relay 목록의 각 항목은 `RelayChoice { url, policy, auth_token }`이고(`auth_token`은 relay가 `shared_token` 접속 허용을 쓸 때 iroh `RelayConfig::with_auth_token`으로 넘긴다) `policy`는 `DirectRequired` 또는 `RelayAllowed`다.
   - `DirectRequired`: 정해 둔 시간(`direct_wait`) 안에 선택 경로가 직접(`is_ip`)이 되지 않으면 끊는다. 직접이었다가 relay로 되돌아가도 끊는다. 끊을 때 사유는 `P2pCloseReason::DirectPathTimeout` 또는 `DirectPathLost`다.
   - `RelayAllowed`: relay 경로로도 연결을 유지한다.
+- 정책은 양쪽이 각자 자기 목록으로 판단한다. 기준은 지금 선택된 relay 경로의 relay URL이다. 그 URL이 자기 목록에 있으면 그 항목의 정책, 없으면(페어링 주소로 받은 상대의 홈 relay 등) config의 `unknown_relay_policy`(기본 `DirectRequired`)를 쓴다. 한쪽이 끊으면 QUIC 연결 종료 코드로 사유(`direct_path_required`)를 실어 보내 상대도 같은 사유를 본다.
 - 기본 relay(tasty hub)는 `DirectRequired`, 사용자 relay는 `RelayAllowed`가 기본이다. 어떤 항목에 어떤 정책을 줄지는 소비자가 정한다([relay](relay.md) "클라이언트 기본 relay").
 - `direct_wait` 기본값은 임시로 10초다. [펀칭 실험](#펀칭-실험) 결과로 확정한다.
 - 끊긴 연결을 다시 걸지는 소비자가 정한다. `DirectPathTimeout`·`DirectPathLost`는 같은 네트워크 조건에서 다시 걸어도 같은 결과일 가능성이 높으므로 `is_retryable()`이 false다.
@@ -58,8 +62,8 @@
 | 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 한쪽이 나가는 UDP를 막은 상태, (3) 가능하면 양쪽 모두 endpoint-dependent mapping(펀칭이 실패해야 하는 기준 조합) |
 | relay 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다 |
 | relay 포트 | TCP 80(ACME 인증)·443(HTTPS relay) 외부 개방. QUIC 주소 확인을 켜면 UDP 7842도. metrics 9090은 외부에 열지 않는다 |
-| relay 이름·인증서 | 그 공인 주소를 가리키는 DNS 이름과 TLS 인증서(Let's Encrypt 또는 운영자 인증서). `--dev`(평문 HTTP)는 제품 클라이언트가 받지 않으므로 이 실험에 쓰지 않는다 |
-| relay 설정 | `relay/punch-only.toml`(상한 값을 단계별로 바꿈)과 `relay/relay-fallback.toml`(상한 없음) 두 가지로 번갈아 띄운다 |
+| relay 이름·인증서 | 그 공인 주소를 가리키는 DNS 이름과 TLS 인증서(Let's Encrypt 또는 운영자 인증서). iroh 클라이언트는 HTTP relay URL에도 접속할 수 있지만, 이 실험은 제품과 같은 조건을 재려는 것이라 운영 정책으로 `--dev`(평문 HTTP)를 쓰지 않는다 |
+| relay 설정 | `relay/punch-only.toml`(상한 값을 단계별로 바꿈. 상한을 낮춰도 0은 아니어서 낮은 속도의 중계는 남는다)과 `relay/relay-fallback.toml`(상한 없음) 두 가지로 번갈아 띄운다 |
 
 측정 항목: 연결 시작부터 선택 경로가 직접이 되기까지의 시간, 그동안 그 연결이 relay를 지난 바이트(클라이언트 경로 통계), 직접 → relay 되돌아감 발생 여부, RTT. relay metrics의 `bytes_recv`·`bytes_sent`는 서버 공용 카운터라 전체 부하로만 본다. 반복 횟수와 상한 값 단계는 실험 작업 지시로 정한다.
 

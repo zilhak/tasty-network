@@ -34,6 +34,8 @@
 
 ## 의존 고정
 
+- P2P의 QUIC ALPN(`tasty-net/2`)은 `proto`와 같은 숫자를 쓴다. `proto`를 올리면 ALPN도 바꾼다.
+- Rust 최소 판: iroh·iroh-relay·iroh-base 1.5.0은 `rust-version = "1.91"`을 선언한다. workspace의 `rust-version`은 의존 그래프 전체의 최솟값보다 낮게 적지 않는다. 고정 툴체인(`rust-toolchain.toml`)은 레포 기반 작업이 정한다.
 - iroh는 `=1.5.0`처럼 정확히 고정한다. relay 이미지(`n0computer/iroh-relay:v1.5.0`)와 클라이언트 판을 함께 옮긴다. 올릴 때는 [P2P](p2p.md)의 API 표와 [relay](relay.md)의 사실을 새 판 소스로 다시 확인하고 같은 커밋에서 고친다.
 - `Cargo.lock`을 커밋하고 검사는 `--locked`로 한다.
 
