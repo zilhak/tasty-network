@@ -56,8 +56,7 @@
 | 다른 서버를 쓰는 두 기기, 직접 경로 전 데이터 보류(Q3·Q4) | 결정됨(2026-11-27): 같은 서버의 기기끼리만 연결되고 다른 서버면 `PeerNotFound`. 중계 경로가 없어 데이터는 언제나 직접 경로로만 간다([P2P](p2p.md#정책)) | 사용자 |
 | hub rendezvous의 접근 정책(누구의 기기 ID를 받을지) | 미정 | hub |
 | tasty 기본 rendezvous 서버 주소와 서버 공개키 | 미정. hub rendezvous 배포 때 정함 | hub, tasty |
-| 판단필요: hub rendezvous에 두 번째 공인 IP를 둘지 | 두 번째 IP가 없으면 address-dependent mapping NAT를 `Independent`로 보고 시도한다(실패하면 연결 실패). 있으면 그 조합을 바로 `NatUnsupported`로 가를 수 있다. 추천: 처음에는 IP 하나 + 포트 둘로 시작하고 펀칭 실험(P1)에서 ADM 비율을 보고 정한다([P2P](p2p.md#nat-판별)) | hub, 사용자 |
-| 판단필요: 서버 신뢰 방식 | 지금 설계는 서버 공개키 고정(raw public key)이다. 대안은 도메인 인증서(WebPKI)다. 키 고정은 공용 인증 기관에 기대지 않고 기기 사이와 같은 코드를 쓰지만, 서버 키를 바꾸면 tasty 설정의 공개키도 바꿔야 한다. 추천: 키 고정. 키 교체 절차(새 키를 미리 설정에 더해 두는 두 키 허용)는 hub rendezvous 배포 때 정한다([rendezvous](rendezvous.md#기기-인증)) | hub, tasty |
-| 판단필요: transport가 p2p에 정식 의존하는 비용 | 사용자 지시대로 transport가 p2p를 어댑터로 쓰므로, transport를 쓰는 모든 소비자에게 quinn·rustls·tokio가 들어온다. 대안은 어댑터만 담는 크레이트(`tasty-net-transport-p2p`)를 따로 두는 것이다. 추천: 지금 소비자(tasty)가 P2P를 쓰므로 정식 의존(지금 설계) 그대로. P2P 없는 소비자가 생기면 다시 본다([크레이트 구성](crates.md#의존-방향)) | 사용자 |
+| 판단필요: hub rendezvous에 두 번째 공인 IP를 둘지 | hub rendezvous 배포 때 결정(Q1). 두 번째 IP가 없으면 주소 의존 매핑 NAT를 가르지 못해 `independent_port_only`로 보고 시도한다(실패하면 연결 실패). 있으면 그 NAT를 `dependent`로 가려 호스트 후보만 시도한다. 추천: 처음에는 IP 하나 + 포트 둘로 시작하고 펀칭 실험(P1)에서 주소 의존 매핑의 비율을 보고 정한다([P2P](p2p.md#nat-판별)) | hub, 사용자 |
+| 판단필요: 서버 신뢰 방식 | hub rendezvous 배포 때 결정(Q1). 지금 설계는 서버 공개키 고정(raw public key)이다. 대안은 도메인 인증서(WebPKI)다. 키 고정은 공용 인증 기관에 기대지 않고 기기 사이와 같은 코드를 쓰지만, 서버 키를 바꾸면 tasty 설정의 공개키도 바꿔야 한다. 추천: 키 고정. 키 교체 절차(새 키를 미리 설정에 더해 두는 두 키 허용)는 hub rendezvous 배포 때 정한다([rendezvous](rendezvous.md#기기-인증)) | hub, tasty |
 | 토폴로지 원격 응답에 실을 workspace 메타데이터 범위(이름·ID) | 미정 | tasty 제품 결정 |
 | 페어링 메시지를 나르는 경로와 승인 화면 | 미정 | tasty 제품 결정 |

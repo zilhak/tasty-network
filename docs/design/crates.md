@@ -31,18 +31,21 @@
 
 ## 의존 방향
 
+화살표는 의존하는 크레이트에서 의존 대상으로 간다(위 표의 "이 레포 안 의존"과 같다).
+
 ```
-identity ─> rendezvous ─> p2p ─┐
-frame ─────────────────────────┼─> transport
-ssh ───────────────────────────┤
-identity ──────────────────────┘
-frame, identity ─> topology
-demo ─> (transport, p2p, rendezvous, ssh, identity, frame)
+transport  ─> frame, ssh, identity, p2p
+p2p        ─> rendezvous, identity
+rendezvous ─> identity
+topology   ─> frame, identity
+demo       ─> transport, p2p, rendezvous, ssh, identity, frame
+frame, ssh, identity ─> (없음)
 ```
 
-- 화살표 반대 방향 의존은 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
+- 이 그림에 없는 의존은 만들지 않는다. 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
 - tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
-- feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다. transport가 p2p에 의존하므로 transport를 쓰는 소비자에게는 quinn·rustls·tokio가 함께 들어온다. 이 레포의 소비자(tasty)는 P2P를 쓰므로 받아들인다. P2P 없이 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`·`tasty-net-ssh`를 직접 쓴다.
+- feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다.
+- 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`·`tasty-net-ssh`를 직접 쓰면 이 의존이 들어오지 않는다.
 
 ## P2P 크레이트 격리
 
