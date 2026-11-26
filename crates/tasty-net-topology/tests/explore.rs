@@ -1367,6 +1367,29 @@ fn a_last_done_that_fails_to_send_is_reported_by_the_waiting_parent() {
 }
 
 #[test]
+fn a_remote_origin_that_fails_after_its_first_part_ends_incomplete_at_the_deadline() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    add_many_links(&mut net, B, 5_000);
+    // The origin B sends its first part, then its second fails: no final done comes.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B) && to == id(A) && matches!(m, Message::Result(p) if p.part == 1)
+    }));
+    let rid = net.explore(A, request(B, 0)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+    assert!(
+        !net.log
+            .iter()
+            .any(|(_, t, m)| *t == id(A) && matches!(m, Message::Done(_)))
+    );
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);

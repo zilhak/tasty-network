@@ -110,10 +110,11 @@ pub enum ExplorationState {
     Running,
     /// The final `done` arrived and every answer arrived whole.
     Finished,
-    /// The final `done` arrived, but at least one answer is incomplete (its node is
-    /// [`NodeStatus::TimedOut`] with [`NodeReason::Incomplete`]).
+    /// The final `done` arrived or the requester's deadline passed, and at least one
+    /// answer is incomplete (its node is [`NodeStatus::TimedOut`] with
+    /// [`NodeReason::Incomplete`]).
     Incomplete,
-    /// The requester's deadline passed first.
+    /// The requester's deadline passed first, with no answer known to be incomplete.
     TimedOut,
 }
 
@@ -286,6 +287,12 @@ impl Exploration {
         if parts_broken || dones_broken {
             self.mark_incomplete(*from, None, unix_ms);
         }
+    }
+
+    fn has_incomplete(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.reason == Some(NodeReason::Incomplete))
     }
 
     /// Every answer with a missing result part or done marks its device incomplete.
@@ -1187,11 +1194,7 @@ impl Agent {
                     && (done.from == exploration.origin || exploration.route.contains(&done.from))
                 {
                     exploration.check_all_parts(now.unix_ms);
-                    let incomplete = exploration
-                        .nodes
-                        .iter()
-                        .any(|n| n.reason == Some(NodeReason::Incomplete));
-                    exploration.state = if incomplete {
+                    exploration.state = if exploration.has_incomplete() {
                         ExplorationState::Incomplete
                     } else {
                         ExplorationState::Finished
@@ -1233,8 +1236,14 @@ impl Agent {
         // branch finish an exploration whose deadline already passed.
         for exploration in self.explorations.values_mut() {
             if exploration.state == ExplorationState::Running && now.mono >= exploration.deadline {
-                exploration.state = ExplorationState::TimedOut;
+                // A missing part found now (or a node already incomplete) says more than
+                // the deadline: part of an answer is known to be lost.
                 exploration.check_all_parts(now.unix_ms);
+                exploration.state = if exploration.has_incomplete() {
+                    ExplorationState::Incomplete
+                } else {
+                    ExplorationState::TimedOut
+                };
                 let origin = exploration.origin;
                 if exploration.node(&origin).is_none() {
                     let me = exploration.me;
