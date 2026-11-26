@@ -86,7 +86,7 @@ access.http.bearer_token = "<token>"   # 또는 환경 변수 IROH_RELAY_HTTP_BE
 한 설정에는 하나만 쓴다.
 
 `relay/check-config.sh` 검사는 위의 표 표기만 받는다(`access.everyone = {}`도 된다). 위치 기반 배열 표기(`access.http = ["<url>", "<token>"]`)는 iroh-relay가 받더라도 검사가 `reason=access-invalid`로 거절하고, 키 이름이 틀렸거나 키가 둘 이상이거나 `access.http`에 `url`·`bearer_token` 밖의 키가 있어도 같다.
-토큰을 환경 변수 `IROH_RELAY_ACCESS_TOKEN`으로만 주는 설정(`shared_token = []`)은 검사가 거절한다. 검사는 환경 변수를 컨테이너에 넘기지 않으므로, 검사할 때는 목록에 자리표시 토큰 하나를 넣는다.
+allowlist·denylist 원소도 검사 컨테이너에 넘길 때 고정 시험 키(RFC 8032 TEST 1 공개 키)로 바꾼다(검사는 원소 수와 endpoint ID 모양만 본다. 모양으로는 공개 키와 잘못 붙여 넣은 비밀을 가를 수 없다). 토큰을 환경 변수 `IROH_RELAY_ACCESS_TOKEN`으로만 주는 설정(`shared_token = []`)은 검사가 거절한다. 검사는 환경 변수를 컨테이너에 넘기지 않으므로, 검사할 때는 목록에 자리표시 토큰 하나를 넣는다.
 검사는 Python `tomllib`(TOML 1.0)로 읽는다. TOML 1.1에서만 되는 표기(여러 줄 인라인 표, 인라인 표의 끝 쉼표, `\x` 이스케이프 등)는 iroh-relay는 읽어도 검사는 설정 오류(`reason=ci-config`)로 끝난다.
 
 `access.http.url` 규약:
@@ -119,7 +119,7 @@ echo | openssl s_client -connect relay.example.com:443 -servername relay.example
 ```
 
 - 기동 로그에 `[HTTPS/WSS] relay: serving on [::]:443`이 있어야 한다. QUIC 주소 확인을 켰으면 `QUIC server listening on`도 있어야 하고, 방화벽과 클라우드 보안 그룹에서 UDP 7842가 열렸는지 본다.
-- 수신 상한이 설정대로 들어갔는지는 `bash relay/check-config.sh <설정 파일>`로 본다. TLS와 QUIC 주소 확인을 뺀 같은 설정을 임시 컨테이너로 띄워 시작 로그의 `client_rx`와 비교한다. 검사 컨테이너에 넘기는 설정에서는 `shared_token`·`access.http.bearer_token` 값을 시험값(`check-config-placeholder`)으로, `access.http.url`을 `http://check-config-placeholder.invalid/`로 바꿔 넣고(기동 검사에서는 콜백을 부르지 않는다), 토큰 환경 변수도 넘기지 않는다. 실패해서 로그를 보여 줄 때는 따옴표 문자열을 가린다.
+- 수신 상한이 설정대로 들어갔는지는 `bash relay/check-config.sh <설정 파일>`로 본다. TLS와 QUIC 주소 확인을 뺀 같은 설정을 임시 컨테이너로 띄워 시작 로그의 `client_rx`와 비교한다. 검사 컨테이너에 넘기는 설정에서는 `shared_token`·`access.http.bearer_token` 값을 시험값(`check-config-placeholder`)으로, `access.http.url`을 `http://check-config-placeholder.invalid/`로, `access.allowlist`·`access.denylist` 원소를 고정 시험 키로 바꿔 넣고(기동 검사에서는 콜백을 부르지 않는다), 토큰 환경 변수도 넘기지 않는다. 실패해서 로그를 보여 줄 때는 따옴표 문자열을 가린다.
 - 운영 relay를 `RUST_LOG=iroh_relay=debug`로 띄우지 않는다. 시작 로그에 `ServerConfig` 전체가 찍히고, 그 안의 `shared_token` 목록과 `access.http.bearer_token` 값이 원문 그대로 나온다.
 - TLS와 QUIC 주소 확인은 이 레포의 CI와 컨테이너 확인이 판정하지 않는다. 배포할 때 위 절차로 본다.
 

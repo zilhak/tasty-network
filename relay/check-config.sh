@@ -6,6 +6,8 @@
 #
 # 설정을 주지 않으면 relay/punch-only.toml과 relay/relay-fallback.toml을 본다. 설정마다:
 #   1. 운영 예시를 tomllib로 읽어 [tls] 표와 enable_quic_addr_discovery를 지운 값으로 CI용 설정을 임시 폴더에 새로 쓴다.
+#      접속 허용 값(shared_token·bearer_token·http.url, allowlist·denylist 원소)은 시험값으로 바꾼다.
+#      allowlist·denylist는 원소 수와 endpoint ID 모양만 보고 원소를 고정 시험 키로 바꾼다.
 #   2. 고정 이미지(RELAY_IMAGE)를 --dev와 그 설정으로 띄운다. 호스트 쪽은 127.0.0.1의 빈 포트에 게시한다.
 #   3. HTTP(/healthz, /, /generate_204)와 metrics(/metrics) 응답, 시작 로그의 평문 리스너 줄
 #      ([HTTP/WS] relay: serving on), 시작 로그에 찍힌 수신 상한이 설정 파일과 같은지
@@ -117,7 +119,8 @@ rc_prepare() {
 }
 
 # 운영 예시 $1을 tomllib로 읽어, 최상위 키 tls·enable_quic_addr_discovery를 지우고 접속 허용 비밀
-# (shared_token 원소, http.bearer_token)을 시험값 RC_SECRET_PLACEHOLDER로, http.url을 자리표시 주소로
+# (shared_token 원소, http.bearer_token)을 시험값 RC_SECRET_PLACEHOLDER로, http.url을 자리표시 주소로,
+# allowlist·denylist 원소를 고정 시험 키 EID_PLACEHOLDER로(원소 수는 유지)
 # 바꾼 값을 TOML로 다시 써서 CI용 설정 $2를 만든다. 최상위와 limits 아래 키는 iroh-relay 설정 구조체의 키(아래 CONFIG_SCHEMA)만,
 # 그 값은 필드 타입에 맞는 종류만, access는 허용 목록(아래 access_valid)에 든 모양만 받는다. 원본 텍스트를 고치지 않으므로
 # 표 머리·점 키·인라인 표·인용 키("tls") 어느 표기로 적었든 파싱 결과의 같은 키가 지워진다.
@@ -297,13 +300,22 @@ def access_valid(d):
             and set(v) <= {"url", "bearer_token"}
             and isinstance(v.get("bearer_token", ""), str))
 
+# allowlist·denylist 원소를 바꿀 고정 공개 시험 키(RFC 8032 TEST 1 공개 키). 모양으로는 공개 키와 잘못 붙여 넣은
+# 32바이트 비밀을 가를 수 없으므로(비밀도 절반쯤은 Ed25519 점으로 풀린다) 모양 검사를 지난 원소도 모두 이 키로 바꾼다.
+# iroh-relay 1.5.0은 목록을 Vec 그대로 두고 contains로만 본다(main.rs:222-223, :252-274). 중복을 거절하지 않으므로 한 키를 되풀이한다.
+EID_PLACEHOLDER = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+
 def scrub(d):
-    # shared_token 원소와 bearer_token은 시험값으로, http.url은 통째로 자리표시 주소로 바꾼다
+    # shared_token 원소와 bearer_token은 시험값으로, http.url은 통째로 자리표시 주소로,
+    # allowlist·denylist 원소는 EID_PLACEHOLDER로 바꾼다
     # (쿼리·사용자 정보에 든 비밀이 시작 로그로 가지 않게. 콜백은 기동 검사에서 호출되지 않는다).
     acc = d.get("access")
     if isinstance(acc, dict):
         if "shared_token" in acc:
             acc["shared_token"] = [ph for _ in acc["shared_token"]]
+        for kind in ("allowlist", "denylist"):
+            if kind in acc:
+                acc[kind] = [EID_PLACEHOLDER for _ in acc[kind]]
         http = acc.get("http")
         if http is not None:
             http["url"] = URL_PLACEHOLDER
@@ -1048,6 +1060,23 @@ print(tomllib.load(open(sys.argv[1], "rb"))["access"]["http"]["url"])' "$t/ci-be
         st_expect "readme-endpoint-id-example-$n" 0 "$?"
     done < <(grep -E '^access\.(allowlist|denylist) = ' "$RELAY_DIR/README.md")
     st_expect readme-endpoint-id-example-count 2 "$n"
+    # 모양 검사를 지난 원소도 고정 시험 키로 바뀐다. 곡선 위로 풀리는 32바이트 비밀(RFC 8032 TEST 3 개인 키 시드)을
+    # hex·base32로 넣어도 변환 파일과 출력에 원래 문자열이 없고, 원소 수(2)는 그대로다.
+    local seed seed32 src_eid
+    seed=c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7
+    seed32=$(python3 -I -c 'import base64, sys; print(base64.b32encode(bytes.fromhex(sys.argv[1])).decode().rstrip("="))' "$seed")
+    for kind in allowlist denylist; do
+        for src_eid in "$seed" "$seed32"; do
+            printf 'access.%s = ["%s", "5866666666666666666666666666666666666666666666666666666666666666"]\n' "$kind" "$src_eid" > "$t/eid-sub.toml"
+            rc_make_ci_config "$t/eid-sub.toml" "$t/ci-eid-sub.toml" > "$t/eid-sub.out" 2>&1
+            st_expect "endpoint-id-substituted-$kind-${#src_eid}" 0 "$?"
+            grep -qiF -e "$src_eid" -e 5866666666666666 "$t/ci-eid-sub.toml" "$t/eid-sub.out"
+            st_expect "endpoint-id-substituted-$kind-${#src_eid}-absent" 1 "$?"
+            st_expect "endpoint-id-substituted-$kind-${#src_eid}-count" "2 2" "$(python3 -I -c 'import sys, tomllib
+v = tomllib.load(open(sys.argv[1], "rb"))["access"][sys.argv[2]]
+print(len(v), sum(x == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" for x in v))' "$t/ci-eid-sub.toml" "$kind")"
+        done
+    done
     # 다시 쓴 CI용 설정이 BMP 밖 문자·이스케이프·제어 문자를 TOML 규칙대로 보존한다. url은 바뀌고 allowlist는 endpoint ID만
     # 받으므로, 스키마·access 검사 없이 같은 인코더를 부르는 rc_encode_toml로 본다.
     printf 'access.allowlist = ["https://example.org/auth/\xf0\x9f\x94\x91?q=\\"x\\"\\\\y\\t"]\n' > "$t/emoji.toml"
