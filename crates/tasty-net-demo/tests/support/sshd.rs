@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::process::{children_of, log};
+use super::process::{children_of, log, terminate, wait_all_gone};
 use super::russh_server::RusshServer;
 use super::{TempDir, ssh_option_path, ssh_path};
 
@@ -35,13 +35,79 @@ enum Running {
     Russh(RusshServer),
 }
 
-/// The sshd child, killed and reaped on drop, so a test that panics leaves no sshd behind.
-struct Reaped(Child);
+/// The sshd listener child. [`Reaped::end`] ends its session processes and the listener;
+/// dropping it does the same, so a test that panics, or a check that falls back to the other
+/// server, leaves no sshd process behind.
+struct Reaped {
+    child: Child,
+    ended: bool,
+}
+
+/// How long ended session processes may take to go.
+const SESSION_END_LIMIT: Duration = Duration::from_secs(10);
+
+impl Reaped {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            ended: false,
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Every process below the listener (session processes and their children).
+    fn sessions(&self) -> Result<Vec<u32>, String> {
+        let mut found = Vec::new();
+        let mut parents = vec![self.pid()];
+        while let Some(parent) = parents.pop() {
+            for child in children_of(parent)? {
+                if !found.contains(&child) {
+                    found.push(child);
+                    parents.push(child);
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Ends the session processes that still run, then kills and reaps the listener, then
+    /// waits until the sessions are gone. Returns the sessions it had to end. Calling it again
+    /// does nothing.
+    fn end(&mut self) -> Result<Vec<u32>, String> {
+        if self.ended {
+            return Ok(Vec::new());
+        }
+        self.ended = true;
+        let listed = self.sessions();
+        if let Ok(sessions) = &listed {
+            for pid in sessions {
+                terminate(*pid);
+            }
+        }
+        let _killed = self.child.kill().is_ok();
+        let status = self.child.wait();
+        log(&format!("sshd pid={} ended ({status:?})", self.pid()));
+        let sessions = listed?;
+        let named: Vec<_> = sessions
+            .iter()
+            .map(|pid| ("sshd session".to_string(), *pid))
+            .collect();
+        let left = wait_all_gone(&named, SESSION_END_LIMIT)?;
+        if !left.is_empty() {
+            return Err(format!("sshd session processes still run: {left:?}"));
+        }
+        Ok(sessions)
+    }
+}
 
 impl Drop for Reaped {
     fn drop(&mut self) {
-        let _killed = self.0.kill().is_ok();
-        let _reaped = self.0.wait().is_ok();
+        if let Err(error) = self.end() {
+            log(&format!("ending sshd {}: {error}", self.pid()));
+        }
     }
 }
 
@@ -69,7 +135,7 @@ impl SshServer {
                         log(&format!(
                             "sshd=openssh path={} pid={} port={}",
                             path.display(),
-                            child.0.id(),
+                            child.pid(),
                             server.port
                         ));
                     }
@@ -139,30 +205,35 @@ impl SshServer {
         let mut pids = Vec::new();
         match self.running {
             Running::OpenSsh { mut child, .. } => {
-                let pid = child.0.id();
+                let pid = child.pid();
                 pids.push(("sshd".to_string(), pid));
+                // The clients have ended; their sessions should follow on their own.
                 let deadline = Instant::now() + Duration::from_secs(15);
-                let sessions_now = || {
-                    children_of(pid)
-                        .unwrap_or_else(|e| panic!("listing the sessions of sshd {pid}: {e}"))
-                };
-                let mut sessions = sessions_now();
-                while !sessions.is_empty() && Instant::now() < deadline {
-                    for s in &sessions {
-                        if !pids.iter().any(|(_, p)| p == s) {
-                            pids.push(("sshd session".to_string(), *s));
+                let mut sessions = child.sessions();
+                while matches!(&sessions, Ok(s) if !s.is_empty()) && Instant::now() < deadline {
+                    if let Ok(s) = &sessions {
+                        for p in s {
+                            if !pids.iter().any(|(_, q)| q == p) {
+                                pids.push(("sshd session".to_string(), *p));
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_millis(200));
-                    sessions = sessions_now();
+                    sessions = child.sessions();
                 }
-                let _killed = child.0.kill().is_ok();
-                let status = child.0.wait();
-                log(&format!("sshd pid={pid} ended ({status:?})"));
-                assert!(
-                    sessions.is_empty(),
-                    "sshd still had session children {sessions:?} 15 s after its clients ended"
-                );
+                // Ends what is left either way, before a failure below is reported.
+                let ended = child.end();
+                match sessions {
+                    Err(e) => panic!("listing the sessions of sshd {pid}: {e}"),
+                    Ok(s) if !s.is_empty() => panic!(
+                        "sshd still had session processes {s:?} 15 s after its clients ended \
+                         (ending them: {ended:?})"
+                    ),
+                    Ok(_) => {}
+                }
+                if let Err(e) = ended {
+                    panic!("ending sshd {pid}: {e}");
+                }
             }
             Running::Russh(server) => server.stop(),
         }
@@ -361,7 +432,7 @@ fn start_openssh() -> Result<SshServer, String> {
             Ok(()) => {
                 let server = SshServer {
                     running: Running::OpenSsh {
-                        child: Reaped(child),
+                        child: Reaped::new(child),
                         path: sshd.clone(),
                     },
                     port,
