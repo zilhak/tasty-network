@@ -183,8 +183,9 @@ impl fmt::Display for PortDiscoveryFailureKind {
 /// diagnostic text for logs.
 ///
 /// `Display` prints only the English sentence of the kind. It does not show remote stderr,
-/// internal commands, or the command's stdout. The detail never holds the stdout either,
-/// because a record can carry a token.
+/// internal commands, or the command's stdout. The detail (and `Debug`) never holds the stdout
+/// or the decoder's error either, because a record can carry a token; remote stderr goes in only
+/// cut short and with token-like runs removed.
 #[derive(Debug)]
 pub struct PortDiscoveryError {
     kind: PortDiscoveryFailureKind,
@@ -487,13 +488,70 @@ fn run_capture_with_budget(
             refine_with_elapsed(classify_by_exit_code(code), elapsed),
             format!(
                 "{what}: code={code:?} elapsed={elapsed:?}: {}",
-                stderr.trim()
+                sanitize_stderr(&stderr)
             ),
         );
         error.exit_code = code;
         return Err(error);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Decodes the stdout of a successful command. A refusal is
+/// [`PortDiscoveryFailureKind::PortParseFailed`]. The detail keeps only the output length: neither
+/// the stdout nor the decoder's error goes into it, because both can quote a record with a token.
+fn decode_output<T, E>(
+    what: &str,
+    stdout: &str,
+    decode: &impl Fn(&str) -> Result<T, E>,
+) -> Result<T, PortDiscoveryError> {
+    decode(stdout).map_err(|_| {
+        PortDiscoveryError::new(
+            PortDiscoveryFailureKind::PortParseFailed,
+            format!(
+                "{what}: the decoder refused the output ({} bytes)",
+                stdout.len()
+            ),
+        )
+    })
+}
+
+/// Runs of at least this many token-like characters are removed from stderr.
+const SECRET_RUN: usize = 32;
+/// The stderr kept in a detail is cut to this many characters.
+const STDERR_DETAIL_LIMIT: usize = 512;
+
+/// The stderr text a detail may keep: trimmed, cut to [`STDERR_DETAIL_LIMIT`] characters, and
+/// with every run of [`SECRET_RUN`] or more ASCII letters, digits, `+`, `=`, `_`, or `-` replaced
+/// by `<redacted N chars>`. A failing remote command could print a record (and its token) to
+/// stderr; ordinary messages (paths, "Permission denied") have no such runs.
+fn sanitize_stderr(stderr: &str) -> String {
+    fn token_like(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-')
+    }
+    fn flush(out: &mut String, run: &mut String) {
+        if run.len() >= SECRET_RUN {
+            out.push_str(&format!("<redacted {} chars>", run.len()));
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    }
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in stderr.trim().chars() {
+        if token_like(c) {
+            run.push(c);
+        } else {
+            flush(&mut out, &mut run);
+            out.push(c);
+        }
+    }
+    flush(&mut out, &mut run);
+    match out.char_indices().nth(STDERR_DETAIL_LIMIT) {
+        Some((cut, _)) => format!("{}...", &out[..cut]),
+        None => out,
+    }
 }
 
 /// One discovery call: launcher, target, names, and the shared deadline.
@@ -505,9 +563,8 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    /// Runs one remote command and decodes its stdout. The decoder's error goes into the
-    /// detail; the stdout does not.
-    fn run<T, E: fmt::Display>(
+    /// Runs one remote command and decodes its stdout ([`decode_output`]).
+    fn run<T, E>(
         &self,
         remote_argv: &[&str],
         decode: &impl Fn(&str) -> Result<T, E>,
@@ -521,16 +578,11 @@ impl Probe<'_> {
             &what,
             self.launcher.spawn_hook(),
         )?;
-        decode(&out).map_err(|e| {
-            PortDiscoveryError::new(
-                PortDiscoveryFailureKind::PortParseFailed,
-                format!("{what}: the output was not accepted: {e}"),
-            )
-        })
+        decode_output(&what, &out, decode)
     }
 
     /// The subcommand mode.
-    fn subcommand<T, E: fmt::Display>(
+    fn subcommand<T, E>(
         &self,
         decode: &impl Fn(&str) -> Result<T, E>,
     ) -> Result<T, PortDiscoveryError> {
@@ -540,7 +592,7 @@ impl Probe<'_> {
     }
 
     /// The file modes at the conventional place.
-    fn file<T, E: fmt::Display>(
+    fn file<T, E>(
         &self,
         windows: bool,
         decode: &impl Fn(&str) -> Result<T, E>,
@@ -549,7 +601,7 @@ impl Probe<'_> {
     }
 
     /// The explicit path: `cat <path>` (Unix, PowerShell, Git Bash), then `type <path>` (cmd).
-    fn explicit_file<T, E: fmt::Display>(
+    fn explicit_file<T, E>(
         &self,
         path: &str,
         decode: &impl Fn(&str) -> Result<T, E>,
@@ -564,7 +616,7 @@ impl Probe<'_> {
     }
 
     /// One non-Auto mode.
-    fn single_mode<T, E: fmt::Display>(
+    fn single_mode<T, E>(
         &self,
         mode: PortMode,
         decode: &impl Fn(&str) -> Result<T, E>,
@@ -578,10 +630,7 @@ impl Probe<'_> {
     }
 
     /// The Auto chain: first success, or the most telling failure.
-    fn auto<T, E: fmt::Display>(
-        &self,
-        decode: &impl Fn(&str) -> Result<T, E>,
-    ) -> Result<T, PortDiscoveryError> {
+    fn auto<T, E>(&self, decode: &impl Fn(&str) -> Result<T, E>) -> Result<T, PortDiscoveryError> {
         let mut errors = Vec::with_capacity(AUTO_FALLBACK_CHAIN.len());
         for m in AUTO_FALLBACK_CHAIN {
             match self.single_mode(m, decode) {
@@ -667,7 +716,7 @@ fn pick_most_informative(mut errors: Vec<PortDiscoveryError>) -> PortDiscoveryEr
 /// most [`PORT_DISCOVERY_STEP_TIMEOUT`]. Spawning, reaping, and output collection have no
 /// bound of their own. It blocks; call it from a worker. A [`SshCancel`] installed on the
 /// calling thread with [`SshCancel::scope`] stops it.
-pub fn discover_remote_port<T, E: fmt::Display>(
+pub fn discover_remote_port<T, E>(
     launcher: &SshLauncher,
     target: &SshTarget,
     mode: PortMode,
@@ -714,7 +763,7 @@ where
 /// A mode whose subcommand reports an exited instance ([`PortDiscoveryFailureKind::RemoteInstanceExited`])
 /// counts as reached. The explicit path of `config` is not used; this finds a mode. It uses the
 /// same budget and bounds as [`discover_remote_port`], blocks, and stops on cancellation.
-pub fn detect_port_mode<T, E: fmt::Display>(
+pub fn detect_port_mode<T, E>(
     launcher: &SshLauncher,
     target: &SshTarget,
     config: &PortDiscoveryConfig,
@@ -834,6 +883,70 @@ mod tests {
                 .expect_err("cannot spawn");
         assert_eq!(err.kind(), PortDiscoveryFailureKind::SshConnectionFailed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_refused_output_is_a_parse_failure_without_its_text() {
+        let stdout = format!("port=1\ntoken={TOKEN}\n");
+        let err = decode_output("ssh(x)", &stdout, &|out: &str| {
+            Err::<u16, _>(format!("token: not 64 lowercase hex in {out}"))
+        })
+        .expect_err("refused");
+        assert_eq!(err.kind(), PortDiscoveryFailureKind::PortParseFailed);
+        assert!(err.detail().contains(&format!("{} bytes", stdout.len())));
+        for text in [
+            err.detail().to_string(),
+            format!("{err:?}"),
+            err.to_string(),
+        ] {
+            assert!(!text.contains(TOKEN), "{text}");
+            assert!(!text.contains("token:"), "{text}");
+        }
+        assert_eq!(
+            decode_output("ssh(x)", "45123\n", &decode_port).expect("a port"),
+            45123
+        );
+    }
+
+    #[test]
+    fn stderr_details_drop_token_like_runs_and_keep_messages() {
+        let stderr = format!("cat: /home/u/.data/net.port: No such file\ntoken={TOKEN}\n");
+        let kept = sanitize_stderr(&stderr);
+        assert!(!kept.contains(TOKEN), "{kept}");
+        assert!(kept.contains("<redacted 64 chars>"), "{kept}");
+        assert!(
+            kept.contains("cat: /home/u/.data/net.port: No such file"),
+            "{kept}"
+        );
+        assert_eq!(
+            sanitize_stderr("  Permission denied (publickey).\n"),
+            "Permission denied (publickey)."
+        );
+        let long = "x ".repeat(STDERR_DETAIL_LIMIT);
+        assert_eq!(
+            sanitize_stderr(&long).chars().count(),
+            STDERR_DETAIL_LIMIT + 3
+        );
+    }
+
+    #[test]
+    fn a_failing_command_keeps_no_token_from_stderr() {
+        let err = capture(
+            helper_command(&format!("fail:3:token={TOKEN}")),
+            Duration::from_secs(10),
+            "stderr",
+        )
+        .expect_err("exit 3");
+        assert_eq!(err.exit_code(), Some(3));
+        assert!(
+            err.detail().contains("<redacted 64 chars>"),
+            "{}",
+            err.detail()
+        );
+        assert!(!err.detail().contains(TOKEN), "{}", err.detail());
+        assert!(!format!("{err:?}").contains(TOKEN));
     }
 
     #[test]
@@ -1444,7 +1557,7 @@ mod tests {
             );
         }
 
-        /// The output the decoder refuses is not copied into the error.
+        /// Neither the refused output nor the decoder's error text is copied into the error.
         #[test]
         fn a_refused_record_stays_out_of_the_error() {
             let fake = FakeSsh::new("secret", "echo secret-token-0123", "exit 1");
@@ -1453,13 +1566,17 @@ mod tests {
                 &target(),
                 PortMode::Subcommand,
                 &config(),
-                |_out: &str| Err::<u16, _>("token: not 64 lowercase hex"),
+                |out: &str| Err::<u16, _>(format!("bad record: {out}")),
             )
             .expect_err("refused");
             assert_eq!(err.kind(), PortDiscoveryFailureKind::PortParseFailed);
-            assert!(err.detail().contains("token: not 64 lowercase hex"));
-            assert!(!err.detail().contains("secret-token"), "{}", err.detail());
-            assert!(!err.to_string().contains("secret-token"));
+            for text in [
+                err.detail().to_string(),
+                format!("{err:?}"),
+                err.to_string(),
+            ] {
+                assert!(!text.contains("secret-token"), "{text}");
+            }
         }
 
         /// A custom decoder gets the whole stdout and its value comes back.
