@@ -212,10 +212,15 @@ pub fn terminate(pid: u32) {
     }
 }
 
-/// Runs a process query command. Returns its stdout when it ran and its exit code is one of
-/// `ok_codes`; anything else (no start, another code, stderr output) is an error, so a failed
-/// query is never read as "no such process".
-fn query(mut command: Command, ok_codes: &[i32]) -> Result<(i32, String), String> {
+/// Runs a process query command. Returns its exit code and stdout when it ran, its exit code
+/// is one of `ok_codes` and `quiet_enough` accepts its stderr; anything else (no start,
+/// another code, other stderr output) is an error, so a failed query is never read as "no such
+/// process".
+fn query(
+    mut command: Command,
+    ok_codes: &[i32],
+    quiet_enough: impl Fn(&str) -> bool,
+) -> Result<(i32, String), String> {
     let what = format!("{command:?}");
     let out = command
         .stdin(Stdio::null())
@@ -223,11 +228,27 @@ fn query(mut command: Command, ok_codes: &[i32]) -> Result<(i32, String), String
         .map_err(|e| format!("{what} did not start: {e}"))?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     match out.status.code() {
-        Some(code) if ok_codes.contains(&code) && stderr.trim().is_empty() => {
+        Some(code) if ok_codes.contains(&code) && quiet_enough(&stderr) => {
             Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
         }
         _ => Err(format!("{what} failed ({}): {}", out.status, stderr.trim())),
     }
+}
+
+/// The stderr of `ps` and `pgrep`: nothing.
+#[cfg(unix)]
+fn no_stderr(stderr: &str) -> bool {
+    stderr.trim().is_empty()
+}
+
+/// `tasklist`'s "no match" notice (`INFO: No tasks ...`), which some Windows versions may
+/// write to stderr, is not an error; other stderr is.
+#[cfg(windows)]
+fn only_tasklist_info(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .map(str::trim)
+        .all(|l| l.is_empty() || l.starts_with("INFO:"))
 }
 
 /// Whether a process with `pid` runs. A Unix zombie does not count: it has ended and only
@@ -238,7 +259,7 @@ pub fn is_running(pid: u32) -> Result<bool, String> {
         let mut ps = Command::new("ps");
         ps.args(["-o", "stat=", "-p", &pid.to_string()]);
         // ps exits 1 with no output when no process has the PID.
-        let (code, stdout) = query(ps, &[0, 1])?;
+        let (code, stdout) = query(ps, &[0, 1], no_stderr)?;
         let stat = stdout.trim();
         if code == 1 && !stat.is_empty() {
             return Err(format!("ps -p {pid} exited 1 with output {stat:?}"));
@@ -249,33 +270,39 @@ pub fn is_running(pid: u32) -> Result<bool, String> {
     {
         let mut tasklist = Command::new("tasklist");
         tasklist.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
-        let (_, stdout) = query(tasklist, &[0])?;
+        // With no match, stdout holds only the INFO notice (or nothing when the notice went
+        // to stderr), so it has no quoted PID.
+        let (_, stdout) = query(tasklist, &[0], only_tasklist_info)?;
         Ok(stdout.contains(&format!("\"{pid}\"")))
     }
 }
 
 /// The PIDs of the running children of `pid`. A query that fails is an error; `pgrep`'s
-/// "no match" (exit 1) is an empty list.
+/// "no match" (exit 1) is an empty list, and its exit 2 or more an error.
 pub fn children_of(pid: u32) -> Result<Vec<u32>, String> {
     #[cfg(unix)]
     let (_, stdout) = {
         let mut pgrep = Command::new("pgrep");
         pgrep.args(["-P", &pid.to_string()]);
-        query(pgrep, &[0, 1])?
+        query(pgrep, &[0, 1], no_stderr)?
     };
     #[cfg(windows)]
     let (_, stdout) = {
+        // `$ErrorActionPreference = 'Stop'` turns a failed query into exit 1, so the exit
+        // code alone tells success. stderr is not read: Windows PowerShell can write progress
+        // records there (a module's first load) on a query that worked, and
+        // `$ProgressPreference` keeps most of them away.
         let mut ps = Command::new("powershell");
         ps.args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             &format!(
-                "$ErrorActionPreference = 'Stop'; \
+                "$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'; \
                  (Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"
             ),
         ]);
-        query(ps, &[0])?
+        query(ps, &[0], |_| true)?
     };
     let mut children = Vec::new();
     for word in stdout.split_whitespace() {
