@@ -20,7 +20,7 @@ use crate::bulk::{BulkParent, BulkRegistry};
 use crate::cancel::AttemptCancel;
 use crate::channel::RawChannel;
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
-use crate::end::{LinkCloser, shutdown_quietly};
+use crate::end::{EndReason, LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
 use crate::hex::random_32;
 use crate::link::{BulkChannel, BulkDial, Link, LinkTimeouts, PeerInfo, deadline_after};
@@ -1103,9 +1103,15 @@ fn accept_on(
     }
     let registry = config.bulk.clone();
     closer.on_end(Box::new(move || registry.revoke(&credential)));
-    let framed = ch
-        .framed_under(&config.timeouts.channel(config.heartbeat), closer.clone())
-        .map_err(HandshakeError::Io)?;
+    let framed = match ch.framed_under(&config.timeouts.channel(config.heartbeat), closer.clone()) {
+        Ok(framed) => framed,
+        Err(e) => {
+            // The ACK is out but no link stands: end it so the credential is revoked and the
+            // socket closes (the dialer sees the channel close).
+            closer.force_close(EndReason::Forced);
+            return Err(HandshakeError::Io(e));
+        }
+    };
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
     Ok(Accepted::Link(Box::new(Link {
