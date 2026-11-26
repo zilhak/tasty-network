@@ -44,6 +44,15 @@ pub(crate) enum OpenFailure {
     Unsafe(UnsafeReason, Option<io::Error>),
 }
 
+/// Why a new temporary file could not be created. `Protect` is a failure to prepare its access
+/// restriction (Windows creates the file with it); `Create` is the creation itself.
+#[derive(Debug)]
+pub(crate) enum CreateFailure {
+    #[cfg_attr(unix, allow(dead_code, reason = "Unix restricts after creation"))]
+    Protect(io::Error),
+    Create(io::Error),
+}
+
 /// An existing secret file opened after the privacy checks, and its contents.
 pub(crate) struct PrivateFile {
     pub(crate) file: File,
@@ -130,8 +139,14 @@ fn create_temp(dir: &Path, name: &OsStr) -> Result<(PathBuf, File), IdentityErro
         let temp = dir.join(temp_name);
         match os::create_temp(&temp) {
             Ok(file) => return Ok((temp, file)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(IdentityError::io(FileOp::CreateTemp, temp, e)),
+            Err(CreateFailure::Create(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(CreateFailure::Create(e)) => {
+                return Err(IdentityError::io(FileOp::CreateTemp, temp, e));
+            }
+            // No file was created, so there is nothing to remove.
+            Err(CreateFailure::Protect(source)) => {
+                return Err(IdentityError::Protect { path: temp, source });
+            }
         }
     }
 }

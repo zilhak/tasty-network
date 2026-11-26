@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use super::OpenFailure;
+use super::{CreateFailure, OpenFailure};
 use crate::error::UnsafeReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,13 +44,14 @@ pub(super) fn narrow_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(mode & 0o700))
 }
 
-pub(super) fn create_temp(path: &Path) -> io::Result<File> {
+pub(super) fn create_temp(path: &Path) -> Result<File, CreateFailure> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
+        .map_err(CreateFailure::Create)
 }
 
 /// Set 0600 explicitly (the creation mode is reduced by the umask only, never widened, but an

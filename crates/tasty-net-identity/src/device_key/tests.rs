@@ -547,6 +547,18 @@ mod windows {
     }
 
     #[test]
+    fn a_security_descriptor_failure_is_a_protect_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = {
+            let _fail = crate::secret_file::windows::fault::fail_descriptor();
+            DeviceKey::load_or_create(dir.path()).unwrap_err()
+        };
+        assert!(matches!(error, IdentityError::Protect { .. }), "{error:?}");
+        assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
+        assert!(temps_in(dir.path()).is_empty());
+    }
+
+    #[test]
     fn a_widened_acl_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         DeviceKey::load_or_create(dir.path()).unwrap();

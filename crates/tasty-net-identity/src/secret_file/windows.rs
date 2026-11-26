@@ -42,7 +42,7 @@ use windows_sys::Win32::{
     },
 };
 
-use super::OpenFailure;
+use super::{CreateFailure, OpenFailure};
 use crate::error::UnsafeReason;
 
 /// Volume serial plus the complete 128-bit file ID.
@@ -76,33 +76,14 @@ pub(super) fn narrow_dir(_dir: &Path, _meta: &std::fs::Metadata) -> io::Result<(
 /// the directory's inherited entries. The share mode is 0, so no other handle can open its data
 /// until this one is closed after the write. `protect` sets and verifies the same security
 /// again before the secret is written.
-pub(super) fn create_temp(path: &Path) -> io::Result<File> {
-    let sid = Sid::current_user()?;
-    let dacl = private_dacl(&sid)?;
-    let mut descriptor = SECURITY_DESCRIPTOR::default();
-    let sd: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
-    // SAFETY: sd points to writable SECURITY_DESCRIPTOR storage that lives in this frame.
-    if unsafe { InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: sd was initialized above; the SID buffer outlives every use of sd in this frame.
-    if unsafe { SetSecurityDescriptorOwner(sd, sid.as_psid(), 0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: sd was initialized above; dacl is an initialized ACL that outlives every use of sd.
-    if unsafe { SetSecurityDescriptorDacl(sd, 1, dacl.as_ptr().cast::<ACL>(), 0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: sd was initialized above; only the DACL protection bit is changed.
-    if unsafe { SetSecurityDescriptorControl(sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+pub(super) fn create_temp(path: &Path) -> Result<File, CreateFailure> {
+    let security = PrivateSecurity::new().map_err(CreateFailure::Protect)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: sd,
+        lpSecurityDescriptor: (&raw const security.descriptor).cast_mut().cast(),
         bInheritHandle: 0,
     };
-    let name = wide_path(path)?;
+    let name = wide_path(path).map_err(CreateFailure::Create)?;
     // SAFETY: name is a NUL-terminated wide string; attributes and the descriptor, SID and DACL
     // it points to live until the call returns; no template handle is passed. CREATE_NEW does
     // not follow an existing link, and FILE_FLAG_OPEN_REPARSE_POINT keeps it that way.
@@ -118,10 +99,82 @@ pub(super) fn create_temp(path: &Path) -> io::Result<File> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+        return Err(CreateFailure::Create(io::Error::last_os_error()));
     }
     // SAFETY: CreateFileW returned a new open handle that nothing else owns; File takes it over.
     Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+/// The security descriptor of a new secret file: owner = current user SID, protected DACL with
+/// one FullControl entry for that SID. The descriptor points into the SID and DACL buffers, which
+/// are heap allocations owned by this value, so moving the value keeps them valid.
+struct PrivateSecurity {
+    _sid: Sid,
+    _dacl: Vec<u32>,
+    descriptor: SECURITY_DESCRIPTOR,
+}
+
+impl PrivateSecurity {
+    fn new() -> io::Result<Self> {
+        #[cfg(test)]
+        if fault::descriptor_fails() {
+            return Err(io::Error::other("injected security descriptor failure"));
+        }
+        let sid = Sid::current_user()?;
+        let dacl = private_dacl(&sid)?;
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        let sd: PSECURITY_DESCRIPTOR = (&raw mut descriptor).cast();
+        // SAFETY: sd points to writable SECURITY_DESCRIPTOR storage in this frame.
+        if unsafe { InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: sd was initialized above; the SID is a heap buffer kept in the returned value.
+        if unsafe { SetSecurityDescriptorOwner(sd, sid.as_psid(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: sd was initialized above; dacl is an initialized ACL in a heap buffer kept in
+        // the returned value.
+        if unsafe { SetSecurityDescriptorDacl(sd, 1, dacl.as_ptr().cast::<ACL>(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: sd was initialized above; only the DACL protection bit is changed.
+        if unsafe { SetSecurityDescriptorControl(sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            _sid: sid,
+            _dacl: dacl,
+            descriptor,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DESCRIPTOR_FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn descriptor_fails() -> bool {
+        DESCRIPTOR_FAILS.with(Cell::get)
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DESCRIPTOR_FAILS.with(|f| f.set(false));
+        }
+    }
+
+    /// Make building the security descriptor of new secret files fail on this thread while the
+    /// guard lives.
+    pub(crate) fn fail_descriptor() -> Guard {
+        DESCRIPTOR_FAILS.with(|f| f.set(true));
+        Guard
+    }
 }
 
 /// Paths from this length on get the verbatim prefix, like std's own conversion (a directory
@@ -646,9 +699,9 @@ mod tests {
         assert_eq!(other.raw_os_error(), Some(32), "{other:?}");
         drop(file);
         File::open(&path).unwrap();
-        assert_eq!(
-            create_temp(&path).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
+        assert!(matches!(
+            create_temp(&path),
+            Err(CreateFailure::Create(e)) if e.kind() == io::ErrorKind::AlreadyExists
+        ));
     }
 }
