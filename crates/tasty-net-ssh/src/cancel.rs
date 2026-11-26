@@ -54,9 +54,11 @@ impl SshCancel {
         self.inner.cancelled.store(true, Ordering::SeqCst);
     }
 
-    /// Marks the handle cancelled, then kills and reaps every registered child. Later discovery
-    /// steps under this handle do not start a child. Calling it more than once is safe. When it
-    /// returns, every child registered under this handle is killed and reaped.
+    /// Marks the handle cancelled, then kills and reaps the children registered at the time of the
+    /// call. A child that its own lookup has already taken out to reap (at its bound or its
+    /// output limit) is reaped by that lookup, which may still be doing so when this returns.
+    /// Later discovery steps under this handle do not start a child. Calling it more than once is
+    /// safe.
     pub fn cancel(&self) {
         // The flag is set while the list is locked, and `register` reads it under the same
         // lock: a child is either in the list taken here or refused.
