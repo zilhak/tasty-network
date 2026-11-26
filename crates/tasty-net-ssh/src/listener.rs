@@ -32,9 +32,17 @@ pub(crate) fn is_channel_connect_failure(line: &str) -> bool {
 
 /// Whether an ssh stderr line says this ssh does not know the `ForkAfterAuthentication` option
 /// (OpenSSH before 8.7: `command-line: line 0: Bad configuration option: forkafterauthentication`).
+/// The option name must end there: a newer ssh refusing a longer name that starts the same
+/// (`forkafterauthenticationextra`) is a different error.
 pub(crate) fn is_fork_option_refusal(line: &str) -> bool {
+    const REFUSAL: &str = "bad configuration option: forkafterauthentication";
     let line = line.to_ascii_lowercase();
-    line.contains("bad configuration option") && line.contains("forkafterauthentication")
+    line.find(REFUSAL).is_some_and(|at| {
+        line[at + REFUSAL.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    })
 }
 
 /// What the stderr relay of one tunnel marked.
@@ -363,6 +371,15 @@ mod tests {
         assert!(seen.fork_option_refused.load(Ordering::Acquire));
         assert_eq!(seen.channel_connect_failures.load(Ordering::Acquire), 0);
         assert!(!is_fork_option_refusal("Bad configuration option: foo"));
+        assert!(is_fork_option_refusal(
+            "command-line: line 0: Bad configuration option: forkafterauthentication\r"
+        ));
+        assert!(!is_fork_option_refusal(
+            "command-line: line 0: Bad configuration option: forkafterauthenticationextra"
+        ));
+        assert!(!is_fork_option_refusal(
+            "Bad configuration option: forkafterauthentication_x"
+        ));
     }
 
     #[test]

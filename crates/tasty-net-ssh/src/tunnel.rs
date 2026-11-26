@@ -175,12 +175,14 @@ impl SshTunnel {
             Ok(tunnel) => Ok(tunnel),
             Err(AttemptError::Failed(e)) => Err(e),
             Err(AttemptError::ForkOptionRefused(_)) => {
-                launcher.mark_fork_option_refused();
-                Self::attempt(launcher, target, remote_port, false, move || sink()).map_err(|e| {
-                    match e {
+                let tunnel = Self::attempt(launcher, target, remote_port, false, move || sink())
+                    .map_err(|e| match e {
                         AttemptError::Failed(e) | AttemptError::ForkOptionRefused(e) => e,
-                    }
-                })
+                    })?;
+                // Remembered only once the start without it worked: a retry that fails for
+                // another reason says nothing about the option.
+                launcher.mark_fork_option_refused();
+                Ok(tunnel)
             }
         }
     }
@@ -622,6 +624,62 @@ mod tests {
                 "{argvs:?}"
             );
             drop((first, again));
+        }
+
+        /// Runs `establish` once on `ssh` and returns the argvs it started and whether the
+        /// launcher still uses the option.
+        fn establish_recording(ssh: &Script) -> (Vec<Vec<String>>, bool) {
+            let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+            let seen = Arc::clone(&argvs);
+            let hook = SpawnHook::new(move |mut cmd| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(
+                        cmd.get_args()
+                            .map(|a| a.to_string_lossy().into_owned())
+                            .collect(),
+                    );
+                cmd.spawn()
+            });
+            let launcher = SshLauncher::new(ssh.path()).with_spawn_hook(hook);
+            let (held, remote) = reserve_local_port().expect("port");
+            drop(held);
+            let established =
+                SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote);
+            assert!(established.is_err(), "this ssh never forwards");
+            let argvs = argvs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            (argvs, launcher.fork_option_supported())
+        }
+
+        /// A newer ssh refusing another option whose name starts the same is not taken for an
+        /// old ssh: no retry, nothing remembered.
+        #[test]
+        fn a_longer_option_name_refusal_is_not_the_fork_option() {
+            let ssh = forwarder_after(
+                "other-option",
+                "echo 'command-line: line 0: Bad configuration option: \
+                 forkafterauthenticationextra' >&2\nexit 255\n",
+            );
+            let (argvs, supported) = establish_recording(&ssh);
+            assert_eq!(argvs.len(), 1, "{argvs:?}");
+            assert!(supported);
+        }
+
+        /// The option is not remembered as unsupported when the start without it fails too.
+        #[test]
+        fn a_failed_retry_does_not_remember_the_refusal() {
+            let ssh = forwarder_after(
+                "old-and-down",
+                "case \" $* \" in *\" ForkAfterAuthentication=no \"*)\n\
+                 echo 'command-line: line 0: Bad configuration option: forkafterauthentication' >&2\n\
+                 exit 255;;\nesac\nexit 255\n",
+            );
+            let (argvs, supported) = establish_recording(&ssh);
+            assert_eq!(argvs.len(), 2, "{argvs:?}");
+            assert!(supported);
         }
 
         /// Whether no process (not even a zombie) has this pid.
