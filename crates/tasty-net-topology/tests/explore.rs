@@ -28,6 +28,7 @@ const E: u8 = 5;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 type DelayRule = Box<dyn Fn(DeviceId, DeviceId, &Message) -> Option<u64>>;
+type FailRule = Box<dyn Fn(DeviceId, DeviceId, &Message) -> bool>;
 
 struct InFlight {
     at_ms: u64,
@@ -52,12 +53,15 @@ struct Net {
     max_part: u32,
     /// Every delivered message: (link sender, receiver, message).
     log: Vec<(DeviceId, DeviceId, Message)>,
+    /// Sends matching a rule fail with `SendError::Failed`.
+    fail: Vec<FailRule>,
 }
 
 struct Sends<'a> {
     me: DeviceId,
     links: &'a [LocalLink],
     no_caps: &'a HashSet<DeviceId>,
+    fail: &'a [FailRule],
     out: Vec<(DeviceId, Message)>,
 }
 
@@ -72,6 +76,9 @@ impl Outbox for Sends<'_> {
         }
         if self.no_caps.contains(to) {
             return Err(SendError::NoCapability);
+        }
+        if self.fail.iter().any(|rule| rule(self.me, *to, message)) {
+            return Err(SendError::Failed);
         }
         assert_ne!(*to, self.me);
         // Every message crosses its wire form.
@@ -104,6 +111,7 @@ impl Net {
             delay: Vec::new(),
             max_part: 0,
             log: Vec::new(),
+            fail: Vec::new(),
         };
         for &n in devices {
             let me = SelfInfo {
@@ -177,10 +185,12 @@ impl Net {
         let failures = self.failures.get(&device).cloned().unwrap_or_default();
         let sharing = self.sharing.get(&device).copied().unwrap_or_default();
         let no_caps = self.no_caps.clone();
+        let fail = std::mem::take(&mut self.fail);
         let mut sends = Sends {
             me: device,
             links: &links,
             no_caps: &no_caps,
+            fail: &fail,
             out: Vec::new(),
         };
         let local = Local {
@@ -191,6 +201,7 @@ impl Net {
         let agent = self.agents.get_mut(&device).unwrap();
         let result = f(agent, local, &mut sends, now);
         let out = sends.out;
+        self.fail = fail;
         self.enqueue(device, out);
         result
     }
@@ -1132,4 +1143,68 @@ fn an_entry_too_large_to_send_marks_the_answer_incomplete() {
     assert_eq!(b.reason, Some(NodeReason::Incomplete));
     // What fit still arrived; the edge that did not is left out.
     assert_eq!(x.edges().len(), 1);
+}
+
+fn add_many_links(net: &mut Net, device: u8, count: u32) {
+    for n in 0..count {
+        let mut seed = [0xCCu8; 32];
+        seed[..4].copy_from_slice(&n.to_be_bytes());
+        net.links.get_mut(&id(device)).unwrap().push(LocalLink {
+            peer: DeviceKey::from_seed(seed).id(),
+            local_side: Side::Acceptor,
+            holder: Side::Dialer,
+            transport: TransportKind::P2pDirect,
+            rtt: None,
+            connected_at: u64::from(n),
+            workspace: None,
+            kind: LinkKind::Attach,
+        });
+    }
+}
+
+#[test]
+fn a_part_that_fails_to_send_leaves_the_answer_incomplete() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    add_many_links(&mut net, B, 5_000);
+    // B's second part does not go out.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B) && to == id(A) && matches!(m, Message::Result(p) if p.part == 1)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+    // After the failed part B sent nothing more: no later part, no done.
+    assert!(net.log.iter().all(|(f, t, m)| {
+        !(*f == id(B) && *t == id(A)) || matches!(m, Message::Result(p) if p.part == 0)
+    }));
+}
+
+#[test]
+fn a_relay_that_fails_stops_the_rest_and_the_requester_sees_the_gap() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    add_many_links(&mut net, C, 5_000);
+    // B cannot relay C's second part to A.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B)
+            && to == id(A)
+            && matches!(m, Message::Result(p) if p.from == id(C) && p.part == 1)
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    assert_eq!(x.node(&id(C)).unwrap().reason, Some(NodeReason::Incomplete));
+    assert_eq!(status(x, B), NodeStatus::Online);
+    // Nothing of C after the failed part crossed B → A.
+    assert!(net.log.iter().all(|(f, t, m)| {
+        !(*f == id(B) && *t == id(A))
+            || !matches!(m, Message::Result(p) if p.from == id(C) && p.part > 0)
+                && !matches!(m, Message::Done(d) if d.from == id(C))
+    }));
 }

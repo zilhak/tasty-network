@@ -49,6 +49,7 @@
 - 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`. 조각은 `(branch, from, part)`로 구별한다. 그래서 여러 기기가 같은 `request_id`로 보내도, 한 기기가 더 큰 남은 depth로 다시 방문돼 두 번 답해도 섞이지 않는다. 전달한 기기는 자기가 보낸 `branch`마다 `done`·`suppressed`를 기다리므로 같은 이웃에게 보낸 두 전달을 구별한다. `branch`는 전달 추적용이고, 노드 상태와 엣지의 합치기는 계속 요청자가 노드·엣지 기준으로 한다.
 - 모든 메시지가 `MAX_FRAME_LEN / 2` 이하다. 받는 쪽은 그보다 긴 JSON을 읽기 전에 거절한다(`MessageError::TooLarge`). `done`의 `timed_out`이 한 메시지에 들어가지 않으면 `more`로 나눈다(`split_done`). 헤더(`return_path` 등)만으로 넘는 결과·`done`은 보내지 않는다.
 - 항목 하나(노드나 엣지)가 혼자서도 한 메시지에 들어가지 않으면 그 항목을 빼고 보내되, 자기 노드를 `timed_out` + 사유 `incomplete`로 바꿔 싣는다. 요청자는 그런 노드가 있으면 `final` `done`을 받아도 탐색 상태를 `Finished`가 아니라 `Incomplete`로 둔다.
+- 조각 송신이나 중계가 실패하면 그 기기는 그 응답의 뒤 조각과 `done`을 보내지 않는다(그 분기는 실패로 끝나고, 보낸 쪽은 그 분기의 이웃 응답도 기다리지 않는다). 요청자는 `(branch, from)`마다 받은 `part`와 `last`를 세어, 그 `done`이 왔거나 탐색이 끝났을 때 빠진 조각이 있으면 그 기기를 `timed_out` + `incomplete`로 바꾸고 탐색 상태를 `Incomplete`로 둔다.
 
 ## 탐색 규칙
 

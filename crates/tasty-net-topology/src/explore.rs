@@ -132,6 +132,23 @@ pub struct Exploration {
     node_index: HashMap<NodeKey, (usize, bool)>,
     edges: Vec<Edge>,
     edge_keys: HashSet<EdgeKey>,
+    /// The parts received per `(branch, from)`, to notice a missing one.
+    parts: HashMap<(String, DeviceId), PartTrack>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartTrack {
+    seen: HashSet<u32>,
+    last: Option<u32>,
+}
+
+impl PartTrack {
+    fn complete(&self) -> bool {
+        self.last.is_some_and(|last| {
+            usize::try_from(last).is_ok_and(|l| self.seen.len() == l + 1)
+                && self.seen.iter().all(|p| *p <= last)
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -188,6 +205,14 @@ impl Exploration {
         if part.from == self.me {
             return;
         }
+        let track = self
+            .parts
+            .entry((part.branch.clone(), part.from))
+            .or_default();
+        track.seen.insert(part.part);
+        if part.last {
+            track.last = Some(part.part);
+        }
         for node in part.nodes {
             self.merge_node(node, &part.from, unix_ms);
         }
@@ -225,6 +250,55 @@ impl Exploration {
                     self.nodes[at] = node;
                     self.node_index.insert(key, (at, was_direct || direct));
                 }
+            }
+        }
+    }
+
+    /// The answer of `branch` by `from` ended (its done arrived): incomplete parts mark
+    /// `from` incomplete.
+    fn check_parts(&mut self, branch: &str, from: &DeviceId, unix_ms: u64) {
+        if self
+            .parts
+            .get(&(branch.to_owned(), *from))
+            .is_some_and(|t| !t.complete())
+        {
+            self.mark_incomplete(*from, unix_ms);
+        }
+    }
+
+    /// Every answer with a missing part marks its device incomplete.
+    fn check_all_parts(&mut self, unix_ms: u64) {
+        let broken: Vec<DeviceId> = self
+            .parts
+            .iter()
+            .filter(|(_, t)| !t.complete())
+            .map(|((_, from), _)| *from)
+            .collect();
+        for device in broken {
+            self.mark_incomplete(device, unix_ms);
+        }
+    }
+
+    fn mark_incomplete(&mut self, device: DeviceId, unix_ms: u64) {
+        let key = NodeKey::Id(device);
+        match self.node_index.get(&key).copied() {
+            Some((at, _)) => {
+                let node = &mut self.nodes[at];
+                node.status = NodeStatus::TimedOut;
+                node.reason = Some(NodeReason::Incomplete);
+                node.explored_at = unix_ms;
+            }
+            None => {
+                self.node_index.insert(key, (self.nodes.len(), true));
+                self.nodes.push(Node {
+                    device_id: Some(device),
+                    display_name: None,
+                    status: NodeStatus::TimedOut,
+                    reason: Some(NodeReason::Incomplete),
+                    reported_by: None,
+                    peer_hint: None,
+                    explored_at: unix_ms,
+                });
             }
         }
     }
@@ -294,6 +368,8 @@ pub struct Agent {
     children: HashMap<String, String>,
     /// Request ID → the next hop this device forwarded it to as a route hop.
     routes: HashMap<String, RouteForward>,
+    /// `(request_id, branch, from)` of answers whose relay failed → when to forget it.
+    failed_relays: HashMap<(String, String, DeviceId), Instant>,
     explorations: HashMap<String, Exploration>,
 }
 
@@ -306,6 +382,7 @@ impl Agent {
             waits: HashMap::new(),
             children: HashMap::new(),
             routes: HashMap::new(),
+            failed_relays: HashMap::new(),
             explorations: HashMap::new(),
         }
     }
@@ -356,6 +433,7 @@ impl Agent {
                 node_index: HashMap::new(),
                 edges: Vec::new(),
                 edge_keys: HashSet::new(),
+                parts: HashMap::new(),
             },
         );
         if request.origin == me {
@@ -490,8 +568,9 @@ impl Agent {
             now.unix_ms,
         );
         if on_link && !local.sharing.enabled {
-            self.send_view(&header, view, out, now);
-            self.send_done(&header, Vec::new(), is_origin, out, now);
+            if self.send_view(&header, view, out, now) {
+                self.send_done(&header, Vec::new(), is_origin, out, now);
+            }
             return;
         }
 
@@ -553,7 +632,11 @@ impl Agent {
                 }
             }
         }
-        self.send_view(&header, view, out, now);
+        if !self.send_view(&header, view, out, now) {
+            // The branch failed: no done follows and the neighbors' answers are not
+            // waited for (their replies are dropped as unexpected).
+            return;
+        }
         if pending.is_empty() {
             self.send_done(&header, timed_out, is_origin, out, now);
             return;
@@ -705,19 +788,25 @@ impl Agent {
             explored_at: now.unix_ms,
         };
         let nodes = own.into_iter().chain(std::iter::once(origin)).collect();
-        self.send_view(
-            header,
-            View {
-                nodes,
-                edges: Vec::new(),
-            },
-            out,
-            now,
-        );
-        self.send_done(header, Vec::new(), true, out, now);
+        let view = View {
+            nodes,
+            edges: Vec::new(),
+        };
+        if self.send_view(header, view, out, now) {
+            self.send_done(header, Vec::new(), true, out, now);
+        }
     }
 
-    fn send_view(&mut self, header: &ResultHeader, view: View, out: &mut dyn Outbox, now: Now) {
+    /// Sends the parts of `view`. `false` when the answer could not be sent whole: a part
+    /// failed (the later parts are not sent) or the header alone does not fit. The caller
+    /// then sends no done for the branch.
+    fn send_view(
+        &mut self,
+        header: &ResultHeader,
+        view: View,
+        out: &mut dyn Outbox,
+        now: Now,
+    ) -> bool {
         let parts = match split_result(
             header,
             view.nodes.clone(),
@@ -754,18 +843,22 @@ impl Agent {
                     Ok(parts) => parts,
                     Err(e) => {
                         tracing::warn!(error = %e, "topology answer not sent");
-                        return;
+                        return false;
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "topology answer not sent");
-                return;
+                return false;
             }
         };
         for part in parts {
-            self.send_reply(Message::Result(part), out, now);
+            if !self.send_reply(Message::Result(part), out, now) {
+                tracing::debug!("topology answer stopped at a part that failed");
+                return false;
+            }
         }
+        true
     }
 
     fn send_done(
@@ -788,20 +881,26 @@ impl Agent {
             }
         };
         for done in dones {
-            self.send_reply(Message::Done(done), out, now);
+            if !self.send_reply(Message::Done(done), out, now) {
+                return;
+            }
         }
     }
 
     /// Sends a reply to the first entry of its return path, or handles it here when that
-    /// entry is this device.
-    fn send_reply(&mut self, reply: Message, out: &mut dyn Outbox, now: Now) {
+    /// entry is this device. `false` when sending failed.
+    fn send_reply(&mut self, reply: Message, out: &mut dyn Outbox, now: Now) -> bool {
         let Some(next) = return_path(&reply).first().copied() else {
-            return;
+            return false;
         };
         if next == self.me.device_id {
             self.receive_reply(None, reply, out, now);
+            true
         } else if let Err(e) = out.send(&next, &reply) {
-            tracing::debug!(error = %e, "topology reply not relayed");
+            tracing::debug!(error = %e, "topology reply not sent");
+            false
+        } else {
+            true
         }
     }
 
@@ -828,8 +927,13 @@ impl Agent {
             tracing::debug!("topology reply from a link not expected for its request dropped");
             return;
         }
-        return_path_mut(&mut reply).remove(0);
         let (branch, from) = branch_and_from(&reply);
+        let relay_key = (reply.request_id().to_owned(), branch.clone(), from);
+        if self.failed_relays.contains_key(&relay_key) {
+            tracing::debug!("topology reply of a branch whose relay failed dropped");
+            return;
+        }
+        return_path_mut(&mut reply).remove(0);
         let tracked = self.children.get(&branch).cloned();
         match return_path(&reply).first().copied() {
             None => self.deliver(reply.clone(), now),
@@ -839,7 +943,12 @@ impl Agent {
             }
             Some(next) => {
                 if let Err(e) = out.send(&next, &reply) {
+                    // Relay nothing more of this answer: the receiver sees the missing part
+                    // (or the missing done) and marks the answer incomplete.
                     tracing::debug!(error = %e, "topology reply not relayed");
+                    self.failed_relays
+                        .insert(relay_key, now.mono + Duration::from_millis(MAX_QUERY_MS));
+                    return;
                 }
                 if let Message::Done(done) = &reply
                     && done.is_final
@@ -902,11 +1011,15 @@ impl Agent {
                 for device in done.timed_out {
                     exploration.report_timed_out(device, &done.from, now.unix_ms);
                 }
+                if !done.more {
+                    exploration.check_parts(&done.branch, &done.from, now.unix_ms);
+                }
                 // Only the origin or a route hop that stopped the query ends it.
                 if done.is_final
                     && !done.more
                     && (done.from == exploration.origin || exploration.route.contains(&done.from))
                 {
+                    exploration.check_all_parts(now.unix_ms);
                     let incomplete = exploration
                         .nodes
                         .iter()
@@ -947,6 +1060,7 @@ impl Agent {
         for exploration in self.explorations.values_mut() {
             if exploration.state == ExplorationState::Running && now.mono >= exploration.deadline {
                 exploration.state = ExplorationState::TimedOut;
+                exploration.check_all_parts(now.unix_ms);
                 let origin = exploration.origin;
                 if exploration.node(&origin).is_none() {
                     let me = exploration.me;
@@ -980,6 +1094,7 @@ impl Agent {
         }
         self.answered.retain(|_, seen| seen.expires > now.mono);
         self.routes.retain(|_, r| r.expires > now.mono);
+        self.failed_relays.retain(|_, expires| *expires > now.mono);
     }
 
     /// The earliest deadline [`Agent::poll`] has to see, if any.
@@ -999,10 +1114,12 @@ impl Agent {
             .map(|e| e.deadline);
         let routes = self.routes.values().map(|r| r.expires);
         let answered = self.answered.values().map(|seen| seen.expires);
+        let failed = self.failed_relays.values().copied();
         waits
             .chain(explorations)
             .chain(routes)
             .chain(answered)
+            .chain(failed)
             .min()
     }
 }
