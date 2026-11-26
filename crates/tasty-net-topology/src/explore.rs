@@ -119,6 +119,9 @@ pub enum ExplorationState {
 pub struct Exploration {
     request_id: String,
     origin: DeviceId,
+    route: Vec<DeviceId>,
+    /// The link the query left on; `None` when this device is the origin.
+    first_hop: Option<DeviceId>,
     me: DeviceId,
     deadline: Instant,
     state: ExplorationState,
@@ -254,6 +257,13 @@ struct Answered {
     expires: Instant,
 }
 
+/// A route hop's record of where it forwarded a query, so it relays replies only from
+/// that link.
+struct RouteForward {
+    next: DeviceId,
+    expires: Instant,
+}
+
 struct Child {
     peer: DeviceId,
     answer_by: Instant,
@@ -279,6 +289,8 @@ pub struct Agent {
     waits: HashMap<String, Wait>,
     /// Child branch → the branch of ours that forwarded it.
     children: HashMap<String, String>,
+    /// Request ID → the next hop this device forwarded it to as a route hop.
+    routes: HashMap<String, RouteForward>,
     explorations: HashMap<String, Exploration>,
 }
 
@@ -290,6 +302,7 @@ impl Agent {
             answered: HashMap::new(),
             waits: HashMap::new(),
             children: HashMap::new(),
+            routes: HashMap::new(),
             explorations: HashMap::new(),
         }
     }
@@ -330,6 +343,9 @@ impl Agent {
             Exploration {
                 request_id: request_id.clone(),
                 origin: request.origin,
+                route: request.route.clone(),
+                first_hop: (request.origin != me)
+                    .then(|| request.route.first().copied().unwrap_or(request.origin)),
                 me,
                 deadline: now.mono + timeout,
                 state: ExplorationState::Running,
@@ -374,7 +390,7 @@ impl Agent {
     ) {
         match message {
             Message::Query(query) => self.answer_query(Some(from), query, local, out, now),
-            reply => self.receive_reply(reply, out, now),
+            reply => self.receive_reply(Some(from), reply, out, now),
         }
     }
 
@@ -393,6 +409,10 @@ impl Agent {
         let deadline = now.mono + Duration::from_millis(query.remaining_ms.min(MAX_QUERY_MS));
         if query.path.is_empty() && query.origin != me {
             self.relay_route(from, query, local, out, now, deadline);
+            return;
+        }
+        if !query_path_ok(&me, from, &query) {
+            tracing::debug!("topology query whose path does not match its link dropped");
             return;
         }
         let is_origin = query.path.is_empty();
@@ -576,7 +596,7 @@ impl Agent {
         let valid = validate_route(&query.requester, &query.origin, &query.route).is_ok()
             && match at {
                 Some(0) => from == Some(&query.requester),
-                Some(_) => true,
+                Some(k) => from == query.route.get(k - 1),
                 None => false,
             };
         let Some(at) = at.filter(|_| valid) else {
@@ -629,7 +649,15 @@ impl Agent {
             ..query.clone()
         };
         match out.send(&next, &Message::Query(forward)) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.routes.insert(
+                    query.request_id.clone(),
+                    RouteForward {
+                        next,
+                        expires: deadline,
+                    },
+                );
+            }
             Err(SendError::NoCapability) => self.stop_route(
                 &header,
                 &query,
@@ -745,7 +773,7 @@ impl Agent {
             return;
         };
         if next == self.me.device_id {
-            self.receive_reply(reply, out, now);
+            self.receive_reply(None, reply, out, now);
         } else if let Err(e) = out.send(&next, &reply) {
             tracing::debug!(error = %e, "topology reply not relayed");
         }
@@ -753,15 +781,28 @@ impl Agent {
 
     /// A result, suppression or done addressed to this device: relay it to the next entry
     /// of its return path (or merge it into the exploration when this device is the
-    /// last), then update the branches this device waits for.
-    fn receive_reply(&mut self, mut reply: Message, out: &mut dyn Outbox, now: Now) {
+    /// last), then update the branches this device waits for. `link` is the peer of the
+    /// link it came on (`None` for a reply this device made for itself); a reply from a
+    /// link this device expects no reply from for that request is dropped.
+    fn receive_reply(
+        &mut self,
+        link: Option<&DeviceId>,
+        mut reply: Message,
+        out: &mut dyn Outbox,
+        now: Now,
+    ) {
         let me = self.me.device_id;
-        let path = return_path_mut(&mut reply);
-        if path.first() != Some(&me) {
+        if return_path(&reply).first() != Some(&me) {
             tracing::debug!("topology reply not addressed to this device dropped");
             return;
         }
-        path.remove(0);
+        if let Some(link) = link
+            && !self.expects_reply_from(link, reply.request_id())
+        {
+            tracing::debug!("topology reply from a link not expected for its request dropped");
+            return;
+        }
+        return_path_mut(&mut reply).remove(0);
         let (branch, from) = branch_and_from(&reply);
         let tracked = self.children.get(&branch).cloned();
         match return_path(&reply).first().copied() {
@@ -774,6 +815,15 @@ impl Agent {
                 if let Err(e) = out.send(&next, &reply) {
                     tracing::debug!(error = %e, "topology reply not relayed");
                 }
+                if let Message::Done(done) = &reply
+                    && done.is_final
+                    && self
+                        .routes
+                        .get(&done.request_id)
+                        .is_some_and(|r| link == Some(&r.next))
+                {
+                    self.routes.remove(&done.request_id);
+                }
             }
         }
         let Some(parent) = tracked else {
@@ -785,7 +835,7 @@ impl Agent {
         let Some(child) = wait.pending.get_mut(&branch) else {
             return;
         };
-        if child.peer != from {
+        if child.peer != from || link.is_some_and(|l| *l != from) {
             return;
         }
         match reply {
@@ -797,6 +847,19 @@ impl Agent {
             }
             Message::Query(_) => {}
         }
+    }
+
+    /// Whether `link` is a peer this device waits on for `request_id`: a neighbor it
+    /// forwarded the request to, the next hop it relayed it to on the route, or the first
+    /// hop of its own exploration.
+    fn expects_reply_from(&self, link: &DeviceId, request_id: &str) -> bool {
+        self.waits.values().any(|wait| {
+            wait.request_id == request_id && wait.pending.values().any(|c| c.peer == *link)
+        }) || self.routes.get(request_id).is_some_and(|r| r.next == *link)
+            || self
+                .explorations
+                .get(request_id)
+                .is_some_and(|x| x.first_hop == Some(*link))
     }
 
     fn deliver(&mut self, reply: Message, now: Now) {
@@ -812,7 +875,10 @@ impl Agent {
                 for device in done.timed_out {
                     exploration.report_timed_out(device, &done.from, now.unix_ms);
                 }
-                if done.is_final {
+                // Only the origin or a route hop that stopped the query ends it.
+                if done.is_final
+                    && (done.from == exploration.origin || exploration.route.contains(&done.from))
+                {
                     exploration.state = ExplorationState::Finished;
                 }
             }
@@ -865,6 +931,7 @@ impl Agent {
             self.finish_wait_if_empty(&key, out, now);
         }
         self.answered.retain(|_, seen| seen.expires > now.mono);
+        self.routes.retain(|_, r| r.expires > now.mono);
         for exploration in self.explorations.values_mut() {
             if exploration.state == ExplorationState::Running && now.mono >= exploration.deadline {
                 exploration.state = ExplorationState::TimedOut;
@@ -892,8 +959,30 @@ impl Agent {
             .values()
             .filter(|e| e.state == ExplorationState::Running)
             .map(|e| e.deadline);
-        waits.chain(explorations).min()
+        let routes = self.routes.values().map(|r| r.expires);
+        waits.chain(explorations).chain(routes).min()
     }
+}
+
+/// Whether an exploring query (at the origin or past it) matches the link it came on:
+/// the route rules hold; at the origin the sender is the last route hop (or the requester
+/// with no route); past it the sender is the last device of `path`, `path` starts at the
+/// origin, has no device twice and does not contain this device.
+fn query_path_ok(me: &DeviceId, from: Option<&DeviceId>, query: &Query) -> bool {
+    if validate_route(&query.requester, &query.origin, &query.route).is_err() {
+        return false;
+    }
+    let Some(last) = query.path.last() else {
+        return match from {
+            None => query.requester == *me,
+            Some(from) => *from == query.route.last().copied().unwrap_or(query.requester),
+        };
+    };
+    let mut seen = HashSet::new();
+    from == Some(last)
+        && query.path.first() == Some(&query.origin)
+        && !query.path.contains(me)
+        && query.path.iter().all(|d| seen.insert(*d))
 }
 
 /// The distinct peers of this device's attach links, minus `skip`, in link order. Both

@@ -875,3 +875,125 @@ fn the_requester_with_sharing_off_does_not_send_its_edges_or_forward() {
     assert_eq!(status(x, A), NodeStatus::Online);
     assert!(x.edges().iter().any(|e| e.touches(&id(C))));
 }
+
+#[test]
+fn a_query_whose_path_does_not_match_its_link_is_dropped() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(B, C);
+    let query = |path: Vec<DeviceId>| tasty_net_topology::Query {
+        request_id: "r".into(),
+        requester: id(A),
+        origin: id(A),
+        route: Vec::new(),
+        path,
+        depth: 1,
+        remaining_ms: 5_000,
+        branch: "b".into(),
+    };
+    // The last device of the path is D, but the query came on the link with B.
+    for path in [
+        vec![id(A), id(D)],
+        // Does not start at the origin.
+        vec![id(D), id(B)],
+        // Contains C itself.
+        vec![id(A), id(C), id(B)],
+        // A device twice.
+        vec![id(A), id(B), id(A), id(B)],
+    ] {
+        net.with_agent(id(C), |agent, local, out, now| {
+            agent.on_message(&id(B), Message::Query(query(path)), local, out, now)
+        });
+        assert!(net.queue.is_empty());
+    }
+    // The control: a path that ends at the link peer is answered.
+    net.with_agent(id(C), |agent, local, out, now| {
+        agent.on_message(
+            &id(B),
+            Message::Query(query(vec![id(A), id(B)])),
+            local,
+            out,
+            now,
+        )
+    });
+    assert!(!net.queue.is_empty());
+}
+
+#[test]
+fn a_later_route_hop_checks_the_previous_hop() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C).link(B, C).link(C, D);
+    let forged = tasty_net_topology::Query {
+        request_id: "r".into(),
+        requester: id(A),
+        origin: id(D),
+        route: vec![id(B), id(C)],
+        path: Vec::new(),
+        depth: 1,
+        remaining_ms: 5_000,
+        branch: "b".into(),
+    };
+    // C is the second hop; the query must come from B, not from A.
+    net.with_agent(id(C), |agent, local, out, now| {
+        agent.on_message(&id(A), Message::Query(forged), local, out, now)
+    });
+    assert!(net.queue.iter().all(|m| m.to != id(D)));
+    assert!(net.queue.iter().any(|m| matches!(
+        &m.message,
+        Message::Result(p) if p.nodes.iter().any(|n| n.reason == Some(NodeReason::RouteInvalid))
+    )));
+}
+
+#[test]
+fn replies_from_unexpected_links_or_senders_are_dropped() {
+    let mut net = Net::new(&[A, B, C, D]);
+    net.link(A, B).link(A, C);
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(A) && to == id(B) && matches!(m, Message::Query(_))).then_some(1_000)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run_until(100);
+    assert_eq!(net.result(A, &rid).state(), ExplorationState::Running);
+
+    // D was never asked: its result is not merged.
+    let fake = tasty_net_topology::ResultPart {
+        request_id: rid.clone(),
+        branch: "x".into(),
+        from: id(D),
+        return_path: vec![id(A)],
+        part: 0,
+        last: true,
+        nodes: vec![tasty_net_topology::Node {
+            device_id: Some(id(D)),
+            display_name: None,
+            status: NodeStatus::Online,
+            reason: None,
+            reported_by: None,
+            peer_hint: None,
+            explored_at: 0,
+        }],
+        edges: Vec::new(),
+    };
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(D), Message::Result(fake), local, out, now)
+    });
+    // B is still pending, but a final done made by B (not the origin) does not end it.
+    let fake_final = tasty_net_topology::Done {
+        request_id: rid.clone(),
+        branch: "x".into(),
+        from: id(B),
+        return_path: vec![id(A)],
+        timed_out: Vec::new(),
+        is_final: true,
+    };
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(B), Message::Done(fake_final), local, out, now)
+    });
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Running);
+    assert!(x.node(&id(D)).is_none());
+
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(node_ids(x), sorted(&[A, B, C]));
+}
