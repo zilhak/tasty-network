@@ -464,6 +464,32 @@ mod windows {
     use super::*;
     use crate::secret_file::windows::testing::read_acl;
 
+    /// The name of a deleted record stays while the publication pins it. A reopen is then
+    /// refused, and the pin reports the pending deletion, so retire sees Missing.
+    #[test]
+    fn a_record_deleted_while_pinned_is_delete_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record");
+        let publication = record(1).publish(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        match fs::File::open(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => assert!(
+                secret_file::is_delete_pending(&publication._pin, &e),
+                "{e:?}"
+            ),
+            Ok(_) => panic!("a deleted record opened again"),
+        }
+        let other = record(2).publish(&dir.path().join("other")).unwrap();
+        let denied = io::Error::from_raw_os_error(5);
+        assert!(
+            !secret_file::is_delete_pending(&other._pin, &denied),
+            "a live file is not pending"
+        );
+        assert_eq!(publication.retire().unwrap(), RetireOutcome::Missing);
+        assert_eq!(other.retire().unwrap(), RetireOutcome::Removed);
+    }
+
     #[test]
     fn record_acl_is_the_current_sid_only_and_protected() {
         let dir = tempfile::tempdir().unwrap();

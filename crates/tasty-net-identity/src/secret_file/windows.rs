@@ -17,8 +17,8 @@ use std::{
 
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-        LocalFree,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING, ERROR_SUCCESS, GENERIC_READ,
+        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     },
     Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAce,
@@ -33,8 +33,8 @@ use windows_sys::Win32::{
     Storage::FileSystem::{
         CREATE_NEW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_INFO, FILE_SHARE_NONE, FileIdInfo, GetFileInformationByHandleEx, READ_CONTROL,
-        WRITE_DAC, WRITE_OWNER,
+        FILE_ID_INFO, FILE_SHARE_NONE, FILE_STANDARD_INFO, FileIdInfo, FileStandardInfo,
+        GetFileInformationByHandleEx, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
     System::{
         SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION},
@@ -186,6 +186,36 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
         Err(Check::Violation(reason)) => Err(OpenFailure::Unsafe(reason, None)),
         Err(Check::Io(e)) => Err(OpenFailure::Unsafe(UnsafeReason::CheckFailed, Some(e))),
     }
+}
+
+/// An open denied with ERROR_ACCESS_DENIED or ERROR_DELETE_PENDING, while the pinned handle of
+/// the same file reports DeletePending.
+pub(super) fn is_delete_pending(pinned: &File, error: &io::Error) -> bool {
+    let denied = matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_ACCESS_DENIED | ERROR_DELETE_PENDING)
+    );
+    if !denied {
+        return false;
+    }
+    let mut info = std::mem::MaybeUninit::<FILE_STANDARD_INFO>::uninit();
+    // SAFETY: the borrow keeps the handle open for this synchronous call; info is aligned,
+    // writable storage of exactly one FILE_STANDARD_INFO.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            pinned.as_raw_handle() as HANDLE,
+            FileStandardInfo,
+            info.as_mut_ptr().cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+    // SAFETY: success for FileStandardInfo initialized the complete FILE_STANDARD_INFO; its
+    // BOOLEAN fields are 0 or 1.
+    let info = unsafe { info.assume_init() };
+    info.DeletePending
 }
 
 pub(super) fn file_id(file: &File) -> io::Result<FileId> {

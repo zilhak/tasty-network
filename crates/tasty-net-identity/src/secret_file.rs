@@ -184,6 +184,13 @@ pub(crate) fn open_private(path: &Path) -> Result<Option<PrivateFile>, IdentityE
     Ok(Some(PrivateFile { file, contents }))
 }
 
+/// Whether `error`, from reopening the path of the still open `pinned` file, only means that
+/// the file was deleted and waits for its last handle to close (Windows keeps the name until
+/// then and refuses to open it). Always false on Unix, where a deleted name is gone at once.
+pub(crate) fn is_delete_pending(pinned: &File, error: &io::Error) -> bool {
+    os::is_delete_pending(pinned, error)
+}
+
 /// The identity of an open file: Unix device and inode, Windows volume and file ID.
 pub(crate) fn file_id(file: &File) -> io::Result<FileId> {
     os::file_id(file)

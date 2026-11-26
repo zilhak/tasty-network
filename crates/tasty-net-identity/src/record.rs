@@ -331,10 +331,22 @@ impl RecordPublication {
             }
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RetireOutcome::Missing),
+            Err(e) if secret_file::is_delete_pending(&self._pin, &e) => {
+                return Ok(RetireOutcome::Missing);
+            }
             Err(e) => return Err(IdentityError::io(FileOp::Read, &self.target, e)),
         }
-        let Some(current) = secret_file::open_private(&self.target)? else {
-            return Ok(RetireOutcome::Missing);
+        let current = match secret_file::open_private(&self.target) {
+            Ok(Some(current)) => current,
+            Ok(None) => return Ok(RetireOutcome::Missing),
+            Err(IdentityError::UnsafeFile {
+                reason: UnsafeReason::CheckFailed,
+                source: Some(e),
+                ..
+            }) if secret_file::is_delete_pending(&self._pin, &e) => {
+                return Ok(RetireOutcome::Missing);
+            }
+            Err(e) => return Err(e),
         };
         let same_id = secret_file::file_id(&current.file)
             .map_err(|e| IdentityError::io(FileOp::Read, &self.target, e))?

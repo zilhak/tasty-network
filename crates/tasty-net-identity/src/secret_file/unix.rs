@@ -104,6 +104,10 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+pub(super) fn is_delete_pending(_pinned: &File, _error: &io::Error) -> bool {
+    false
+}
+
 pub(super) fn file_id(file: &File) -> io::Result<FileId> {
     let meta = file.metadata()?;
     Ok(FileId {
