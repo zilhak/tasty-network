@@ -6,7 +6,7 @@
 
 | 비밀 | 수명 | 공유 범위 | 쓰는 곳 |
 |---|---|---|---|
-| 기기 키(ed25519 비밀키) | 영속. 디렉터리에 한 번 만들고 계속 쓴다 | 같은 디렉터리를 쓰는 모든 인스턴스. P2P endpoint는 그중 하나만 연다([P2P](p2p.md) "endpoint와 런타임") | handshake 서명, P2P endpoint 키, 토폴로지 노드 ID |
+| 기기 키(ed25519 비밀키) | 영속. 디렉터리에 한 번 만들고 계속 쓴다 | 같은 디렉터리를 쓰는 모든 인스턴스. P2P endpoint는 그중 하나만 연다([P2P](p2p.md#endpoint와-런타임)) | handshake 서명, P2P TLS raw public key(기기 사이와 rendezvous 서버 연결), 토폴로지 노드 ID |
 | 연결 토큰 | 인스턴스 하나. 시작 때 발급하고, 인스턴스가 끝나면 소비자가 게시 핸들로 자기 레코드만 정리한다(아래 "파일 형식") | 그 인스턴스 하나 | SSH 경로 handshake의 `token` |
 
 API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityError>`와 `ConnectionToken::issue() -> Result<ConnectionToken, RandomError>`(값만 만들고 게시는 연결 레코드로 한다). 같은 디렉터리로 토큰을 두 번 발급하면 값이 다르다. 기기 키는 같다. OS 난수 원천이 실패하면 패닉하지 않고 `RandomError`(키 생성 중이면 `IdentityError::Random`)를 돌려준다.
@@ -30,11 +30,11 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 - `publish`는 읽는 쪽이 거절할 레코드(포트 0, 빈 인스턴스 ID, 4096바이트를 넘는 줄)를 쓰기 전에 `IdentityError::InvalidRecord`로 거절하고 기존 레코드를 그대로 둔다. 파일 정체성은 교체 전 임시 파일의 핸들에서 얻는다. 교체 뒤 확인 단계가 실패하면 잠금을 쥔 채, 대상의 파일 정체성이 자기 게시분과 같을 때만 그 파일을 지우고 오류를 돌려준다. 핸들 없이 토큰이 든 레코드가 남지 않게 하기 위해서다. 정체성이 다르거나 알 수 없으면(잠금에 참여하지 않는 쪽이 대상을 바꿈) 그 파일은 남의 것이므로 지우지 않고 오류만 돌려준다. 알려진 한계: 이 정리는 파일 정체성을 확인한 뒤 경로 이름으로 지운다. 핸들로 지우는 이식 가능한 방법이 없어서다. 확인과 삭제 사이에 게시 잠금에 참여하지 않는 프로세스가 그 경로의 파일을 바꾸면 바뀐 파일이 지워질 수 있다. `retire`의 삭제도 같다.
 - 이 레포가 쓴 파일(임시 파일, 교체 뒤 실패한 레코드)을 지우지 못하면 `IdentityError::Leftover { leftover, cause, cleanup }`로 남은 경로와 처음 오류를 함께 돌려준다. 그 파일에는 비밀이 들어 있을 수 있다. 오류에는 비밀 원문을 담지 않는다.
 - 형식이 맞지 않는 파일은 손상으로 본다. `load_or_create`는 손상 파일을 만나면 `IdentityError::Corrupt`를 돌려주고 파일을 그대로 둔다. 새 키로 덮지 않는다. 덮으면 모든 상대가 이 기기를 다른 기기로 본다.
-- 키의 정본 표현은 32바이트 seed다. `iroh-base` 1.5.0의 `SecretKey::from_bytes(&[u8; 32])`로 그대로 iroh endpoint에 넘긴다(P2P와 SSH에서 같은 기기 ID).
+- 키의 정본 표현은 32바이트 seed다. ed25519 구현은 `ed25519-dalek`(`SigningKey::from_bytes(&[u8; 32])`)이다. P2P는 같은 seed로 TLS 서명 키(PKCS#8)와 raw public key를 만든다([P2P](p2p.md#인증)). 그래서 P2P와 SSH에서 같은 기기 ID다. 지금 develop 코드는 `iroh-base` 1.5.0의 `SecretKey`를 거쳐 같은 `ed25519-dalek` 3.0.0을 쓰고 있고, 직접 의존으로 바꾸는 일은 후속 작업이다. 키 파일 형식과 기기 ID는 바뀌지 않는다.
 
 ## 기기 ID 문자열
 
-기기 ID는 ed25519 공개키다. 문자열 표현은 소문자 hex 64자이고, `iroh-base` 1.5.0 `PublicKey`의 `Display`(`data_encoding::HEXLOWER`, `iroh-base/src/key.rs`)와 같다. 같은 키가 토폴로지, relay 접속 허용 헤더, `PublicKey`의 `Display`에서 같은 전체 문자열로 보인다. iroh와 iroh-relay의 내부 로그(연결 성립, relay 등록)는 `fmt_short()`로 처음 5바이트(hex 10자)만 찍으므로 전체 ID와 같지 않다(`iroh-base/src/key.rs` `fmt_short`). 이 레포의 로그와 오류는 전체 ID를 쓴다. iroh의 `FromStr`은 hex와 base32를 모두 받으므로, 이 레포의 `DeviceId::from_str`은 와이어와 파일에서 소문자 hex 64자만 받도록 따로 검사한다.
+기기 ID는 ed25519 공개키다. 문자열 표현은 소문자 hex 64자다. 같은 키가 handshake, 토폴로지, rendezvous 서버의 기기 조회 키(`punch_request.peer`, [rendezvous](rendezvous.md#기기-인증)), P2P 연결 정보에서 같은 전체 문자열로 보인다. 이 레포의 로그와 오류는 전체 ID를 쓴다. `DeviceId::from_str`은 와이어와 파일에서 소문자 hex 64자만 받는다(iroh-base를 거치던 지금 코드는 hex와 base32를 함께 받는 파서를 막으려 따로 검사한다. 직접 구현으로 바꾸면 그 검사가 파서 자체가 된다).
 
 ## 파일 권한
 
@@ -70,9 +70,9 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 
 ## 서명
 
-- `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`. 검증은 `verify_strict`다(`iroh-base` `PublicKey::verify`).
+- `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`. 검증은 `verify_strict`다(`ed25519-dalek` `VerifyingKey::verify_strict`).
 - `Signature`는 64바이트이고 문자열 표현은 소문자 hex 128자다(handshake `sig`). `FromStr`은 그 형식만 받는다.
-- 파일 없이 키를 만드는 `DeviceKey::from_seed([u8; 32])`·`DeviceKey::generate() -> Result<DeviceKey, RandomError>`와 iroh에 넘길 `DeviceKey::to_seed()`를 둔다. `DeviceKey`의 `Debug`는 seed를 찍지 않는다.
+- 파일 없이 키를 만드는 `DeviceKey::from_seed([u8; 32])`·`DeviceKey::generate() -> Result<DeviceKey, RandomError>`와 P2P TLS 키를 만들 때 쓰는 `DeviceKey::to_seed()`를 둔다. `DeviceKey`의 `Debug`는 seed를 찍지 않는다.
 - handshake는 서명 대상의 SHA-256에 서명한다([handshake v2](handshake.md) "흐름 (SSH 경로)").
 
 ## 토큰 비교

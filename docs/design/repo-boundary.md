@@ -4,7 +4,7 @@
 
 ## 원칙
 
-- 이 레포는 "두 기기 사이에 인증된 바이트 채널을 만들고 유지하는 일"을 맡는다. 프레임 형식, 전송(SSH·P2P), handshake와 인증, 기기 ID, 토폴로지 질의 형식, relay 배포물이 여기에 있다.
+- 이 레포는 "두 기기 사이에 인증된 바이트 채널을 만들고 유지하는 일"을 맡는다. 프레임 형식, 전송(SSH·P2P), handshake와 인증, 기기 ID, 토폴로지 질의 형식, rendezvous 서버와 그 배포물이 여기에 있다.
 - tasty는 "그 채널로 무엇을 주고받는가"를 맡는다. attach 도메인 메시지, 점유, mirror, 화면, 설정 저장, 번역 문구가 tasty에 남는다.
 - 와이어 형식(프레임 바이트)은 바꾸지 않고 옮긴다. handshake만 v2로 바꾼다([handshake v2](handshake.md)).
 - 이 레포는 tasty의 데이터 디렉터리(`tasty_home`, `TASTY_HOME`), 환경 변수, 프로필 파일 형식을 모른다. 필요한 값은 소비자가 인자로 준다.
@@ -17,16 +17,17 @@
 | SSH 실행 | `tasty-net-ssh` | `ssh` 경로 찾기, 공통 옵션, `-L` 터널, 포트 발견, 셸 감지, 취소, backoff, 리스너 판정 |
 | 전송·handshake | `tasty-net-transport` | 전송 trait, 논리 채널, handshake v2 양쪽 함수, 역할, 거절 사유, bulk 자격, 요청 채널, heartbeat, 시도 취소, 강제 종료와 읽기 깨우기 |
 | 기기 ID·토큰 | `tasty-net-identity` | 기기 키 생성·저장·로드, 서명, 연결 토큰, 권한 걸린 파일, TOFU 판정 |
-| P2P | `tasty-net-p2p` | iroh endpoint, 경로 감시와 직접 경로 정책, 페어링 메시지·허용 목록 검사 |
+| P2P | `tasty-net-p2p` | P2P 소켓, NAT 판별, 펀칭, quinn 연결, 기기 키 인증, 페어링 메시지·허용 목록 검사, 연결 정보·설정값 조회 |
+| rendezvous 서버 | `tasty-net-rendezvous` | 조정 프로토콜, STUN 반사, 서버 본체와 실행 파일 |
 | 토폴로지 | `tasty-net-topology` | 노드·엣지 모델, 질의·결과 메시지, capability 이름, 탐색 알고리즘, 응답 측 공통 함수 |
-| relay 배포물 | `relay/` | 설정 예시, compose 예시, 설정 검사, 운영 안내, 접속 허용 콜백의 공개 규약 |
+| rendezvous 배포물 | `rendezvous/`(지금의 `relay/`를 바꾼다) | 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사, 운영 안내 |
 
 ## tasty에 남을 것
 
 - attach 도메인 메시지: `StreamControl`, `StructuralOp`, `ForceDetachNotice`, descriptor, `*_CAPABILITY` 상수(`ipc.stream.*`), `InheritCwd`.
 - 연결별 프레임 분류와 push sink(`StreamHub`), 점유(`OccupancyRegistry`), mirror, 재연결 정책(언제 다시 거는가), 자기 인스턴스 ID 생성.
 - 원격 프로필 해석·저장, 프로필에서 `SshTarget`을 만드는 일, 셸 감지 결과 저장.
-- 번역 문구(i18n), UI, 설정 값 저장(heartbeat 시간, 공개 설정, 기본 relay 주소).
+- 번역 문구(i18n), UI, 설정 값 저장(heartbeat 시간, 공개 설정, P2P 켜짐, 기본 rendezvous 서버 주소와 공개키).
 - 일반 JSON-RPC 요청·응답 루프와 메서드 dispatch. 포워딩 포트를 attach 전용으로 좁히는 일([위협 모델](threat-model.md)).
 
 ## 파일 단위 경계 (tasty 698aa49e03)

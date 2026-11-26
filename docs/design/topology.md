@@ -9,17 +9,19 @@
 | `Node` | `device_id`(모르면 빈 값), `display_name`(선택), `status: NodeStatus`, `reason`(선택, 예: `route_broken`. 응답이 온전히 오지 않았으면 `incomplete`), `reported_by`(이 노드 상태를 만든 기기, 선택), `peer_hint`(소비자가 준 표시 이름, 선택), `explored_at`(응답 받은 시각, Unix ms, 표시용. 마감 판정에 쓰지 않는다) |
 | `NodeStatus` | `online` · `offline`(정의 파일 방식에서만) · `auth_rejected`(인증 단계에서 연결이 거절됨. 인증을 못 하는 구버전 포함) · `no_capability`(연결은 되지만 상대 `caps`에 `net.topology`가 없음) · `timed_out` · `sharing_off`(공개 꺼짐) |
 | `Edge` | `dialer: DeviceId`, `acceptor: DeviceId`, `holder: dialer \| acceptor`, `transport: TransportKind`, `rtt_ms`(선택), `connected_at`(Unix ms), `workspace`(선택, `WorkspaceRef{id, name}` — 공개 범위에 따라 빠짐) |
-| `TransportKind` | `ssh_forward` · `ssh_role_reversed` · `p2p_direct` · `p2p_relay` |
+| `TransportKind` | `ssh_forward` · `ssh_role_reversed` · `ssh_inbound` · `p2p_udp` |
 
 - 엣지는 연결 방향(dialer → acceptor)과 holder를 따로 담는다. 역할 반전과 P2P에서 둘이 다르기 때문이다([전송 추상화](transport.md) "역할").
 - 같은 두 기기 사이 attach가 여럿이면 엣지도 여럿이다. 같은 `(dialer, acceptor, holder, transport, workspace)`는 하나로 합친다.
-- P2P 엣지의 `transport`와 `rtt_ms`는 선택 경로(`Path::is_ip`·`is_relay`·`rtt`)에서 온다.
+- `TransportKind` 값은 transport 연결 목록의 `PathKind`와 같다([전송 추상화](transport.md#연결-목록)). `p2p_udp`는 펀칭된 직접 UDP 경로의 QUIC 연결이다. 중계 경로가 없으므로 iroh 설계의 `p2p_direct`·`p2p_relay` 구분은 없앤다. `ssh_inbound`는 SSH 포워딩으로 들어온 루프백 연결을 받은 쪽의 값이다(받는 쪽은 정방향인지 역할 반전인지를 holder로만 안다).
+- P2P 엣지의 `rtt_ms`는 P2P 연결의 RTT(`P2pConnection::rtt`)에서 온다. SSH 엣지는 `rtt_ms`가 없다.
+- 이 값 바꿈은 문서 결정이다. 지금 topology 크레이트 코드는 다른 작업이 고치고 있어 이번에 바꾸지 않는다. 와이어 값이 바뀌므로 그 작업이나 후속 작업이 같이 맞춘다.
 - SSH 엣지의 `transport`는 링크의 holder에서 온다. transport `peer()`의 전송 종류가 `Ssh`·`Tcp`이고 holder가 dialer면 `ssh_forward`, acceptor면 `ssh_role_reversed`다(위 "역할" 표). 메모리 전송 링크는 시험용이라 엣지가 아니다. 대응표는 `tasty_net_topology::TransportKind` 문서 주석에 있다.
 - 기기가 자기 자신에 대해 답한 노드는 `reported_by`가 없다. 다른 기기에 대해 보고한 노드(실패 관측, `no_capability`, 경로 중단의 `origin`)에는 보고한 기기가 들어 있다.
 
 ## 엣지 목록 입력
 
-엣지를 실제로 모으는 일은 tasty가 한다(점유 레지스트리, 연결 등록). 이 레포는 입력 형식 `LocalLink{peer, local_side, holder, transport, rtt, connected_at, workspace, kind}`와 집계 함수를 준다.
+엣지의 데이터 원천은 transport의 연결 목록이다([전송 추상화](transport.md#연결-목록)). 연결 목록의 `connected` 항목과 그 위 attach 링크가 `LocalLink`의 `peer`·`local_side`·`holder`·`transport`(= `path`)·`rtt`·`connected_at`을 준다. workspace처럼 도메인 값과 점유 정보를 붙이는 일은 tasty가 한다(점유 레지스트리). topology는 transport에 의존하지 않으므로 변환은 소비자나 transport 쪽 도우미가 한다. 이 레포는 입력 형식 `LocalLink{peer, local_side, holder, transport, rtt, connected_at, workspace, kind}`와 집계 함수를 준다.
 
 - `local_side`(`dialer` · `acceptor`)는 이 기기가 그 링크를 열었는지 받았는지다. 집계는 이 값으로 엣지의 `dialer`·`acceptor`를 채운다.
 - `kind`가 `attach`인 인증된 링크만 엣지가 된다. bulk·요청 채널, debug echo 연결은 넣지 않는다.
