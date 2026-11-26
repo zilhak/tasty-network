@@ -10,6 +10,25 @@ Status: under construction. Nothing here is used by a Tasty release yet.
 
 See the [design documents](docs/design/index.md).
 
+## Development
+
+After cloning, run once:
+
+```bash
+bash scripts/dev-setup.sh
+```
+
+It points `core.hooksPath` at `.githooks`, so commits, merges, and pushes run the checks, and prepares shellcheck and the cargo dependencies. All checks go through one entry point:
+
+```bash
+bash scripts/check.sh          # fmt, shellcheck, no-tasty-deps, clippy, test
+bash scripts/check.sh help     # every step
+```
+
+- [Branches](docs/dev-guide/branching.md): git-flow with `develop`, `release`, and `main`, as in Tasty
+- [Git hooks](docs/dev-guide/git-hooks.md)
+- [CI](docs/dev-guide/ci.md)
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

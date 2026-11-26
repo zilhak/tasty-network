@@ -1,0 +1,36 @@
+# CI
+
+워크플로는 `.github/workflows/ci.yml` 하나다. `develop`·`release`·`main` push, 이 세 브랜치를 base로 한 PR, 수동 실행(`workflow_dispatch`)에서 돈다. 모든 검사는 `scripts/check.sh`의 단계를 부르므로 로컬과 훅에서 같은 명령으로 다시 돌릴 수 있다.
+
+## 잡
+
+| 잡 | 러너 | 단계 |
+|---|---|---|
+| `fmt` | `ubuntu-latest` | `scripts/check.sh fmt` |
+| `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, `scripts/check.sh test --no-fail-fast` |
+| `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`) |
+| `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
+
+- 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
+- 같은 브랜치의 새 push는 앞 실행을 취소하지 않는다. PR은 마지막 커밋만 돌린다.
+- Windows 잡은 Git Bash(`shell: bash`)로 돈다.
+
+## 툴체인
+
+잡마다 `scripts/install-toolchain.sh`가 `rust-toolchain.toml`의 채널을 rustfmt·clippy와 함께 설치한다. `RUSTUP_AUTO_INSTALL=0`이라 그 밖의 툴체인을 몰래 받지 않는다.
+
+## 동작 수준 기준과의 관계
+
+- D1(세 OS CI)은 이 워크플로 실행 하나의 `fmt` 잡과 `clippy-test` 세 잡의 결론으로 본다.
+- D7(tasty 의존 없음)은 `repo-checks` 잡의 `no-tasty-deps` 단계 결론으로 본다.
+- 기준과 증거 형식의 정본은 [동작 수준 기준](../design/done-criteria.md)이다.
+
+## cargo deny
+
+- `deny.toml`의 licenses·bans·sources를 본다. 라이선스 허용 목록은 tasty `deny.toml`과 같다. git 의존과 crates.io 밖의 레지스트리는 받지 않는다.
+- advisories는 보지 않는다. 새 보안 공지는 커밋과 무관하게 나와 바뀐 것이 없는 커밋의 실행도 실패시키기 때문이다. 외부 의존(iroh 등)이 들어오는 작업에서 따로 잡을 둘지 정한다.
+- cargo-deny는 공식 릴리스 아카이브를 받아 워크플로에 고정한 SHA-256과 대조한 뒤 쓴다.
+
+## shellcheck
+
+`scripts/install-shellcheck.sh`가 러너에 shellcheck가 없을 때만 고정 판(SHA-256 대조)을 잡의 임시 폴더에 받는다.
