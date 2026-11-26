@@ -1,9 +1,13 @@
-//! The child creation hook. Every `ssh` child of this crate is created through a [`SpawnHook`].
+//! How this crate starts `ssh`: the program, host key checking, and the child creation hook.
+//! Every `ssh` child of this crate is created through a [`SpawnHook`].
 
 use std::fmt;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
+
+use crate::{SshTarget, push_common_opts, resolve_ssh_path};
 
 /// Signature of a custom child creation function.
 pub type SpawnFn = dyn Fn(Command) -> io::Result<Child> + Send + Sync;
@@ -48,6 +52,86 @@ impl fmt::Debug for SpawnHook {
             .field("custom", &self.custom.is_some())
             .finish()
     }
+}
+
+/// How to start `ssh`: the program, whether host keys are checked automatically, and the
+/// child creation hook. Tunnels and port discovery take it.
+#[derive(Clone, Debug)]
+pub struct SshLauncher {
+    program: PathBuf,
+    verify: bool,
+    spawn_hook: SpawnHook,
+}
+
+impl SshLauncher {
+    /// Starts `program` as ssh, without automatic host key checking and with the default hook.
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            verify: false,
+            spawn_hook: SpawnHook::default(),
+        }
+    }
+
+    /// Starts the system ssh ([`resolve_ssh_path`]).
+    pub fn system() -> Self {
+        Self::new(resolve_ssh_path())
+    }
+
+    /// With `verify`, `-o StrictHostKeyChecking=accept-new` goes before the target's extra
+    /// options and wins over them. Without it this crate passes no host key option, and the
+    /// target's options, the ssh config, or the ssh default decide.
+    pub fn with_verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
+        self
+    }
+
+    /// Creates every child of this launcher through `hook`.
+    pub fn with_spawn_hook(mut self, hook: SpawnHook) -> Self {
+        self.spawn_hook = hook;
+        self
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn verifies_host_keys(&self) -> bool {
+        self.verify
+    }
+
+    pub fn spawn_hook(&self) -> &SpawnHook {
+        &self.spawn_hook
+    }
+
+    /// The ssh command for `target`: common options, `before` (more options), the destination,
+    /// then `after` (the remote command).
+    pub(crate) fn command(&self, target: &SshTarget, before: &[String], after: &[&str]) -> Command {
+        let mut args: Vec<String> = Vec::new();
+        push_common_opts(&mut args, target, self.verify);
+        args.extend(before.iter().cloned());
+        args.push(target.destination.clone());
+        args.extend(after.iter().map(|a| (*a).to_string()));
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&args);
+        // A GUI host (Windows subsystem, no console) runs this in process. Without
+        // CREATE_NO_WINDOW Windows opens a new console window for ssh.exe.
+        hide_console(&mut cmd);
+        cmd
+    }
+}
+
+/// Keeps a console subsystem child from opening a new console window on Windows
+/// (`CREATE_NO_WINDOW`). It does nothing on other systems.
+pub(crate) fn hide_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW of winbase.h, written out to avoid a windows-sys dependency.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 #[cfg(test)]
@@ -95,5 +179,32 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(format!("{hook:?}").contains("custom: true"));
+    }
+
+    #[test]
+    fn the_launcher_puts_the_destination_between_options_and_the_remote_command() {
+        let launcher = SshLauncher::new("/opt/ssh").with_verify(true);
+        assert_eq!(launcher.program(), Path::new("/opt/ssh"));
+        assert!(launcher.verifies_host_keys());
+        assert!(launcher.spawn_hook().is_default());
+        let mut target = SshTarget::parse("me@box");
+        target.extra_options = vec!["ProxyJump=bastion".into()];
+        let cmd = launcher.command(&target, &["-N".to_string()], &["prog", "port"]);
+        assert_eq!(cmd.get_program(), "/opt/ssh");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let dest = args
+            .iter()
+            .position(|a| a == "me@box")
+            .expect("destination");
+        let n = args.iter().position(|a| a == "-N").expect("-N");
+        let jump = args
+            .iter()
+            .position(|a| a == "ProxyJump=bastion")
+            .expect("extra option");
+        assert!(jump < n && n < dest, "{args:?}");
+        assert_eq!(&args[dest + 1..], ["prog", "port"]);
     }
 }
