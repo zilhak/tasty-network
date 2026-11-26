@@ -174,6 +174,14 @@ impl SshServer {
         );
     }
 
+    /// The OpenSSH listener's PID; the Rust server runs in the test process.
+    pub fn pid(&self) -> Option<u32> {
+        match &self.running {
+            Running::OpenSsh { child, .. } => Some(child.pid()),
+            Running::Russh(_) => None,
+        }
+    }
+
     /// `openssh` or `russh`.
     pub fn kind(&self) -> &'static str {
         match self.running {
