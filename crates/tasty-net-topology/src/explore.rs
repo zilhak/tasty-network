@@ -21,7 +21,7 @@ use crate::local::{
     self_node,
 };
 use crate::message::{
-    MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
+    Done, MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
     Suppressed, split_done, split_result, validate_route,
 };
 use crate::model::{Edge, EdgeKey, Node, NodeReason, NodeStatus};
@@ -134,6 +134,8 @@ pub struct Exploration {
     edge_keys: HashSet<EdgeKey>,
     /// The parts received per `(branch, from)`, to notice a missing one.
     parts: HashMap<(String, DeviceId), PartTrack>,
+    /// The dones received per `(branch, from)`, counted like the parts.
+    done_parts: HashMap<(String, DeviceId), PartTrack>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,37 +256,55 @@ impl Exploration {
         }
     }
 
-    /// The answer of `branch` by `from` ended (its done arrived): incomplete parts mark
-    /// `from` incomplete.
+    /// Counts one done of `branch` by `from`. This device's own dones are not counted (its
+    /// own answer was merged as its local view).
+    fn track_done(&mut self, done: &Done) {
+        if done.from == self.me {
+            return;
+        }
+        let track = self
+            .done_parts
+            .entry((done.branch.clone(), done.from))
+            .or_default();
+        track.seen.insert(done.part);
+        if !done.more {
+            track.last = Some(done.part);
+        }
+    }
+
+    /// The answer of `branch` by `from` ended (its last done arrived): missing result
+    /// parts or dones mark `from` incomplete.
     /// A done with no part at all before it is incomplete too: the answer's first part
     /// was lost. This device's own done carries no tracked parts and is skipped.
     fn check_parts(&mut self, branch: &str, from: &DeviceId, unix_ms: u64) {
         if *from == self.me {
             return;
         }
-        if self
-            .parts
-            .get(&(branch.to_owned(), *from))
-            .is_none_or(|t| !t.complete())
-        {
-            self.mark_incomplete(*from, unix_ms);
+        let key = (branch.to_owned(), *from);
+        let parts_broken = self.parts.get(&key).is_none_or(|t| !t.complete());
+        let dones_broken = self.done_parts.get(&key).is_some_and(|t| !t.complete());
+        if parts_broken || dones_broken {
+            self.mark_incomplete(*from, None, unix_ms);
         }
     }
 
-    /// Every answer with a missing part marks its device incomplete.
+    /// Every answer with a missing result part or done marks its device incomplete.
     fn check_all_parts(&mut self, unix_ms: u64) {
         let broken: Vec<DeviceId> = self
             .parts
             .iter()
+            .chain(&self.done_parts)
             .filter(|(_, t)| !t.complete())
             .map(|((_, from), _)| *from)
             .collect();
         for device in broken {
-            self.mark_incomplete(device, unix_ms);
+            self.mark_incomplete(device, None, unix_ms);
         }
     }
 
-    fn mark_incomplete(&mut self, device: DeviceId, unix_ms: u64) {
+    /// Marks `device` timed out with reason incomplete, over any answer of its own. A new
+    /// node records `reporter`.
+    fn mark_incomplete(&mut self, device: DeviceId, reporter: Option<DeviceId>, unix_ms: u64) {
         let key = NodeKey::Id(device);
         match self.node_index.get(&key).copied() {
             Some((at, _)) => {
@@ -300,7 +320,7 @@ impl Exploration {
                     display_name: None,
                     status: NodeStatus::TimedOut,
                     reason: Some(NodeReason::Incomplete),
-                    reported_by: None,
+                    reported_by: reporter,
                     peer_hint: None,
                     explored_at: unix_ms,
                 });
@@ -308,22 +328,10 @@ impl Exploration {
         }
     }
 
-    /// `reporter` could not relay the answer of `device` whole. A direct answer of `device`
-    /// that did arrive is kept (as for any report).
+    /// `reporter` could not relay the answer of `device` whole, or its done never came:
+    /// part of that answer is lost even when other parts of it arrived.
     fn report_incomplete(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
-        self.merge_node(
-            Node {
-                device_id: Some(device),
-                display_name: None,
-                status: NodeStatus::TimedOut,
-                reason: Some(NodeReason::Incomplete),
-                reported_by: Some(*reporter),
-                peer_hint: None,
-                explored_at: unix_ms,
-            },
-            reporter,
-            unix_ms,
-        );
+        self.mark_incomplete(device, Some(*reporter), unix_ms);
     }
 
     fn report_timed_out(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
@@ -459,6 +467,7 @@ impl Agent {
             edges: Vec::new(),
             edge_keys: HashSet::new(),
             parts: HashMap::new(),
+            done_parts: HashMap::new(),
         };
         if request.origin == me {
             self.explorations.insert(request_id.clone(), exploration);
@@ -1162,6 +1171,7 @@ impl Agent {
         match reply {
             Message::Result(part) => exploration.merge_part(part, now.unix_ms),
             Message::Done(done) => {
+                exploration.track_done(&done);
                 for device in done.timed_out {
                     exploration.report_timed_out(device, &done.from, now.unix_ms);
                 }
@@ -1246,6 +1256,9 @@ impl Agent {
                     self.children.remove(&branch);
                     if !child.answered {
                         wait.timed_out.push(child.peer);
+                    } else if !wait.incomplete.contains(&child.peer) {
+                        // Its answer began but its last done never came.
+                        wait.incomplete.push(child.peer);
                     }
                 }
             }

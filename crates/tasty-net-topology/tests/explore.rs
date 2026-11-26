@@ -1047,6 +1047,7 @@ fn replies_from_unexpected_links_or_senders_are_dropped() {
         timed_out: Vec::new(),
         is_final: true,
         more: false,
+        part: 0,
         incomplete: Vec::new(),
     };
     net.with_agent(id(A), |agent, local, out, now| {
@@ -1282,6 +1283,7 @@ fn a_done_whose_answer_never_arrived_marks_its_sender_incomplete() {
         timed_out: Vec::new(),
         is_final: false,
         more: false,
+        part: 0,
         incomplete: Vec::new(),
     });
     net.with_agent(id(A), |agent, local, out, now| {
@@ -1293,6 +1295,75 @@ fn a_done_whose_answer_never_arrived_marks_its_sender_incomplete() {
     let b = x.node(&id(B)).unwrap();
     assert_eq!(b.status, NodeStatus::TimedOut);
     assert_eq!(b.reason, Some(NodeReason::Incomplete));
+}
+
+#[test]
+fn a_missing_done_between_others_marks_its_sender_incomplete() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    let branch = queued_branch(&net, A, B);
+    // B's answer is whole, but of its three dones the middle one never arrives.
+    net.queue.clear();
+    let part = Message::Result(tasty_net_topology::ResultPart {
+        request_id: rid.clone(),
+        branch: branch.clone(),
+        from: id(B),
+        return_path: vec![id(A)],
+        part: 0,
+        last: true,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+    });
+    let done = |part: u32, more: bool| {
+        Message::Done(tasty_net_topology::Done {
+            request_id: rid.clone(),
+            branch: branch.clone(),
+            from: id(B),
+            return_path: vec![id(A)],
+            timed_out: Vec::new(),
+            is_final: false,
+            more,
+            part,
+            incomplete: Vec::new(),
+        })
+    };
+    for message in [part, done(0, true), done(2, false)] {
+        net.with_agent(id(A), |agent, local, out, now| {
+            agent.on_message(&id(B), message, local, out, now)
+        });
+    }
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+}
+
+#[test]
+fn a_last_done_that_fails_to_send_is_reported_by_the_waiting_parent() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    // C answers, but its done does not reach B.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(C) && to == id(B) && matches!(m, Message::Done(_))
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let c = x.node(&id(C)).unwrap();
+    assert_eq!(c.status, NodeStatus::TimedOut);
+    assert_eq!(c.reason, Some(NodeReason::Incomplete));
+    assert_eq!(status(x, B), NodeStatus::Online);
+    // B's done carries C as incomplete, not as timed out.
+    assert!(net.log.iter().any(|(f, t, m)| {
+        *f == id(B)
+            && *t == id(A)
+            && matches!(m, Message::Done(d) if d.from == id(B)
+            && d.incomplete == vec![id(C)] && d.timed_out.is_empty())
+    }));
 }
 
 #[test]
@@ -1408,6 +1479,7 @@ fn a_reply_on_a_waited_link_but_for_another_branch_is_dropped() {
         timed_out: vec![id(D)],
         is_final: true,
         more: false,
+        part: 0,
         incomplete: Vec::new(),
     };
     net.with_agent(id(A), |agent, local, out, now| {
