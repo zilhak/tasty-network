@@ -8,19 +8,29 @@
 //!
 //! | Item | Consumer |
 //! |------|----------|
-//! | [`SshTarget`] · [`PortMode`] | consumers that connect over SSH |
+//! | [`SshTarget`] · [`PortMode`] · [`Backoff`] | consumers that connect over SSH |
 //! | [`SshLauncher`] · [`resolve_ssh_path`] | consumers that start the system `ssh` (program, host key checking, hook) |
 //! | [`SpawnHook`] · [`SpawnFn`] | hosts that bind `ssh` children to their own lifetime |
+//! | [`SshTunnel`] · [`TunnelError`] | consumers that open `-L` tunnels (shared through an `Arc`; the last reference reaps the child) |
 //! | [`SshCancel`] ([`SshCancelScope`] is its return type) | consumers that stop a port discovery from another thread |
 //! | [`discover_remote_port`] · [`PortDiscoveryConfig`] · [`decode_port`] · [`PortDecodeError`] | consumers that read the remote record over SSH (the record decoder is passed in) |
 //! | [`detect_port_mode`] | consumers that find which mode reaches a remote host (shell detection) |
 //! | [`SSH_CONNECT_TIMEOUT`] · [`PORT_DISCOVERY_STEP_TIMEOUT`] · [`PORT_DISCOVERY_TOTAL_TIMEOUT`] | consumers that match progress display and messages to the same values |
 //! | [`PortDiscoveryError`] · [`PortDiscoveryFailureKind`] · [`PortModeParseError`] | consumers that branch on the failure cause (messages come from the kind, `Display` is fixed English) |
 //! | [`PORT_COMMAND_EXITED_INSTANCE_CODE`] | the remote subcommand and port discovery, which share this exit code |
+//! | [`tunnel_drop_totals`] | hosts that measure the time spent releasing tunnels |
+//! | [`RemoteListenerAbsent`] · [`connection_closed_error`] · [`is_dropped_connection`] | consumers that classify a failure behind a tunnel with [`SshTunnel::explain_failure`] |
+//! | [`ListenerVerdict`] | consumers that judge a tunnel's failures after handing the tunnel elsewhere |
+//!
+//! Profile handling (building an [`SshTarget`] from a stored profile, saving detection results)
+//! is not here; the consumer does it with these value types. The crate reads no environment
+//! variable: host key checking is [`SshLauncher::with_verify`].
 
 mod cancel;
 mod discovery;
+mod listener;
 mod spawn;
+mod tunnel;
 
 pub use cancel::{SshCancel, SshCancelScope};
 pub use discovery::{
@@ -28,7 +38,11 @@ pub use discovery::{
     PortDecodeError, PortDiscoveryConfig, PortDiscoveryError, PortDiscoveryFailureKind, PortMode,
     PortModeParseError, decode_port, detect_port_mode, discover_remote_port,
 };
+pub use listener::{
+    ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
+};
 pub use spawn::{SpawnFn, SpawnHook, SshLauncher};
+pub use tunnel::{Backoff, SshTunnel, TunnelError, tunnel_drop_totals};
 
 use std::path::PathBuf;
 use std::time::Duration;
