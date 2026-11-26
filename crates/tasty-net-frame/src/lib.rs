@@ -11,11 +11,13 @@
 //! because every transport uses the same ones.
 #![forbid(unsafe_code)]
 
+mod bulk;
 mod read_failure;
 
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
+pub use bulk::{BULK_CHUNK_HEADER_LEN, decode_bulk_chunk, encode_bulk_chunk};
 pub use read_failure::ReadFailure;
 
 /// Frame header length: a 1-byte tag and a 4-byte big-endian payload length.
