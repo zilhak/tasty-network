@@ -1282,7 +1282,7 @@ mod tests {
         }
 
         impl FakeSsh {
-            /// `on_port` runs for the subcommand (last argument `port`), `on_file` for any
+            /// `on_port` runs for the subcommand (last argument `port`) and the script exits after it; `on_file` runs for any
             /// other remote command.
             fn new(name: &str, on_port: &str, on_file: &str) -> Self {
                 static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -1295,7 +1295,7 @@ mod tests {
                 let script = format!(
                     "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\n\
                      printf '%s\\n' \"$last\" >> '{}'\n\
-                     if [ \"$last\" = port ]; then {on_port}; fi\n{on_file}\n",
+                     if [ \"$last\" = port ]; then {on_port}\nexit; fi\n{on_file}\n",
                     log.display()
                 );
                 crate::write_test_script(&base, &script);
