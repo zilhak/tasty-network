@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Writes `line` to stderr directly. The test harness captures `print!`/`eprint!` of passing
@@ -39,6 +40,33 @@ impl Transcript {
     }
 }
 
+/// The child PIDs a [`Proc`] saw right before it was killed (see [`Proc::track_children`]).
+#[derive(Clone, Default)]
+pub struct ChildList(Arc<Mutex<Vec<u32>>>);
+
+impl ChildList {
+    fn add(&self, pids: Vec<u32>) {
+        let mut list = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for pid in pids {
+            if !list.contains(&pid) {
+                list.push(pid);
+            }
+        }
+    }
+
+    pub fn pids(&self) -> Vec<u32> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// How long a killed process's stdout reader may take to pass the last lines on. A child that
+/// shares the killed process's stdout (the tunnel ssh shares the dialer's) keeps the pipe
+/// open, so the reader may not end within it.
+const OUTPUT_END_LIMIT: Duration = Duration::from_secs(2);
+
 /// A child process with piped stdio. Its stdout lines come through [`Proc::expect`]; stdout
 /// and stderr both go to its [`Transcript`]. Dropping it kills and reaps the child.
 pub struct Proc {
@@ -48,6 +76,8 @@ pub struct Proc {
     lines: Receiver<String>,
     pub transcript: Transcript,
     status: Option<ExitStatus>,
+    stdout_reader: Option<JoinHandle<()>>,
+    children: Option<ChildList>,
 }
 
 fn relay(
@@ -55,7 +85,7 @@ fn relay(
     from: impl Read + Send + 'static,
     transcript: Transcript,
     tx: Option<mpsc::Sender<String>>,
-) {
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for line in BufReader::new(from).lines() {
             let Ok(line) = line else { break };
@@ -67,7 +97,7 @@ fn relay(
                 None => transcript.push(format!("[{name} stderr] {line}")),
             }
         }
-    });
+    })
 }
 
 impl Proc {
@@ -81,18 +111,19 @@ impl Proc {
             .unwrap_or_else(|e| panic!("starting {name} ({command:?}) failed: {e}"));
         let transcript = Transcript::default();
         let (tx, lines) = mpsc::channel();
-        relay(
+        let stdout_reader = relay(
             name.into(),
             child.stdout.take().expect("stdout"),
             transcript.clone(),
             Some(tx),
         );
-        relay(
+        // The stderr reader is not joined; the transcript is read for stdout lines.
+        drop(relay(
             name.into(),
             child.stderr.take().expect("stderr"),
             transcript.clone(),
             None,
-        );
+        ));
         let stdin = child.stdin.take();
         Self {
             name: name.into(),
@@ -101,7 +132,15 @@ impl Proc {
             lines,
             transcript,
             status: None,
+            stdout_reader: Some(stdout_reader),
+            children: None,
         }
+    }
+
+    /// From now on, [`Proc::kill`] lists the process's children right before it kills it and
+    /// keeps their PIDs in the returned list, so children that outlive it can be ended too.
+    pub fn track_children(&mut self) -> ChildList {
+        self.children.get_or_insert_with(ChildList::default).clone()
     }
 
     pub fn pid(&self) -> u32 {
@@ -180,11 +219,37 @@ impl Proc {
         }
     }
 
-    /// Kills the process and reaps it.
+    /// Kills the process and reaps it. With [`Proc::track_children`], first lists its
+    /// children. Afterwards waits up to [`OUTPUT_END_LIMIT`] for the stdout reader to pass the
+    /// last lines to the transcript.
     pub fn kill(&mut self) {
         if self.status.is_none() {
+            if let Some(list) = &self.children {
+                match children_of(self.pid()) {
+                    Ok(pids) => list.add(pids),
+                    Err(e) => log(&format!("listing the children of {}: {e}", self.name)),
+                }
+            }
             let _killed = self.child.kill().is_ok();
             self.status = self.child.wait().ok();
+            self.join_stdout_reader();
+        }
+    }
+
+    fn join_stdout_reader(&mut self) {
+        let deadline = Instant::now() + OUTPUT_END_LIMIT;
+        while self
+            .stdout_reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(reader) = self.stdout_reader.take_if(|reader| reader.is_finished())
+            && reader.join().is_err()
+        {
+            log(&format!("the stdout reader of {} panicked", self.name));
         }
     }
 }

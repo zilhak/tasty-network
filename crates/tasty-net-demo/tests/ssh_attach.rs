@@ -16,10 +16,12 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use support::process::{Proc, Transcript, is_running, log, terminate, wait_all_gone};
+use support::process::{
+    ChildList, Proc, Transcript, children_of, is_running, log, terminate, wait_all_gone,
+};
 use support::sshd::SshServer;
 use support::{TempDir, ssh_path};
 use tasty_net_demo::field;
@@ -53,17 +55,53 @@ fn number<T: std::str::FromStr>(line: &str, key: &str) -> T {
 
 /// One test's processes. Every PID it learns is checked at the end. When a test fails
 /// before [`Scene::finish`], dropping it ends what still runs: the dialers, then every ssh
-/// child a dialer reported (they outlive a killed dialer), then the other tracked processes,
-/// and last the SSH server with its sessions (its field drops after this).
+/// child of a dialer (they outlive a killed dialer), then the other tracked processes, and
+/// last the SSH server with its sessions (its field drops after this).
 struct Scene {
     sshd: Option<SshServer>,
     dir: Option<TempDir>,
     record: PathBuf,
     tracked: Vec<(String, u32)>,
-    /// The dialers' transcripts, read again on drop: a test that fails while waiting for a
-    /// line has not tracked the ssh children reported before it.
-    dialers: Vec<Transcript>,
+    /// What each dialer left to find its ssh children by, read again on drop: a test that
+    /// fails while waiting for a line has not tracked the ssh children of the dialer yet.
+    dialers: Vec<DialerTrace>,
+    /// Filled on drop, before the SSH server ends, for a test of the failure path.
+    drop_report: Option<Arc<Mutex<Option<DropReport>>>>,
     finished: bool,
+}
+
+/// A dialer's transcript (its `ssh-spawned` lines) and the children it had when it was
+/// killed ([`Proc::track_children`]).
+struct DialerTrace {
+    transcript: Transcript,
+    children: ChildList,
+}
+
+/// What [`Scene`]'s drop tracked and what still ran after it ended them, before the SSH
+/// server ended.
+struct DropReport {
+    tracked: Vec<(String, u32)>,
+    left: Result<Vec<(String, u32)>, String>,
+}
+
+/// Ends the tracked processes that run, dialers first, then ssh children, then the rest, and
+/// waits until they are gone. Returns what still runs, or the error of a failed query.
+fn end_in_order(pids: &[(String, u32)]) -> Result<Vec<(String, u32)>, String> {
+    let rank = |what: &str| match what {
+        "demo-dialer" => 0,
+        w if w.starts_with("ssh ") => 1,
+        _ => 2,
+    };
+    let mut order = pids.to_vec();
+    order.sort_by_key(|(what, _)| rank(what));
+    for (what, pid) in &order {
+        // A failed query counts as running: ending a process that is gone is harmless.
+        if is_running(*pid).unwrap_or(true) {
+            log(&format!("ending {what} {pid} left by a failed test"));
+            terminate(*pid);
+        }
+    }
+    wait_all_gone(&order, Duration::from_secs(10))
 }
 
 impl Drop for Scene {
@@ -71,25 +109,36 @@ impl Drop for Scene {
         if self.finished {
             return;
         }
-        self.track_ssh_children();
-        let rank = |what: &str| match what {
-            "demo-dialer" => 0,
-            w if w.starts_with("ssh ") => 1,
-            _ => 2,
-        };
-        let mut order = self.tracked.clone();
-        order.sort_by_key(|(what, _)| rank(what));
-        for (what, pid) in &order {
-            // A failed query counts as running: ending a process that is gone is harmless.
-            if is_running(*pid).unwrap_or(true) {
-                log(&format!("ending {what} {pid} left by a failed test"));
-                terminate(*pid);
+        // A dialer that still runs: its children, before it is ended.
+        let dialers: Vec<u32> = self
+            .tracked
+            .iter()
+            .filter(|(what, _)| what == "demo-dialer")
+            .map(|(_, pid)| *pid)
+            .collect();
+        for pid in dialers {
+            if is_running(pid).unwrap_or(false) {
+                self.track_dialer_children(pid);
             }
         }
-        if let Ok(left) = wait_all_gone(&order, Duration::from_secs(10))
-            && !left.is_empty()
-        {
-            log(&format!("still running after a failed test: {left:?}"));
+        self.track_ssh_children();
+        let mut left = end_in_order(&self.tracked);
+        // With the ssh children gone, the killed dialers' stdout ends; an `ssh-spawned` line
+        // still in the pipe shows now.
+        let before = self.tracked.len();
+        self.track_ssh_children();
+        if self.tracked.len() > before {
+            left = end_in_order(&self.tracked);
+        }
+        match &left {
+            Ok(left) if left.is_empty() => {}
+            other => log(&format!("still running after a failed test: {other:?}")),
+        }
+        if let Some(report) = &self.drop_report {
+            *report.lock().unwrap_or_else(PoisonError::into_inner) = Some(DropReport {
+                tracked: self.tracked.clone(),
+                left,
+            });
         }
     }
 }
@@ -105,6 +154,7 @@ impl Scene {
             record,
             tracked: Vec::new(),
             dialers: Vec::new(),
+            drop_report: None,
             finished: false,
         }
     }
@@ -157,7 +207,11 @@ impl Scene {
         }
         let mut dialer = Proc::spawn("demo-dialer", command);
         self.track("demo-dialer", dialer.pid());
-        self.dialers.push(dialer.transcript.clone());
+        let children = dialer.track_children();
+        self.dialers.push(DialerTrace {
+            transcript: dialer.transcript.clone(),
+            children,
+        });
         let line = dialer.expect_prefix("dialer pid=", LOCAL_STEP);
         assert_eq!(number::<u32>(&line, "pid"), dialer.pid());
         dialer
@@ -171,9 +225,26 @@ impl Scene {
         line
     }
 
-    /// Tracks every ssh child the dialers reported so far.
+    /// Tracks the running children of the dialer `pid` (its ssh children).
+    fn track_dialer_children(&mut self, pid: u32) {
+        match children_of(pid) {
+            Ok(children) => {
+                for child in children {
+                    self.track("ssh child", child);
+                }
+            }
+            Err(e) => log(&format!("listing the children of demo-dialer {pid}: {e}")),
+        }
+    }
+
+    /// Tracks every ssh child the dialers reported so far, and the children a killed dialer
+    /// had.
     fn track_ssh_children(&mut self) {
-        let lines: Vec<String> = self.dialers.iter().flat_map(Transcript::lines).collect();
+        let lines: Vec<String> = self
+            .dialers
+            .iter()
+            .flat_map(|d| d.transcript.lines())
+            .collect();
         for line in lines {
             if line.starts_with("dialer ssh-spawned ") {
                 let role = field(&line, "role").unwrap_or("?").to_string();
@@ -182,10 +253,25 @@ impl Scene {
                 }
             }
         }
+        // After the reported ones, so those keep their role in the name.
+        let killed: Vec<u32> = self
+            .dialers
+            .iter()
+            .flat_map(|d| d.children.pids())
+            .collect();
+        for pid in killed {
+            self.track("ssh child", pid);
+        }
     }
 
     /// Ends the dialer with `quit` and checks a clean exit.
     fn quit_dialer(&mut self, mut dialer: Proc) {
+        self.track_ssh_children();
+        let children = children_of(dialer.pid())
+            .unwrap_or_else(|e| panic!("listing the children of the dialer: {e}"));
+        for child in children {
+            self.track("ssh child", child);
+        }
         dialer.send_line("quit");
         let status = dialer.wait_exit(LOCAL_STEP);
         self.track_ssh_children();
@@ -456,16 +542,20 @@ fn wrong_token_is_rejected_without_retry() {
 }
 
 /// A test that fails while waiting for the dialer leaves no process behind: the wait runs out
-/// (as a reconnect that does not come would) after the tunnel ssh started but before any ssh
-/// child was tracked, and dropping the scene ends the dialer, its ssh children, the server
-/// and sshd.
+/// (as a reconnect that does not come would) while the tunnel ssh runs and before any ssh
+/// child was tracked, and dropping the scene ends the dialer, its ssh children and the server
+/// before the SSH server, and then sshd.
 #[test]
 fn a_failed_wait_leaves_no_ssh_behind() {
     let _one = one_at_a_time();
     let mut dialer_lines: Option<Transcript> = None;
     let mut others: Vec<(String, u32)> = Vec::new();
+    let mut tunnel: Option<u32> = None;
+    let mut tunnel_ran_at_expiry: Option<bool> = None;
+    let report: Arc<Mutex<Option<DropReport>>> = Arc::default();
     let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut scene = Scene::new();
+        scene.drop_report = Some(Arc::clone(&report));
         if let Some(pid) = scene.sshd().pid() {
             others.push(("sshd".into(), pid));
         }
@@ -474,14 +564,49 @@ fn a_failed_wait_leaves_no_ssh_behind() {
         let record = scene.record.clone();
         let mut dialer = scene.start_dialer(&record);
         dialer_lines = Some(dialer.transcript.clone());
-        dialer.expect("\"role=tunnel\"", SSH_STEP, |l| {
+        let line = dialer.expect("\"role=tunnel\"", SSH_STEP, |l| {
             l.starts_with("dialer ssh-spawned ") && l.ends_with("role=tunnel")
         });
-        // Never matches: this wait runs out and the test body panics here.
-        dialer.expect("that never comes", Duration::from_secs(3), |_| false);
-        drop((server, dialer));
+        let pid: u32 = number(&line, "pid");
+        tunnel = Some(pid);
+        // Never matches: this wait runs out, and the test body panics with its message.
+        let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dialer.expect("that never comes", Duration::from_secs(3), |_| false)
+        }));
+        let Err(expiry) = waited else {
+            unreachable!("a wait that matches nothing returned")
+        };
+        tunnel_ran_at_expiry =
+            Some(is_running(pid).unwrap_or_else(|e| panic!("checking the tunnel ssh {pid}: {e}")));
+        let _kept = (server, dialer);
+        std::panic::resume_unwind(expiry);
     }));
     assert!(failed.is_err(), "the inner wait was meant to run out");
+    let tunnel = tunnel.expect("the dialer started a tunnel ssh");
+    assert_eq!(
+        tunnel_ran_at_expiry,
+        Some(true),
+        "the tunnel ssh {tunnel} ran when the wait ran out"
+    );
+
+    // What the scene's drop saw before the SSH server ended.
+    let seen = report
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .expect("the scene's drop reported");
+    assert!(
+        seen.tracked.iter().any(|(_, pid)| *pid == tunnel),
+        "the scene's drop tracked the tunnel ssh {tunnel}: {:?}",
+        seen.tracked
+    );
+    let left_before_sshd = seen
+        .left
+        .unwrap_or_else(|e| panic!("checking the processes before sshd ended: {e}"));
+    assert!(
+        left_before_sshd.is_empty(),
+        "still running before sshd ended: {left_before_sshd:?}"
+    );
 
     let lines = dialer_lines.expect("the dialer started").lines();
     let mut pids = others;
@@ -498,10 +623,12 @@ fn a_failed_wait_leaves_no_ssh_behind() {
     let left = wait_all_gone(&pids, Duration::from_secs(15))
         .unwrap_or_else(|e| panic!("checking the processes: {e}"));
     log(&format!(
-        "processes left after a failed wait: {} of {} ({} tunnel ssh; {})",
+        "processes left after a failed wait: {} of {} ({} tunnel ssh, running at expiry; \
+         tracked by the drop: {}; left before sshd ended: 0; {})",
         left.len(),
         pids.len(),
         tunnels,
+        seen.tracked.len(),
         pids.iter()
             .map(|(what, pid)| format!("{what} {pid}"))
             .collect::<Vec<_>>()
