@@ -1599,6 +1599,78 @@ fn a_neighbor_whose_first_part_fails_to_send_is_timed_out_with_a_reason() {
     assert_eq!(b.reported_by, Some(id(A)));
 }
 
+fn final_done(rid: &str, branch: &str, from: u8, return_path: Vec<DeviceId>) -> Message {
+    Message::Done(tasty_net_topology::Done {
+        request_id: rid.to_owned(),
+        branch: branch.to_owned(),
+        from: id(from),
+        return_path,
+        timed_out: Vec::new(),
+        is_final: true,
+        more: false,
+        part: 0,
+        incomplete: Vec::new(),
+    })
+}
+
+#[test]
+fn a_final_done_of_another_branch_does_not_end_a_remote_exploration() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B's real answer comes late.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(B) && to == id(A))
+            .then_some(100)
+            .filter(|_| !matches!(m, Message::Query(_)))
+    }));
+    let rid = net.explore(A, request(B, 0)).unwrap();
+    net.run_until(50);
+    // On B's link, B's final done for a branch A never sent.
+    let wrong = final_done(&rid, "another-branch", B, vec![id(A)]);
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(B), wrong, local, out, now)
+    });
+    assert_eq!(net.result(A, &rid).state(), ExplorationState::Running);
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, B), NodeStatus::Online);
+}
+
+#[test]
+fn a_route_hop_relays_only_the_final_done_of_the_branch_it_forwarded() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    // C's real answer comes late.
+    net.delay.push(Box::new(|from, to, m| {
+        (from == id(C) && to == id(B))
+            .then_some(100)
+            .filter(|_| !matches!(m, Message::Query(_)))
+    }));
+    let request = ExploreRequest {
+        origin: id(C),
+        route: vec![id(B)],
+        depth: 0,
+        timeout: TIMEOUT,
+    };
+    let rid = net.explore(A, request).unwrap();
+    net.run_until(50);
+    // On C's link, C's final done for a branch B never forwarded.
+    let wrong = final_done(&rid, "another-branch", C, vec![id(B), id(A)]);
+    net.with_agent(id(B), |agent, local, out, now| {
+        agent.on_message(&id(C), wrong, local, out, now)
+    });
+    assert!(
+        net.queue
+            .iter()
+            .all(|m| !matches!(&m.message, Message::Done(_)))
+    );
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(status(x, C), NodeStatus::Online);
+}
+
 #[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);

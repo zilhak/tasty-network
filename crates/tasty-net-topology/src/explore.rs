@@ -126,6 +126,9 @@ pub struct Exploration {
     route: Vec<DeviceId>,
     /// The link the query left on; `None` when this device is the origin.
     first_hop: Option<DeviceId>,
+    /// The branch of the query this device sent (or answered itself as the origin): a
+    /// final done made by the first hop (or by this device) must carry it.
+    first_branch: String,
     me: DeviceId,
     deadline: Instant,
     state: ExplorationState,
@@ -443,6 +446,11 @@ struct Answered {
 /// that link.
 struct RouteForward {
     next: DeviceId,
+    /// The branch of the forwarded query.
+    branch: String,
+    /// The devices that may end the query past this hop: the later route hops and the
+    /// origin.
+    ends: Vec<DeviceId>,
     expires: Instant,
 }
 
@@ -525,7 +533,7 @@ impl Agent {
             path: Vec::new(),
             depth: request.depth,
             remaining_ms: millis(timeout.saturating_sub(self.config.hop_reserve)),
-            branch,
+            branch: branch.clone(),
         };
         let mut exploration = Exploration {
             request_id: request_id.clone(),
@@ -533,6 +541,7 @@ impl Agent {
             route: request.route.clone(),
             first_hop: (request.origin != me)
                 .then(|| request.route.first().copied().unwrap_or(request.origin)),
+            first_branch: branch,
             me,
             deadline: now.mono + timeout,
             state: ExplorationState::Running,
@@ -911,15 +920,22 @@ impl Agent {
         let next = query.route.get(at + 1).copied().unwrap_or(query.origin);
         let forward = Query {
             remaining_ms: child_ms,
-            branch,
+            branch: branch.clone(),
             ..query.clone()
         };
         match out.send(&next, &Message::Query(forward)) {
             Ok(()) => {
+                let ends = query.route[at + 1..]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(query.origin))
+                    .collect();
                 self.routes.insert(
                     query.request_id.clone(),
                     RouteForward {
                         next,
+                        branch,
+                        ends,
                         expires: deadline,
                     },
                 );
@@ -1121,14 +1137,35 @@ impl Agent {
             }
         }
         // A final done for this device's own exploration counts only from the link the
-        // end can come on: the first hop, or this device itself when it is the origin.
+        // end can come on (the first hop, or this device itself when it is the origin),
+        // made by a device that can end it (the origin or a route hop), and, when the
+        // first hop itself made it, for the branch this device sent.
         if return_path(&reply).len() == 1
             && let Message::Done(done) = &reply
             && done.is_final
             && let Some(exploration) = self.explorations.get(&done.request_id)
-            && link != exploration.first_hop.as_ref()
         {
-            tracing::debug!("topology final done from a link that cannot end it dropped");
+            let subject = exploration.first_hop.unwrap_or(me);
+            let can_end = done.from == exploration.origin || exploration.route.contains(&done.from);
+            if link != exploration.first_hop.as_ref()
+                || !can_end
+                || (done.from == subject && done.branch != exploration.first_branch)
+            {
+                tracing::debug!("topology final done that cannot end the exploration dropped");
+                return;
+            }
+        }
+        // The same at a route hop for a final done from the hop it forwarded to: made by
+        // a later route hop or the origin, and by the next hop only for the forwarded
+        // branch. Its record is kept for the real one.
+        if let Message::Done(done) = &reply
+            && done.is_final
+            && let Some(r) = self.routes.get(&done.request_id)
+            && link == Some(&r.next)
+            && !self.children.contains_key(&branch)
+            && (!r.ends.contains(&done.from) || (done.from == r.next && done.branch != r.branch))
+        {
+            tracing::debug!("topology final done that cannot end the route dropped");
             return;
         }
         let relay_key = (reply.request_id().to_owned(), branch.clone(), from);
