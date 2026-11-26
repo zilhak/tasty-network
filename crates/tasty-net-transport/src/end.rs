@@ -1,7 +1,7 @@
 //! The end of a link: a reason that only rises, one settle point, and the forced close that
 //! wakes every blocked read (docs/design/transport.md "시도 취소, 닫기, 회수").
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::channel::ChannelControl;
@@ -63,8 +63,11 @@ struct CloserInner {
     end: EndState,
     /// Every channel of the link: the ordered channel and the bulk channels opened under it.
     channels: Mutex<Vec<Arc<dyn ChannelControl>>>,
-    /// Run once by the first forced close (the bulk credential revocation of an attach link).
+    /// Run once when the link ends: the first forced close or the normal end (the bulk
+    /// credential revocation of an attach link).
     hooks: Mutex<Vec<CloseHook>>,
+    /// The link ended (forced or normal); no channel is adopted any more.
+    ended: AtomicBool,
 }
 
 /// The cloneable closer of one link.
@@ -94,8 +97,60 @@ impl LinkCloser {
                 end: EndState::default(),
                 channels: Mutex::new(vec![first]),
                 hooks: Mutex::new(Vec::new()),
+                ended: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Adds a channel that the end of this link also closes. Returns false, adding nothing, when
+    /// the link already ended or is ending.
+    pub(crate) fn adopt(&self, channel: Arc<dyn ChannelControl>) -> bool {
+        let mut channels = lock(&self.inner.channels);
+        if self.has_ended() {
+            return false;
+        }
+        channels.push(channel);
+        true
+    }
+
+    /// Runs `hook` once when the link ends. A link that already ended runs it at once.
+    pub(crate) fn on_end(&self, hook: CloseHook) {
+        let mut hooks = lock(&self.inner.hooks);
+        if self.has_ended() {
+            drop(hooks);
+            hook();
+            return;
+        }
+        hooks.push(hook);
+    }
+
+    fn has_ended(&self) -> bool {
+        self.inner.ended.load(Ordering::Acquire) || self.inner.end.is_ending()
+    }
+
+    /// The normal end of the link (both directions half-closed and the reader ended): closes
+    /// the remaining channels (the bulk channels under the link) and runs the end hooks,
+    /// without raising a reason.
+    pub(crate) fn end_normally(&self) {
+        let hooks = self.mark_ended(None);
+        self.wake();
+        for hook in hooks {
+            hook();
+        }
+    }
+
+    /// Marks the link ended (raising `reason` if any) under the locks `adopt` and `on_end`
+    /// read the state under, and takes the hooks. A channel or hook added alongside is either
+    /// in the lists or handled by its caller.
+    fn mark_ended(&self, reason: Option<EndReason>) -> Vec<CloseHook> {
+        let channels = lock(&self.inner.channels);
+        let mut hooks = lock(&self.inner.hooks);
+        if let Some(reason) = reason {
+            self.inner.end.raise(reason);
+        }
+        self.inner.ended.store(true, Ordering::Release);
+        drop(channels);
+        std::mem::take(&mut *hooks)
     }
 
     /// Raises the reason. A lower reason never replaces a higher one, and a settled reason
@@ -123,15 +178,7 @@ impl LinkCloser {
     /// are blocked on them (on Windows this cancels the pending socket I/O too). Calling it
     /// again only raises the reason and wakes again.
     pub fn force_close(&self, reason: EndReason) {
-        let hooks = {
-            // Raised under the lock `adopt` and `on_force_close` read it under, so a channel or
-            // hook added alongside is either in the lists taken here or handled by its caller.
-            let channels = lock(&self.inner.channels);
-            let mut hooks = lock(&self.inner.hooks);
-            self.inner.end.raise(reason);
-            drop(channels);
-            std::mem::take(&mut *hooks)
-        };
+        let hooks = self.mark_ended(Some(reason));
         self.wake();
         for hook in hooks {
             hook();
@@ -191,5 +238,33 @@ mod tests {
         assert!(!other.settle());
         other.force_close(EndReason::Forced);
         assert_eq!(c.settled(), Some(EndReason::Lost));
+    }
+    #[test]
+    fn a_hook_added_after_the_forced_close_runs_at_once() {
+        let c = closer();
+        let ran = Arc::new(AtomicU8::new(0));
+        let seen = Arc::clone(&ran);
+        c.on_end(Box::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        c.force_close(EndReason::Forced);
+        c.force_close(EndReason::Forced);
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "a hook runs once");
+        let late = Arc::clone(&ran);
+        c.on_end(Box::new(move || {
+            late.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_ended_link_adopts_nothing() {
+        let c = closer();
+        let (extra, _peer) = memory_channel_pair();
+        assert!(c.adopt(extra.control()));
+        c.end_normally();
+        assert!(!c.is_ending(), "a normal end raises no reason");
+        let (late, _peer2) = memory_channel_pair();
+        assert!(!c.adopt(late.control()));
     }
 }

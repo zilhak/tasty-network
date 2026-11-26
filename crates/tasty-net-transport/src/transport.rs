@@ -7,6 +7,8 @@ use std::io;
 use std::net::TcpListener;
 use std::sync::Arc;
 
+use tasty_net_identity::{ConnectionToken, DeviceId};
+
 use crate::cancel::AttemptCancel;
 use crate::channel::RawChannel;
 
@@ -64,6 +66,26 @@ pub struct Connection {
 pub trait EndpointHandle: Send + Sync {
     /// Opens one more channel to the same peer.
     fn connect_more(&self, cancel: &AttemptCancel) -> Result<RawChannel, ConnectError>;
+
+    /// How a dialer proves itself to this endpoint. `None` means it cannot dial a handshake.
+    fn auth(&self) -> Option<DialAuth>;
+
+    /// Called once the first channel to this endpoint finished its handshake: the endpoint
+    /// (a new SSH tunnel, a new QUIC connection) may now be shared with other channels and
+    /// leaves the attempt that created it.
+    fn publish(&self) {}
+}
+
+/// What a dialer proves itself with, from the endpoint it reached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DialAuth {
+    /// The SSH path: the connection token from the peer's connection record.
+    Token(ConnectionToken),
+    /// The P2P path: the peer's device ID, which the QUIC connection already proved.
+    P2p {
+        /// The connection's remote ID.
+        remote_id: DeviceId,
+    },
 }
 
 /// A peer endpoint a transport reached: the SSH tunnel, the QUIC connection, the memory
@@ -88,6 +110,15 @@ impl Endpoint {
     /// Opens one more channel to the same peer.
     pub fn connect_more(&self, cancel: &AttemptCancel) -> Result<RawChannel, ConnectError> {
         self.handle.connect_more(cancel)
+    }
+
+    /// How a dialer proves itself to this endpoint.
+    pub fn auth(&self) -> Option<DialAuth> {
+        self.handle.auth()
+    }
+
+    pub(crate) fn publish(&self) {
+        self.handle.publish();
     }
 }
 

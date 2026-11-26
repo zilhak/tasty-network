@@ -10,7 +10,7 @@ use crate::cancel::AttemptCancel;
 use crate::channel::{ChannelControl, RawChannel};
 use crate::lock::lock;
 use crate::transport::{
-    AcceptError, ConnectError, Connection, Endpoint, EndpointHandle, Listener, Transport,
+    AcceptError, ConnectError, Connection, DialAuth, Endpoint, EndpointHandle, Listener, Transport,
     TransportKind,
 };
 
@@ -90,6 +90,25 @@ impl Read for PipeReader {
 
 struct PipeWriter {
     pipe: Arc<Pipe>,
+}
+
+/// A dropped write half ends the direction, like the last handle of a socket.
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        lock(&self.pipe.state).write_closed = true;
+        self.pipe.cv.notify_all();
+    }
+}
+
+/// A dropped read half makes later writes of the peer fail, like the last handle of a socket.
+impl Drop for PipeReader {
+    fn drop(&mut self) {
+        let mut state = lock(&self.pipe.state);
+        state.read_closed = true;
+        state.buf.clear();
+        drop(state);
+        self.pipe.cv.notify_all();
+    }
 }
 
 impl Write for PipeWriter {
@@ -190,7 +209,7 @@ pub fn memory_channel_pair() -> (RawChannel, RawChannel) {
 pub fn memory_transport() -> (MemoryTransport, MemoryListener) {
     let (tx, rx) = mpsc::channel();
     (
-        MemoryTransport { tx },
+        MemoryTransport { tx, auth: None },
         MemoryListener { rx: Mutex::new(rx) },
     )
 }
@@ -200,6 +219,7 @@ pub fn memory_transport() -> (MemoryTransport, MemoryListener) {
 #[derive(Clone)]
 pub struct MemoryTransport {
     tx: Sender<RawChannel>,
+    auth: Option<DialAuth>,
 }
 
 impl std::fmt::Debug for MemoryTransport {
@@ -209,6 +229,13 @@ impl std::fmt::Debug for MemoryTransport {
 }
 
 impl MemoryTransport {
+    /// The transport whose endpoints give `auth` to the dialing handshake (the token the
+    /// receiving side checks, or the remote ID a P2P receiving side was told).
+    pub fn with_auth(mut self, auth: DialAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
     fn open(&self, cancel: &AttemptCancel) -> Result<RawChannel, ConnectError> {
         if cancel.is_cancelled() {
             return Err(ConnectError::Cancelled);
@@ -231,6 +258,10 @@ struct MemoryEndpoint {
 impl EndpointHandle for MemoryEndpoint {
     fn connect_more(&self, cancel: &AttemptCancel) -> Result<RawChannel, ConnectError> {
         self.transport.open(cancel)
+    }
+
+    fn auth(&self) -> Option<DialAuth> {
+        self.transport.auth.clone()
     }
 }
 

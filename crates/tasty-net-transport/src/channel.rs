@@ -18,6 +18,7 @@ use tasty_net_frame::{
 use crate::end::{EndReason, LinkCloser};
 use crate::heartbeat::{Heartbeat, HeartbeatPolicy};
 use crate::lock::lock;
+use crate::reject::P2pCloseReason;
 use crate::transport::TransportKind;
 
 /// Control of one channel, shared by its reader, its writer and whoever closes it.
@@ -36,6 +37,12 @@ pub trait ChannelControl: Send + Sync {
     /// Ends both directions and wakes a read blocked on this channel in another thread. Bytes
     /// not yet read are dropped.
     fn shutdown_and_wake(&self) -> io::Result<()>;
+
+    /// Why the whole QUIC connection under this channel was closed, once it was closed with a
+    /// code. Only a P2P channel has one ([`P2pCloseReason`]).
+    fn close_reason(&self) -> Option<P2pCloseReason> {
+        None
+    }
 }
 
 /// One channel as a transport gives it: a read half, a write half and its control.
@@ -143,6 +150,7 @@ impl RawChannel {
             reader_end: Mutex::new(false),
             reader_end_cv: Condvar::new(),
             writer_closed: AtomicBool::new(false),
+            on_normal_end: Mutex::new(None),
         });
         let out = Arc::new(Outbox {
             state: Mutex::new(OutState {
@@ -249,18 +257,47 @@ pub struct Framed {
     pub closer: LinkCloser,
 }
 
+impl Framed {
+    /// Runs `hook` once when the reader ended and the write half was closed.
+    pub(crate) fn on_normal_end(&self, hook: NormalEndHook) {
+        *lock(&self.writer.shared.on_normal_end) = Some(hook);
+        self.writer.shared.check_normal_end();
+    }
+}
+
 /// State the reader and the writer of one channel share.
 pub(crate) struct ChannelShared {
     control: Arc<dyn ChannelControl>,
     reader_end: Mutex<bool>,
     reader_end_cv: Condvar,
     writer_closed: AtomicBool,
+    /// Run once when the reader ended and the write half is closed (the normal end).
+    on_normal_end: Mutex<Option<NormalEndHook>>,
 }
+
+type NormalEndHook = Box<dyn FnOnce() + Send>;
 
 impl ChannelShared {
     fn mark_reader_end(&self) {
         *lock(&self.reader_end) = true;
         self.reader_end_cv.notify_all();
+        self.check_normal_end();
+    }
+
+    fn mark_writer_closed(&self) {
+        self.writer_closed.store(true, Ordering::Release);
+        self.check_normal_end();
+    }
+
+    fn check_normal_end(&self) {
+        let ended = *lock(&self.reader_end) && self.writer_closed.load(Ordering::Acquire);
+        if !ended {
+            return;
+        }
+        let hook = lock(&self.on_normal_end).take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Waits until the reader ended or `limit` passed. True if the reader ended.
@@ -512,8 +549,9 @@ impl ChannelWriter {
         }
         // The heartbeat thread stops before the shutdown, so no Ping follows it.
         self.heartbeat.take();
-        self.shared.writer_closed.store(true, Ordering::Release);
-        self.shared.control.shutdown_write()
+        let shut = self.shared.control.shutdown_write();
+        self.shared.mark_writer_closed();
+        shut
     }
 
     /// The writer's end of a connection (docs/design/transport.md "종료 순서"): closes the

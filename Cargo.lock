@@ -704,7 +704,11 @@ dependencies = [
 name = "tasty-net-transport"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
+ "serde_json",
+ "sha2",
  "tasty-net-frame",
+ "tasty-net-identity",
  "tracing",
  "windows-sys",
 ]
