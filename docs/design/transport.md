@@ -15,8 +15,8 @@
 
 두 층으로 나눈다. 전송마다 다른 것은 아래 층(`RawChannel`)뿐이고, handshake·heartbeat·링크 수명은 위 층이 모든 전송에 같게 한다.
 
-- `RawChannel`: 전송 구현이 제공하는 채널 하나. 읽기 반쪽(`Read`), 쓰기 반쪽(`Write`), 제어(`set_read_timeout`, `shutdown_write`, `shutdown_and_wake`)로 나눌 수 있다.
-- `Transport`: `connect(&self, target, &AttemptCancel) -> Result<RawChannel, ConnectError>`로 순서 채널을 연다. 같은 끝점에 두 번째 채널(bulk)을 여는 `connect_more`를 가진다. SSH 구현은 터널을 한 번 만들고 그 로컬 포트에 TCP를 다시 연다. P2P 구현은 같은 QUIC 연결에 양방향 스트림을 하나 더 연다.
+- `RawChannel`: 전송 구현이 제공하는 채널 하나. 읽기 반쪽(`Read`), 쓰기 반쪽(`Write`), 제어(`ChannelControl`: `set_read_timeout`, `set_write_timeout`, `shutdown_write`, `shutdown_and_wake`, P2P의 `close_reason`)로 나눌 수 있다.
+- `Transport`: `connect(&self, target, &AttemptCancel) -> Result<Connection, ConnectError>`로 순서 채널을 연다. `Connection`은 그 채널(`channel`)과 이번 연결이 닿은 끝점(`endpoint: Endpoint`)이다. 같은 끝점에 두 번째 채널(bulk·요청)을 여는 `Endpoint::connect_more`가 있고, `Transport::connect_more(&Endpoint, ..)`는 그것을 부른다. 끝점은 SSH 경로의 토큰(발견한 연결 레코드의 것)이나 P2P의 `remote_id`도 들고 있어 handshake가 쓴다. SSH 구현은 터널을 한 번 만들고 그 로컬 포트에 TCP를 다시 연다. P2P 구현은 같은 QUIC 연결에 양방향 스트림을 하나 더 연다.
 - `Listener`: 받는 쪽. `accept() -> Result<RawChannel, AcceptError>`. SSH 경로에서는 소비자의 루프백 TCP listener가 받은 소켓을 `RawChannel::from_tcp`로 감싼다. 첫 줄 분기(`stream.open`인지 일반 JSON-RPC인지)는 소비자가 하고, 이미 읽은 바이트를 넘긴다(아래 "받는 쪽 진입").
 - 위 층 함수: `dial_handshake`(dialer)와 `accept_handshake`(acceptor)가 `RawChannel`에 handshake v2를 돌려 `Link`(또는 bulk·요청 채널)를 만든다([handshake v2](handshake.md)).
 
@@ -26,9 +26,9 @@
 |---|---|
 | `take_ordered()` | 순서 채널의 `ChannelReader`·`ChannelWriter`를 한 번만 꺼낸다. 읽기 스레드와 쓰기 스레드가 따로 가진다 |
 | `open_bulk(ext)` | 부모 링크의 bulk 자격으로 bulk 채널을 연다([handshake v2](handshake.md) "bulk 자격") |
-| `peer()` | handshake가 확인한 상대 정보: 기기 ID, 인스턴스 ID, 역할, capability 목록, 전송 종류 |
+| `peer()` | handshake가 확인한 상대 정보: 기기 ID, 인스턴스 ID, 역할, capability 목록, 전송 종류. 전송 종류는 `TransportKind{Ssh, Tcp, P2p, Memory}`이고 이 쪽에서 본 값이다. SSH 경로의 받는 쪽은 루프백 listener가 받은 소켓이라 `Tcp`이고, 역할 표(아래 "역할")는 `Ssh`·`Tcp`에 같다 |
 | `closer()` | 복제 가능한 `LinkCloser`. 강제 종료와 끝 사유 확정 |
-| `Drop` | 남은 채널을 닫고, 내부 워커 스레드를 join하고, SSH 터널 참조를 놓는다. 그 터널의 마지막 참조였으면 터널 자식을 끝내고 회수한다(아래 "터널 수명과 재연결") |
+| `Drop` | 그 링크의 모든 채널(이미 꺼낸 순서 채널의 반쪽 포함)을 양쪽으로 닫고 bulk 자격을 폐기하고, 내부 워커 스레드를 join하고, SSH 터널 참조를 놓는다. 그 터널의 마지막 참조였으면 터널 자식을 끝내고 회수한다(아래 "터널 수명과 재연결") |
 
 `ChannelReader::read_frame`은 `tasty-net-frame`의 `read_frame`을 쓰고 실패를 `ReadFailure`로 분류해 돌려준다. `ChannelWriter::write_frame`은 헤더와 payload를 한 버퍼로 모아 `write_all`을 한 번 부르고 `flush`한다(`tasty:crates/tasty-ipc/src/stream.rs` `write_frame`). `write_all`이 안에서 부분 쓰기를 다시 시도하므로 시스템 호출 하나를 보장하지는 않는다.
 
@@ -60,6 +60,7 @@ bulk 채널은 전송 구조상 언제나 부모 링크의 dialer가 열고 acce
 - Ping 송신 정책은 연결 쪽마다 고른다(`tasty:docs/dev-guide/attach-behavior.md` "연결 생존 확인 (read timeout + heartbeat)").
   - `HeartbeatPolicy::WhenIdle`: 송신이 `HEARTBEAT_INTERVAL` 동안 조용할 때만 Ping을 보낸다. tasty 서버 write 스레드의 동작이다.
   - `HeartbeatPolicy::Periodic`: 트래픽과 관계없이 `HEARTBEAT_INTERVAL`마다 보낸다. tasty GUI·CLI 클라이언트의 동작이다.
+  - 실제 간격은 `HEARTBEAT_INTERVAL`(5초)과 `read_timeout`의 6분의 1 중 짧은 쪽이다. 시험처럼 `read_timeout`을 짧게 준 링크에서도 상대의 시간 제한보다 Ping이 먼저 간다.
 - 채널마다 따로 돈다. bulk 채널도 자기 Ping과 시간 제한을 가진다.
 - Ping 송신과 읽기 시간 제한은 성공 ACK 직후부터 양쪽 모두 시작한다. 첫 도메인 프레임(descriptor, 첫 요청 등)이 heartbeat 주기보다 늦어도 연결이 끊기지 않게 하기 위해서다. `ChannelReader`는 Ping을 받아 시간 제한만 갱신하고 소비자에게 넘기지 않는다(지금 tasty client reader도 Ping을 건너뛴다, `tasty:crates/tasty-remote/src/transport.rs`). 그래서 Ping은 O2(첫 Control은 descriptor)나 상태 표의 "첫 도메인 프레임" 규칙에 들어가지 않는다.
 - 시간 제한은 소켓 읽기 시간 제한이라 프레임 일부를 읽은 뒤에도 만료될 수 있다(`tasty:crates/tasty-ipc/src/stream/read_failure.rs` 주석). 시간 초과뿐 아니라 어떤 읽기 실패든 헤더나 payload 일부를 이미 소비했을 수 있다(`tasty:crates/tasty-ipc/src/stream.rs` `read_frame` 주석). 그래서 한 번 읽기 실패가 난 `ChannelReader`는 종류와 관계없이 이후 읽기도 같은 실패를 돌려준다. 같은 채널에서 다시 읽어 프레임 경계를 잃는 일을 막는다.
@@ -165,7 +166,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 
 - mesh는 지금처럼 순서 채널에 둔다. O6이 MeshInput을 Data·확인 지점과 한 순서로 묶기 때문이다. 나중에 대역폭 때문에 나눈다면 서버→client `MeshData`만 옮길 수 있고, MeshContext·MeshInput은 순서 채널에 남아야 하며, 손실 통지가 채널마다 따로 필요하다. 그때 이 표를 먼저 고친다.
 - bulk는 지금도 별도 소켓이다(O12). bulk 채널과 순서 채널 사이에 순서 계약은 없다. bulk의 시작 선언·데이터·완료와 그 결과·손실 통지는 모두 그 bulk 채널 안에서 오간다. 지금 tasty에서는 `StreamHub`가 연결과 `bulk_workspace` 결속을 기록하고(`register_bulk`), 시작(`BulkBegin`)과 완료(`BulkCommit`) 인가는 도메인이 한다(`tasty:src/remote/server.rs`). 이 레포의 bulk 자격은 그 앞에 새로 더하는 검사이고, 도메인의 시작·완료 인가는 그대로 남는다.
-- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 전송마다 그 전송을 가진 크레이트에 둔다. 메모리·루프백 TCP는 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`, P2P는 `tasty-net-p2p`의 `tests/`에 있는 `ordered_stream_preserves_mixed_tag_order`(실제 iroh endpoint 두 개와 시험 안 relay)다. transport는 p2p에 의존하지 않으므로(dev-dependency로도 두지 않는다) iroh 시험을 transport에 두지 않는다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
+- 이 레포의 시험은 "한 채널 안 순서"를 tag 종류를 섞은 프레임으로 확인한다. 정본 시험은 전송마다 그 전송을 가진 크레이트에 둔다. 메모리·루프백 TCP는 `tasty-net-transport`의 `ordered_channel_preserves_mixed_tag_order`(handshake를 마친 루프백 링크는 `tests/loopback.rs`의 `a_handshaken_link_keeps_the_order_of_mixed_tag_frames`), P2P는 `tasty-net-p2p`의 `tests/`에 있는 `ordered_stream_preserves_mixed_tag_order`(실제 iroh endpoint 두 개와 시험 안 relay)다. transport는 p2p에 의존하지 않으므로(dev-dependency로도 두지 않는다) iroh 시험을 transport에 두지 않는다. O1~O11과 O15의 도메인 의미는 tasty 시험이 계속 확인한다.
 
 ## 역할
 
@@ -196,7 +197,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 
 지금 tasty는 포워딩 포트로 일반 JSON-RPC를 보낸다. 원격 목록은 두 층이다: 공개 메서드 `remote.workspaces`(로컬 tasty)가 포워딩 포트로 `workspace.list`를 부르고 `attach.list`의 점유 정보를 합친다(`tasty:crates/tasty-remote/src/browse.rs` `browse_via_port_bound`). workspace 생성은 `workspace.create`(`tasty:crates/tasty-remote/src/create.rs:36`), 상태 확인과 자기 인스턴스 판정은 `system.info`(`tasty:crates/tasty-remote/src/self_instance.rs:39-42`)다. 이 경로는 인증이 없고, 같은 포트가 모든 IPC 메서드를 연다([위협 모델](threat-model.md) T3).
 
-- 이 레포는 `purpose = "request"` 채널을 준다. handshake v2(토큰·기기 증명)를 마친 뒤 Control 프레임으로 `{id, method, params}` 요청과 `{id, result}` 또는 `{id, error}` 응답을 주고받는다. dialer 쪽 `RequestClient::call(method, params, timeout)`, 받는 쪽 `RequestHandler` trait.
+- 이 레포는 `purpose = "request"` 채널을 준다. 받는 쪽은 검사 1~6을 통과한 요청 채널마다 도메인 콜백 `DomainPolicy::accept_request(peer)`를 부른다(기본은 수락, 거절은 `domain` 사유). handshake v2(토큰·기기 증명)를 마친 뒤 Control 프레임으로 `{id, method, params}` 요청과 `{id, result}` 또는 `{id, error}` 응답을 주고받는다. dialer 쪽 `RequestClient::call(method, params, timeout)`, 받는 쪽 `RequestHandler` trait.
 - 이 레포는 메서드를 정의하지 않는다. 받는 쪽 소비자가 허용 목록을 둔다. 요청 채널로 원격에 보내는 최소 범위는 `workspace.list`, `attach.list`(점유 표시용, 또는 같은 정보를 주는 응답), `workspace.create`, `system.info`다. `remote.workspaces`는 로컬 쪽 메서드로 남아 이 요청들을 부른다. 그 밖의 메서드는 tasty가 필요할 때 목록에 더한다.
 - P2P에서도 같은 요청 채널을 지원한다. 목록 조회·생성·상태 확인이 SSH와 P2P에서 같다.
 - 자기 인스턴스 판정은 handshake의 인스턴스 ID 비교가 대신한다. `system.info`로 다시 물을 필요가 없다.

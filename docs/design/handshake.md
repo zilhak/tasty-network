@@ -51,6 +51,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
   8. `ext`. 와이어의 `ext`는 JSON 문자열이고 그 안에 소비자의 JSON 텍스트가 들어 있다. 서명 대상은 그 문자열 값을 JSON 문자열로 풀어낸 UTF-8 바이트 그대로다. 다시 직렬화하지 않으므로 숫자 표기·키 순서가 양 끝의 `serde_json` feature(`arbitrary_precision` 등)에 따라 달라지지 않는다. 없으면 빈 바이트
 
   그래서 두 기기 ID, 역할, capability 제안, 도메인 요청이 이 채널 하나에 묶인다. 이 인코딩을 바꾸면 `proto`를 올린다.
+- 메시지 2·3·4(와 P2P의 hello)는 Control 프레임 하나에 JSON 객체 하나다. 최상위 키 하나로 무엇인지 가른다: `{"challenge": {..}}`, `{"proof": {..}}`, `{"hello": {..}}`. ACK만 감싸지 않고 v1 `StreamAck`과 같은 평평한 객체(`ok` 키가 있음)다. 그래서 dialer는 메시지 2 자리에서 거절 ACK도 읽을 수 있다.
 - 받는 쪽은 토큰 검사를 통과하기 전에는 challenge를 보내지 않는다. 토큰 없는 상대는 기기 ID조차 받지 못한다.
 - 4번 ACK가 `ok:true`이면 양쪽이 일반 프레임 흐름으로 넘어간다. 그 뒤 첫 도메인 프레임은 목적마다 다르다(아래 "상태 표"의 "성공 ACK 뒤 첫 도메인 프레임"). heartbeat Ping은 이 규칙에 세지 않는다. 양쪽은 성공 ACK 직후부터 Ping을 보낼 수 있다([전송 추상화](transport.md) "heartbeat와 읽기 시간 제한").
 
@@ -85,7 +86,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 3. 목적별 필드(`Malformed`). `purpose` 값, 위 상태 표의 필수 필드, 필드 타입, `caps` 이름 문법, P2P의 `device_id`가 `remote_id()`와 같은지. 토큰 뒤에 두므로 토큰 없는 상대는 어떤 필드가 틀렸는지도 알 수 없다. SSH 경로는 여기까지 통과해야 challenge를 보낸다
 4. 서명(SSH 경로, proof를 받은 뒤, `SignatureInvalid`)
 5. 자기 자신(`SelfAttach`). 기록을 바꿀 수 있는 TOFU보다 앞에 둔다. 자기 자신과의 연결이 빈 프로필에 자기 키를 기록해 두면, 사용자가 프로필 주소를 고친 뒤에도 그 기록 때문에 다시 등록해야 하기 때문이다
-6. TOFU(`PeerKeyMismatch`). 소비자가 `PeerKeyStore`를 준 쪽만 본다. tasty dialer는 원격 프로필 이름으로 상대 키를 기록한다. 받는 쪽은 상대를 부를 이름이 없으므로 보통 주지 않고, 확인된 상대 기기 ID를 `Link::peer()`로 받아 기록·표시한다
+6. TOFU(`PeerKeyMismatch`). 소비자가 `PeerKeyStore`를 준 쪽만 본다. 저장소 자체가 실패하면 거절 사유가 아니다. 그 쪽은 ACK 없이 채널을 닫고 로컬 오류 `HandshakeError::Store`로 끝낸다. tasty dialer는 원격 프로필 이름으로 상대 키를 기록한다. 받는 쪽은 상대를 부를 이름이 없으므로 보통 주지 않고, 확인된 상대 기기 ID를 `Link::peer()`로 받아 기록·표시한다
 7. 역할(`RoleRefused`). `holder = "acceptor"` 제안의 승인 대기도 여기다(아래 "역할 반전 승인의 기한")
 8. bulk 자격(`purpose = bulk`일 때, `BulkCredentialInvalid`)
 9. 소비자 도메인 콜백(`Domain`)
@@ -159,7 +160,7 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
 ## 도메인 확장
 
 - `ext`는 소비자가 채우고 소비자가 검사한다. 이 레포는 문자열을 그대로 넘기고, 소비자가 그 안의 JSON을 읽는다. tasty는 `target`·`target_workspace`·`bulk_workspace`를 `ext`에 그대로 싣는다.
-- 소비자 도메인 콜백은 `ext`를 받아 수락(ACK의 `ext`와 bulk grant를 돌려줌)이나 거절(`domain` 사유와 코드)을 돌려준다. bulk 채널의 도메인 콜백은 부모 링크와 그 grant를 함께 받는다.
+- 소비자 도메인 콜백은 `ext`를 받아 수락(ACK의 `ext`와 bulk grant를 돌려줌)이나 거절(`domain` 사유와 코드)을 돌려준다. 거절 ACK의 `ext`는 `{"code": "<코드>"}` JSON 텍스트이고, dialer는 `domain_code(ext)`로 코드를 읽는다. bulk 채널의 도메인 콜백은 부모 링크와 그 grant를 함께 받는다.
 - tasty 쪽 계약: `target`·`target_workspace`·`bulk_workspace`는 서로 배타다. 둘 이상이면 `domain` + `conflicting_targets`로 거절한다([레포 경계](repo-boundary.md) "`StreamOpenParams` 도메인 필드").
 
 ## bulk 자격
