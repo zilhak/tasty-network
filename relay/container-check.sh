@@ -50,11 +50,11 @@ cc_cleanup() {
 #             선택 경로가 바뀔 때마다 한 줄을 쓴다:
 #               p2p-peer path-selected path=relay relay=<relay URL>
 #               p2p-peer path-selected path=direct addr=<IP:포트>
-#             relay 경로가 먼저 선택된 뒤 직접 경로로 바뀌면 0으로 끝난다.
+#             첫 선택이 relay 경로이고 그 뒤 직접 경로로 바뀌면 0으로 끝난다.
 # 통과 조건(셋 다):
 #   1. dialer 종료 코드 0.
-#   2. dialer 로그에서 이 relay(<URL>, 끝 / 무시)의 path=relay 줄 뒤에 path=direct 줄이 있다.
-#      처음부터 직접으로 붙은 연결(listener 주소에 직접 주소가 들어 있는 경우 등)은 통과하지 않는다.
+#   2. dialer 로그의 첫 path-selected 줄이 이 relay(<URL>, 끝 / 무시)의 path=relay이고, 그 뒤에 path=direct 줄이 있다.
+#      첫 선택이 직접인 연결(listener 주소에 직접 주소가 들어 있는 경우 등)은 나중에 relay를 거쳐도 통과하지 않는다.
 #   3. peer 실행 전후로 relay metrics relayserver_accepts_total이 2 이상 늘었다(두 peer가 이 relay에 붙음).
 cc_run_peers() {
     local name="$1" url="$2" peer="$3" metrics="$4" dir pid waited rc lines a0 a1
@@ -109,7 +109,7 @@ cc_accepts() {
     echo "$v"
 }
 
-# 로그 $1에서 relay URL $2의 path=relay 선택 뒤에 path=direct 선택이 있으면 0.
+# 로그 $1의 첫 path-selected 줄이 relay URL $2의 path=relay이고 그 뒤에 path=direct 줄이 있으면 0.
 cc_path_switched() {
     awk -v want="${2%/}" '
         $0 ~ /(^|[[:space:]])path-selected([[:space:]]|$)/ {
@@ -118,8 +118,9 @@ cc_path_switched() {
                 if ($i ~ /^path=/) path = substr($i, 6)
                 if ($i ~ /^relay=/) { relay = substr($i, 7); sub(/\/$/, "", relay) }
             }
-            if (path == "relay" && relay == want) seen = 1
-            if (path == "direct" && seen) { ok = 1; exit }
+            n++
+            if (n == 1) { if (path == "relay" && relay == want) seen = 1; else exit }
+            else if (path == "direct" && seen) { ok = 1; exit }
         }
         END { exit ok ? 0 : 1 }
     ' "$1"
@@ -173,6 +174,16 @@ cc_self_test() {
         'p2p-peer path-selected path=relay relay=http://127.0.0.1:5/' > "$t/rev.log"
     cc_path_switched "$t/rev.log" "http://127.0.0.1:5"
     st_case direct-then-relay-rejected 1 $?
+    printf '%s\n' 'p2p-peer path-selected path=direct addr=127.0.0.1:9' \
+        'p2p-peer path-selected path=relay relay=http://127.0.0.1:5/' \
+        'p2p-peer path-selected path=direct addr=127.0.0.1:9' > "$t/drd.log"
+    cc_path_switched "$t/drd.log" "http://127.0.0.1:5"
+    st_case direct-relay-direct-rejected 1 $?
+    printf '%s\n' 'p2p-peer path-selected path=relay relay=http://other:5/' \
+        'p2p-peer path-selected path=relay relay=http://127.0.0.1:5/' \
+        'p2p-peer path-selected path=direct addr=127.0.0.1:9' > "$t/orrd.log"
+    cc_path_switched "$t/orrd.log" "http://127.0.0.1:5"
+    st_case first-other-relay-rejected 1 $?
     printf '%s\n' 'p2p-peer path-selected path=relay relay=http://other:5/' \
         'p2p-peer path-selected path=direct addr=127.0.0.1:9' > "$t/other.log"
     cc_path_switched "$t/other.log" "http://127.0.0.1:5"
