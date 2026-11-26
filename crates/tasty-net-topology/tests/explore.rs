@@ -1361,6 +1361,8 @@ fn a_last_done_that_fails_to_send_is_reported_by_the_waiting_parent() {
     let c = x.node(&id(C)).unwrap();
     assert_eq!(c.status, NodeStatus::TimedOut);
     assert_eq!(c.reason, Some(NodeReason::Incomplete));
+    // C's own answer had arrived; the state is now B's report.
+    assert_eq!(c.reported_by, Some(id(B)));
     assert_eq!(status(x, B), NodeStatus::Online);
     // B's done carries C as incomplete, not as timed out.
     assert!(net.log.iter().any(|(f, t, m)| {
@@ -1535,6 +1537,7 @@ fn a_reported_incomplete_device_stays_incomplete_in_either_order() {
         let d = x.node(&id(D)).unwrap();
         assert_eq!(d.status, NodeStatus::TimedOut, "{report_first}");
         assert_eq!(d.reason, Some(NodeReason::Incomplete), "{report_first}");
+        assert_eq!(d.reported_by, Some(id(B)), "{report_first}");
         assert_eq!(status(&x, B), NodeStatus::Online, "{report_first}");
     }
 }

@@ -357,8 +357,9 @@ impl Exploration {
         self.apply_incomplete(device, unix_ms);
     }
 
-    /// Marks the node of `device` incomplete if `device` is recorded so. A new node
-    /// records the reporter.
+    /// Marks the node of `device` incomplete if `device` is recorded so. A reporter (a
+    /// parent that reported it) becomes the node's `reported_by`, on a new node or an
+    /// existing one.
     fn apply_incomplete(&mut self, device: DeviceId, unix_ms: u64) {
         let Some(&reporter) = self.incomplete.get(&device) else {
             return;
@@ -370,6 +371,9 @@ impl Exploration {
                 node.status = NodeStatus::TimedOut;
                 node.reason = Some(NodeReason::Incomplete);
                 node.explored_at = unix_ms;
+                if reporter.is_some() {
+                    node.reported_by = reporter;
+                }
             }
             None => {
                 self.node_index.insert(key, (self.nodes.len(), true));
