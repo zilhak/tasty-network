@@ -283,13 +283,24 @@ pub enum RetireOutcome {
 /// A completed record publication. It remembers the published path, the actual target, the
 /// file identity and the contents, so that [`RecordPublication::retire`] removes only its own
 /// generation.
-#[derive(Debug)]
 pub struct RecordPublication {
     path: PathBuf,
     target: PathBuf,
     contents: String,
     id: FileId,
     _pin: File,
+}
+
+impl fmt::Debug for RecordPublication {
+    /// The contents hold the token, so only their length is shown.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordPublication")
+            .field("path", &self.path)
+            .field("target", &self.target)
+            .field("id", &self.id)
+            .field("contents_len", &self.contents.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RecordPublication {

@@ -105,6 +105,17 @@ fn debug_hides_the_token() {
 }
 
 #[test]
+fn publication_debug_hides_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = record(1);
+    let publication = r.publish(&dir.path().join("record")).unwrap();
+    let debug = format!("{publication:?} {publication:#?}");
+    assert!(!debug.contains(r.token.expose_hex()), "{debug}");
+    assert!(debug.contains("RecordPublication"));
+    publication.retire().unwrap();
+}
+
+#[test]
 fn publish_then_retire_removes_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tasty.record");
