@@ -8,7 +8,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use tasty_net_frame::{ReadFailure, StreamTag, read_frame, write_frame};
@@ -1044,10 +1044,10 @@ fn accept_on(
             Some(handler) => {
                 let started = Instant::now();
                 let decision = await_proposal(
+                    &mut io,
                     handler,
                     &peer,
                     config.timeouts.role_proposal_timeout,
-                    cancel,
                 )?;
                 // The wait is not part of the handshake timeout.
                 io.deadline = io
@@ -1159,34 +1159,64 @@ fn challenge(
     Ok(verified.then_some(dialer_id))
 }
 
-/// Hands the proposal to the consumer and waits for its answer, the proposal timeout, or a
-/// cancel.
+/// How long one look at the channel waits while a role proposal is pending.
+const PROPOSAL_POLL: Duration = Duration::from_millis(50);
+
+/// Hands the proposal to the consumer and waits for its answer or the proposal timeout,
+/// measured from the call of the consumer's handler (docs/design/handshake.md "역할 반전 승인의
+/// 기한"). While it waits it watches the channel: the dialer sends nothing until the ACK, so
+/// EOF means the peer closed and any byte breaks the protocol. A cancel or a closed peer ends
+/// the wait with that error, and an approval counts only if both are still clear after it
+/// came, so the domain callback never runs for a handshake that already lost.
 fn await_proposal(
+    io: &mut Io<'_>,
     handler: &ProposalHandler,
     peer: &PeerInfo,
     limit: Duration,
-    cancel: &AttemptCancel,
 ) -> Result<RoleDecision, HandshakeError> {
+    let deadline = deadline_after(limit)?;
     let (tx, rx) = mpsc::channel();
     handler(RoleProposal {
         peer: peer.clone(),
         reply: tx,
     });
-    let deadline = deadline_after(limit)?;
     loop {
-        if cancel.is_cancelled() {
+        if io.cancel.is_cancelled() {
             return Err(HandshakeError::Cancelled);
+        }
+        match rx.try_recv() {
+            Ok(true) => {
+                peer_still_there(io, Duration::from_millis(1))?;
+                if io.cancel.is_cancelled() {
+                    return Err(HandshakeError::Cancelled);
+                }
+                return Ok(RoleDecision::Accepted);
+            }
+            Ok(false) | Err(TryRecvError::Disconnected) => return Ok(RoleDecision::Refused),
+            Err(TryRecvError::Empty) => {}
         }
         let now = Instant::now();
         if now >= deadline {
             return Ok(RoleDecision::Refused);
         }
-        let step = (deadline - now).min(Duration::from_millis(50));
-        match rx.recv_timeout(step) {
-            Ok(true) => return Ok(RoleDecision::Accepted),
-            Ok(false) | Err(RecvTimeoutError::Disconnected) => return Ok(RoleDecision::Refused),
-            Err(RecvTimeoutError::Timeout) => {}
-        }
+        peer_still_there(io, (deadline - now).min(PROPOSAL_POLL))?;
+    }
+}
+
+/// Waits up to `wait` for a byte from the dialer, which must send nothing before the ACK:
+/// a timeout is the good case, EOF is [`HandshakeError::PeerClosed`].
+fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeError> {
+    io.ch
+        .control()
+        .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
+        .map_err(HandshakeError::Io)?;
+    let mut byte = [0u8; 1];
+    match io.ch.read(&mut byte) {
+        Ok(0) => Err(HandshakeError::PeerClosed),
+        Ok(_) => Err(HandshakeError::Protocol("bytes before the ACK")),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(()),
+        Err(e) if ReadFailure::of_io(&e) == ReadFailure::HeartbeatTimeout => Ok(()),
+        Err(e) => Err(io.fail(e)),
     }
 }
 

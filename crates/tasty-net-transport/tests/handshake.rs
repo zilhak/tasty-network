@@ -1190,3 +1190,122 @@ fn a_frame_that_completes_after_the_deadline_is_not_taken() {
     );
     assert_eq!(policy.attach_calls.load(Ordering::SeqCst), 0);
 }
+
+/// A dialer that closes while its reversal waits for approval gets no domain callback, even
+/// when the approval comes afterwards.
+#[test]
+fn a_peer_that_closes_during_the_approval_wait_gets_no_domain_call() {
+    let mut s = server(Some(token('a')));
+    // The proposal is kept and approved only after the dialer has gone.
+    let pending = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&pending);
+    s.config = s.config.with_role_proposals(move |proposal| {
+        *slot.lock().expect("lock") = Some(proposal);
+    });
+    let (transport, listener) = pair(None);
+    let acceptor = accept_one(listener, s.config.clone());
+    let mut conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let challenge = raw_open(
+        &mut conn.channel,
+        json!({
+            "proto": 2, "purpose": "attach", "token": token('a').expose_hex(),
+            "device_id": key(1).id().to_string(), "instance_id": "d",
+            "nonce": "00".repeat(32), "holder": "acceptor", "caps": [],
+        }),
+    );
+    let challenge = &challenge["challenge"];
+    let acceptor_nonce = hex32(challenge["nonce"].as_str().expect("nonce"));
+    let digest = transcript_digest(&TranscriptFields {
+        holder: "acceptor",
+        dialer: key(1).id(),
+        acceptor: key(2).id(),
+        dialer_instance: "d",
+        acceptor_instance: "acceptor-1",
+        dialer_nonce: [0; 32],
+        acceptor_nonce,
+        dialer_caps: &[],
+        acceptor_caps: &["net.request"],
+        ext: "",
+        signer: "dialer",
+    });
+    let proof = json!({"proof": {"sig": key(1).sign(&digest).to_string()}});
+    write_frame(
+        &mut conn.channel,
+        StreamTag::Control,
+        proof.to_string().as_bytes(),
+    )
+    .expect("proof");
+    std::thread::sleep(Duration::from_millis(100));
+    drop(conn);
+    std::thread::sleep(Duration::from_millis(100));
+    if let Some(proposal) = pending.lock().expect("lock").take() {
+        proposal.accept();
+    }
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::PeerClosed)),
+        "{result:?}"
+    );
+    assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
+}
+
+/// The fields of the signed transcript, rebuilt here from docs/design/handshake.md so the
+/// tests sign what a real dialer signs.
+struct TranscriptFields<'a> {
+    holder: &'a str,
+    dialer: tasty_net_identity::DeviceId,
+    acceptor: tasty_net_identity::DeviceId,
+    dialer_instance: &'a str,
+    acceptor_instance: &'a str,
+    dialer_nonce: [u8; 32],
+    acceptor_nonce: [u8; 32],
+    dialer_caps: &'a [&'a str],
+    acceptor_caps: &'a [&'a str],
+    ext: &'a str,
+    signer: &'a str,
+}
+
+fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&u32::try_from(bytes.len()).expect("len").to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn put_caps(out: &mut Vec<u8>, caps: &[&str]) {
+    let mut sorted = caps.to_vec();
+    sorted.sort_unstable();
+    out.extend_from_slice(&u32::try_from(sorted.len()).expect("len").to_be_bytes());
+    for name in sorted {
+        put(out, name.as_bytes());
+    }
+}
+
+/// The SHA-256 a signer signs for an attach handshake.
+fn transcript_digest(f: &TranscriptFields<'_>) -> [u8; 32] {
+    use sha2::Digest;
+    let mut out = Vec::new();
+    put(&mut out, b"tasty-net handshake v2");
+    put(&mut out, f.signer.as_bytes());
+    put(&mut out, &2u32.to_be_bytes());
+    put(&mut out, b"attach");
+    put(&mut out, f.holder.as_bytes());
+    put(&mut out, f.dialer.as_bytes());
+    put(&mut out, f.acceptor.as_bytes());
+    put(&mut out, f.dialer_instance.as_bytes());
+    put(&mut out, f.acceptor_instance.as_bytes());
+    put(&mut out, &f.dialer_nonce);
+    put(&mut out, &f.acceptor_nonce);
+    put_caps(&mut out, f.dialer_caps);
+    put_caps(&mut out, f.acceptor_caps);
+    put(&mut out, f.ext.as_bytes());
+    sha2::Sha256::digest(&out).into()
+}
+
+fn hex32(text: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).expect("hex");
+    }
+    out
+}
