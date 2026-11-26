@@ -22,5 +22,11 @@ tasty-net-identity = { path = "../tasty-net-identity" }
 tasty-net-ssh = { path = "../tasty-net-ssh" }
 tasty-net-transport = { path = "../tasty-net-transport" }
 
+[dev-dependencies]
+# The test-only SSH server, the fallback when OpenSSH sshd cannot serve
+# (docs/design/testing.md "SSH 통합 시험의 sshd"). ring instead of the default aws-lc-rs.
+russh = { version = "0.65", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util"] }
+
 [lints]
 workspace = true
