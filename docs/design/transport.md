@@ -80,7 +80,7 @@ P2P 구현은 QUIC 오류를 이 `ErrorKind`로 바꿔 돌려준다. 상대가 �
 
 | 동작 | 계약 | 참고한 tasty 동작 |
 |---|---|---|
-| 시도 취소 `AttemptCancel` | 연결 시도마다 하나. 시도 중 만든 소켓·터널 자식·QUIC 연결을 등록한다. `cancel()` 뒤 진행 중인 `connect`·handshake는 정해진 시간 안에 `Cancelled`로 돌아오고 등록된 자원은 닫히고 회수된다 | `tasty:crates/tasty-remote/src/outbound.rs` `register_socket` |
+| 시도 취소 `AttemptCancel` | 연결 시도마다 하나. 시도 중 만든 소켓·터널 자식·스트림과, 아직 다른 채널에 공개하지 않은 QUIC 연결을 등록한다. `cancel()` 뒤 진행 중인 `connect`·handshake는 정해진 시간 안에 `Cancelled`로 돌아오고 등록된 자원은 닫히고 회수된다. P2P에서 공유 연결을 쓰는 시도는 자기 스트림만 소유한다(아래 "P2P의 닫기 범위") | `tasty:crates/tasty-remote/src/outbound.rs` `register_socket` |
 | 쓰기 반쪽 닫기 `ChannelWriter::half_close` | 상대가 남은 프레임을 끝까지 읽은 뒤 EOF를 본다. TCP는 `shutdown(Write)`, QUIC는 송신 스트림 `finish` | `tasty:crates/tasty-remote/src/transport.rs` `Shutdown::Write` |
 | 강제 종료 `LinkCloser::force_close(reason)` | 그 링크의 모든 채널을 닫고 막혀 있는 읽기를 깨운다. TCP는 `shutdown(Both)` 뒤 Windows에서 진행 중 I/O 취소까지 한다. P2P는 그 링크의 스트림만 닫는다(아래 "P2P의 닫기 범위") | `tasty:crates/tasty-utils/src/socket_wake.rs` `shutdown_both_and_wake` |
 | 끝 사유 | 사유는 올라가기만 하고 한 번만 확정된다. 먼저 확정한 쪽의 사유가 최종이다. 깨우기는 두 가지로 나눈다. 소켓 I/O 깨우기(`shutdown_and_wake`)는 확정 결과와 관계없이 한다. 소비자에게 끝을 알리는 콜백은 확정에 이긴 쪽만 부른다 | `tasty:crates/tasty-remote/src/transport_end.rs` |
@@ -105,17 +105,23 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 
 | 일어난 일 | 닫히는 것 | 남는 것 |
 |---|---|---|
-| 한 스트림의 handshake 거절 ACK | 그 스트림 | 같은 연결의 다른 링크·채널 |
-| 요청 채널 닫기 | 그 스트림 | 나머지 |
-| `LinkCloser::force_close`, `Link` drop | 그 링크의 순서 스트림과 그 링크를 부모로 연 bulk 스트림 | 같은 연결의 다른 링크·요청 채널 |
-| 페어링 거절, 직접 경로 정책 종료(`DirectPathTimeout`·`DirectPathLost`) | QUIC 연결 전체와 그 위 모든 링크·채널. 종료 코드는 [handshake v2](handshake.md) "QUIC 종료 코드" | 없음 |
-| 연결 위 마지막 링크·채널이 닫힘, endpoint 종료 | QUIC 연결(코드 0 `closed`) | 없음 |
+| 일어난 일 | 닫히는 것 | 닫는 방식 | 남는 것 |
+|---|---|---|---|
+| 한 스트림의 handshake 거절 ACK | 그 스트림 | 정상 종료 | 같은 연결의 다른 링크·채널 |
+| 요청 채널 닫기 | 그 스트림 | 정상 종료 | 나머지 |
+| 부모 링크의 정상 종료(양쪽이 `half_close`를 마치고 reader가 끝남, 위 "종료 순서") | 그 링크의 순서 스트림과 그 링크를 부모로 연 bulk 스트림 | 순서 스트림은 정상 종료, 진행 중 bulk 스트림은 강제 종료(아래) | 같은 연결의 다른 링크·요청 채널 |
+| `LinkCloser::force_close`, `Link` drop, 시도 취소 | 그 링크(또는 시도)의 스트림 | 강제 종료 | 같은 연결의 다른 링크·요청 채널 |
+| 페어링 거절, 직접 경로 정책 종료(`DirectPathTimeout`·`DirectPathLost`) | QUIC 연결 전체와 그 위 모든 링크·채널. 종료 코드는 [handshake v2](handshake.md) "QUIC 종료 코드" | `Connection::close` | 없음 |
+| 연결 위 마지막 링크·채널이 닫힘, endpoint 종료 | QUIC 연결(코드 0 `closed`) | 아래 "연결을 닫는 때" | 없음 |
 
-스트림을 닫을 때는 송신 쪽 `reset`과 수신 쪽 `stop`을 쓴다. `Connection::close`는 진행 중 작업을 모두 실패시키고 상대가 아직 읽지 않은 데이터를 버릴 수 있으므로 위 표의 연결 전체 종료에서만 쓴다.
+- 정상 종료는 마지막 프레임을 상대가 읽게 하는 종료다. 송신 스트림을 `finish`하고 상대가 받았다고 확인할 때까지(송신 스트림의 완료 확인) `drain_cap` 안에서 기다린다. 거절 ACK와 요청 채널의 마지막 응답은 이 방식으로 보낸다.
+- 강제 종료는 남은 바이트를 버린다. 송신 쪽 `reset`과 수신 쪽 `stop`을 쓴다. `force_close`, 시도 취소, 진행 중 bulk를 부모와 함께 끊을 때만 쓴다.
+- 연결을 닫는 때: 마지막 채널이 정상 종료로 끝났다는 이유만으로 바로 `Connection::close`를 부르지 않는다. 그 채널들의 정상 종료가 끝난 뒤(상대 확인 또는 `drain_cap`) 코드 0으로 닫는다. `Connection::close`는 진행 중 작업을 모두 실패시키고 상대가 아직 읽지 않은 데이터를 버릴 수 있기 때문이다(iroh `src/endpoint/connection.rs` `close` 설명).
+- 연결 공유의 시작: 새 QUIC 연결은 그 연결을 만든 시도의 첫 채널 handshake가 성공할 때까지 그 시도의 `AttemptCancel`이 소유한다. 그동안 다른 채널은 그 연결을 쓰지 않는다(공개를 기다리거나 시도가 끝나면 새 연결을 연다). handshake가 성공하면 연결을 공유 목록에 공개하고 `AttemptCancel`에서 뺀다. 그 뒤의 연결 수명은 공유 목록이 갖고, 시도 취소는 그 시도의 스트림만 닫는다.
 
 ### 터널 수명과 재연결
 
-- SSH 전송의 `Link`가 그 터널의 수명을 가진다. 링크를 닫으면 터널도 끝난다. bulk·요청 채널은 같은 터널을 쓴다.
+- SSH 전송의 `Link`가 그 터널의 수명을 가진다. 링크를 닫으면 터널도 끝난다. bulk·요청 채널은 같은 터널을 쓴다. 그래서 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널도 끝난다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
 - 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum만 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
 - 다시 걸 때는 포트 발견과 터널 열기부터 새로 한다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
 

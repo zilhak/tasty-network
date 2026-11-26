@@ -12,7 +12,7 @@
 | `RelayMode::Custom(RelayMap)` | 이 endpoint의 홈 relay 후보를 소비자가 준 relay로 한정한다. `RelayMode::Default`(n0 운영 relay)는 쓰지 않는다. 상대 주소에 다른 relay URL이 있으면 iroh는 로컬 map에 없어도 그 relay에 접속한다. 그때 인증 토큰은 로컬 map의 같은 URL 항목에서만 찾는다(`src/socket/transports/relay/actor.rs` `start_active_relay`). QUIC 주소 확인은 map 항목의 `RelayConfig.quic`으로만 시도한다(`src/net_report/reportgen.rs`) |
 | `EndpointAddr` | 상대 주소: endpoint ID, relay URL, 직접 주소 |
 | `Connection::remote_id()` | TLS로 확인된 상대 ID. 서명 증명을 다시 하지 않는다 |
-| `Connection::path_events`(`PathEvent`: 열림·닫힘·선택 경로 바뀜·`Lagged`), `Connection::paths`·`paths_stream`(스냅샷), `Path::{is_selected, is_ip, is_relay, rtt}` | 선택 경로가 직접인지 relay인지, RTT. 정책의 현재 상태는 `paths_stream` 스냅샷으로 갱신한다. 새 선택 경로가 없으면 `PathEvent::Selected`는 오지 않지만 스냅샷은 바뀌므로, 선택 경로가 없는 구간도 놓치지 않는다. `path_events`는 경로 전환 이력(로그·펀칭 측정)에 쓴다 |
+| `Connection::path_events`(`PathEvent`: 열림·닫힘·선택 경로 바뀜·`Lagged`), `Connection::paths`·`paths_stream`(스냅샷), `Path::{is_selected, is_ip, is_relay, rtt}` | 선택 경로가 직접인지 relay인지, RTT. 정책은 두 입력을 함께 쓴다. `PathEvent::Selected`는 선택이 바뀔 때마다 오므로 짧게 relay로 갔다 돌아온 것도 이것으로 본다. `paths_stream` 스냅샷은 poll할 때의 상태만 주므로 그 사이의 전환이 빠질 수 있다. 대신 시작 때의 상태, 선택 경로가 없는 구간(이때는 `Selected`가 오지 않는다), `Lagged` 뒤의 현재 상태를 스냅샷으로 맞춘다. `path_events`는 경로 전환 이력(로그·펀칭 측정)에도 쓴다 |
 | `Path::stats()`, `PathEvent::Closed` | 경로별 바이트(펀칭 실험의 relay 경유 바이트) |
 | `iroh-base` `SecretKey::from_bytes`·`to_bytes`·`public`, `PublicKey::from_bytes`·`as_bytes`·`Display` | 기기 키와 같은 32바이트 |
 | feature `test-utils`의 `run_relay_server`·`run_relay_server_with`·`run_relay_server_with_access`(async, `Result<(RelayMap, RelayUrl, Server), _>`) | 시험 안 relay. 자체 서명 인증서라 시험용 TLS 신뢰 설정을 함께 넘긴다 |
@@ -43,7 +43,7 @@
 사용자 결정(2026-11-26) 1+2안 중 (1)이 이 크레이트 몫이다.
 
 - relay 목록의 각 항목은 `RelayChoice { url, policy, auth_token, quic_addr_discovery }`이고 `policy`는 `DirectRequired` 또는 `RelayAllowed`다. `auth_token`은 relay가 `shared_token` 접속 허용을 쓸 때 iroh `RelayConfig::with_auth_token`으로 넘긴다. `quic_addr_discovery`는 `Off` 또는 `Port(u16)`이고 기본은 `Off`다. relay 서버의 QUIC 주소 확인은 기본 꺼짐인데, iroh의 URL → `RelayConfig` 기본 변환은 7842 포트로 주소 확인을 시도하므로(`iroh-relay/src/relay_map.rs`) 그대로 두지 않고 이 값으로 `RelayConfig.quic`을 정한다.
-  - `DirectRequired`: 정해 둔 시간(`direct_wait`) 안에 선택 경로가 직접(`is_ip`)이 되지 않으면 끊는다. 직접이었다가 relay로 되돌아가도 끊는다. 끊을 때 사유는 `P2pCloseReason::DirectPathTimeout`(코드 2) 또는 `DirectPathLost`(코드 3)다.
+  - `DirectRequired`: 정해 둔 시간(`direct_wait`) 안에 선택 경로가 직접(`is_ip`)이 되지 않으면 끊는다. 직접이었다가 relay로 되돌아가도 끊는다. 되돌아감은 `Selected` 이벤트나 스냅샷에서 relay 경로가 선택된 것을 본 때다. `Lagged`로 이벤트를 놓쳤으면 그동안의 이력은 복원하지 않고 스냅샷의 현재 상태로 판정한다. 지금 relay가 선택돼 있으면 되돌아감으로 끊고, 직접이면 유지하고 놓친 구간이 있었다고 로그에 남긴다. 끊을 때 사유는 `P2pCloseReason::DirectPathTimeout`(코드 2) 또는 `DirectPathLost`(코드 3)다.
   - `RelayAllowed`: relay 경로로도 연결을 유지한다.
 - 정책은 양쪽이 각자 자기 목록으로 판단한다. 기준은 지금 선택된 relay 경로의 relay URL이다. 그 URL이 자기 목록에 있으면 그 항목의 정책, 없으면(페어링 주소로 받은 상대의 홈 relay 등) config의 `unknown_relay_policy`(기본 `DirectRequired`)를 쓴다. 한쪽이 끊으면 그 QUIC 연결 전체를 두 사유 중 하나의 종료 코드로 닫는다([handshake v2](handshake.md) "QUIC 종료 코드"). 상대는 종료 프레임을 받은 경우에만 같은 사유를 보고, 받지 못하면 idle timeout으로 끝난다.
 - `DirectRequired`가 보장하는 것은 직접 경로를 시간 안에 얻지 못하거나 잃었을 때의 종료다. relay 중계가 0이라는 보장은 아니다. iroh는 선택 경로로 앱 데이터를 보내므로, `direct_wait` 동안과 직접 → relay로 되돌아간 뒤 끊기 전까지 handshake와 앱 프레임은 relay를 지날 수 있다. `punch-only` relay의 수신 상한이 그 양을 낮은 속도로 묶는다. 직접 경로가 확인될 때까지 앱 프레임을 보류하는 계약은 지금 두지 않았다([남은 결정](index.md#남은-결정)).
@@ -64,7 +64,7 @@
 | 네트워크 B | A와 다른 망. 모바일 테더링(이동통신사 CGNAT, endpoint-dependent mapping일 수 있음)을 1순위로 한다 |
 | 추가 조합 | (1) 두 기기가 같은 공유기 안, (2) 한쪽이 나가는 UDP를 막은 상태, (3) 가능하면 양쪽 모두 endpoint-dependent mapping(펀칭 실패가 예상되는 관측 조합. 포트 예측이나 포트 매핑(iroh 기본 feature의 portmapper)으로 직접 경로가 설 수도 있어 실패를 확정하는 조건은 아니다. 직접 경로를 확실히 막는 대조는 (2)와 CI의 `clear_ip_transports()`다) |
 | relay 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다 |
-| relay 포트 | TCP 80(ACME 인증)·443(HTTPS relay) 외부 개방. QUIC 주소 확인을 켜면 UDP 7842도. metrics 9090은 외부에 열지 않는다 |
+| relay 포트 | TCP 443(HTTPS relay. 내장 Let's Encrypt의 TLS-ALPN-01 인증도 이 포트로 받는다)·80(TLS 구성에서는 captive portal용 평문 HTTP) 외부 개방. QUIC 주소 확인을 켜면 UDP 7842도. metrics 9090은 외부에 열지 않는다 |
 | relay 이름·인증서 | 그 공인 주소를 가리키는 DNS 이름과 TLS 인증서(Let's Encrypt 또는 운영자 인증서). iroh 클라이언트는 HTTP relay URL에도 접속할 수 있지만, 이 실험은 제품과 같은 조건을 재려는 것이라 운영 정책으로 `--dev`(평문 HTTP)를 쓰지 않는다 |
 | relay 설정 | `relay/punch-only.toml`(상한 값을 단계별로 바꿈. 상한을 낮춰도 0은 아니어서 낮은 속도의 중계는 남는다)과 `relay/relay-fallback.toml`(상한 없음) 두 가지로 번갈아 띄운다 |
 

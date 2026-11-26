@@ -46,7 +46,7 @@ CI 첫 실행의 결과(어느 OS가 어느 서버로 돌았는지)를 이 절�
 ### Windows
 
 1. GitHub Windows 러너에서 OpenSSH 서버(`sshd.exe`)를 준비해 같은 방식으로 띄운다. 러너는 관리자 권한이라 설치 단계를 둘 수 있다. 사용자 계정 아래에서 서비스가 아닌 전경 실행이 되는지는 CI 첫 실행으로 판정한다.
-2. 1이 안 되면 대체: 시험 전용 Rust SSH 서버(`russh` 크레이트, dev-dependency)가 `direct-tcpip`(로컬 포워딩)을 받는 최소 서버를 시험 도우미에 둔다. 클라이언트는 여전히 시스템 `ssh.exe`다. 역할 반전도 `-L`만 쓰므로 이 대체로 충분하다.
+2. 1이 안 되면 대체: 시험 전용 Rust SSH 서버(`russh` 크레이트, dev-dependency)를 시험 도우미에 둔다. 받아야 하는 요청은 두 가지다. `direct-tcpip`(로컬 포워딩)과 `exec`(포트 발견 명령. 받은 명령을 시험 사용자 권한으로 OS 셸에서 실행하고 stdout·종료 코드를 돌려준다). 서버 재시작 뒤 새 인스턴스의 연결 레코드를 다시 발견해 연결하는 경로(D2 `reconnect_after_server_restart`)가 `exec`에 기대기 때문이다. 클라이언트는 여전히 시스템 `ssh`다. 역할 반전도 `-L`만 쓰므로 포워딩은 `direct-tcpip`로 충분하다. 다른 OS에서 같은 대체를 쓸 때도 이 두 요청을 같게 받는다.
 3. 어느 쪽을 썼는지 시험 로그에 한 줄로 남긴다(`sshd=openssh` 또는 `sshd=russh`).
 
 1과 2가 모두 안 되면 Windows의 SSH 통합 시험은 "미실행"이고, 미실행은 통과로 세지 않는다([동작 수준 기준](done-criteria.md) "판정 규칙").

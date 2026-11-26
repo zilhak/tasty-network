@@ -36,8 +36,8 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 | 순서 | 방향 | 메시지 | 받는 쪽이 하는 검사 |
 |---|---|---|---|
 | 1 | dialer → acceptor | `stream.open` 줄. `params = {proto:2, purpose, token, device_id, instance_id, nonce, holder, caps, ext}` | `proto`·형식 검사, 토큰 상수 시간 비교. 실패하면 바로 거절 ACK |
-| 2 | acceptor → dialer | `challenge = {device_id, instance_id, nonce, caps, sig}`. `sig`는 받는 쪽 키로 서명 대상(아래)에 서명한 값 | dialer: 서명 검증, TOFU 판정, 자기 인스턴스 비교 |
-| 3 | dialer → acceptor | `proof = {sig}`. dialer 키로 서명 대상에 서명한 값 | 서명 검증, TOFU 판정, 자기 인스턴스 비교, 역할 검사 |
+| 2 | acceptor → dialer | `challenge = {device_id, instance_id, nonce, caps, sig}`. `sig`는 받는 쪽 키로 서명 대상(아래)에 서명한 값 | dialer: 서명 검증, 자기 인스턴스 비교, TOFU 판정 |
+| 3 | dialer → acceptor | `proof = {sig}`. dialer 키로 서명 대상에 서명한 값 | 서명 검증, 자기 인스턴스 비교, TOFU 판정, 역할 검사 |
 | 4 | acceptor → dialer | `ack = {ok, proto, reason?, error?, client_id?, bulk_credential?, ext?}` | — |
 
 - 서명 대상은 아래 필드를 이 순서로 이어 붙인 바이트의 SHA-256이다. 각 필드는 4바이트 big-endian 길이 + 바이트로 넣어 경계가 모호하지 않게 한다.
@@ -48,7 +48,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
   5. dialer 인스턴스 ID, acceptor 인스턴스 ID(UTF-8)
   6. dialer nonce, acceptor nonce(각 32바이트 원본)
   7. dialer `caps`, acceptor `caps`. 각 목록은 이름 개수(u32 big-endian) 뒤에 이름마다 4바이트 big-endian 길이 + 바이트를 이은 것이다. 이름은 바이트 오름차순으로 정렬한다. 빈 목록은 개수 0 하나다. 이름 문법과 중복 처리는 아래 "capability"
-  8. `ext`(받은 JSON 값을 `serde_json::Value`로 읽어 키 정렬·공백 없는 형태로 다시 직렬화한 UTF-8. 없으면 빈 바이트)
+  8. `ext`. 와이어의 `ext`는 JSON 문자열이고 그 안에 소비자의 JSON 텍스트가 들어 있다. 서명 대상은 그 문자열 값을 JSON 문자열로 풀어낸 UTF-8 바이트 그대로다. 다시 직렬화하지 않으므로 숫자 표기·키 순서가 양 끝의 `serde_json` feature(`arbitrary_precision` 등)에 따라 달라지지 않는다. 없으면 빈 바이트
   
   그래서 두 기기 ID, 역할, capability 제안, 도메인 요청이 이 채널 하나에 묶인다. 이 인코딩을 바꾸면 `proto`를 올린다.
 - 받는 쪽은 토큰 검사를 통과하기 전에는 challenge를 보내지 않는다. 토큰 없는 상대는 기기 ID조차 받지 못한다.
@@ -74,7 +74,7 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 | P2P · request | `proto, purpose, device_id, instance_id, caps` | hello → ACK | P2P · attach와 같음. 역할 검사 없음 | SSH · request와 같음 |
 | P2P · bulk | `proto, purpose, instance_id, bulk_credential` (+`ext`) | ACK | 자격이 이 스트림과 같은 QUIC 연결 위 attach 링크의 것인지 본다. 그래서 상대 기기 ID는 메시지 1의 필드가 아니라 연결의 `remote_id()`가 부모 링크의 상대와 같은 것으로 확인된다. 실패: 거절 ACK | SSH · bulk와 같음 |
 
-거절 ACK를 보낸 쪽은 바로 그 채널을 닫는다. 성공 ACK 뒤에만 일반 프레임 흐름이 시작된다. P2P에서 채널을 닫는 것은 그 스트림만이고 QUIC 연결은 닫지 않는다([전송 추상화](transport.md) "P2P의 닫기 범위").
+거절 ACK를 보낸 쪽은 그 채널을 정상 종료로 닫는다. 상대가 ACK를 읽을 수 있게 송신을 끝낸 뒤 닫는다는 뜻이다(TCP는 `shutdown(Write)`, P2P는 `finish`). 성공 ACK 뒤에만 일반 프레임 흐름이 시작된다. P2P에서 채널을 닫는 것은 그 스트림만이고 QUIC 연결은 닫지 않는다([전송 추상화](transport.md) "P2P의 닫기 범위").
 
 ## 검사 순서
 
@@ -84,13 +84,13 @@ tasty 전환 뒤에는 한쪽만 새 버전인 두 기기 사이 attach가 되�
 2. 토큰(SSH 경로). `token` 필드가 없으면 `TokenMissing`, 값이 틀리면(형식이 64자 hex가 아닌 경우 포함) `TokenInvalid`. P2P의 페어링 검사는 이보다 앞서 QUIC 연결 단계에서 끝난다
 3. 목적별 필드(`Malformed`). `purpose` 값, 위 상태 표의 필수 필드, 필드 타입, `caps` 이름 문법, P2P의 `device_id`가 `remote_id()`와 같은지. 토큰 뒤에 두므로 토큰 없는 상대는 어떤 필드가 틀렸는지도 알 수 없다. SSH 경로는 여기까지 통과해야 challenge를 보낸다
 4. 서명(SSH 경로, proof를 받은 뒤, `SignatureInvalid`)
-5. TOFU(`PeerKeyMismatch`). 소비자가 `PeerKeyStore`를 준 쪽만 본다. tasty dialer는 원격 프로필 이름으로 상대 키를 기록한다. 받는 쪽은 상대를 부를 이름이 없으므로 보통 주지 않고, 확인된 상대 기기 ID를 `Link::peer()`로 받아 기록·표시한다
-6. 자기 자신(`SelfAttach`)
+5. 자기 자신(`SelfAttach`). 기록을 바꿀 수 있는 TOFU보다 앞에 둔다. 자기 자신과의 연결이 빈 프로필에 자기 키를 기록해 두면, 사용자가 프로필 주소를 고친 뒤에도 그 기록 때문에 다시 등록해야 하기 때문이다
+6. TOFU(`PeerKeyMismatch`). 소비자가 `PeerKeyStore`를 준 쪽만 본다. tasty dialer는 원격 프로필 이름으로 상대 키를 기록한다. 받는 쪽은 상대를 부를 이름이 없으므로 보통 주지 않고, 확인된 상대 기기 ID를 `Link::peer()`로 받아 기록·표시한다
 7. 역할(`RoleRefused`). `holder = "acceptor"` 제안의 승인 대기도 여기다(아래 "역할 반전 승인의 기한")
 8. bulk 자격(`purpose = bulk`일 때, `BulkCredentialInvalid`)
 9. 소비자 도메인 콜백(`Domain`)
 
-dialer 쪽도 2번 메시지를 받은 뒤 서명 → TOFU → 자기 자신 순으로 보고, 실패하면 3번을 보내지 않고 닫는다.
+dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순으로 보고, 실패하면 3번을 보내지 않고 닫는다.
 
 ### 역할 반전 승인의 기한
 
@@ -111,7 +111,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → TOFU → 자기 자신 순
 | `nonce` | 1, 2 | 32바이트 난수의 hex. SSH 경로만 |
 | `holder` | 1 | `dialer` · `acceptor`. `purpose = attach`일 때만 |
 | `caps` | 1, 2 | 이 레포 수준 capability 이름 목록(예: `net.request`, `net.topology`). 모르는 이름은 무시 |
-| `ext` | 1, 4 | 도메인 확장. JSON 객체, 이 레포는 해석하지 않는다 |
+| `ext` | 1, 4 | 도메인 확장. 소비자의 JSON 텍스트를 담은 JSON 문자열(위 서명 대상 8번). 이 레포는 해석하지 않는다 |
 | `sig` | 2, 3 | ed25519 서명의 hex |
 | `ok`, `error` | 4 | v1 `StreamAck`과 같은 뜻. `error`는 `ok:false`이면 필수인 영어 한 문장이다. v1 클라이언트는 이 값을 그대로 보여 준다(위 "구버전 처리") |
 | `reason` | 4 | 거절 사유(아래). `ok:false`일 때 |
@@ -157,7 +157,7 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
 
 ## 도메인 확장
 
-- `ext`는 소비자가 채우고 소비자가 검사한다. tasty는 `target`·`target_workspace`·`bulk_workspace`를 `ext`에 그대로 싣는다.
+- `ext`는 소비자가 채우고 소비자가 검사한다. 이 레포는 문자열을 그대로 넘기고, 소비자가 그 안의 JSON을 읽는다. tasty는 `target`·`target_workspace`·`bulk_workspace`를 `ext`에 그대로 싣는다.
 - 소비자 도메인 콜백은 `ext`를 받아 수락(ACK의 `ext`와 bulk grant를 돌려줌)이나 거절(`domain` 사유와 코드)을 돌려준다. bulk 채널의 도메인 콜백은 부모 링크와 그 grant를 함께 받는다.
 - tasty 쪽 계약: `target`·`target_workspace`·`bulk_workspace`는 서로 배타다. 둘 이상이면 `domain` + `conflicting_targets`로 거절한다([레포 경계](repo-boundary.md) "`StreamOpenParams` 도메인 필드").
 
@@ -170,7 +170,15 @@ P2P 구현이 QUIC 연결 전체를 닫을 때 `Connection::close(error_code, re
 - bulk 채널의 메시지 1은 `purpose = bulk`, 토큰(SSH), `bulk_credential`을 싣는다. SSH 경로에서도 서명은 다시 하지 않는다. 자격이 인증된 부모 링크에서 나왔기 때문이다.
 - 부모 링크가 끝나면 그 자격은 폐기된다. 폐기된 자격의 bulk 요청은 `bulk_credential_invalid`.
 - 자격은 링크 수명 동안 바뀌지 않는다. 그래서 자격을 갱신하는 메시지가 없다. grant가 지금도 유효한지는 bulk handshake마다 acceptor의 도메인 콜백이 (부모 링크, grant)를 받아 판단한다. grant가 바뀌었으면 `domain` 사유로 거절한다.
-- 열려 있는 bulk 채널이 쓰던 자격이 폐기돼도 그 채널을 이 레포가 끊지는 않는다. 완료 인가는 tasty가 commit 시점에 확인한다(`tasty:src/remote/server.rs` bulk 완료).
+- 이미 열린 bulk 채널의 수명:
+
+  | 일어난 일 | 열린 bulk 채널 | 완료 인가 |
+  |---|---|---|
+  | 부모 링크의 정상 종료 | 이 레포가 강제 종료로 닫는다. SSH는 터널이 끝나서, P2P는 부모와 함께 스트림을 닫아서 같은 결과다 | 전송이 끝까지 가지 못하므로 결과 불명(O12) |
+  | 부모 링크의 강제 종료 | 위와 같다 | 위와 같다 |
+  | grant 변경(부모는 살아 있음) | 이 레포는 끊지 않는다 | tasty가 commit 시점에 확인한다. 지금도 활성 holder와 registration이 바뀌었으면 완료를 거절한다(`tasty:src/remote/server.rs` `finalize_bulk_transfer`) |
+
+  부모가 끝난 뒤의 bulk는 지금 tasty에서도 완료 인가를 통과하지 못하므로(위 함수의 활성 holder 검사) 부모와 함께 닫아도 잃는 완료가 없다.
 
 ## capability
 

@@ -75,7 +75,7 @@
 
 ## `StreamOpenParams` 도메인 필드
 
-`StreamOpenParams`의 `target`·`target_workspace`·`bulk_workspace`(`tasty:crates/tasty-ipc/src/stream.rs:199`)는 attach 도메인 값이다. v2 handshake는 이 값을 해석하지 않고 `ext` 객체에 그대로 싣는다([handshake v2](handshake.md) "도메인 확장"). 세 필드의 상호 배타 검사는 tasty의 도메인 검증 콜백이 한다. 지금 tasty는 `target`과 `target_workspace`를 함께 받으면 workspace를 고르지만 필드 문서는 거절한다고 적는다. v2로 바꿀 때 tasty는 문서대로 거절(`Domain` 사유)한다. 이 레포의 시험은 거절 경로를 소비자 콜백 흉내로 확인한다.
+`StreamOpenParams`의 `target`·`target_workspace`·`bulk_workspace`(`tasty:crates/tasty-ipc/src/stream.rs:199`)는 attach 도메인 값이다. v2 handshake는 이 값을 해석하지 않는다. tasty가 이 값을 담은 JSON 텍스트를 `ext` 문자열에 그대로 싣는다([handshake v2](handshake.md) "도메인 확장"). 세 필드의 상호 배타 검사는 tasty의 도메인 검증 콜백이 한다. 지금 tasty는 `target`과 `target_workspace`를 함께 받으면 workspace를 고르지만 필드 문서는 거절한다고 적는다. v2로 바꿀 때 tasty는 문서대로 거절(`Domain` 사유)한다. 이 레포의 시험은 거절 경로를 소비자 콜백 흉내로 확인한다.
 
 ## tasty-ssh 역방향 의존 끊기
 
@@ -115,6 +115,8 @@
 - 명시 경로가 없으면 모드를 따른다. `Auto`는 subcommand → Unix 파일 → Windows 파일 순이다(`AUTO_FALLBACK_CHAIN`).
 - 취소와 원격 인스턴스 종료 확정(`RemoteInstanceExited`)은 다음 방식으로 넘어가지 않고 그 자리에서 끝난다(`stops_auto_chain`).
 - 새 연결 레코드(포트·토큰·인스턴스 ID, [기기 키·토큰](identity.md) "토큰 전달")도 같은 우선순위·체인·종료 분류로 읽는다. 레코드 하나를 읽으므로 포트와 토큰을 따로 찾는 단계가 없다.
+- 레코드 해석은 한 곳에 둔다. `tasty-net-ssh`의 발견 루프는 stdout을 해석하는 디코더를 주입받고(지금 tasty의 `parse_port` 자리), `tasty-net-transport`가 `tasty-net-identity`의 레코드 파서를 넘긴다. 그래서 게시와 SSH 발견이 같은 파서를 쓰고, ssh 크레이트는 이 레포 안 의존이 없는 채로 남는다([크레이트 구성](crates.md) "의존 방향"). 숫자 포트 하나를 읽는 경우(`Discovered::LegacyPort`)도 그 파서가 가른다.
+- 발견 실패의 진단 detail에는 stdout 원문을 넣지 않는다([기기 키·토큰](identity.md) "토큰 비교"의 원문 규칙).
 
 - 환경 변수 `TASTY_SSH_VERIFY`(`lib.rs:227` `run_ssh_connect`, :1105 `detect_for_profile`, `tasty:crates/tasty-remote/src/browse.rs`)는 읽지 않는다. 호스트 키 확인 여부는 `verify: bool` 인자로 받고, 환경 변수를 이 값으로 바꾸는 일은 tasty에 남는다.
 - ssh 옵션 순서(`lib.rs:348-384`)는 그대로 옮긴다. `BatchMode=no`·`ServerAliveInterval`·`ServerAliveCountMax`는 언제나, `StrictHostKeyChecking=accept-new`는 `verify = true`일 때만 사용자 `extra_options`보다 먼저 넣는다(ssh는 같은 옵션의 첫 값을 쓰므로 이 값들이 이긴다). `verify = false`이면 이 레포는 `StrictHostKeyChecking`을 넣지 않고, 사용자 `extra_options`나 ssh 설정 파일·기본값이 정한다. `ConnectTimeout`은 맨 뒤에 기본값(`SSH_CONNECT_TIMEOUT` 10초)을 넣는다. ssh는 명령행 `-o`를 설정 파일보다 먼저 적용하므로, 이 기본값을 이기는 것은 그보다 앞에 들어간 사용자 `extra_options`의 `ConnectTimeout`뿐이다. ssh 설정 파일의 `ConnectTimeout`은 이 기본값에 진다.
