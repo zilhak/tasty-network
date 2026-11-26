@@ -490,3 +490,62 @@ fn a_frame_is_one_write_and_one_flush_on_a_nodelay_socket() {
     let _channel = RawChannel::from_tcp(stream).expect("channel");
     assert!(probe.nodelay().expect("nodelay"));
 }
+
+/// Over TCP too, a cancel of the accepting attempt during the approval wait is `Cancelled`
+/// and no domain callback runs.
+#[test]
+fn a_cancel_during_the_approval_wait_is_cancelled_over_tcp() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let policy = Arc::new(common::EchoPolicy::default());
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked = std::sync::Mutex::new(asked_tx);
+    let config = AcceptConfig::new(key(2), "acceptor-1", Some(token('a')), policy.clone())
+        .with_timeouts(timeouts())
+        .with_role_proposals(move |proposal| {
+            asked.lock().expect("lock").send(proposal).expect("asked");
+        });
+    let cancel = AttemptCancel::new();
+    let attempt = cancel.clone();
+    let acceptor = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut channel = RawChannel::from_tcp(stream).expect("channel");
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(channel, &line, Vec::new(), &config, &attempt)
+    });
+    let dialer = std::thread::spawn(move || {
+        let transport = Loopback {
+            addr,
+            token: token('a'),
+        };
+        let conn = transport
+            .connect(&(), &AttemptCancel::new())
+            .expect("connect");
+        dial_handshake(
+            conn,
+            &client(),
+            Holder::Acceptor,
+            None,
+            &AttemptCancel::new(),
+        )
+        .map(drop)
+    });
+    let proposal = asked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the proposal");
+    std::thread::sleep(Duration::from_millis(120));
+    cancel.cancel();
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::Cancelled)),
+        "{result:?}"
+    );
+    proposal.accept();
+    assert!(dialer.join().expect("dialer").is_err());
+    assert_eq!(policy.links.load(Ordering::SeqCst), 0);
+}

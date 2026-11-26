@@ -1470,3 +1470,56 @@ fn bytes_read_after_the_first_line_are_handed_to_the_handshake() {
     let link = link_of(acceptor.join().expect("acceptor"));
     assert_eq!(link.peer().device_id(), key(1).id());
 }
+
+/// A cancel of the accepting attempt while a reversal waits for approval ends it with
+/// `Cancelled`, not `PeerClosed`, and no domain callback runs even if the approval follows.
+#[test]
+fn a_cancel_during_the_approval_wait_is_cancelled() {
+    let mut s = server(Some(token('a')));
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked = Mutex::new(asked_tx);
+    s.config = s.config.with_role_proposals(move |proposal| {
+        asked.lock().expect("lock").send(proposal).expect("asked");
+    });
+    let (transport, listener) = pair(Some(token('a')));
+    let cancel = AttemptCancel::new();
+    let attempt = cancel.clone();
+    let config = s.config.clone();
+    let acceptor = std::thread::spawn(move || {
+        let mut channel = listener.accept().expect("accept");
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        accept_handshake(channel, &line, Vec::new(), &config, &attempt)
+    });
+    let dialer = std::thread::spawn(move || {
+        let conn = transport
+            .connect(&(), &AttemptCancel::new())
+            .expect("connect");
+        dial_handshake(
+            conn,
+            &client(1, "d"),
+            Holder::Acceptor,
+            None,
+            &AttemptCancel::new(),
+        )
+        .map(drop)
+    });
+    let proposal = asked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the proposal");
+    // The wait is in its channel watch when the cancel comes.
+    std::thread::sleep(Duration::from_millis(120));
+    cancel.cancel();
+    let result = acceptor.join().expect("acceptor");
+    assert!(
+        matches!(result, Err(HandshakeError::Cancelled)),
+        "{result:?}"
+    );
+    proposal.accept();
+    assert!(dialer.join().expect("dialer").is_err());
+    assert_eq!(s.policy.attach_calls.load(Ordering::SeqCst), 0);
+}

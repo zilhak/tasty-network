@@ -418,6 +418,20 @@ impl Io<'_> {
         Ok(self.deadline - now)
     }
 
+    /// What ended the channel when a read saw it end: the attempt's cancel first, then the
+    /// code the P2P connection was closed with, and only then `otherwise` (EOF or the bytes
+    /// the read got). The cancel and the close shut the channel too, so the read alone cannot
+    /// tell them from the peer.
+    fn ended_by(&self, otherwise: HandshakeError) -> HandshakeError {
+        if self.cancel.is_cancelled() {
+            return HandshakeError::Cancelled;
+        }
+        if let Some(reason) = self.ch.control().close_reason() {
+            return HandshakeError::Closed(reason);
+        }
+        otherwise
+    }
+
     fn fail(&self, error: io::Error) -> HandshakeError {
         if self.cancel.is_cancelled() {
             return HandshakeError::Cancelled;
@@ -1282,7 +1296,9 @@ fn await_proposal(
 }
 
 /// Waits up to `wait` for a byte from the dialer, which must send nothing before the ACK:
-/// a timeout is the good case, EOF is [`HandshakeError::PeerClosed`].
+/// a timeout is the good case. EOF and a byte are told apart in the order of [`Io::fail`]:
+/// the cancel, then the P2P close code, then [`HandshakeError::PeerClosed`] or a protocol
+/// error.
 fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeError> {
     io.ch
         .control()
@@ -1290,8 +1306,8 @@ fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeErro
         .map_err(HandshakeError::Io)?;
     let mut byte = [0u8; 1];
     match io.ch.read(&mut byte) {
-        Ok(0) => Err(HandshakeError::PeerClosed),
-        Ok(_) => Err(HandshakeError::Protocol("bytes before the ACK")),
+        Ok(0) => Err(io.ended_by(HandshakeError::PeerClosed)),
+        Ok(_) => Err(io.ended_by(HandshakeError::Protocol("bytes before the ACK"))),
         Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(()),
         Err(e) if ReadFailure::of_io(&e) == ReadFailure::HeartbeatTimeout => Ok(()),
         Err(e) => Err(io.fail(e)),
