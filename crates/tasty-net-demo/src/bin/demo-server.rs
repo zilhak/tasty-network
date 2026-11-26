@@ -26,7 +26,7 @@ use std::io::BufRead;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,25 +52,32 @@ fn main() -> ExitCode {
     }
 }
 
-/// Counts the attach links whose registration is alive.
+/// Counts the attach links whose registration is alive. The count changes and its line is
+/// printed under one lock, so the printed `live=` values come in the order the count changed.
 #[derive(Default)]
 struct LivePolicy {
     next_client: AtomicU32,
-    live: Arc<AtomicUsize>,
+    live: Arc<Mutex<usize>>,
 }
 
 /// The registration of one attach link: the link holds it and drops it when it ends.
 struct Registration {
     client: u32,
-    live: Arc<AtomicUsize>,
+    live: Arc<Mutex<usize>>,
+}
+
+fn lock_live(live: &Mutex<usize>) -> std::sync::MutexGuard<'_, usize> {
+    live.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let live = self.live.fetch_sub(1, Ordering::SeqCst) - 1;
+        let mut live = lock_live(&self.live);
+        *live -= 1;
         emit(&format!(
-            "server released client={} live={live}",
-            self.client
+            "server released client={} live={}",
+            self.client, *live
         ));
     }
 }
@@ -78,11 +85,15 @@ impl Drop for Registration {
 impl DomainPolicy for LivePolicy {
     fn accept_attach(&self, request: &AttachRequest<'_>) -> Result<DomainAccept, DomainReject> {
         let client = self.next_client.fetch_add(1, Ordering::SeqCst) + 1;
-        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
-        emit(&format!(
-            "server attached client={client} live={live} peer={}",
-            request.peer().instance_id()
-        ));
+        {
+            let mut live = lock_live(&self.live);
+            *live += 1;
+            emit(&format!(
+                "server attached client={client} live={} peer={}",
+                *live,
+                request.peer().instance_id()
+            ));
+        }
         Ok(DomainAccept {
             client_id: Some(client),
             guard: Some(Box::new(Registration {
