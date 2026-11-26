@@ -118,7 +118,9 @@ pub fn split_mesh_frame(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshAssembleError {
     /// The header is truncated or inconsistent: `chunk_count` is 0, `chunk_index` is out
-    /// of range, or the header disagrees with earlier chunks of the same frame.
+    /// of range, or any header field other than `chunk_index` (`chunk_count`,
+    /// `total_len`, `generation`, `frame_seq`, `full_textures`) disagrees with earlier
+    /// chunks of the same frame.
     Malformed,
     /// The lengths do not add up: `total_len` exceeds what `chunk_count` chunks can
     /// carry (rejected at once to avoid a large allocation), a chunk carries more than
@@ -194,8 +196,15 @@ impl MeshFrameAssembler {
             full_textures: meta.full_textures,
             received: HashMap::new(),
         });
-        // A reused frame_id whose header disagrees is treated as corruption.
-        if slot.chunk_count != meta.chunk_count || slot.total_len != meta.total_len {
+        // Every chunk of a frame carries the same header apart from chunk_index. A chunk
+        // whose header disagrees (or a reused frame_id) is treated as corruption, so the
+        // result never depends on which chunk arrived first.
+        if slot.chunk_count != meta.chunk_count
+            || slot.total_len != meta.total_len
+            || slot.generation != meta.generation
+            || slot.frame_seq != meta.frame_seq
+            || slot.full_textures != meta.full_textures
+        {
             self.inflight.remove(&key);
             return Err(MeshAssembleError::Malformed);
         }
@@ -495,6 +504,36 @@ mod tests {
         );
         // The frame was dropped: the real second chunk now starts a new frame.
         assert!(assembler.push_chunk(&chunks[1]).unwrap().is_none());
+    }
+
+    /// A chunk whose generation, frame_seq or full_textures differs from the earlier
+    /// chunks of its frame is rejected, so the result cannot depend on arrival order.
+    #[test]
+    fn a_chunk_with_different_pass_through_fields_is_malformed() {
+        type Change = fn(&mut MeshChunkMeta);
+        let changes: [(&str, Change); 3] = [
+            ("generation", |m| m.generation += 1),
+            ("frame_seq", |m| m.frame_seq += 1),
+            ("full_textures", |m| m.full_textures = !m.full_textures),
+        ];
+        let bytes = vec![3u8; MESH_CHUNK_MAX_PAYLOAD + 1];
+        let chunks = split_mesh_frame(1, 1, 10, 20, false, &bytes);
+        for (field, change) in changes {
+            let mut assembler = MeshFrameAssembler::new();
+            assert!(assembler.push_chunk(&chunks[0]).unwrap().is_none());
+            let (mut meta, data) = decode_mesh_chunk(&chunks[1]).unwrap();
+            change(&mut meta);
+            assert_eq!(
+                assembler.push_chunk(&encode_mesh_chunk(&meta, data)),
+                Err(MeshAssembleError::Malformed),
+                "{field}"
+            );
+            // The frame was dropped: the real second chunk now starts a new frame.
+            assert!(
+                assembler.push_chunk(&chunks[1]).unwrap().is_none(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
