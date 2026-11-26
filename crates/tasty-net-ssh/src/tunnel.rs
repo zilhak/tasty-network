@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{kill_and_reap, recover_mutex};
-use crate::listener::{ListenerVerdict, RemoteListenerAbsent, StderrMarks, relay_stderr};
+use crate::listener::{ListenerVerdict, StderrMarks, relay_stderr};
 use crate::{SshLauncher, SshTarget};
 
 /// How long `establish` waits for the local end to accept connections.
@@ -289,22 +289,11 @@ impl SshTunnel {
         matches!(self.lock_child().try_wait(), Ok(None))
     }
 
-    /// The absent-listener verdict of this tunnel. Use it to judge failures after the tunnel
-    /// moved elsewhere.
+    /// The absent-listener verdict for the next channel through this tunnel. Take it right
+    /// before opening that channel; it counts only ssh refusals after this call
+    /// ([`ListenerVerdict`]). It stays usable after the tunnel moved elsewhere or dropped.
     pub fn listener_verdict(&self) -> ListenerVerdict {
         ListenerVerdict::new(self.remote_port, Arc::clone(&self.marks))
-    }
-
-    /// Whether a request through the tunnel failed with `failure` because nothing listens on the
-    /// remote port ([`ListenerVerdict::remote_listener_absent`]).
-    pub fn remote_listener_absent(&self, failure: &(dyn Error + 'static)) -> bool {
-        self.listener_verdict().remote_listener_absent(failure)
-    }
-
-    /// [`RemoteListenerAbsent`] if nothing listens on the remote port
-    /// ([`ListenerVerdict::explain_failure`]).
-    pub fn explain_failure(&self, failure: &(dyn Error + 'static)) -> Option<RemoteListenerAbsent> {
-        self.listener_verdict().explain_failure(failure)
     }
 }
 
@@ -540,6 +529,7 @@ mod tests {
     #[cfg(unix)]
     mod fake {
         use super::*;
+        use crate::listener::RemoteListenerAbsent;
         use std::io::{Read, Write};
         use std::path::{Path, PathBuf};
 
@@ -734,6 +724,7 @@ mod tests {
             assert_ne!(tunnel.local_port(), remote);
             assert!(tunnel.is_alive());
 
+            let verdict = tunnel.listener_verdict();
             let mut conn = TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
             conn.set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
@@ -742,7 +733,7 @@ mod tests {
             conn.read_exact(&mut back).expect("echo");
             assert_eq!(&back, b"hello");
             // A listener is present, so a dropped connection is not explained as absent.
-            assert!(!tunnel.remote_listener_absent(&connection_closed()));
+            assert!(!verdict.remote_listener_absent(&connection_closed()));
 
             let pid = only_pid(&pids);
             let (_, drops_before) = tunnel_drop_totals();
@@ -755,23 +746,14 @@ mod tests {
             crate::connection_closed_error("eof")
         }
 
-        /// With nothing on the remote port, the tunnel still comes up, the first connection
-        /// closes, and the verdict says the listener is absent.
-        #[test]
-        fn an_empty_remote_port_is_judged_absent() {
-            let fake = forwarder();
-            let launcher = SshLauncher::new(fake.path());
-            let (held, remote) = reserve_local_port().expect("port");
-            drop(held);
-            let tunnel = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote)
-                .expect("tunnel");
+        /// Opens a channel through `tunnel` and reads until it ends without an answer (EOF or a
+        /// reset). A read timeout would be a different failure and fails the test.
+        fn unanswered_channel(tunnel: &SshTunnel) -> io::Error {
             let mut conn = TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
             conn.set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buf = [0u8; 1];
-            // EOF or a reset: either way the connection ended without an answer. A read
-            // timeout would be a different failure and must not pass here.
-            let failure = match conn.read(&mut buf) {
+            match conn.read(&mut buf) {
                 Ok(0) => connection_closed(),
                 Err(e)
                     if matches!(
@@ -782,15 +764,50 @@ mod tests {
                     e
                 }
                 other => panic!("expected EOF or a reset, got {other:?}"),
-            };
-            assert!(tunnel.remote_listener_absent(&failure));
+            }
+        }
+
+        /// With nothing on the remote port, the tunnel still comes up, the first channel closes,
+        /// and its verdict says the listener is absent. Once a listener accepts there, a later
+        /// channel that closes without an answer is not blamed on the earlier refusals.
+        #[test]
+        fn an_empty_remote_port_is_judged_absent_for_that_channel_only() {
+            let fake = forwarder();
+            let launcher = SshLauncher::new(fake.path());
+            let (held, remote) = reserve_local_port().expect("port");
+            drop(held);
+            let tunnel = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote)
+                .expect("tunnel");
+            let first = tunnel.listener_verdict();
+            let failure = unanswered_channel(&tunnel);
+            assert!(first.remote_listener_absent(&failure));
             assert_eq!(
-                tunnel.explain_failure(&failure),
+                first.explain_failure(&failure),
                 Some(RemoteListenerAbsent {
                     remote_port: remote
                 })
             );
-            let verdict = tunnel.listener_verdict();
+
+            // A listener that accepts and closes at once, so the channel opens but gets no answer.
+            let listener =
+                TcpListener::bind(("127.0.0.1", remote)).expect("rebind the remote port");
+            std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    drop(conn);
+                }
+            });
+            // Let the refusal lines of the ready probe and the first channel arrive.
+            std::thread::sleep(Duration::from_millis(300));
+            let second = tunnel.listener_verdict();
+            let failure = unanswered_channel(&tunnel);
+            assert!(
+                !second.remote_listener_absent(&failure),
+                "the listener is there now"
+            );
+            // The first verdict still covers the first channel's refusal.
+            assert!(first.remote_listener_absent(&failure));
+
+            let verdict = first;
             let status = tunnel.terminate_and_reap().expect("reaped");
             assert!(!status.success());
             assert!(!tunnel.is_alive());

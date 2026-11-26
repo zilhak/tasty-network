@@ -16,7 +16,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait after a failure for the stderr line. ssh writes the refusal line and then
@@ -40,8 +40,8 @@ pub(crate) fn is_fork_option_refusal(line: &str) -> bool {
 /// What the stderr relay of one tunnel marked.
 #[derive(Debug, Default)]
 pub(crate) struct StderrMarks {
-    /// A channel connect failure line ([`is_channel_connect_failure`]).
-    pub(crate) channel_connect_failed: AtomicBool,
+    /// How many channel connect failure lines came so far ([`is_channel_connect_failure`]).
+    pub(crate) channel_connect_failures: AtomicU64,
     /// ssh refused `ForkAfterAuthentication` ([`is_fork_option_refusal`]).
     pub(crate) fork_option_refused: AtomicBool,
 }
@@ -105,7 +105,7 @@ impl LineScanner {
     fn finish_line(&mut self, seen: &StderrMarks) {
         let line = String::from_utf8_lossy(&self.line);
         if is_channel_connect_failure(&line) {
-            seen.channel_connect_failed.store(true, Ordering::Release);
+            seen.channel_connect_failures.fetch_add(1, Ordering::AcqRel);
         }
         if is_fork_option_refusal(&line) {
             seen.fork_option_refused.store(true, Ordering::Release);
@@ -140,15 +140,20 @@ pub(crate) fn relay_stderr(mut from: impl Read, mut to: impl Write, seen: &Stder
     scanner.finish_line(seen);
 }
 
-/// If the failure is a dropped connection, waits briefly for the stderr mark and decides.
-fn judge_after_failure(seen: &AtomicBool, failure: &(dyn Error + 'static)) -> bool {
+/// If the failure is a dropped connection, waits briefly for a failure line after `baseline` and
+/// decides.
+fn judge_after_failure(
+    failures: &AtomicU64,
+    baseline: u64,
+    failure: &(dyn Error + 'static),
+) -> bool {
     let dropped = is_dropped_connection(failure);
     if !dropped {
         return false;
     }
     let deadline = Instant::now() + VERDICT_GRACE;
     loop {
-        let refused = seen.load(Ordering::Acquire);
+        let refused = failures.load(Ordering::Acquire) > baseline;
         if refused || Instant::now() >= deadline {
             return listener_absent(refused, dropped);
         }
@@ -156,35 +161,50 @@ fn judge_after_failure(seen: &AtomicBool, failure: &(dyn Error + 'static)) -> bo
     }
 }
 
-/// Judges failures of a tunnel after the tunnel moved elsewhere (a connection worker and so on).
-/// It reads the tunnel's channel connect failure mark, so take it with
-/// `SshTunnel::listener_verdict` before handing the tunnel over.
+/// Judges the failure of one channel through a tunnel.
+///
+/// Take it with `SshTunnel::listener_verdict` right before opening the channel. It counts only
+/// the channel connect failure lines ssh writes after that moment, so an earlier refusal on the
+/// same tunnel (the ready probe, another channel, or a time when the remote listener was down)
+/// does not make a later channel's drop look like an absent listener. ssh's stderr does not say
+/// which local connection a line belongs to, so a refusal of another channel opened at the same
+/// time still counts.
 #[derive(Clone, Debug)]
 pub struct ListenerVerdict {
     remote_port: u16,
     marks: Arc<StderrMarks>,
+    /// Failure lines seen before this verdict was taken.
+    baseline: u64,
 }
 
 impl ListenerVerdict {
     pub(crate) fn new(remote_port: u16, marks: Arc<StderrMarks>) -> Self {
-        Self { remote_port, marks }
+        let baseline = marks.channel_connect_failures.load(Ordering::Acquire);
+        Self {
+            remote_port,
+            marks,
+            baseline,
+        }
     }
 
-    /// A handle with a fixed observation of the ssh stderr. For testing code that uses the
-    /// verdict without a tunnel.
+    /// A handle with a fixed observation: whether ssh reported a channel connect failure after
+    /// the verdict was taken. For testing code that uses the verdict without a tunnel.
     pub fn with_observation(remote_port: u16, channel_connect_failed: bool) -> Self {
-        let marks = StderrMarks::default();
-        marks
-            .channel_connect_failed
-            .store(channel_connect_failed, Ordering::Release);
-        Self::new(remote_port, Arc::new(marks))
+        let marks = Arc::new(StderrMarks::default());
+        let mut verdict = Self::new(remote_port, Arc::clone(&marks));
+        if channel_connect_failed {
+            marks.channel_connect_failures.store(1, Ordering::Release);
+            verdict.baseline = 0;
+        }
+        verdict
     }
 
     /// Whether a request through the tunnel failed with `failure` because nothing listens on the
     /// remote port. The connection must have dropped without an answer and ssh must have
-    /// reported a channel connect failure. It waits up to 0.5 s for that line.
+    /// reported a channel connect failure since this verdict was taken. It waits up to 0.5 s for
+    /// that line.
     pub fn remote_listener_absent(&self, failure: &(dyn Error + 'static)) -> bool {
-        judge_after_failure(&self.marks.channel_connect_failed, failure)
+        judge_after_failure(&self.marks.channel_connect_failures, self.baseline, failure)
     }
 
     /// [`RemoteListenerAbsent`] if the listener is absent ([`Self::remote_listener_absent`]).
@@ -319,7 +339,7 @@ mod tests {
         let mut out = Vec::new();
         relay_stderr(Chunks(input), &mut out, &seen);
         assert_eq!(out, expected);
-        assert!(seen.channel_connect_failed.load(Ordering::Acquire));
+        assert_eq!(seen.channel_connect_failures.load(Ordering::Acquire), 1);
         assert!(!seen.fork_option_refused.load(Ordering::Acquire));
 
         let seen = StderrMarks::default();
@@ -329,7 +349,7 @@ mod tests {
             &mut out,
             &seen,
         );
-        assert!(!seen.channel_connect_failed.load(Ordering::Acquire));
+        assert_eq!(seen.channel_connect_failures.load(Ordering::Acquire), 0);
 
         let seen = StderrMarks::default();
         relay_stderr(
@@ -341,18 +361,35 @@ mod tests {
             &seen,
         );
         assert!(seen.fork_option_refused.load(Ordering::Acquire));
-        assert!(!seen.channel_connect_failed.load(Ordering::Acquire));
+        assert_eq!(seen.channel_connect_failures.load(Ordering::Acquire), 0);
         assert!(!is_fork_option_refusal("Bad configuration option: foo"));
     }
 
     #[test]
     fn the_verdict_needs_a_dropped_connection_and_the_marked_line() {
-        let marked = AtomicBool::new(true);
-        let unmarked = AtomicBool::new(false);
+        let marked = AtomicU64::new(1);
+        let unmarked = AtomicU64::new(0);
         let dropped = connection_closed_error("eof");
-        assert!(judge_after_failure(&marked, &dropped));
-        assert!(!judge_after_failure(&marked, &Plain));
-        assert!(!judge_after_failure(&unmarked, &dropped));
+        assert!(judge_after_failure(&marked, 0, &dropped));
+        assert!(!judge_after_failure(&marked, 0, &Plain));
+        assert!(!judge_after_failure(&unmarked, 0, &dropped));
+        // A line from before the verdict does not count.
+        assert!(!judge_after_failure(&marked, 1, &dropped));
+    }
+
+    #[test]
+    fn a_verdict_counts_only_refusals_after_it_was_taken() {
+        let marks = Arc::new(StderrMarks::default());
+        let dropped = connection_closed_error("eof");
+        marks.channel_connect_failures.store(3, Ordering::Release);
+        let later = ListenerVerdict::new(80, Arc::clone(&marks));
+        assert!(!later.remote_listener_absent(&dropped), "old refusals only");
+        marks
+            .channel_connect_failures
+            .fetch_add(1, Ordering::AcqRel);
+        assert!(later.remote_listener_absent(&dropped));
+        let after = ListenerVerdict::new(80, marks);
+        assert!(!after.remote_listener_absent(&dropped));
     }
 
     #[test]

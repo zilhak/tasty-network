@@ -19,8 +19,7 @@
 //! | [`PortDiscoveryError`] · [`PortDiscoveryFailureKind`] · [`PortModeParseError`] | consumers that branch on the failure cause (messages come from the kind, `Display` is fixed English) |
 //! | [`PORT_COMMAND_EXITED_INSTANCE_CODE`] | the remote subcommand and port discovery, which share this exit code |
 //! | [`tunnel_drop_totals`] | hosts that measure the time spent releasing tunnels |
-//! | [`RemoteListenerAbsent`] · [`connection_closed_error`] · [`is_dropped_connection`] | consumers that classify a failure behind a tunnel with [`SshTunnel::explain_failure`] |
-//! | [`ListenerVerdict`] | consumers that judge a tunnel's failures after handing the tunnel elsewhere |
+//! | [`ListenerVerdict`] ([`SshTunnel::listener_verdict`]) · [`RemoteListenerAbsent`] · [`connection_closed_error`] · [`is_dropped_connection`] | consumers that classify a channel's failure behind a tunnel (one verdict per channel, taken before opening it) |
 //!
 //! Profile handling (building an [`SshTarget`] from a stored profile, saving detection results)
 //! is not here; the consumer does it with these value types. The crate reads no environment
