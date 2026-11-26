@@ -216,6 +216,8 @@ pub(crate) mod test_helper {
     ///   exits with `<code>`.
     /// - `flood:<bytes>[:<code>]`: writes `<bytes>` bytes to stdout (stopping at a write error)
     ///   and exits with `<code>` (0 by default). `flood:forever` writes until the pipe closes.
+    ///   `flood:hold` writes until the pipe closes and then stays alive for 60 s, ignoring the
+    ///   write error, so only a kill ends it.
     pub(crate) fn helper_command(mode: &str) -> Command {
         let mut c = Command::new(std::env::current_exe().expect("test binary path"));
         c.args([ENTRY, "--exact", "--nocapture", "--test-threads=1"])
@@ -279,7 +281,8 @@ pub(crate) mod test_helper {
             "flood" => {
                 let (count, code) = arg.split_once(':').unwrap_or((arg, "0"));
                 let code: i32 = code.parse().expect("exit code");
-                let n: usize = if count == "forever" {
+                let hold = count == "hold";
+                let n: usize = if count == "forever" || hold {
                     usize::MAX
                 } else {
                     count.parse().expect("byte count")
@@ -295,6 +298,9 @@ pub(crate) mod test_helper {
                     left -= k;
                 }
                 let _flushed = out.flush();
+                if hold {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
                 std::process::exit(code);
             }
             other => panic!("unknown helper mode {other}"),
@@ -368,6 +374,11 @@ pub(crate) mod test_helper {
     /// Whether process `pid` runs (a zombie does not).
     pub(crate) fn process_runs(pid: u32) -> bool {
         pid_runs(&pid.to_string())
+    }
+
+    /// Whether process `pid` exists at all, a zombie included. A reaped child does not.
+    pub(crate) fn process_exists(pid: u32) -> bool {
+        pid_stat(&pid.to_string()).is_some_and(|stat| !stat.is_empty())
     }
 
     #[cfg(unix)]

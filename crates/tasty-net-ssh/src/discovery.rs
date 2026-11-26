@@ -1170,7 +1170,7 @@ pub fn detect_port_mode<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helper::{Orphan, helper_command, process_runs};
+    use crate::test_helper::{Orphan, helper_command, process_exists, process_runs};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A command that fails if it is ever started. Tells an early return from a spawn.
@@ -2014,6 +2014,34 @@ mod tests {
         );
         assert!(err.detail().contains("longer than"), "{}", err.detail());
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    /// A child that stays alive past the stdout limit is killed and reaped by the collecting side.
+    #[test]
+    fn a_child_past_the_stdout_limit_is_killed_and_reaped() {
+        let (hook, child_pid) = recording_hook();
+        let started = Instant::now();
+        let err = run_capture_with_budget(
+            helper_command("flood:hold"),
+            Duration::from_secs(20),
+            "held flood",
+            &hook,
+        )
+        .expect_err("too long");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::PortParseFailed,
+            "{}",
+            err.detail()
+        );
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        let pid = child_pid.load(Ordering::Acquire);
+        assert_ne!(pid, 0);
+        assert!(
+            !process_exists(pid),
+            "the child {pid} is left (running or a zombie)"
+        );
     }
 
     /// A descendant that keeps stdout open after the command exits is bounded by the budget.
