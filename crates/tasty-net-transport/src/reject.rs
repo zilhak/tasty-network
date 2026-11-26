@@ -224,6 +224,9 @@ pub enum HandshakeError {
     /// The channel through the SSH tunnel dropped and ssh reported that nothing listens on
     /// the remote port (the remote instance is not running, or its record is stale).
     RemoteListenerAbsent(RemoteListenerAbsent),
+    /// Message 1 would be longer than [`MAX_HANDSHAKE_LINE`](crate::MAX_HANDSHAKE_LINE) (a
+    /// long `ext`); nothing was sent.
+    MessageTooLong,
     /// The QUIC connection was closed with a code during the handshake.
     Closed(P2pCloseReason),
     /// The endpoint has no credential to dial with (no token and no remote ID).
@@ -285,6 +288,9 @@ impl fmt::Display for HandshakeError {
             Self::PeerClosed => f.write_str("the peer closed the channel during the handshake"),
             Self::RemoteListenerAbsent(_) => {
                 f.write_str("nothing listens on the remote port behind the SSH tunnel")
+            }
+            Self::MessageTooLong => {
+                f.write_str("message 1 is longer than the handshake line limit")
             }
             Self::Closed(reason) => write!(f, "the P2P connection was closed ({reason:?})"),
             Self::NoCredential => f.write_str("the endpoint has no token or remote ID to dial with"),

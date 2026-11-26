@@ -356,8 +356,10 @@ impl std::error::Error for FirstLineError {
     }
 }
 
-/// Reads the first line of a channel, without its line break, within `max_len` bytes and by
-/// `deadline`. It reads one byte at a time, so nothing after the line break is consumed and
+/// Reads the first line of a channel by `deadline` and returns it without its line break.
+/// `max_len` counts the line break too, as [`MAX_HANDSHAKE_LINE`] does: a line of
+/// `max_len - 1` bytes and its break pass, one byte more is [`FirstLineError::TooLong`]. It
+/// reads one byte at a time, so nothing after the line break is consumed and
 /// [`accept_handshake`] gets no buffered bytes from it.
 pub fn read_first_line(
     channel: &mut RawChannel,
@@ -379,7 +381,8 @@ pub fn read_first_line(
             Ok(0) => return Err(FirstLineError::Closed),
             Ok(_) if byte[0] == b'\n' => return Ok(line),
             Ok(_) => {
-                if line.len() >= max_len {
+                // This byte plus the line break still to come must fit in `max_len`.
+                if line.len() + 2 > max_len {
                     return Err(FirstLineError::TooLong);
                 }
                 line.push(byte[0]);
@@ -530,6 +533,16 @@ fn explain(ch: &RawChannel, error: HandshakeError) -> HandshakeError {
     }
 }
 
+/// Message 1 as bytes, refused here when it is longer than [`MAX_HANDSHAKE_LINE`] with its
+/// line break (the peer would refuse it as `malformed`).
+fn checked_line(open: &OpenOut<'_>) -> Result<Vec<u8>, HandshakeError> {
+    let line = open.line();
+    if line.len() > MAX_HANDSHAKE_LINE {
+        return Err(HandshakeError::MessageTooLong);
+    }
+    Ok(line)
+}
+
 /// The dialer's view after message 1.
 struct Dialed {
     peer: PeerInfo,
@@ -575,7 +588,7 @@ fn dial_open(
         ext,
         bulk_credential: None,
     };
-    io.write_line(&open.line())?;
+    io.write_line(&checked_line(&open)?)?;
     let first = parse_reply(&io.read_control()?).ok_or(HandshakeError::Protocol(
         "a reply that is not a handshake message",
     ))?;
@@ -805,7 +818,9 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         ext,
         bulk_credential: Some(bulk.credential),
     };
-    let ack = io.write_line(&open.line()).and_then(|()| read_ack(&mut io));
+    let ack = checked_line(&open)
+        .and_then(|line| io.write_line(&line))
+        .and_then(|()| read_ack(&mut io));
     let ack = ack.map_err(|e| explain(&ch, e))?;
     let framed = ch
         .framed(&config.timeouts.channel(config.heartbeat))

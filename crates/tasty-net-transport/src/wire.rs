@@ -156,9 +156,12 @@ pub(crate) struct OpenIn {
     pub bulk_credential: Option<[u8; 32]>,
 }
 
-/// Step 1: the line is a JSON object with object `params`, and `proto` is 2.
+/// Step 1: the line is a JSON object with object `params`, and `proto` is 2. The line may
+/// come with or without its line break; either way it is measured with the break, so it
+/// holds at most [`MAX_HANDSHAKE_LINE`] - 1 bytes before it.
 pub(crate) fn parse_open_line(line: &[u8]) -> Result<Map<String, Value>, RejectReason> {
-    if line.len() > MAX_HANDSHAKE_LINE {
+    let content = line.strip_suffix(b"\n").unwrap_or(line);
+    if content.len() + 1 > MAX_HANDSHAKE_LINE {
         return Err(RejectReason::Malformed);
     }
     let Ok(Value::Object(mut message)) = serde_json::from_slice::<Value>(line) else {
@@ -604,6 +607,34 @@ mod tests {
         line.extend(std::iter::repeat_n(b'a', MAX_HANDSHAKE_LINE));
         line.extend_from_slice(br#""}}"#);
         assert_eq!(parse_open_line(&line).err(), Some(RejectReason::Malformed));
+    }
+
+    /// A message 1 of exactly `len` bytes before its line break.
+    fn line_of(len: usize) -> Vec<u8> {
+        let head = br#"{"method":"stream.open","params":{"proto":2,"ext":""#;
+        let tail = br#""}}"#;
+        let mut line = head.to_vec();
+        line.extend(std::iter::repeat_n(b'a', len - head.len() - tail.len()));
+        line.extend_from_slice(tail);
+        assert_eq!(line.len(), len);
+        line
+    }
+
+    #[test]
+    fn the_line_limit_counts_the_line_break() {
+        let fits = line_of(MAX_HANDSHAKE_LINE - 1);
+        assert!(parse_open_line(&fits).is_ok());
+        let mut fits_with_break = fits.clone();
+        fits_with_break.push(b'\n');
+        assert!(parse_open_line(&fits_with_break).is_ok());
+        let over = line_of(MAX_HANDSHAKE_LINE);
+        assert_eq!(parse_open_line(&over).err(), Some(RejectReason::Malformed));
+        let mut over_with_break = over;
+        over_with_break.push(b'\n');
+        assert_eq!(
+            parse_open_line(&over_with_break).err(),
+            Some(RejectReason::Malformed)
+        );
     }
 
     #[test]

@@ -15,11 +15,12 @@ use tasty_net_identity::{
 };
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, DialAuth, DialConfig,
-    DomainAccept, DomainPolicy, DomainReject, HandshakeError, Holder, LEGACY_PROTOCOL_ERROR, Link,
-    LinkTimeouts, Listener, MAX_HANDSHAKE_LINE, MemoryListener, MemoryTransport, PeerInfo,
-    RawChannel, RejectReason, RequestError, RequestHandler, Side, TooOldEvidence, Transport,
-    TransportKind, accept_handshake, accept_p2p_handshake, dial_handshake, dial_request,
-    domain_code, memory_transport, read_first_line,
+    DomainAccept, DomainPolicy, DomainReject, FirstLineError, HandshakeError, Holder,
+    LEGACY_PROTOCOL_ERROR, Link, LinkTimeouts, Listener, MAX_HANDSHAKE_LINE, MemoryListener,
+    MemoryTransport, PeerInfo, RawChannel, RejectReason, RequestError, RequestHandler, Side,
+    TooOldEvidence, Transport, TransportKind, accept_handshake, accept_p2p_handshake,
+    dial_handshake, dial_request, domain_code, memory_channel_pair, memory_transport,
+    read_first_line,
 };
 
 fn key(n: u8) -> DeviceKey {
@@ -1074,4 +1075,48 @@ fn a_p2p_first_line_over_the_limit_is_malformed() {
         acceptor.join().expect("acceptor"),
         Err(HandshakeError::Refused(RejectReason::Malformed))
     ));
+}
+
+#[test]
+fn the_first_line_limit_counts_the_line_break() {
+    for (len, fits) in [(MAX_HANDSHAKE_LINE - 1, true), (MAX_HANDSHAKE_LINE, false)] {
+        let (mut a, mut b) = memory_channel_pair();
+        let mut line = vec![b'x'; len];
+        line.push(b'\n');
+        a.write_all(&line).expect("write");
+        let read = read_first_line(
+            &mut b,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        );
+        match (read, fits) {
+            (Ok(got), true) => assert_eq!(got.len(), len),
+            (Err(FirstLineError::TooLong), false) => {}
+            (other, _) => panic!("{len} bytes: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_dialer_does_not_send_a_line_over_the_limit() {
+    let (transport, listener) = pair(Some(token('a')));
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let mut accepted = listener.accept().expect("accept");
+    let ext = "a".repeat(MAX_HANDSHAKE_LINE);
+    let result = dial_handshake(
+        conn,
+        &client(1, "d"),
+        Holder::Dialer,
+        Some(&ext),
+        &AttemptCancel::new(),
+    );
+    assert!(
+        matches!(result, Err(HandshakeError::MessageTooLong)),
+        "{result:?}"
+    );
+    // Nothing came: the dialer's channel closed without a byte.
+    let mut byte = [0u8; 1];
+    assert_eq!(accepted.read(&mut byte).expect("eof"), 0);
 }
