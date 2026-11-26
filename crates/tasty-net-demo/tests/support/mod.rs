@@ -13,7 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct TempDir(PathBuf);
 
 impl TempDir {
+    /// A new directory; panics when it cannot be made.
     pub fn new(what: &str) -> Self {
+        Self::try_new(what).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A new directory, or why it could not be made.
+    pub fn try_new(what: &str) -> Result<Self, String> {
         static N: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -25,8 +31,8 @@ impl TempDir {
             N.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&path)
-            .unwrap_or_else(|e| panic!("creating {} failed: {e}", path.display()));
-        Self(path)
+            .map_err(|e| format!("creating {} failed: {e}", path.display()))?;
+        Ok(Self(path))
     }
 
     pub fn path(&self) -> &Path {

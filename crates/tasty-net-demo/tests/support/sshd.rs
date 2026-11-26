@@ -328,7 +328,7 @@ fn sshd_config(dir: &Path, port: u16, penalties: bool) -> String {
 fn start_openssh() -> Result<SshServer, String> {
     let sshd = find_sshd().ok_or("no sshd binary found")?;
     let user = current_user()?;
-    let dir = TempDir::new("sshd");
+    let dir = TempDir::try_new("sshd")?;
     let d = dir.path();
     keygen(d, &d.join("host_key"))?;
     keygen(d, &d.join("client_key"))?;
@@ -432,7 +432,7 @@ fn wait_listening(child: &mut Child, log_path: &Path) -> Result<(), String> {
 
 fn start_russh() -> Result<SshServer, String> {
     let user = current_user()?;
-    let dir = TempDir::new("russh");
+    let dir = TempDir::try_new("russh")?;
     let d = dir.path();
     let server = RusshServer::start(&d.join("client_key"))?;
     let port = server.port();
