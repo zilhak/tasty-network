@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+# One version for every crate in this repository (docs/design/versioning.md).
+version = "0.1.0"
+edition = "2024"
+# Not lower than the minimum of the whole dependency graph: iroh 1.5.0 declares 1.91
+# (docs/design/versioning.md). The pinned toolchain is in rust-toolchain.toml.
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/zilhak/tasty-network"
+
+[workspace.lints.rust]
+# Unsafe operations inside an unsafe fn still need an explicit unsafe block.
+unsafe_op_in_unsafe_fn = "deny"
+# Cast a function to an integer through a pointer (f as *const () as usize).
+function_casts_as_integer = "deny"
+unused_assignments = "deny"
+unused_must_use = "deny"
+dead_code = "deny"
+
+[workspace.lints.clippy]
+# Every unsafe block explains its preconditions in a SAFETY comment (docs/design/crates.md).
+undocumented_unsafe_blocks = "deny"
+# FFI code that has to group several unsafe operations explains it at that place.
+multiple_unsafe_ops_per_block = "deny"
+# A public unsafe fn lists what the caller must uphold in a # Safety section.
+missing_safety_doc = "deny"
+# Discarding a must_use value with `let _ =` is reported; CI turns warnings into errors.
+let_underscore_must_use = "warn"
