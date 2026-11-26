@@ -2219,10 +2219,12 @@ mod tests {
         assert_eq!(err.kind(), PortDiscoveryFailureKind::TimedOut);
     }
 
-    /// A cancel that comes while collect waits on an empty channel ends it as cancelled, through
-    /// the branch that would otherwise go on waiting or time out.
+    /// A cancel set while collect waits on an empty channel, or already set at the deadline,
+    /// gives `Cancelled`. The orders here can pass the flag check after an empty receive, but the
+    /// test does not force the cancel to land between that check and the deadline's empty
+    /// receive; it checks the result in the orders it can produce.
     #[test]
-    fn a_cancel_during_the_wait_for_output_is_cancelled() {
+    fn a_cancel_while_collect_waits_gives_cancelled() {
         let handle = SshCancel::new();
         let _scope = handle.scope();
         let (_tx, rx) = mpsc::channel::<Captured>();
@@ -2268,9 +2270,12 @@ mod tests {
         assert!(elapsed < Duration::from_millis(1200), "{elapsed:?}");
     }
 
-    /// Cancellation also stops the wait for an output held open by a descendant.
+    /// A cancel after the direct child ended, while a descendant holds its output, gives
+    /// `Cancelled` and returns well before the budget. The cancel may meet the wait for the held
+    /// output, or the lookup just before it (taking the child back after its exit); the test does
+    /// not force one of the two and checks the result for either.
     #[test]
-    fn cancel_stops_the_wait_for_a_held_output() {
+    fn a_cancel_after_the_child_ended_with_a_held_output_gives_cancelled() {
         let handle = SshCancel::new();
         let _scope = handle.scope();
         let mut orphan = Orphan::new("cancel-held");
@@ -2278,7 +2283,7 @@ mod tests {
         let killer = handle.clone();
         let pid_file = orphan.pid_file().to_path_buf();
         // Cancel only once the grandchild's PID is out and the direct child has ended, so the
-        // cancel meets the wait for the held output, not the helper itself.
+        // cancel does not kill the helper before it hands the grandchild's PID over.
         let t = std::thread::spawn(move || {
             let limit = Instant::now() + Duration::from_secs(10);
             loop {
