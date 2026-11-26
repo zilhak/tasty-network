@@ -224,7 +224,18 @@ pub fn split_result(
         nodes: Vec::new(),
         edges: Vec::new(),
     };
-    // The longest empty part: the largest part number and `false` (longer than `true`).
+    // The whole answer as the one part it would be (`part: 0, last: true`), measured as
+    // sent: this is exact, so an answer that fits is never refused.
+    let mut whole = empty(0, true);
+    let tag = json_len(&Message::Result(whole.clone()))? - json_len(&whole)?;
+    whole.nodes = nodes;
+    whole.edges = edges;
+    if json_len(&whole)? + tag <= limit {
+        return Ok(vec![whole]);
+    }
+    let ResultPart { nodes, edges, .. } = whole;
+    // Several parts: estimate with the longest empty part, the largest part number and
+    // `false` (longer than `true`).
     let base = json_len(&Message::Result(empty(u32::MAX, false)))?;
     if base > limit {
         return Err(MessageError::TooLarge);
@@ -284,7 +295,19 @@ pub fn split_done(
         is_final: false,
         more: true,
     };
-    // The longest empty done: `more` present and `false` (longer than `true`).
+    // The whole list as the one done it would be (`more` absent), measured as sent.
+    let mut whole = Done {
+        is_final,
+        more: false,
+        ..empty()
+    };
+    let tag = json_len(&Message::Done(whole.clone()))? - json_len(&whole)?;
+    whole.timed_out = timed_out;
+    if json_len(&whole)? + tag <= limit {
+        return Ok(vec![whole]);
+    }
+    let Done { timed_out, .. } = whole;
+    // Several dones: estimate with the longest empty one, `more` present and `false`.
     let base = json_len(&Message::Done(empty()))?;
     if base > limit {
         return Err(MessageError::TooLarge);
@@ -600,5 +623,72 @@ mod limit_tests {
         }
         let joined: Vec<DeviceId> = dones.iter().flat_map(|d| d.timed_out.clone()).collect();
         assert_eq!(joined, ids);
+    }
+}
+
+#[cfg(test)]
+mod exact_fit_tests {
+    use super::*;
+    use crate::model::NodeStatus;
+    use tasty_net_identity::DeviceKey;
+
+    fn id(n: u8) -> DeviceId {
+        DeviceKey::from_seed([n; 32]).id()
+    }
+
+    fn header() -> ResultHeader {
+        ResultHeader {
+            request_id: "r".into(),
+            branch: "b".into(),
+            from: id(1),
+            return_path: vec![id(2), id(3)],
+        }
+    }
+
+    #[test]
+    fn an_answer_that_fits_exactly_is_one_part() {
+        for nodes in [
+            Vec::new(),
+            vec![Node {
+                device_id: Some(id(4)),
+                display_name: Some("x".into()),
+                status: NodeStatus::Online,
+                reason: None,
+                reported_by: None,
+                peer_hint: None,
+                explored_at: 1,
+            }],
+        ] {
+            let parts = split_result(&header(), nodes.clone(), Vec::new(), usize::MAX).unwrap();
+            let exact = Message::Result(parts[0].clone()).to_json().unwrap().len();
+            let parts = split_result(&header(), nodes.clone(), Vec::new(), exact).unwrap();
+            assert_eq!(parts.len(), 1);
+            assert!(parts[0].last);
+            assert_eq!(parts[0].part, 0);
+            if nodes.is_empty() {
+                assert_eq!(
+                    split_result(&header(), nodes, Vec::new(), exact - 1),
+                    Err(MessageError::TooLarge)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_done_that_fits_exactly_is_one_message() {
+        for timed_out in [Vec::new(), vec![id(5), id(6)]] {
+            let dones = split_done(&header(), timed_out.clone(), true, usize::MAX).unwrap();
+            let exact = Message::Done(dones[0].clone()).to_json().unwrap().len();
+            let dones = split_done(&header(), timed_out.clone(), true, exact).unwrap();
+            assert_eq!(dones.len(), 1);
+            assert!(!dones[0].more);
+            assert!(dones[0].is_final);
+            if timed_out.is_empty() {
+                assert_eq!(
+                    split_done(&header(), timed_out, true, exact - 1),
+                    Err(MessageError::TooLarge)
+                );
+            }
+        }
     }
 }
