@@ -183,13 +183,31 @@ impl MeshFrameAssembler {
         if meta.chunk_count == 0 || meta.chunk_index >= meta.chunk_count {
             return Err(MeshAssembleError::Malformed);
         }
-        // Reject a total_len that chunk_count full chunks could not reach.
-        let max_possible = (meta.chunk_count as u64) * (MESH_CHUNK_MAX_PAYLOAD as u64);
-        if meta.total_len as u64 > max_possible {
-            return Err(MeshAssembleError::LengthMismatch);
+        let key = (meta.surface_id, meta.frame_id);
+        if let Some(slot) = self.inflight.get(&key) {
+            // Every chunk of a frame carries the same header apart from chunk_index. A
+            // chunk whose header disagrees (or a reused frame_id) is treated as
+            // corruption, so the result never depends on which chunk arrived first. This
+            // comes before the length bound below, so such a chunk always drops the frame.
+            if slot.chunk_count != meta.chunk_count
+                || slot.total_len != meta.total_len
+                || slot.generation != meta.generation
+                || slot.frame_seq != meta.frame_seq
+                || slot.full_textures != meta.full_textures
+            {
+                self.inflight.remove(&key);
+                return Err(MeshAssembleError::Malformed);
+            }
+        } else {
+            // Reject a total_len that chunk_count full chunks could not reach, before
+            // any state exists for the frame. A frame in progress already passed this
+            // check with the same header.
+            let max_possible = u64::from(meta.chunk_count) * (MESH_CHUNK_MAX_PAYLOAD as u64);
+            if u64::from(meta.total_len) > max_possible {
+                return Err(MeshAssembleError::LengthMismatch);
+            }
         }
 
-        let key = (meta.surface_id, meta.frame_id);
         let slot = self.inflight.entry(key).or_insert_with(|| InFlight {
             chunk_count: meta.chunk_count,
             total_len: meta.total_len,
@@ -199,18 +217,6 @@ impl MeshFrameAssembler {
             received: HashMap::new(),
             received_len: 0,
         });
-        // Every chunk of a frame carries the same header apart from chunk_index. A chunk
-        // whose header disagrees (or a reused frame_id) is treated as corruption, so the
-        // result never depends on which chunk arrived first.
-        if slot.chunk_count != meta.chunk_count
-            || slot.total_len != meta.total_len
-            || slot.generation != meta.generation
-            || slot.frame_seq != meta.frame_seq
-            || slot.full_textures != meta.full_textures
-        {
-            self.inflight.remove(&key);
-            return Err(MeshAssembleError::Malformed);
-        }
         if payload.len() > MESH_CHUNK_MAX_PAYLOAD {
             self.inflight.remove(&key);
             return Err(MeshAssembleError::LengthMismatch);
@@ -637,6 +643,64 @@ mod tests {
             .unwrap()
             .expect("both chunks arrived");
         assert_eq!(assembled, b"abcd");
+    }
+
+    /// A chunk of a frame in progress whose header disagrees is Malformed even when its
+    /// total_len is also beyond what its chunk_count can carry, and the frame is dropped.
+    #[test]
+    fn a_disagreeing_header_beyond_the_length_bound_is_malformed() {
+        let bytes = vec![5u8; MESH_CHUNK_MAX_PAYLOAD + 1];
+        let chunks = split_mesh_frame(1, 1, 0, 0, false, &bytes);
+        let (base, data) = decode_mesh_chunk(&chunks[1]).unwrap();
+        type Change = fn(&mut MeshChunkMeta);
+        let changes: [(&str, Change); 2] = [
+            ("chunk_count", |m| {
+                m.chunk_count = 1;
+                m.chunk_index = 0;
+            }),
+            ("total_len", |m| m.total_len = u32::MAX),
+        ];
+        for (field, change) in changes {
+            let mut meta = base;
+            change(&mut meta);
+            assert!(
+                u64::from(meta.total_len)
+                    > u64::from(meta.chunk_count) * MESH_CHUNK_MAX_PAYLOAD as u64,
+                "{field}: the chunk must also be beyond the length bound"
+            );
+            let mut assembler = MeshFrameAssembler::new();
+            assert!(assembler.push_chunk(&chunks[0]).unwrap().is_none());
+            assert_eq!(
+                assembler.push_chunk(&encode_mesh_chunk(&meta, data)),
+                Err(MeshAssembleError::Malformed),
+                "{field}"
+            );
+            assert!(
+                assembler.inflight.is_empty(),
+                "{field}: frame state is dropped"
+            );
+        }
+    }
+
+    /// A first chunk beyond the length bound is rejected without creating state.
+    #[test]
+    fn a_first_chunk_beyond_the_length_bound_leaves_no_state() {
+        let meta = MeshChunkMeta {
+            surface_id: 1,
+            frame_id: 1,
+            chunk_index: 0,
+            chunk_count: 2,
+            total_len: (2 * MESH_CHUNK_MAX_PAYLOAD + 1) as u32,
+            generation: 0,
+            frame_seq: 0,
+            full_textures: false,
+        };
+        let mut assembler = MeshFrameAssembler::new();
+        assert_eq!(
+            assembler.push_chunk(&encode_mesh_chunk(&meta, b"x")),
+            Err(MeshAssembleError::LengthMismatch)
+        );
+        assert!(assembler.inflight.is_empty());
     }
 
     #[test]
