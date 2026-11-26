@@ -519,8 +519,10 @@ fn a_silent_neighbor_times_out_and_the_rest_continues() {
     let rid = net.explore(A, request(A, 2)).unwrap();
     net.run();
     let x = net.result(A, &rid);
-    assert_eq!(x.state(), ExplorationState::Finished);
+    // B never answered: timed out with a reason, and the exploration is not Finished.
+    assert_eq!(x.state(), ExplorationState::Incomplete);
     assert_eq!(status(x, B), NodeStatus::TimedOut);
+    assert_eq!(x.node(&id(B)).unwrap().reason, Some(NodeReason::Incomplete));
     assert_eq!(x.node(&id(B)).unwrap().reported_by, Some(id(A)));
     assert_eq!(status(x, C), NodeStatus::Online);
     assert_eq!(status(x, D), NodeStatus::Online);
@@ -551,6 +553,8 @@ fn a_direct_answer_wins_over_a_timeout_seen_on_another_path() {
     net.run();
     let x = net.result(A, &rid);
     assert_eq!(status(x, D), NodeStatus::Online);
+    assert_eq!(x.node(&id(D)).unwrap().reason, None);
+    assert_eq!(x.state(), ExplorationState::Finished);
 }
 
 #[test]
@@ -1092,8 +1096,9 @@ fn a_neighbor_given_up_is_not_relayed_later() {
     let rid = net.explore(A, request(A, 2)).unwrap();
     net.run();
     let x = net.result(A, &rid);
-    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
     assert_eq!(status(x, C), NodeStatus::TimedOut);
+    assert_eq!(x.node(&id(C)).unwrap().reason, Some(NodeReason::Incomplete));
     assert_eq!(x.node(&id(C)).unwrap().reported_by, Some(id(B)));
     // The late answer of C reached B but went no further.
     assert!(net.log.iter().any(|(f, t, _)| *f == id(C) && *t == id(B)));
@@ -1129,7 +1134,7 @@ fn many_timed_out_neighbors_come_back_in_several_dones() {
     let rid = net.explore(A, request(A, 2)).unwrap();
     net.run();
     let x = net.result(A, &rid);
-    assert_eq!(x.state(), ExplorationState::Finished);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
     let dones: Vec<_> = net
         .log
         .iter()
@@ -1576,6 +1581,25 @@ fn a_remote_origin_whose_done_a_route_hop_cannot_relay_ends_incomplete() {
 }
 
 #[test]
+fn a_neighbor_whose_first_part_fails_to_send_is_timed_out_with_a_reason() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    // B gets the query, but its first part does not go out: A hears nothing from B.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B) && to == id(A) && matches!(m, Message::Result(p) if p.part == 0)
+    }));
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    net.run();
+    assert!(!net.log.iter().any(|(f, t, _)| *f == id(B) && *t == id(A)));
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+    assert_eq!(b.reported_by, Some(id(A)));
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);
@@ -1627,8 +1651,9 @@ fn a_hop_timeout_of_duration_max_does_not_panic() {
     let rid = net.explore(A, request(A, 2)).unwrap();
     net.run();
     let x = net.result(A, &rid);
-    // C never answers; B gives it up at its branch deadline and the exploration finishes.
-    assert_eq!(x.state(), ExplorationState::Finished);
+    // C never answers; B gives it up at its branch deadline and the exploration ends
+    // with C as an answer that did not come.
+    assert_eq!(x.state(), ExplorationState::Incomplete);
     assert_eq!(status(x, C), NodeStatus::TimedOut);
 }
 

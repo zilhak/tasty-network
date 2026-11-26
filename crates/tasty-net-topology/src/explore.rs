@@ -389,6 +389,25 @@ impl Exploration {
         self.mark_incomplete(device, Some(*reporter), unix_ms);
     }
 
+    /// `reporter` sent `device` the query and gave it up before its first part: timed
+    /// out with reason incomplete, so the exploration does not end `Finished`. A direct
+    /// answer of `device` on another path still wins (as for any report).
+    fn report_no_answer(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
+        self.merge_node(
+            Node {
+                device_id: Some(device),
+                display_name: None,
+                status: NodeStatus::TimedOut,
+                reason: Some(NodeReason::Incomplete),
+                reported_by: Some(*reporter),
+                peer_hint: None,
+                explored_at: unix_ms,
+            },
+            reporter,
+            unix_ms,
+        );
+    }
+
     fn report_timed_out(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
         self.merge_node(
             Node {
@@ -1234,7 +1253,7 @@ impl Agent {
             Message::Done(done) => {
                 exploration.track_done(&done);
                 for device in done.timed_out {
-                    exploration.report_timed_out(device, &done.from, now.unix_ms);
+                    exploration.report_no_answer(device, &done.from, now.unix_ms);
                 }
                 for device in done.incomplete {
                     exploration.report_incomplete(device, &done.from, now.unix_ms);
