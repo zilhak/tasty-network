@@ -1,0 +1,2 @@
+# Windows 체크아웃에서도 셸 스크립트와 훅이 CR 없이 돌도록 모든 텍스트 파일을 LF로 체크아웃한다.
+* text=auto eol=lf
