@@ -83,7 +83,7 @@ impl Read for PipeReader {
                     };
                     self.pipe
                         .cv
-                        .wait_timeout(state, left)
+                        .wait_timeout(state, wait_slice(left))
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .0
                 }
@@ -145,6 +145,16 @@ struct MemoryControl {
     outgoing: Arc<Pipe>,
     incoming: Arc<Pipe>,
     timeouts: Arc<Timeouts>,
+}
+
+/// The longest single condvar wait of a timed read. A longer time left is waited in slices
+/// of this size, so no one wait gets a time the platform cannot turn into a deadline (it would
+/// wait without a limit then) even when the read's time left is near the [`Instant`] limit.
+const WAIT_SLICE: Duration = Duration::from_secs(60 * 60);
+
+/// One condvar wait of a timed read with `left` time left.
+fn wait_slice(left: Duration) -> Duration {
+    left.min(WAIT_SLICE)
 }
 
 /// The rule a TCP socket's timeouts follow: zero is refused, and so is a timeout that cannot
@@ -325,6 +335,17 @@ impl Listener for MemoryListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A timed read waits at most one slice at a time, whatever time it has left.
+    #[test]
+    fn a_timed_read_waits_in_bounded_slices() {
+        assert_eq!(wait_slice(Duration::MAX), WAIT_SLICE);
+        assert_eq!(wait_slice(WAIT_SLICE + Duration::from_nanos(1)), WAIT_SLICE);
+        assert_eq!(
+            wait_slice(Duration::from_millis(30)),
+            Duration::from_millis(30)
+        );
+    }
 
     /// The memory control refuses read and write timeouts that cannot make a deadline, as a
     /// TCP socket's would, so a later read cannot wait without a limit.
