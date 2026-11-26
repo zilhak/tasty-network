@@ -1706,6 +1706,50 @@ fn the_requesters_own_edges_are_its_local_view_when_it_is_not_visited_again() {
 }
 
 #[test]
+fn two_attaches_of_one_link_stay_two_local_edges_when_not_visited_again() {
+    // A dials B twice, the same way, for two workspaces. B shares the workspace ID only,
+    // or no workspace field at all.
+    for exposure in [
+        WorkspaceExposure {
+            id: true,
+            name: false,
+        },
+        WorkspaceExposure::NONE,
+    ] {
+        let mut net = Net::new(&[A, B]);
+        for (ws, name) in [("ws-1", "one"), ("ws-2", "two")] {
+            let workspace = WorkspaceRef {
+                id: Some(ws.into()),
+                name: Some(name.into()),
+            };
+            net.link_on(A, B, Some(workspace));
+        }
+        net.sharing.insert(
+            id(B),
+            Sharing {
+                enabled: true,
+                workspace: exposure,
+            },
+        );
+        let rid = net.explore(A, request(B, 0)).unwrap();
+        net.run();
+        let x = net.result(A, &rid);
+        let mut names: Vec<_> = x
+            .edges()
+            .iter()
+            .filter(|e| e.touches(&id(A)) && e.touches(&id(B)))
+            .map(|e| e.workspace.as_ref().and_then(|w| w.name.clone()))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![Some("one".to_owned()), Some("two".to_owned())],
+            "{exposure:?}"
+        );
+    }
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);

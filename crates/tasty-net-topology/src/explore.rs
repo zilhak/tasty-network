@@ -241,18 +241,47 @@ impl Exploration {
         for node in part.nodes {
             self.merge_node(node, &part.from, unix_ms);
         }
-        for mut edge in part.edges {
-            if edge.touches(&self.me) {
+        for edge in part.edges {
+            let merged = if edge.touches(&self.me) {
                 if self.local_merged {
                     continue;
                 }
-                if let Some(own) = self.own_edges.iter().find(|own| same_link(own, &edge)) {
-                    edge = own.clone();
+                let own = self.own_copies(&edge);
+                if own.is_empty() { vec![edge] } else { own }
+            } else {
+                vec![edge]
+            };
+            for edge in merged {
+                if self.edge_keys.insert(edge.key()) {
+                    self.edges.push(edge);
                 }
             }
-            if self.edge_keys.insert(edge.key()) {
-                self.edges.push(edge);
-            }
+        }
+    }
+
+    /// The local copies of this device's edges that a remote copy `edge` stands for: the
+    /// local edges of the same link (same dialer, acceptor, holder and transport) with
+    /// the workspace ID the remote copy carries, or, when it carries none (or none of
+    /// them has it), every local edge of that link. Two attaches of the same link in
+    /// different workspaces are two edges, so one remote copy may stand for several.
+    fn own_copies(&self, edge: &Edge) -> Vec<Edge> {
+        let same: Vec<&Edge> = self
+            .own_edges
+            .iter()
+            .filter(|own| same_link(own, edge))
+            .collect();
+        let wanted = edge.workspace.as_ref().and_then(|w| w.id.as_ref());
+        let by_id: Vec<Edge> = same
+            .iter()
+            .filter(|own| {
+                wanted.is_some() && own.workspace.as_ref().and_then(|w| w.id.as_ref()) == wanted
+            })
+            .map(|own| (*own).clone())
+            .collect();
+        if by_id.is_empty() {
+            same.into_iter().cloned().collect()
+        } else {
+            by_id
         }
     }
 
