@@ -137,6 +137,22 @@ pub struct PortDiscoveryConfig {
 }
 
 impl PortDiscoveryConfig {
+    /// The subcommand's words for the remote shell. ssh joins them with spaces into one command
+    /// line. The program word stays as is when [`program_plain`] allows it, so sh, PowerShell,
+    /// and cmd all run it from the command position; otherwise it is quoted for sh (PowerShell
+    /// then reads the quoted word as a string and does not run it). Arguments are quoted with
+    /// [`sh_quote`].
+    fn subcommand_words(&self) -> Vec<String> {
+        let program = if program_plain(&self.remote_program) {
+            self.remote_program.clone()
+        } else {
+            sh_quote(&self.remote_program)
+        };
+        std::iter::once(program)
+            .chain(self.remote_args.iter().map(|w| sh_quote(w)))
+            .collect()
+    }
+
     /// The remote command that reads the record file at the conventional place, quoted for
     /// the shell that runs it ([`sh_path`] for `cat`, [`cmd_quote`] for `type`).
     fn file_command(&self, windows: bool) -> String {
@@ -159,6 +175,16 @@ fn sh_plain(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_-./:%+".contains(c))
+}
+
+/// Whether the subcommand's program word goes unquoted: ASCII letters, digits, and `_-./:\`.
+/// A Windows path such as `C:\Tools\netprog.exe` then reaches PowerShell and cmd as tasty sent
+/// it. sh drops an unquoted `\`, so a Unix program path with a backslash does not run as
+/// written; such paths are rare.
+fn program_plain(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:\\".contains(c))
 }
 
 /// Quotes `s` for a POSIX shell: single quotes, with `'` written as `'\''`. A plain value
@@ -930,12 +956,7 @@ impl Probe<'_> {
         &self,
         decode: &impl Fn(&str) -> Result<T, E>,
     ) -> Result<T, PortDiscoveryError> {
-        // ssh joins the words with spaces into one command line for the remote shell, so each
-        // word is quoted for sh (see `sh_quote` for other shells).
-        let words: Vec<String> = std::iter::once(&self.config.remote_program)
-            .chain(&self.config.remote_args)
-            .map(|w| sh_quote(w))
-            .collect();
+        let words = self.config.subcommand_words();
         let argv: Vec<&str> = words.iter().map(String::as_str).collect();
         self.run(&argv, decode).map_err(refine_port_command_failure)
     }
@@ -1753,6 +1774,34 @@ mod tests {
             c.file_command(true),
             "type \"%USERPROFILE%\\.netprog-data\\net.port\""
         );
+    }
+
+    /// The program word goes unquoted when it can, so a Windows path runs under PowerShell as
+    /// tasty sent it; arguments keep the sh quoting.
+    #[test]
+    fn the_program_word_stays_plain_where_it_can() {
+        let mut c = config();
+        c.remote_program = "C:\\Tools\\netprog.exe".into();
+        assert_eq!(
+            c.subcommand_words().join(" "),
+            "C:\\Tools\\netprog.exe port"
+        );
+        c.remote_program = "/opt/net/bin/netprog".into();
+        c.remote_args = vec!["record".into(), "--json".into(), "~/x".into()];
+        assert_eq!(
+            c.subcommand_words().join(" "),
+            "/opt/net/bin/netprog record --json '~/x'"
+        );
+        c.remote_program = "C:\\Program Files\\netprog.exe".into();
+        c.remote_args = vec!["port".into()];
+        assert_eq!(
+            c.subcommand_words().join(" "),
+            "'C:\\Program Files\\netprog.exe' port"
+        );
+        for program in ["~/bin/netprog", "net,prog", "a=b", "@net"] {
+            c.remote_program = program.into();
+            assert_eq!(c.subcommand_words()[0], format!("'{program}'"), "{program}");
+        }
     }
 
     /// The characters each shell reads differently are quoted for that shell.
