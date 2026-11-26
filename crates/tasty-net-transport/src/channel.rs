@@ -383,11 +383,13 @@ impl ChannelShared {
         !matches!(*lock(&self.heartbeat), HeartbeatSlot::Stopped)
     }
 
-    /// Puts the slot in a state, for tests that hold a join in progress.
+    /// Makes the running heartbeat thread run `hook` right before it ends, for tests that
+    /// hold its join in progress.
     #[cfg(test)]
-    pub(crate) fn set_heartbeat_slot(&self, state: HeartbeatSlot) {
-        *lock(&self.heartbeat) = state;
-        self.heartbeat_stopped.notify_all();
+    pub(crate) fn heartbeat_before_exit(&self, hook: Box<dyn FnOnce() + Send>) {
+        if let HeartbeatSlot::Running(heartbeat) = &*lock(&self.heartbeat) {
+            heartbeat.before_exit(hook);
+        }
     }
 
     fn mark_reader_end(&self) {

@@ -385,11 +385,12 @@ mod tests {
         drop(writer);
     }
 
-    /// A link dropped while another caller (the writer) is still joining the heartbeat waits
-    /// until that join completed, so its drop never returns with the worker still alive.
+    /// The real heartbeat thread is held right before it ends. The writer's drop, which took
+    /// the thread out and joins it, and the link's drop, which comes during that join, both
+    /// wait until the thread really ended.
     #[test]
-    fn dropping_a_link_waits_for_a_heartbeat_join_in_progress() {
-        use crate::channel::HeartbeatSlot;
+    fn the_writer_and_the_link_both_wait_for_the_heartbeat_to_end() {
+        use std::sync::mpsc;
 
         let (a, _b) = memory_channel_pair();
         let control = a.control();
@@ -397,6 +398,12 @@ mod tests {
             .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::Periodic))
             .expect("framed");
         let shared = framed.shared();
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        shared.heartbeat_before_exit(Box::new(move || {
+            reached_tx.send(()).expect("reached");
+            let _released = release_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        }));
         let mut link = Link {
             ordered_shared: Arc::clone(&shared),
             ordered: Some((framed.reader, framed.writer)),
@@ -408,16 +415,21 @@ mod tests {
             bulk: None,
             _guard: None,
         };
-        let halves = link.take_ordered().expect("ordered");
-        // Another caller took the worker out and is joining it.
-        shared.set_heartbeat_slot(HeartbeatSlot::Stopping);
-        assert!(shared.heartbeat_running(), "not joined yet");
-        let dropping = std::thread::spawn(move || drop(link));
+        let (reader, writer) = link.take_ordered().expect("ordered");
+        // The writer's drop stops the thread and joins it; the thread stops at its last step.
+        let writer_drop = std::thread::spawn(move || drop(writer));
+        reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the thread is at its end");
+        let link_drop = std::thread::spawn(move || drop(link));
         std::thread::sleep(Duration::from_millis(150));
-        assert!(!dropping.is_finished(), "the drop waits for the join");
-        shared.set_heartbeat_slot(HeartbeatSlot::Stopped);
-        dropping.join().expect("drop");
+        assert!(!writer_drop.is_finished(), "the writer waits for its join");
+        assert!(!link_drop.is_finished(), "the link waits for the same join");
+        assert!(shared.heartbeat_running(), "not joined yet");
+        release_tx.send(()).expect("release");
+        writer_drop.join().expect("writer drop");
+        link_drop.join().expect("link drop");
         assert!(!shared.heartbeat_running());
-        drop(halves);
+        drop(reader);
     }
 }

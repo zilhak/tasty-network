@@ -21,6 +21,9 @@ pub enum HeartbeatPolicy {
 struct Stop {
     stopped: Mutex<bool>,
     cv: Condvar,
+    /// Run by the thread right before it ends, for tests that hold a join in progress.
+    #[cfg(test)]
+    before_exit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// The heartbeat thread of one channel. Dropping it stops and joins the thread; a Ping write
@@ -39,15 +42,29 @@ impl Heartbeat {
         let stop = Arc::new(Stop {
             stopped: Mutex::new(false),
             cv: Condvar::new(),
+            #[cfg(test)]
+            before_exit: Mutex::new(None),
         });
         let seen = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name("tasty-net-heartbeat".into())
-            .spawn(move || run(&out, &seen, policy, interval))?;
+            .spawn(move || {
+                run(&out, &seen, policy, interval);
+                #[cfg(test)]
+                if let Some(hook) = lock(&seen.before_exit).take() {
+                    hook();
+                }
+            })?;
         Ok(Self {
             stop,
             thread: Some(thread),
         })
+    }
+
+    /// Makes the thread run `hook` right before it ends (after it saw the stop).
+    #[cfg(test)]
+    pub(crate) fn before_exit(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.stop.before_exit) = Some(hook);
     }
 }
 
