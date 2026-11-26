@@ -142,6 +142,10 @@ pub struct Exploration {
     done_parts: HashMap<(String, DeviceId), PartTrack>,
     /// This device's local view was merged: its own edges are the local view's.
     local_merged: bool,
+    /// This device's own edges as its local view had them when a remote exploration
+    /// started: a remote copy of one of them is merged as this copy, so its own edges are
+    /// the local ones even when the exploration never comes back to this device.
+    own_edges: Vec<Edge>,
     /// Devices known to have an incomplete answer → who reported it (`None` when this
     /// device found it). Kept apart from the nodes so a later direct answer of the same
     /// device does not erase it: it is applied again after each merge and at the end.
@@ -201,8 +205,7 @@ impl Exploration {
             .map(|&(at, _)| &self.nodes[at])
     }
 
-    /// This device's own view, merged without crossing a link.
-    /// Merges this device's local view. Its own edges come from here only: remote copies
+    /// Merges this device's local view, without crossing a link. Its own edges come from here only: remote copies
     /// of them that arrived before are dropped and later ones are skipped (`merge_part`),
     /// so its screen shows its own edges as the local view has them whatever the order.
     fn merge_view(&mut self, view: View, unix_ms: u64) {
@@ -238,9 +241,14 @@ impl Exploration {
         for node in part.nodes {
             self.merge_node(node, &part.from, unix_ms);
         }
-        for edge in part.edges {
-            if self.local_merged && edge.touches(&self.me) {
-                continue;
+        for mut edge in part.edges {
+            if edge.touches(&self.me) {
+                if self.local_merged {
+                    continue;
+                }
+                if let Some(own) = self.own_edges.iter().find(|own| same_link(own, &edge)) {
+                    edge = own.clone();
+                }
             }
             if self.edge_keys.insert(edge.key()) {
                 self.edges.push(edge);
@@ -432,6 +440,15 @@ impl Exploration {
     }
 }
 
+/// Whether two copies of an edge describe the same link (their workspace fields may
+/// differ by what each side shares).
+fn same_link(a: &Edge, b: &Edge) -> bool {
+    a.dialer == b.dialer
+        && a.acceptor == b.acceptor
+        && a.holder == b.holder
+        && a.transport == b.transport
+}
+
 fn report_rank(status: NodeStatus) -> u8 {
     match status {
         NodeStatus::AuthRejected => 3,
@@ -557,6 +574,11 @@ impl Agent {
             done_parts: HashMap::new(),
             local_merged: false,
             incomplete: HashMap::new(),
+            own_edges: if request.origin == me {
+                Vec::new()
+            } else {
+                local_view(&self.me, local.links, local.failures, now.unix_ms).edges
+            },
         };
         if request.origin == me {
             self.explorations.insert(request_id.clone(), exploration);

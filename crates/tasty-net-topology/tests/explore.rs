@@ -1675,6 +1675,36 @@ fn a_route_hop_relays_only_the_final_done_of_the_branch_it_forwarded() {
 }
 
 #[test]
+fn the_requesters_own_edges_are_its_local_view_when_it_is_not_visited_again() {
+    let mut net = Net::new(&[A, B]);
+    let workspace = WorkspaceRef {
+        id: Some("ws-1".into()),
+        name: Some("my project".into()),
+    };
+    net.link_on(A, B, Some(workspace));
+    // Depth 0 at B: B answers with its edges and never queries A.
+    let rid = net.explore(A, request(B, 0)).unwrap();
+    net.run();
+    assert!(
+        !net.log
+            .iter()
+            .any(|(f, t, m)| { *f == id(B) && *t == id(A) && matches!(m, Message::Query(_)) })
+    );
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Finished);
+    let ab: Vec<_> = x
+        .edges()
+        .iter()
+        .filter(|e| e.touches(&id(A)) && e.touches(&id(B)))
+        .collect();
+    assert_eq!(ab.len(), 1, "{ab:?}");
+    assert_eq!(
+        ab[0].workspace.as_ref().and_then(|w| w.name.as_deref()),
+        Some("my project")
+    );
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);
