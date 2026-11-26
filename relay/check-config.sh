@@ -313,10 +313,11 @@ with open(sys.argv[1], "rb") as f:
 if v is None:
     print(sys.argv[3])
     sys.exit(0)
-port = str(v).rsplit(":", 1)[-1] if isinstance(v, str) and ":" in v else ""
-if not port.isdigit():
+port = v.rsplit(":", 1)[-1] if isinstance(v, str) and ":" in v else ""
+if not (port.isascii() and port.isdigit()):
     sys.exit(1)
-print(port)
+# 정수로 읽어 십진 표기로 돌려준다(iroh-relay의 SocketAddr처럼 "03340"은 3340). 게시·조회·리스너 비교가 이 값을 쓴다.
+print(int(port))
 PY
 }
 
@@ -554,6 +555,11 @@ rc_self_test() {
     printf "http_bind_addr = '[::]:8080'\n" > "$t/literal.toml"
     st_expect port-literal-string 8080 "$(rc_toml_port "$t/literal.toml" http_bind_addr 3340)"
     st_expect port-default 9090 "$(rc_toml_port "$t/literal.toml" metrics_bind_addr 9090)"
+    printf 'http_bind_addr = "0.0.0.0:03340"\n' > "$t/zero.toml"
+    got=$(rc_toml_port "$t/zero.toml" http_bind_addr 3340)
+    st_expect port-leading-zero 3340 "$got"
+    rc_listener_line_ok '2026-01-01T00:00:00Z  INFO iroh_relay::server::http_server: [HTTP/WS] relay: serving on 0.0.0.0:3340' "$got"
+    st_expect port-leading-zero-listener 0 "$?"
     # 정리 소유권: docker를 흉내 내는 함수로 응답을 바꿔 본다(서브셸 안에서만).
     (
         docker() { if [[ $1 == create ]]; then echo 'Error: Conflict. The container name is already in use' >&2; return 1; fi; return 0; }
