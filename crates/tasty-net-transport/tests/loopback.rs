@@ -272,28 +272,40 @@ fn a_refused_bulk_attempt_does_not_hold_the_acceptor_for_the_drain_cap() {
     drop(link);
 }
 
-/// A P2P stream stand-in over loopback TCP: its control reports the close code the test sets,
-/// as a QUIC stream reports the code its connection was closed with.
+/// A P2P stream stand-in over loopback TCP: the control of a real TCP channel (so a close
+/// wakes a blocked read on every OS, through this crate's own wake path), with the close code
+/// the test sets laid over it, as a QUIC stream reports the code its connection was closed
+/// with.
 struct CodedControl {
-    stream: TcpStream,
+    inner: Arc<dyn ChannelControl>,
     reason: std::sync::Mutex<Option<P2pCloseReason>>,
+}
+
+impl CodedControl {
+    fn over(stream: &TcpStream) -> Arc<Self> {
+        let tcp = RawChannel::from_tcp(stream.try_clone().expect("clone")).expect("channel");
+        Arc::new(Self {
+            inner: tcp.control(),
+            reason: std::sync::Mutex::new(None),
+        })
+    }
 }
 
 impl ChannelControl for CodedControl {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.stream.set_read_timeout(timeout)
+        self.inner.set_read_timeout(timeout)
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.stream.set_write_timeout(timeout)
+        self.inner.set_write_timeout(timeout)
     }
 
     fn shutdown_write(&self) -> io::Result<()> {
-        self.stream.shutdown(std::net::Shutdown::Write)
+        self.inner.shutdown_write()
     }
 
     fn shutdown_and_wake(&self) -> io::Result<()> {
-        self.stream.shutdown(std::net::Shutdown::Both)
+        self.inner.shutdown_and_wake()
     }
 
     fn close_reason(&self) -> Option<P2pCloseReason> {
@@ -306,10 +318,7 @@ fn p2p_channel() -> (RawChannel, Arc<CodedControl>, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let peer = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
     let (stream, _) = listener.accept().expect("accept");
-    let control = Arc::new(CodedControl {
-        stream: stream.try_clone().expect("clone"),
-        reason: std::sync::Mutex::new(None),
-    });
+    let control = CodedControl::over(&stream);
     let channel = RawChannel::new(
         Box::new(stream.try_clone().expect("clone")),
         Box::new(stream),
@@ -587,10 +596,7 @@ fn an_ack_written_past_the_deadline_times_out_and_revokes_its_credential() {
     let registry = config.clone();
     let acceptor = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
-        let control = Arc::new(CodedControl {
-            stream: stream.try_clone().expect("clone"),
-            reason: std::sync::Mutex::new(None),
-        });
+        let control = CodedControl::over(&stream);
         let mut channel = RawChannel::new(
             Box::new(stream.try_clone().expect("clone")),
             // Write 1 is the challenge, write 2 the success ACK.
@@ -718,10 +724,7 @@ fn a_parent_that_ends_right_after_the_bulk_ack_drops_its_guard() {
         let parent = accept(RawChannel::from_tcp(stream).expect("channel"));
         parent_tx.send(parent).expect("parent");
         let (stream, _) = listener.accept().expect("accept bulk");
-        let control = Arc::new(CodedControl {
-            stream: stream.try_clone().expect("clone"),
-            reason: std::sync::Mutex::new(None),
-        });
+        let control = CodedControl::over(&stream);
         let channel = RawChannel::new(
             Box::new(stream.try_clone().expect("clone")),
             Box::new(FlushStall {
