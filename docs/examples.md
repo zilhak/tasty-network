@@ -19,15 +19,17 @@ SSH로 로그인할 수 있는 기기(같은 기기의 `localhost`도 된다)가
 cargo build -p tasty-net-demo --bins --locked
 
 # 단말 1: SSH로 닿는 기기에서 서버를 띄운다
-target/debug/demo-server --record "$HOME/demo-record.json"
+target/debug/demo-server --record "$HOME/tasty-net-demo/record.json"
 # server ready pid=... port=... instance=demo-server-...
 
 # 단말 2: 다른 기기(또는 같은 기기)에서 dialer를 띄운다. --record는 서버 기기 안의 경로다
-target/debug/demo-dialer --destination me@server-host --record /home/me/demo-record.json
+target/debug/demo-dialer --destination me@server-host --record /home/me/tasty-net-demo/record.json
 # dialer connected attempt=1 instance=demo-server-... tunnel_pid=12345
 send hello
 # dialer echo hello
 ```
+
+레코드는 예제 전용 하위 디렉터리(Windows는 `%USERPROFILE%\tasty-net-demo\record.json`)에 둔다. 레코드를 발행하면 그 부모 디렉터리가 없으면 만들고 권한을 소유자만(Unix 0700)으로 좁히며, 레코드를 거둬도 되돌리지 않는다. 홈 디렉터리 바로 아래 파일을 주면 홈 디렉터리 권한이 좁혀진다.
 
 `--ssh-port`, `--identity <키 파일>`, `--option Key=Value`(여러 번)는 `ssh` 옵션으로 넘어간다. `--read-timeout-ms`는 링크의 읽기 timeout이다(기본 30000, 두 바이너리에 같은 값을 준다).
 
