@@ -177,6 +177,7 @@ impl RawChannel {
             reader_end_cv: Condvar::new(),
             writer_closed: AtomicBool::new(false),
             on_normal_end: Mutex::new(None),
+            heartbeat: Mutex::new(None),
         });
         let out = Arc::new(Outbox {
             state: Mutex::new(OutState {
@@ -191,6 +192,7 @@ impl RawChannel {
             config.heartbeat,
             heartbeat_interval(read_timeout),
         )?;
+        *lock(&shared.heartbeat) = Some(heartbeat);
         Ok(Framed {
             reader: ChannelReader {
                 inner: self.reader,
@@ -203,7 +205,6 @@ impl RawChannel {
                 out,
                 shared,
                 closer: closer.clone(),
-                heartbeat: Some(heartbeat),
                 drain_cap: config.drain_cap,
                 _keep: keep,
             },
@@ -289,6 +290,12 @@ impl Framed {
         *lock(&self.writer.shared.on_normal_end) = Some(hook);
         self.writer.shared.check_normal_end();
     }
+
+    /// The state the halves share, for an owner that must stop the heartbeat itself (a
+    /// [`Link`](crate::Link) whose writer the consumer may keep).
+    pub(crate) fn shared(&self) -> Arc<ChannelShared> {
+        Arc::clone(&self.writer.shared)
+    }
 }
 
 /// State the reader and the writer of one channel share.
@@ -299,11 +306,26 @@ pub(crate) struct ChannelShared {
     writer_closed: AtomicBool,
     /// Run once when the reader ended and the write half is closed (the normal end).
     on_normal_end: Mutex<Option<NormalEndHook>>,
+    /// The heartbeat thread, stopped and joined by whoever comes first: the writer's half
+    /// close, the writer's drop, or the link's drop.
+    heartbeat: Mutex<Option<Heartbeat>>,
 }
 
 type NormalEndHook = Box<dyn FnOnce() + Send>;
 
 impl ChannelShared {
+    /// Stops and joins the heartbeat thread, once. The join runs outside the lock, so a second
+    /// caller returns at once.
+    pub(crate) fn stop_heartbeat(&self) {
+        let heartbeat = lock(&self.heartbeat).take();
+        drop(heartbeat);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heartbeat_running(&self) -> bool {
+        lock(&self.heartbeat).is_some()
+    }
+
     fn mark_reader_end(&self) {
         *lock(&self.reader_end) = true;
         self.reader_end_cv.notify_all();
@@ -557,7 +579,6 @@ pub struct ChannelWriter {
     out: Arc<Outbox>,
     shared: Arc<ChannelShared>,
     closer: LinkCloser,
-    heartbeat: Option<Heartbeat>,
     drain_cap: Duration,
     _keep: Arc<Vec<Arc<dyn Any + Send + Sync>>>,
 }
@@ -585,7 +606,7 @@ impl ChannelWriter {
             return Ok(());
         }
         // The heartbeat thread stops before the shutdown, so no Ping follows it.
-        self.heartbeat.take();
+        self.shared.stop_heartbeat();
         let shut = self.shared.control.shutdown_write();
         self.shared.mark_writer_closed();
         shut
@@ -618,7 +639,7 @@ impl ChannelWriter {
 impl Drop for ChannelWriter {
     fn drop(&mut self) {
         // Stop and join the heartbeat thread; the socket closes with the last half.
-        self.heartbeat.take();
+        self.shared.stop_heartbeat();
     }
 }
 

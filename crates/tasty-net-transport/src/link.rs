@@ -9,7 +9,7 @@ use tasty_net_frame::HEARTBEAT_TIMEOUT;
 use tasty_net_identity::DeviceId;
 
 use crate::channel::{
-    ChannelConfig, ChannelControl, ChannelReader, ChannelWriter, DEFAULT_DRAIN_CAP,
+    ChannelConfig, ChannelControl, ChannelReader, ChannelShared, ChannelWriter, DEFAULT_DRAIN_CAP,
 };
 use crate::end::{EndReason, GuardSlot, LinkCloser};
 use crate::handshake::{DialConfig, dial_bulk};
@@ -158,6 +158,9 @@ pub struct Link {
     pub(crate) ext: Option<String>,
     pub(crate) bulk: Option<BulkDial>,
     pub(crate) _guard: Option<Box<dyn Any + Send>>,
+    /// The ordered channel's shared state, so dropping the link stops and joins its
+    /// heartbeat even while the consumer still holds the taken writer.
+    pub(crate) ordered_shared: Arc<ChannelShared>,
 }
 
 impl fmt::Debug for Link {
@@ -218,6 +221,7 @@ impl Drop for Link {
         if !self.closer.ended_normally() {
             self.closer.force_close(EndReason::Forced);
         }
+        self.ordered_shared.stop_heartbeat();
     }
 }
 
@@ -254,5 +258,47 @@ impl BulkChannel {
     /// The domain `ext`: on the dialer the success ACK's, on the accepting end the request's.
     pub fn ext(&self) -> Option<&str> {
         self.ext.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::memory_channel_pair;
+    use tasty_net_identity::DeviceKey;
+
+    /// Dropping the link stops and joins the ordered channel's heartbeat even though the
+    /// consumer still holds the writer it took.
+    #[test]
+    fn dropping_a_link_joins_the_heartbeat_of_a_kept_writer() {
+        let (a, _b) = memory_channel_pair();
+        let control = a.control();
+        let framed = a
+            .framed(&LinkTimeouts::default().channel(HeartbeatPolicy::Periodic))
+            .expect("framed");
+        let shared = framed.shared();
+        let mut link = Link {
+            ordered: Some((framed.reader, framed.writer)),
+            closer: framed.closer,
+            control,
+            peer: PeerInfo {
+                device_id: DeviceKey::from_seed([1; 32]).id(),
+                instance_id: "peer".into(),
+                holder: Some(Holder::Dialer),
+                caps: Vec::new(),
+                transport: TransportKind::Memory,
+                local_side: Side::Dialer,
+            },
+            client_id: None,
+            ext: None,
+            bulk: None,
+            _guard: None,
+            ordered_shared: Arc::clone(&shared),
+        };
+        let (_reader, writer) = link.take_ordered().expect("ordered");
+        assert!(shared.heartbeat_running());
+        drop(link);
+        assert!(!shared.heartbeat_running(), "the link's drop joined it");
+        drop(writer);
     }
 }

@@ -746,7 +746,9 @@ pub fn dial_handshake(
         .map_err(HandshakeError::Io)?;
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
+    let ordered_shared = framed.shared();
     Ok(Link {
+        ordered_shared,
         ordered: Some((framed.reader, framed.writer)),
         closer,
         control,
@@ -1117,7 +1119,9 @@ fn accept_on(
     };
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
+    let ordered_shared = framed.shared();
     Ok(Accepted::Link(Box::new(Link {
+        ordered_shared,
         ordered: Some((framed.reader, framed.writer)),
         closer,
         control,
