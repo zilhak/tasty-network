@@ -105,8 +105,10 @@ impl Scene {
             .arg(self.sshd.port.to_string())
             .arg("--identity")
             .arg(ssh_path(&self.sshd.identity))
+            // The path goes into the remote shell command (`cat`, then `type`), so it keeps
+            // the OS's own form; cmd's `type` needs backslashes.
             .arg("--record")
-            .arg(ssh_path(record))
+            .arg(record)
             .args(["--read-timeout-ms", READ_TIMEOUT_MS]);
         for option in self.sshd.client_options() {
             command.arg("--option").arg(option);

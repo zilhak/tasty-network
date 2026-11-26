@@ -150,11 +150,16 @@ impl TestServer {
 
 /// Runs `command` with the OS shell. Returns stdout, stderr and the exit code.
 fn run_shell(command: &str) -> (Vec<u8>, Vec<u8>, u32) {
-    let mut shell = if cfg!(windows) {
+    #[cfg(windows)]
+    let mut shell = {
+        // The command line goes to cmd as the client sent it, as Windows OpenSSH runs
+        // `cmd.exe /c <command>`; quoting it as one argument would change its quotes.
         let mut c = Command::new("cmd");
-        c.arg("/C").arg(command);
+        std::os::windows::process::CommandExt::raw_arg(c.arg("/C"), command);
         c
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut shell = {
         let mut c = Command::new("sh");
         c.arg("-c").arg(command);
         c
