@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use support::process::{
-    ChildList, Proc, Transcript, children_of, is_running, log, terminate, wait_all_gone,
+    ChildList, Proc, Transcript, children_of, describe, is_running, log, terminate, wait_all_gone,
 };
 use support::sshd::SshServer;
 use support::{TempDir, ssh_path};
@@ -33,6 +33,9 @@ const READ_TIMEOUT_MS: &str = "3000";
 const SSH_STEP: Duration = Duration::from_secs(60);
 /// Bound of one expected event without SSH.
 const LOCAL_STEP: Duration = Duration::from_secs(20);
+/// How long a dialer's ssh children may outlive the dialer after `quit`. The dialer ends them
+/// before it exits, so this only absorbs the time a reaped process takes to vanish.
+const SSH_END_AFTER_QUIT: Duration = Duration::from_secs(5);
 
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
@@ -188,6 +191,11 @@ impl Scene {
     }
 
     fn start_dialer(&mut self, record: &Path) -> Proc {
+        self.start_dialer_with(record, &[])
+    }
+
+    /// [`Scene::start_dialer`] with extra environment variables for the dialer.
+    fn start_dialer_with(&mut self, record: &Path, env: &[(&str, &str)]) -> Proc {
         let sshd = self.sshd();
         let mut command = Command::new(env!("CARGO_BIN_EXE_demo-dialer"));
         command
@@ -205,6 +213,7 @@ impl Scene {
         for option in sshd.client_options() {
             command.arg("--option").arg(option);
         }
+        command.envs(env.iter().copied());
         let mut dialer = Proc::spawn("demo-dialer", command);
         self.track("demo-dialer", dialer.pid());
         let children = dialer.track_children();
@@ -278,6 +287,35 @@ impl Scene {
         assert!(
             status.success(),
             "the dialer did not end cleanly: {status}\n{}",
+            dialer.transcript.render()
+        );
+        self.check_ssh_ended_with(&dialer);
+    }
+
+    /// After the dialer's `quit`, and before the SSH server ends: every ssh child it had is
+    /// gone. A dialer that exits while one still runs would leave that ssh, and its sshd
+    /// session, behind. Logs what is left (with its parent PID) and the sshd sessions, then
+    /// fails.
+    fn check_ssh_ended_with(&self, dialer: &Proc) {
+        let ssh: Vec<(String, u32)> = self
+            .tracked
+            .iter()
+            .filter(|(what, _)| what.starts_with("ssh "))
+            .cloned()
+            .collect();
+        let left = wait_all_gone(&ssh, SSH_END_AFTER_QUIT)
+            .unwrap_or_else(|e| panic!("checking the dialer's ssh children after quit: {e}"));
+        if left.is_empty() {
+            return;
+        }
+        for (what, pid) in &left {
+            log(&format!("left after quit: {what}: {}", describe(*pid)));
+        }
+        log(&format!("sshd sessions: {}", self.sshd().session_listing()));
+        let pids: Vec<String> = left.iter().map(|(_, pid)| pid.to_string()).collect();
+        panic!(
+            "the dialer left ssh {} after quit\n--- demo-dialer transcript ---\n{}",
+            pids.join(", "),
             dialer.transcript.render()
         );
     }
@@ -683,4 +721,36 @@ fn a_failed_wait_leaves_no_ssh_behind() {
         left.is_empty(),
         "processes left after a failed wait: {left:?}"
     );
+}
+
+/// The dialer waits on `quit` until its stdin thread has let the link's writer go, which ends
+/// the tunnel ssh. The test hook keeps the writer 1.5 s longer: the dialer must still end
+/// after that, and leave no ssh.
+#[test]
+fn quit_waits_for_the_detaching_writer() {
+    const HOLD: Duration = Duration::from_millis(1500);
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = scene.start_server();
+    let record = scene.record.clone();
+    let hold = HOLD.as_millis().to_string();
+    let mut dialer =
+        scene.start_dialer_with(&record, &[("TASTY_NET_DEMO_HOLD_WRITER_MS", hold.as_str())]);
+    connect_and_check(&mut scene, &mut server, &ready, &mut dialer);
+    let started = Instant::now();
+    scene.quit_dialer(dialer);
+    let took = started.elapsed();
+    log(&format!(
+        "the dialer ended {} ms after quit with the writer held {} ms",
+        took.as_millis(),
+        HOLD.as_millis()
+    ));
+    assert!(
+        took >= HOLD,
+        "the dialer ended {took:?} after quit, before its writer went ({HOLD:?})"
+    );
+    let released = server.expect_prefix("server released ", LOCAL_STEP);
+    assert_eq!(field(&released, "live"), Some("0"), "{released}");
+    Scene::stop_server(server);
+    scene.finish();
 }

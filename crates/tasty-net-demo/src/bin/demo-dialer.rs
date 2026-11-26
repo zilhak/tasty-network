@@ -15,6 +15,10 @@
 //! refusal ends the dialer without waiting for stdin: no link was up, and the main thread
 //! drops what is left of the attempt and the transport before it returns.
 //!
+//! Test hook: `TASTY_NET_DEMO_HOLD_WRITER_MS=<ms>` makes the stdin thread keep the writer that
+//! long after its Detach before letting it go, so a test can check that the dialer still
+//! waits for it (`tests/ssh_attach.rs`).
+//!
 //! ```text
 //! demo-dialer --destination <user@host> --record <remote path>
 //!             [--ssh-port <port>] [--identity <file>] [--option Key=Value]...
@@ -77,10 +81,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// The test hook of the module text.
+const HOLD_WRITER_ENV: &str = "TASTY_NET_DEMO_HOLD_WRITER_MS";
+
 /// What the stdin thread and the connection loop share.
 #[derive(Default)]
 struct Shared {
     quit: AtomicBool,
+    /// How long the stdin thread keeps the writer after its Detach ([`HOLD_WRITER_ENV`]).
+    hold_writer: Duration,
     /// The writer and closer of the link that is up.
     link: Mutex<Option<(ChannelWriter, LinkCloser)>>,
     /// The attempt in progress, so `quit` can cancel it.
@@ -141,11 +150,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     .with_timeouts(timeouts);
 
     emit(&format!("dialer pid={}", std::process::id()));
+    let hold_writer = match std::env::var(HOLD_WRITER_ENV) {
+        Ok(ms) => Duration::from_millis(ms.parse().map_err(|_| {
+            tasty_net_demo::UsageError(format!("{HOLD_WRITER_ENV} needs milliseconds"))
+        })?),
+        Err(_) => Duration::ZERO,
+    };
     let detach_limit = timeouts
         .write_timeout
         .saturating_add(timeouts.drain_cap)
+        .saturating_add(hold_writer)
         .saturating_add(DETACH_END_MARGIN);
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared {
+        hold_writer,
+        ..Shared::default()
+    });
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let stdin_thread = {
         let shared = Arc::clone(&shared);
@@ -182,7 +201,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     tunnel_pid.load(Ordering::SeqCst)
                 ));
                 if shared.quit.load(Ordering::SeqCst) {
-                    detach(&shared);
+                    detach(&shared, Duration::ZERO);
                 }
                 let end = read_link(reader);
                 lock(&shared.link).take();
@@ -315,14 +334,15 @@ fn read_stdin(shared: &Shared, wake: &mpsc::Sender<()>) {
     if let Some(cancel) = lock(&shared.attempt).as_ref() {
         cancel.cancel();
     }
-    detach(shared);
+    detach(shared, shared.hold_writer);
     // The loop may be waiting out a backoff. A failed send means it already ended.
     let _sent = wake.send(()).is_ok();
 }
 
 /// Sends Detach on the link that is up and ends its writer; the server answers by ending its
 /// side, which ends the reader. When the drain cap runs out the link is closed both ways.
-fn detach(shared: &Shared) {
+/// The writer goes `hold` after that (the test hook).
+fn detach(shared: &Shared, hold: Duration) {
     let taken = lock(&shared.link).take();
     if let Some((mut writer, closer)) = taken {
         if writer.write_frame(StreamTag::Detach, &[]).is_err() {
@@ -330,5 +350,6 @@ fn detach(shared: &Shared) {
             return;
         }
         writer.finish();
+        std::thread::sleep(hold);
     }
 }

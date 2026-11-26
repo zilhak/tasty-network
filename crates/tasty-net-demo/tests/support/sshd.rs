@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::process::{children_of, log, terminate, wait_all_gone};
+use super::process::{children_of, describe, log, terminate, wait_all_gone};
 use super::russh_server::RusshServer;
 use super::{TempDir, ssh_option_path, ssh_path};
 
@@ -200,6 +200,30 @@ impl SshServer {
         match &self.running {
             Running::OpenSsh { child, .. } => Some(child.pid()),
             Running::Russh(_) => None,
+        }
+    }
+
+    /// The OpenSSH listener's session processes as a log line (PID, parent PID, state and
+    /// command line each); the Rust server has none of its own.
+    pub fn session_listing(&self) -> String {
+        match &self.running {
+            Running::OpenSsh { child, .. } => {
+                let Sessions { found, error } = child.sessions();
+                let mut text = if found.is_empty() {
+                    "none".to_string()
+                } else {
+                    found
+                        .iter()
+                        .map(|pid| describe(*pid))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                if let Some(e) = error {
+                    text.push_str(&format!(" (listing failed: {e})"));
+                }
+                text
+            }
+            Running::Russh(_) => "none (the Rust server runs in the test process)".into(),
         }
     }
 

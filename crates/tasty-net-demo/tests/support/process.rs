@@ -381,6 +381,43 @@ pub fn children_of(pid: u32) -> Result<Vec<u32>, String> {
     Ok(children)
 }
 
+/// One line about `pid` for a failure log: its PID, parent PID, state and command line, or
+/// what the query said when there is no such process or the query failed.
+pub fn describe(pid: u32) -> String {
+    #[cfg(unix)]
+    let mut command = {
+        let mut ps = Command::new("ps");
+        ps.args(["-o", "pid=,ppid=,stat=,args=", "-p", &pid.to_string()]);
+        ps
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut ps = Command::new("powershell");
+        ps.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$ProgressPreference = 'SilentlyContinue'; \
+                 Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | \
+                 ForEach-Object {{ \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }}"
+            ),
+        ]);
+        ps
+    };
+    match command.stdin(Stdio::null()).output() {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if text.is_empty() {
+                format!("pid {pid}: no such process ({})", out.status)
+            } else {
+                text
+            }
+        }
+        Err(e) => format!("pid {pid}: the query did not start: {e}"),
+    }
+}
+
 /// Waits up to `timeout` until none of `pids` runs. Returns the ones still running, or the
 /// error of a query that failed.
 pub fn wait_all_gone(
