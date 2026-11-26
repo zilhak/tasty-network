@@ -1,0 +1,26 @@
+[package]
+name = "tasty-net-demo"
+description = "Example binaries and two-process integration tests of the Tasty network library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "demo-server"
+path = "src/bin/demo-server.rs"
+
+[[bin]]
+name = "demo-dialer"
+path = "src/bin/demo-dialer.rs"
+
+[dependencies]
+tasty-net-frame = { path = "../tasty-net-frame" }
+tasty-net-identity = { path = "../tasty-net-identity" }
+tasty-net-ssh = { path = "../tasty-net-ssh" }
+tasty-net-transport = { path = "../tasty-net-transport" }
+
+[lints]
+workspace = true

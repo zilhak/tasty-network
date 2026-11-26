@@ -676,6 +676,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tasty-net-demo"
+version = "0.1.0"
+dependencies = [
+ "tasty-net-frame",
+ "tasty-net-identity",
+ "tasty-net-ssh",
+ "tasty-net-transport",
+]
+
+[[package]]
 name = "tasty-net-frame"
 version = "0.1.0"
 
