@@ -815,22 +815,31 @@ impl Probe<'_> {
 
     /// The Auto chain: first success, or the most telling failure.
     fn auto<T, E>(&self, decode: &impl Fn(&str) -> Result<T, E>) -> Result<T, PortDiscoveryError> {
-        let mut errors = Vec::with_capacity(AUTO_FALLBACK_CHAIN.len());
-        for m in AUTO_FALLBACK_CHAIN {
-            match self.single_mode(m, decode) {
-                Ok(found) => return Ok(found),
-                // Cancellation does not fall back: the next mode would start a new ssh for a
-                // lookup that was just stopped. An exited instance stops too: the file modes
-                // would read the record it left behind and report success.
-                Err(e) if stops_auto_chain(e.kind) => return Err(e),
-                Err(e) => {
-                    tracing::debug!("{m:?} port discovery failed ({e}); falling back");
-                    errors.push(e);
-                }
+        auto_chain(|m| self.single_mode(m, decode))
+    }
+}
+
+/// Runs the Auto chain: the first mode that finds the record wins, a stopping failure ends the
+/// chain, and otherwise the most informative failure is returned.
+fn auto_chain<T, F>(mut try_mode: F) -> Result<T, PortDiscoveryError>
+where
+    F: FnMut(PortMode) -> Result<T, PortDiscoveryError>,
+{
+    let mut errors = Vec::with_capacity(AUTO_FALLBACK_CHAIN.len());
+    for m in AUTO_FALLBACK_CHAIN {
+        match try_mode(m) {
+            Ok(found) => return Ok(found),
+            // Cancellation does not fall back: the next mode would start a new ssh for a
+            // lookup that was just stopped. An exited instance stops too: the file modes
+            // would read the record it left behind and report success.
+            Err(e) if stops_auto_chain(e.kind) => return Err(e),
+            Err(e) => {
+                tracing::debug!("{m:?} port discovery failed ({e}); falling back");
+                errors.push(e);
             }
         }
-        Err(pick_most_informative(errors))
     }
+    Err(pick_most_informative(errors))
 }
 
 /// The remote subcommand's exit code [`PORT_COMMAND_EXITED_INSTANCE_CODE`] settles on an
@@ -1372,6 +1381,53 @@ mod tests {
             ]
         );
         assert!(!AUTO_FALLBACK_CHAIN.contains(&PortMode::Auto));
+    }
+
+    /// Runs the Auto chain with every mode failing with `kind` and returns the modes it tried.
+    fn auto_chain_tries(kind: PortDiscoveryFailureKind) -> (Vec<PortMode>, PortDiscoveryError) {
+        let mut tried = Vec::new();
+        let err = auto_chain::<(), _>(|m| {
+            tried.push(m);
+            Err(PortDiscoveryError::new(kind, format!("{m:?} failed")))
+        })
+        .unwrap_err();
+        (tried, err)
+    }
+
+    #[test]
+    fn the_auto_chain_stops_at_cancellation_and_an_exited_instance() {
+        for kind in [
+            PortDiscoveryFailureKind::Cancelled,
+            PortDiscoveryFailureKind::RemoteInstanceExited,
+        ] {
+            let (tried, err) = auto_chain_tries(kind);
+            assert_eq!(tried, [PortMode::Subcommand], "{kind:?}");
+            assert_eq!(err.kind(), kind);
+        }
+        let (tried, err) = auto_chain_tries(PortDiscoveryFailureKind::RemoteInstanceNotRunning);
+        assert_eq!(tried, AUTO_FALLBACK_CHAIN.to_vec());
+        assert_eq!(
+            err.kind(),
+            PortDiscoveryFailureKind::RemoteInstanceNotRunning
+        );
+    }
+
+    #[test]
+    fn the_auto_chain_returns_the_first_found_record() {
+        let mut tried = Vec::new();
+        let found = auto_chain(|m| {
+            tried.push(m);
+            if m == PortMode::FileUnix {
+                Ok(45123)
+            } else {
+                Err(PortDiscoveryError::new(
+                    PortDiscoveryFailureKind::RemoteInstanceNotRunning,
+                    "no record",
+                ))
+            }
+        });
+        assert_eq!(found.unwrap(), 45123);
+        assert_eq!(tried, [PortMode::Subcommand, PortMode::FileUnix]);
     }
 
     #[test]
