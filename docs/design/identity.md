@@ -59,6 +59,15 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 3. 게시에 성공해도, `AlreadyExists`여도, 그 밖의 오류여도 임시 이름은 지운다. 지우지 못하면 `IdentityError::Leftover`다(게시에 성공했으면 `cause`가 없다). `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
 4. 파일 시스템이 하드 링크를 지원하지 않으면 오류를 돌려준다(조용히 다른 방식으로 바꾸지 않는다).
 
+알려진 한계(Unix): umask가 소유자 권한 비트를 빼면(예: 0277·0377·0400) 이 크레이트가 새 디렉터리·잠금 파일을 만든 직후 0700·0600을 걸기 전의 짧은 틈이 생긴다. 그 틈에 같은 경로로 들어온 다른 호출은 권한 오류로 실패할 수 있다. 오류 종류는 어디서 막히느냐에 따라 다르다.
+
+- 새 디렉터리 안에서 키 임시 파일을 만들 때(디렉터리가 0500): `IdentityError::Io`(`FileOp::CreateTemp`).
+- 새 디렉터리 안에서 레코드 잠금 파일을 열 때, 또는 새 잠금 파일이 아직 읽을 수 없을 때(umask 0400에서 0200): `IdentityError::Io`(`FileOp::Lock`).
+- 탐색 권한이 없는 새 중간 디렉터리 아래를 볼 때(0400): `IdentityError::Io`(`FileOp::CreateDir`).
+- 탐색 권한이 없는 새 키 디렉터리에서 기존 키를 읽을 때(0400): 키 파일을 검사할 수 없으므로 `IdentityError::UnsafeFile`(`UnsafeReason::CheckFailed`).
+
+비밀이 새거나 권한이 넓어지지는 않고, 다시 호출하면 성공한다. 소유자 비트를 빼는 umask는 일반적인 설정이 아니다.
+
 ## 서명
 
 - `DeviceKey::sign(&[u8]) -> Signature`, `DeviceId::verify(&[u8], &Signature) -> bool`. 검증은 `verify_strict`다(`iroh-base` `PublicKey::verify`).
