@@ -147,21 +147,37 @@ struct MemoryControl {
     timeouts: Arc<Timeouts>,
 }
 
+/// The rule a TCP socket's timeouts follow: zero is refused, and so is a timeout that cannot
+/// be added to an [`Instant`] (a wait on it could not end).
+fn check_timeout(timeout: Option<Duration>) -> io::Result<()> {
+    let Some(timeout) = timeout else {
+        return Ok(());
+    };
+    if timeout.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a zero timeout is not allowed",
+        ));
+    }
+    if Instant::now().checked_add(timeout).is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the timeout is too large to make a deadline",
+        ));
+    }
+    Ok(())
+}
+
 impl ChannelControl for MemoryControl {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        if timeout == Some(Duration::ZERO) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a zero timeout is not allowed",
-            ));
-        }
+        check_timeout(timeout)?;
         *lock(&self.timeouts.read) = timeout;
         Ok(())
     }
 
-    fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
-        // Writes into a memory pipe never block.
-        Ok(())
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        // Writes into a memory pipe never block, but the value follows the same rule.
+        check_timeout(timeout)
     }
 
     fn shutdown_write(&self) -> io::Result<()> {
@@ -309,6 +325,33 @@ impl Listener for MemoryListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The memory control refuses read and write timeouts that cannot make a deadline, as a
+    /// TCP socket's would, so a later read cannot wait without a limit.
+    #[test]
+    fn a_timeout_too_large_for_a_deadline_is_refused() {
+        let (a, _b) = memory_channel_pair();
+        let control = a.control();
+        let read = control
+            .set_read_timeout(Some(Duration::MAX))
+            .expect_err("too large");
+        assert_eq!(read.kind(), io::ErrorKind::InvalidInput);
+        let write = control
+            .set_write_timeout(Some(Duration::MAX))
+            .expect_err("too large");
+        assert_eq!(write.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            control
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .is_ok()
+        );
+        assert!(
+            control
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .is_ok()
+        );
+        assert!(control.set_read_timeout(None).is_ok());
+    }
 
     #[test]
     fn a_memory_read_times_out_and_a_shutdown_wakes_it() {
