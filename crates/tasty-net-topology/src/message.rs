@@ -110,6 +110,15 @@ pub struct Done {
     /// `more` finishes the branch. Absent when `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub more: bool,
+    /// Devices whose answer in this branch `from` could not relay whole (a relay to the
+    /// next receiver failed). The requester marks them timed out with reason
+    /// `incomplete`. Absent when empty.
+    #[serde(
+        default,
+        with = "ids::device_id_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub incomplete: Vec<DeviceId>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -276,13 +285,14 @@ pub fn split_result(
 }
 
 /// Splits a branch's `done` so that each message's JSON is at most `limit` bytes: the
-/// `timed_out` list is spread over several messages, all but the last with `more: true`
-/// and `final: false`; the last carries `is_final`. Concatenating the `timed_out` lists in
-/// order gives the input back. [`MessageError::TooLarge`] when the header alone does not
-/// fit.
+/// `timed_out` and `incomplete` lists are spread over several messages, all but the last
+/// with `more: true` and `final: false`; the last carries `is_final`. Concatenating each
+/// list over the messages in order gives the input back. [`MessageError::TooLarge`] when
+/// the header alone does not fit.
 pub fn split_done(
     header: &ResultHeader,
     timed_out: Vec<DeviceId>,
+    incomplete: Vec<DeviceId>,
     is_final: bool,
     limit: usize,
 ) -> Result<Vec<Done>, MessageError> {
@@ -294,8 +304,9 @@ pub fn split_done(
         timed_out: Vec::new(),
         is_final: false,
         more: true,
+        incomplete: Vec::new(),
     };
-    // The whole list as the one done it would be (`more` absent), measured as sent.
+    // Everything as the one done it would be (`more` absent), measured as sent.
     let mut whole = Done {
         is_final,
         more: false,
@@ -303,19 +314,29 @@ pub fn split_done(
     };
     let tag = json_len(&Message::Done(whole.clone()))? - json_len(&whole)?;
     whole.timed_out = timed_out;
+    whole.incomplete = incomplete;
     if json_len(&whole)? + tag <= limit {
         return Ok(vec![whole]);
     }
-    let Done { timed_out, .. } = whole;
-    // Several dones: estimate with the longest empty one, `more` present and `false`.
-    let base = json_len(&Message::Done(empty()))?;
+    let Done {
+        timed_out,
+        incomplete,
+        ..
+    } = whole;
+    // Several dones: estimate with the longest empty one, `more` present and `false`, and
+    // an `incomplete` field present.
+    let base = json_len(&Message::Done(empty()))? + r#","incomplete":[]"#.len();
     if base > limit {
         return Err(MessageError::TooLarge);
     }
     let mut dones = Vec::new();
     let mut current = empty();
     let mut size = base;
-    for device in timed_out {
+    let entries = timed_out
+        .into_iter()
+        .map(|d| (false, d))
+        .chain(incomplete.into_iter().map(|d| (true, d)));
+    for (is_incomplete, device) in entries {
         // The quoted ID and at most one comma.
         let len = device.to_string().len() + 3;
         if base + len > limit {
@@ -326,7 +347,11 @@ pub fn split_done(
             size = base;
         }
         size += len;
-        current.timed_out.push(device);
+        if is_incomplete {
+            current.incomplete.push(device);
+        } else {
+            current.timed_out.push(device);
+        }
     }
     current.more = false;
     current.is_final = is_final;
@@ -505,6 +530,7 @@ mod tests {
             timed_out: vec![id(3)],
             is_final: true,
             more: false,
+            incomplete: Vec::new(),
         });
         let value: serde_json::Value = serde_json::from_slice(&done.to_json().unwrap()).unwrap();
         assert_eq!(value["event"], EVENT_DONE);
@@ -587,6 +613,7 @@ mod limit_tests {
             timed_out: Vec::new(),
             is_final: false,
             more: false,
+            incomplete: Vec::new(),
         });
         let mut json = done.to_json().unwrap();
         assert!(Message::from_json(&json).is_ok());
@@ -604,7 +631,7 @@ mod limit_tests {
             Err(MessageError::TooLarge)
         );
         assert_eq!(
-            split_done(&big, Vec::new(), true, MAX_MESSAGE_JSON),
+            split_done(&big, Vec::new(), Vec::new(), true, MAX_MESSAGE_JSON),
             Err(MessageError::TooLarge)
         );
     }
@@ -612,7 +639,8 @@ mod limit_tests {
     #[test]
     fn a_long_timed_out_list_is_spread_over_several_dones() {
         let ids: Vec<DeviceId> = (1..=9_000).map(id).collect();
-        let dones = split_done(&header(3), ids.clone(), true, MAX_MESSAGE_JSON).unwrap();
+        let dones =
+            split_done(&header(3), ids.clone(), Vec::new(), true, MAX_MESSAGE_JSON).unwrap();
         assert!(dones.len() > 1, "{} dones", dones.len());
         for (i, done) in dones.iter().enumerate() {
             let is_last = i + 1 == dones.len();
@@ -677,15 +705,16 @@ mod exact_fit_tests {
     #[test]
     fn a_done_that_fits_exactly_is_one_message() {
         for timed_out in [Vec::new(), vec![id(5), id(6)]] {
-            let dones = split_done(&header(), timed_out.clone(), true, usize::MAX).unwrap();
+            let dones =
+                split_done(&header(), timed_out.clone(), Vec::new(), true, usize::MAX).unwrap();
             let exact = Message::Done(dones[0].clone()).to_json().unwrap().len();
-            let dones = split_done(&header(), timed_out.clone(), true, exact).unwrap();
+            let dones = split_done(&header(), timed_out.clone(), Vec::new(), true, exact).unwrap();
             assert_eq!(dones.len(), 1);
             assert!(!dones[0].more);
             assert!(dones[0].is_final);
             if timed_out.is_empty() {
                 assert_eq!(
-                    split_done(&header(), timed_out, true, exact - 1),
+                    split_done(&header(), timed_out, Vec::new(), true, exact - 1),
                     Err(MessageError::TooLarge)
                 );
             }

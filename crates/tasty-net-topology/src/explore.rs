@@ -256,11 +256,16 @@ impl Exploration {
 
     /// The answer of `branch` by `from` ended (its done arrived): incomplete parts mark
     /// `from` incomplete.
+    /// A done with no part at all before it is incomplete too: the answer's first part
+    /// was lost. This device's own done carries no tracked parts and is skipped.
     fn check_parts(&mut self, branch: &str, from: &DeviceId, unix_ms: u64) {
+        if *from == self.me {
+            return;
+        }
         if self
             .parts
             .get(&(branch.to_owned(), *from))
-            .is_some_and(|t| !t.complete())
+            .is_none_or(|t| !t.complete())
         {
             self.mark_incomplete(*from, unix_ms);
         }
@@ -301,6 +306,24 @@ impl Exploration {
                 });
             }
         }
+    }
+
+    /// `reporter` could not relay the answer of `device` whole. A direct answer of `device`
+    /// that did arrive is kept (as for any report).
+    fn report_incomplete(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
+        self.merge_node(
+            Node {
+                device_id: Some(device),
+                display_name: None,
+                status: NodeStatus::TimedOut,
+                reason: Some(NodeReason::Incomplete),
+                reported_by: Some(*reporter),
+                peer_hint: None,
+                explored_at: unix_ms,
+            },
+            reporter,
+            unix_ms,
+        );
     }
 
     fn report_timed_out(&mut self, device: DeviceId, reporter: &DeviceId, unix_ms: u64) {
@@ -356,6 +379,8 @@ struct Wait {
     deadline: Instant,
     pending: HashMap<String, Child>,
     timed_out: Vec<DeviceId>,
+    /// Devices whose answer this device could not relay whole.
+    incomplete: Vec<DeviceId>,
 }
 
 /// The topology state machine of one device.
@@ -564,6 +589,12 @@ impl Agent {
             .answered
             .get(&query.request_id)
             .map_or(deadline, |seen| seen.expires.max(deadline));
+        // Kept to undo the record if the answer cannot be sent, so the same query can be
+        // answered again instead of suppressed.
+        let previous = self
+            .answered
+            .get(&query.request_id)
+            .map(|seen| (seen.depth, seen.expires));
         self.answered.insert(
             query.request_id.clone(),
             Answered {
@@ -602,7 +633,9 @@ impl Agent {
         );
         if on_link && !local.sharing.enabled {
             if self.send_view(&header, view, out, now) {
-                self.send_done(&header, Vec::new(), is_origin, out, now);
+                self.send_done(&header, Vec::new(), Vec::new(), is_origin, out, now);
+            } else {
+                self.undo_answered(&query.request_id, previous);
             }
             return;
         }
@@ -668,10 +701,11 @@ impl Agent {
         if !self.send_view(&header, view, out, now) {
             // The branch failed: no done follows and the neighbors' answers are not
             // waited for (their replies are dropped as unexpected).
+            self.undo_answered(&query.request_id, previous);
             return;
         }
         if pending.is_empty() {
-            self.send_done(&header, timed_out, is_origin, out, now);
+            self.send_done(&header, timed_out, Vec::new(), is_origin, out, now);
             return;
         }
         for branch in pending.keys() {
@@ -687,8 +721,21 @@ impl Agent {
                 deadline,
                 pending,
                 timed_out,
+                incomplete: Vec::new(),
             },
         );
+    }
+
+    fn undo_answered(&mut self, request_id: &str, previous: Option<(u32, Instant)>) {
+        match previous {
+            Some((depth, expires)) => {
+                self.answered
+                    .insert(request_id.to_owned(), Answered { depth, expires });
+            }
+            None => {
+                self.answered.remove(request_id);
+            }
+        }
     }
 
     /// A query on its way to the origin: forward it to the next hop, or stop it with a
@@ -833,7 +880,7 @@ impl Agent {
             edges: Vec::new(),
         };
         if self.send_view(header, view, out, now) {
-            self.send_done(header, Vec::new(), true, out, now);
+            self.send_done(header, Vec::new(), Vec::new(), true, out, now);
         }
     }
 
@@ -905,6 +952,7 @@ impl Agent {
         &mut self,
         header: &ResultHeader,
         timed_out: Vec<DeviceId>,
+        incomplete: Vec<DeviceId>,
         is_final: bool,
         out: &mut dyn Outbox,
         now: Now,
@@ -913,7 +961,7 @@ impl Agent {
             from: self.me.device_id,
             ..header.clone()
         };
-        let dones = match split_done(&header, timed_out, is_final, MAX_MESSAGE_JSON) {
+        let dones = match split_done(&header, timed_out, incomplete, is_final, MAX_MESSAGE_JSON) {
             Ok(dones) => dones,
             Err(e) => {
                 tracing::warn!(error = %e, "topology done not sent");
@@ -1014,6 +1062,9 @@ impl Agent {
                     tracing::debug!(error = %e, "topology reply not relayed");
                     self.failed_relays
                         .insert(relay_key, now.mono + Duration::from_millis(MAX_QUERY_MS));
+                    if let Some(link) = link {
+                        self.note_failed_relay(link, &reply, &branch, from, out, now);
+                    }
                     return;
                 }
                 if let Message::Done(done) = &reply
@@ -1054,6 +1105,40 @@ impl Agent {
         }
     }
 
+    /// A reply that came on `link` could not be relayed: every branch of this device that
+    /// waits on `link` for that request reports `from` as incomplete in its done. When the
+    /// reply was the neighbor's own answer to that branch, the branch stops waiting for it.
+    fn note_failed_relay(
+        &mut self,
+        link: &DeviceId,
+        reply: &Message,
+        branch: &str,
+        from: DeviceId,
+        out: &mut dyn Outbox,
+        now: Now,
+    ) {
+        let request_id = reply.request_id();
+        let mut emptied = Vec::new();
+        for (key, wait) in &mut self.waits {
+            if wait.request_id != request_id || !wait.pending.values().any(|c| c.peer == *link) {
+                continue;
+            }
+            if !wait.incomplete.contains(&from) {
+                wait.incomplete.push(from);
+            }
+            if wait.pending.get(branch).is_some_and(|c| c.peer == from) {
+                wait.pending.remove(branch);
+                self.children.remove(branch);
+                if wait.pending.is_empty() {
+                    emptied.push(key.clone());
+                }
+            }
+        }
+        for key in emptied {
+            self.finish_wait_if_empty(&key, out, now);
+        }
+    }
+
     /// Whether `link` is a peer this device waits on for `request_id`: a neighbor it
     /// forwarded the request to, the next hop it relayed it to on the route, or the first
     /// hop of its own exploration.
@@ -1079,6 +1164,9 @@ impl Agent {
             Message::Done(done) => {
                 for device in done.timed_out {
                     exploration.report_timed_out(device, &done.from, now.unix_ms);
+                }
+                for device in done.incomplete {
+                    exploration.report_incomplete(device, &done.from, now.unix_ms);
                 }
                 if !done.more {
                     exploration.check_parts(&done.branch, &done.from, now.unix_ms);
@@ -1117,7 +1205,14 @@ impl Agent {
             from: self.me.device_id,
             return_path: wait.return_path,
         };
-        self.send_done(&header, wait.timed_out, wait.is_final, out, now);
+        self.send_done(
+            &header,
+            wait.timed_out,
+            wait.incomplete,
+            wait.is_final,
+            out,
+            now,
+        );
     }
 
     /// Applies every deadline that passed by `now`: gives up neighbors that did not answer
@@ -1351,5 +1446,62 @@ mod tests {
         agent.answer_query(Some(&id(1)), query("r3"), local, &mut Sink, at(3_500));
         assert_eq!(agent.answered.len(), 1);
         assert!(agent.answered.contains_key("r3"));
+    }
+
+    /// Fails its first send, then records what it sends.
+    struct FailOnce {
+        failed: bool,
+        sent: Vec<Message>,
+    }
+
+    impl Outbox for FailOnce {
+        fn send(&mut self, _: &DeviceId, message: &Message) -> Result<(), SendError> {
+            if !self.failed {
+                self.failed = true;
+                return Err(SendError::Failed);
+            }
+            self.sent.push(message.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_answer_that_could_not_be_sent_is_sent_again_for_the_same_query() {
+        let me = SelfInfo {
+            device_id: id(2),
+            display_name: None,
+        };
+        let mut agent = Agent::new(me, AgentConfig::default());
+        let links = [LocalLink {
+            peer: id(1),
+            local_side: Side::Acceptor,
+            holder: Side::Dialer,
+            transport: TransportKind::SshForward,
+            rtt: None,
+            connected_at: 0,
+            workspace: None,
+            kind: LinkKind::Attach,
+        }];
+        let local = Local {
+            links: &links,
+            failures: &[],
+            sharing: Sharing::default(),
+        };
+        let now = Now {
+            mono: Instant::now(),
+            unix_ms: 0,
+        };
+        let mut out = FailOnce {
+            failed: false,
+            sent: Vec::new(),
+        };
+        agent.on_message(&id(1), Message::Query(query("r1")), local, &mut out, now);
+        assert!(out.sent.is_empty());
+        assert!(agent.answered.is_empty());
+
+        agent.on_message(&id(1), Message::Query(query("r1")), local, &mut out, now);
+        assert!(matches!(out.sent.first(), Some(Message::Result(p)) if p.part == 0));
+        assert!(matches!(out.sent.last(), Some(Message::Done(_))));
+        assert!(!out.sent.iter().any(|m| matches!(m, Message::Suppressed(_))));
     }
 }

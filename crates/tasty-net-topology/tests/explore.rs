@@ -1047,6 +1047,7 @@ fn replies_from_unexpected_links_or_senders_are_dropped() {
         timed_out: Vec::new(),
         is_final: true,
         more: false,
+        incomplete: Vec::new(),
     };
     net.with_agent(id(A), |agent, local, out, now| {
         agent.on_message(&id(B), Message::Done(fake_final), local, out, now)
@@ -1238,6 +1239,63 @@ fn a_relay_that_fails_stops_the_rest_and_the_requester_sees_the_gap() {
 }
 
 #[test]
+fn a_first_part_that_is_not_relayed_is_reported_by_the_relaying_neighbor() {
+    let mut net = Net::new(&[A, B, C]);
+    net.link(A, B).link(B, C);
+    // B cannot relay C's first part to A.
+    net.fail.push(Box::new(|from, to, m| {
+        from == id(B)
+            && to == id(A)
+            && matches!(m, Message::Result(p) if p.from == id(C) && p.part == 0)
+    }));
+    let rid = net.explore(A, request(A, 2)).unwrap();
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let c = x.node(&id(C)).unwrap();
+    assert_eq!(c.status, NodeStatus::TimedOut);
+    assert_eq!(c.reason, Some(NodeReason::Incomplete));
+    assert_eq!(c.reported_by, Some(id(B)));
+    assert_eq!(status(x, B), NodeStatus::Online);
+    // B's done carried the reason and did not wait for C's timeout.
+    assert!(net.log.iter().any(|(f, t, m)| {
+        *f == id(B)
+            && *t == id(A)
+            && matches!(m, Message::Done(d) if d.from == id(B)
+            && d.incomplete == vec![id(C)] && d.timed_out.is_empty())
+    }));
+}
+
+#[test]
+fn a_done_whose_answer_never_arrived_marks_its_sender_incomplete() {
+    let mut net = Net::new(&[A, B]);
+    net.link(A, B);
+    let rid = net.explore(A, request(A, 1)).unwrap();
+    let branch = queued_branch(&net, A, B);
+    // B's answer never arrives; only its done does.
+    net.queue.clear();
+    let done = Message::Done(tasty_net_topology::Done {
+        request_id: rid.clone(),
+        branch,
+        from: id(B),
+        return_path: vec![id(A)],
+        timed_out: Vec::new(),
+        is_final: false,
+        more: false,
+        incomplete: Vec::new(),
+    });
+    net.with_agent(id(A), |agent, local, out, now| {
+        agent.on_message(&id(B), done, local, out, now)
+    });
+    net.run();
+    let x = net.result(A, &rid);
+    assert_eq!(x.state(), ExplorationState::Incomplete);
+    let b = x.node(&id(B)).unwrap();
+    assert_eq!(b.status, NodeStatus::TimedOut);
+    assert_eq!(b.reason, Some(NodeReason::Incomplete));
+}
+
+#[test]
 fn a_first_hop_without_the_capability_stays_in_the_result() {
     let mut net = Net::new(&[A, B, C]);
     net.link(A, B).link(B, C);
@@ -1350,6 +1408,7 @@ fn a_reply_on_a_waited_link_but_for_another_branch_is_dropped() {
         timed_out: vec![id(D)],
         is_final: true,
         more: false,
+        incomplete: Vec::new(),
     };
     net.with_agent(id(A), |agent, local, out, now| {
         agent.on_message(&id(B), Message::Done(forged_final), local, out, now)
