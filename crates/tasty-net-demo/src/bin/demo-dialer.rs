@@ -88,9 +88,9 @@ use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, BulkChannel, ChannelReader, ChannelWriter, ConnectOptions, ConnectionId,
-    ConnectionTable, DialConfig, EndReason, HandshakeError, Holder, Link, LinkCloser, LinkId,
-    LinkTimeouts, RedialError, Redialer, RedialerConfig, RequestClient, Side, SshTransport,
+    AttemptCancel, BulkChannel, ChannelReader, ChannelWriter, ConnectError, ConnectOptions,
+    ConnectionId, ConnectionTable, DialConfig, EndReason, HandshakeError, Holder, Link, LinkCloser,
+    LinkId, LinkTimeouts, RedialError, Redialer, RedialerConfig, RequestClient, Side, SshTransport,
     Transport, dial_handshake, dial_request,
 };
 
@@ -304,15 +304,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         };
         lock(&shared.attempt).take();
         let quitting = shared.quit.load(Ordering::SeqCst);
-        let mut link = match result {
+        let no_link = match result {
+            Ok(link) => Ok(link),
+            Err(no_link) => Err((next_after(&no_link, quitting), no_link)),
+        };
+        let mut link = match no_link {
             Ok(link) => link,
-            Err(
-                NoLink::Attempt(HandshakeError::Cancelled)
-                | NoLink::Redial(
-                    RedialError::Cancelled | RedialError::Failed(HandshakeError::Cancelled),
-                ),
-            ) if quitting => break,
-            Err(NoLink::Attempt(error)) if error.is_retryable() => {
+            Err((Next::Quit, _)) => break,
+            Err((Next::Redial, _)) => {
                 // The failed attempt's entry is the newest one; the redialer names it.
                 lost = Some(
                     connections
@@ -323,7 +322,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 );
                 continue;
             }
-            Err(NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error))) => {
+            Err((
+                Next::Rejected,
+                NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error)),
+            )) => {
                 let reason = match &error {
                     HandshakeError::Rejected { reason, .. } => reason.as_str().to_string(),
                     HandshakeError::SelfAttach => "self_attach".into(),
@@ -341,11 +343,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 drop(dial);
                 return Ok(ExitCode::from(EXIT_REJECTED));
             }
-            Err(NoLink::Redial(error)) => {
+            Err((_, NoLink::Redial(error))) => {
                 emit(&format!("dialer gave-up error={}", error_chain(&error)));
                 drop(error);
                 drop(dial);
                 return Ok(ExitCode::from(EXIT_GAVE_UP));
+            }
+            Err((_, NoLink::Attempt(error))) => {
+                return Err(format!("an attempt ended unclassified: {error}").into());
             }
         };
         let entry = entry_of(&connections, link.link_id());
@@ -400,6 +405,43 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     drop(dial);
     emit("dialer bye");
     Ok(ExitCode::SUCCESS)
+}
+
+/// What the loop does when an attempt or a redial gave no link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Next {
+    /// `quit` cancelled it, in the SSH connection or in the handshake: end with code 0.
+    Quit,
+    /// The first attempt failed in a way connecting again can change: redial its entry.
+    Redial,
+    /// A refusal connecting again cannot change: end with code 3.
+    Rejected,
+    /// The redialer gave up, or the loss is not one to redial: end with code 4.
+    GaveUp,
+}
+
+/// Whether `error` is a cancelled attempt, in the SSH connection or in the handshake.
+fn cancelled(error: &HandshakeError) -> bool {
+    matches!(
+        error,
+        HandshakeError::Cancelled | HandshakeError::Connect(ConnectError::Cancelled)
+    )
+}
+
+/// The [`Next`] step after `no_link`. `quitting` is whether `quit` came (it cancels the
+/// attempt), so a cancelled attempt is the end that `quit` asked for.
+fn next_after(no_link: &NoLink, quitting: bool) -> Next {
+    match no_link {
+        NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error))
+            if quitting && cancelled(error) =>
+        {
+            Next::Quit
+        }
+        NoLink::Redial(RedialError::Cancelled) if quitting => Next::Quit,
+        NoLink::Attempt(error) if error.is_retryable() => Next::Redial,
+        NoLink::Attempt(_) | NoLink::Redial(RedialError::Failed(_)) => Next::Rejected,
+        NoLink::Redial(_) => Next::GaveUp,
+    }
 }
 
 /// The entry of the connection table that carries the attach link `link`.
@@ -664,5 +706,63 @@ fn detach(slot: &LinkSlot, hold: Duration) {
         }
         writer.finish();
         std::thread::sleep(hold);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tasty_net_transport::RejectReason;
+
+    fn rejected(reason: RejectReason) -> HandshakeError {
+        HandshakeError::Rejected {
+            reason,
+            error: String::new(),
+            ext: None,
+        }
+    }
+
+    /// A cancel in the SSH connection ends like a cancel in the handshake, on the first
+    /// attempt and in a redial; refusals and the redialer's end keep their codes.
+    #[test]
+    fn a_cancel_after_quit_is_a_quit_wherever_it_came() {
+        let connect = || HandshakeError::Connect(ConnectError::Cancelled);
+        let cases = [
+            (NoLink::Attempt(HandshakeError::Cancelled), Next::Quit),
+            (NoLink::Attempt(connect()), Next::Quit),
+            (NoLink::Redial(RedialError::Cancelled), Next::Quit),
+            (NoLink::Redial(RedialError::Failed(connect())), Next::Quit),
+            (
+                NoLink::Redial(RedialError::Failed(HandshakeError::Cancelled)),
+                Next::Quit,
+            ),
+            (
+                NoLink::Attempt(rejected(RejectReason::TokenInvalid)),
+                Next::Rejected,
+            ),
+            (
+                NoLink::Redial(RedialError::Failed(rejected(RejectReason::RoleRefused))),
+                Next::Rejected,
+            ),
+            (NoLink::Attempt(HandshakeError::SelfAttach), Next::Rejected),
+            (NoLink::Attempt(HandshakeError::TimedOut), Next::Redial),
+            (NoLink::Redial(RedialError::Exhausted(None)), Next::GaveUp),
+            (NoLink::Redial(RedialError::NotRedialed), Next::GaveUp),
+        ];
+        for (no_link, want) in &cases {
+            assert_eq!(next_after(no_link, true), *want, "{}", describe(no_link));
+        }
+        // Without quit nothing cancels; a cancel then is not taken for one.
+        assert_eq!(
+            next_after(&NoLink::Attempt(connect()), false),
+            Next::Rejected
+        );
+    }
+
+    fn describe(no_link: &NoLink) -> String {
+        match no_link {
+            NoLink::Attempt(e) => format!("attempt: {e:?}"),
+            NoLink::Redial(e) => format!("redial: {e:?}"),
+        }
     }
 }
