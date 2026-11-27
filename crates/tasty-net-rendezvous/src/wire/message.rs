@@ -99,15 +99,18 @@ fn parse_object<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, MessageErro
 
 impl DeviceMessage {
     /// Parse a frame body. Besides the JSON shape, a `punch_result` must give a reason exactly
-    /// when it is not `ok`.
+    /// when it is not `ok`, and a `punch_answer` exactly when it does not `accept`.
     pub fn parse(body: &[u8]) -> Result<Self, MessageError> {
         let msg: DeviceMessage = parse_object(body)?;
-        if let DeviceMessage::PunchResult(r) = &msg
-            && r.ok == r.reason.is_some()
-        {
-            return Err(shape("punch_result has a reason exactly when ok is false"));
+        match &msg {
+            DeviceMessage::PunchResult(r) if r.ok == r.reason.is_some() => {
+                Err(shape("punch_result has a reason exactly when ok is false"))
+            }
+            DeviceMessage::PunchAnswer(a) if a.accept == a.reason.is_some() => Err(shape(
+                "punch_answer has a reason exactly when accept is false",
+            )),
+            _ => Ok(msg),
         }
-        Ok(msg)
     }
 
     /// The frame body (JSON) of this message.
@@ -590,7 +593,7 @@ mod tests {
                 ..
             })
         ));
-        // A reason exactly when the punch failed.
+        // A reason exactly when the punch failed or the answer refused.
         for (body, ok) in [
             (
                 &br#"{"type":"punch_result","punch_id":1,"ok":true,"reason":"limits_invalid"}"#[..],
@@ -600,6 +603,22 @@ mod tests {
             (br#"{"type":"punch_result","punch_id":1,"ok":true}"#, true),
             (
                 br#"{"type":"punch_result","punch_id":1,"ok":false,"reason":"timeout"}"#,
+                true,
+            ),
+            (
+                br#"{"type":"punch_answer","punch_id":1,"accept":true,"reason":"not_paired"}"#,
+                false,
+            ),
+            (
+                br#"{"type":"punch_answer","punch_id":1,"accept":false}"#,
+                false,
+            ),
+            (
+                br#"{"type":"punch_answer","punch_id":1,"accept":true}"#,
+                true,
+            ),
+            (
+                br#"{"type":"punch_answer","punch_id":1,"accept":false,"reason":"not_paired"}"#,
                 true,
             ),
         ] {
