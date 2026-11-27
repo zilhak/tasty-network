@@ -188,8 +188,14 @@ pub(crate) async fn run(core: Arc<Core>) {
     }
 }
 
-fn clear_registration(core: &Core) {
-    *lock(&core.link) = None;
+pub(crate) fn clear_registration(core: &Core) {
+    {
+        // The judgement belongs to the registration that reported it: it leaves the status with
+        // the link, so the next registration shows none until its own report is queued.
+        let mut r = lock(&core.reg);
+        r.nat = None;
+        *lock(&core.link) = None;
+    }
     // Attempts still waiting for the server lose it.
     lock(&core.requests).clear();
     for tx in lock(&core.punches).values() {

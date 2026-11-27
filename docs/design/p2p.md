@@ -78,7 +78,7 @@
   | 응답이 하나뿐이거나 없다 | `unknown` |
 
 - 필터링 성질(RFC 4787 §5)은 판별하지 않는다. RFC 5780의 CHANGE-REQUEST가 필요하고, 판별 결과가 시도 여부를 바꾸지 않기 때문이다. 시도해 보고 결과로 판정한다.
-- 판별은 서버에 등록한 직후와 `reflexive_changed`를 받을 때 다시 한다. 결과와 대상별 응답(`stun_results`)을 `nat_report`로 서버에 알린다. 서버는 다른 반사 주소를 `reported_reflexive` 후보로, `mapping`을 상대에게 줄 `peer_nat`으로 저장한다.
+- 판별은 서버에 등록한 직후와 `reflexive_changed`를 받을 때 다시 한다. 결과와 대상별 응답(`stun_results`)을 `nat_report`로 서버에 알린다. 서버는 다른 반사 주소를 `reported_reflexive` 후보로, `mapping`을 상대에게 줄 `peer_nat`으로 저장한다. 판별 결과는 그 등록에 속한다. 등록이 끝나면 기기는 `status()`의 `nat`·`nat_answers`에서 결과를 지우고, 새 등록은 자기 판별 전까지 결과를 보이지 않는다(서버도 새 등록의 NAT를 `unknown`으로 시작한다).
 - 시도 규칙(서버가 펀칭 요청을 받을 때 정한다):
   - 두 기기가 모두 `dependent`면 반사 주소 후보로는 시도하지 않는다. 주소 의존·주소와 포트 의존 매핑은 같은 내부 주소·포트에서 같은 목적지로 보내는 패킷에만 매핑을 다시 쓴다([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1). 그래서 서버에서 관측한 매핑이 다른 목적지인 상대에게 보낼 때 그대로 쓰인다는 보장이 없고, 양쪽이 모두 그러면 교환한 반사 주소로는 펀칭이 서지 않는다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3. 포트 예측(§3.5)은 하지 않는다). 대신 호스트 후보(사설 IPv4, 전역 IPv6)로만 시도한다(`mode = host_only`). 같은 망 안의 두 기기나 NAT 없는 IPv6 경로는 이것으로 닿는다. 어느 한쪽에도 호스트 후보가 없으면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. `host_only` 시도가 실패해도 `NatUnsupported`다.
   - 그 밖(한쪽만 `dependent`, `independent_port_only`, `unknown`)은 모든 후보로 시도한다(`mode = all`). `dependent` 쪽이 상대의 반사 주소로 보낸 프로브가 상대 NAT의 필터를 통과하면, 상대는 처음 보는 주소(peer reflexive, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.3.1.3)에서 온 프로브로 경로를 얻는다.

@@ -160,9 +160,9 @@ pub struct P2pStatus {
     pub local_addr: Option<SocketAddr>,
     /// The reflexive address the server saw.
     pub reflexive: Option<SocketAddr>,
-    /// The NAT judgement.
+    /// The NAT judgement of the current registration; `Unknown` until its report is queued.
     pub nat: NatMapping,
-    /// The answers of the last judgement.
+    /// The answers of that judgement; empty until then.
     pub nat_answers: Vec<StunAnswer>,
     /// The server values (`welcome.limits`).
     pub limits: Option<Limits>,

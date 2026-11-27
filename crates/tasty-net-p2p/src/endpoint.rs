@@ -1763,6 +1763,54 @@ mod tests {
         ep.close();
     }
 
+    /// The judgement of a registration leaves the status when that registration ends: the
+    /// next registration shows none until its own report is in its link's queue, so a
+    /// punch_request sent on seeing a judgement never goes ahead of the report the server
+    /// judges the mode with (the server starts every registration at `unknown`).
+    #[test]
+    fn a_new_registration_shows_no_judgement_before_its_report_is_queued() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([41; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            40,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
+        assert!(!ep.status().nat_answers.is_empty(), "the first one judged");
+        crate::server::clear_registration(&core);
+        let (tx, mut again) = mpsc::unbounded_channel();
+        let next = core.open_link(tx);
+        let s = ep.status();
+        assert!(
+            s.nat_answers.is_empty() && s.nat == NatMapping::Unknown,
+            "the earlier judgement still shows: {s:?}"
+        );
+        let _judging = core
+            .handle
+            .spawn(crate::server::rejudge(core.clone(), next));
+        let until = Instant::now() + Duration::from_secs(10);
+        while ep.status().nat_answers.is_empty() {
+            assert!(Instant::now() < until, "judged again");
+            std::hint::spin_loop();
+        }
+        assert!(
+            matches!(again.try_recv(), Ok(DeviceMessage::NatReport(_))),
+            "the report of the new registration is not queued yet"
+        );
+        ep.close();
+    }
+
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
     /// judgement that wait started ends with it: no STUN request goes out after that and no
     /// transaction ID waits. Only the shutdown signal is sent, so the runtime still runs and a
