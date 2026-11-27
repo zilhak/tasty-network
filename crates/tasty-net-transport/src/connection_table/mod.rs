@@ -94,7 +94,14 @@ impl ConnectionTableConfig {
 
 /// The table of this device's connections. Clones share it.
 ///
-/// Give it to [`SshTransport::with_connections`](crate::SshTransport::with_connections) and
+#[cfg_attr(
+    feature = "ssh",
+    doc = " Give it to [`SshTransport::with_connections`](crate::SshTransport::with_connections) and"
+)]
+#[cfg_attr(
+    not(feature = "ssh"),
+    doc = " Give it to the SSH transport's `with_connections` (with the `system-ssh` feature) and"
+)]
 /// [`AcceptConfig::with_connections`](crate::AcceptConfig::with_connections); they make one
 /// entry per physical connection and change it as the connection goes. There is no API to
 /// make or change an entry.

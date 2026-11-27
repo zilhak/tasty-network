@@ -9,7 +9,8 @@
 #   scripts/check.sh check          cargo check --workspace --all-targets
 #   scripts/check.sh transport-no-ssh
 #                                   그래프 판정 자체 시험 뒤 tasty-net-transport를 SSH 없이(--no-default-features)
-#                                   clippy·시험하고, 그 의존 그래프에 tasty-net-ssh가 없는지 본다
+#                                   clippy·시험·문서(깨진 문서 링크는 실패)하고, 그 의존 그래프에
+#                                   tasty-net-ssh가 없는지 본다
 #   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh p2p-isolation  판정 자체 시험 뒤 P2P 크레이트의 workspace 안 의존 범위 (scripts/check-p2p-isolation.sh)
@@ -21,7 +22,7 @@
 #                                   (scripts/check-p2p-example-pair.sh). all에 없고 CI의 clippy·test 잡이 부른다
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
-# 의존을 해석하는 cargo 명령(clippy·test·check·tree·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
+# 의존을 해석하는 cargo 명령(clippy·test·check·tree·doc·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
 # cargo fmt는 의존을 해석하지 않아 --locked가 없다.
 # Linux·macOS의 bash와 Windows의 Git Bash에서 돈다.
 # fmt·lint·test·check·all은 이 clone에서 .githooks가 돌지 않으면 stderr에 경고한다.
@@ -127,6 +128,9 @@ cmd_transport_no_ssh() {
     echo "transport --no-default-features 그래프에 tasty-net-ssh 없음(대조: 기본 feature에는 있음)" >&2
     run cargo clippy --locked -p tasty-net-transport --no-default-features --all-targets -- -D warnings
     run cargo test --locked -p tasty-net-transport --no-default-features
+    # SSH 없는 문서도 남는 항목의 링크가 모두 풀린다(조건부 항목을 무조건 링크하지 않는다).
+    RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
+        run cargo doc --locked -p tasty-net-transport --no-default-features --no-deps
 }
 cmd_no_tasty_deps() {
     run bash scripts/check-no-tasty-deps.sh --self-test
@@ -206,7 +210,7 @@ case "$sub" in
     p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
     -h | --help | help)
-        sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

@@ -306,7 +306,14 @@ pub struct Segment {
     pub local: Option<String>,
     /// The remote address, when the segment has one. On `local_forward` it is the local
     /// addresses of the channels open on the forwarding end, joined with
-    /// [`FORWARDED_SEPARATOR`](crate::FORWARDED_SEPARATOR), and none without channels.
+    #[cfg_attr(
+        feature = "ssh",
+        doc = " [`FORWARDED_SEPARATOR`](crate::FORWARDED_SEPARATOR), and none without channels."
+    )]
+    #[cfg_attr(
+        not(feature = "ssh"),
+        doc = " `FORWARDED_SEPARATOR` (an item of the SSH transport), and none without channels."
+    )]
     pub remote: Option<String>,
 }
 

@@ -38,7 +38,7 @@
 - 이 단계의 transport 조합은 기본(`system-ssh`)과 `--no-default-features`(SSH 없음) 둘이다.
 - 이 단계에는 내장 백엔드가 없다. 그래서 `ssh.backend` 설정값과 선택 규칙도 아직 없고, 지금처럼 시스템 ssh만 쓴다.
 - 모바일 cross check는 transport `--no-default-features`만 본다. ssh 크레이트는 아직 목록에 없다([모바일 cross check](mobile.md#모바일-cross-check)).
-- SSH 없는 조합은 검사 단계 `scripts/check.sh transport-no-ssh`가 본다: `--no-default-features`의 clippy·시험과, 그 `cargo tree`에 `tasty-net-ssh`가 없는지(기본 feature의 그래프에는 있는지 대조). CI는 세 OS의 clippy·test 잡에서 부른다([CI](../dev-guide/ci.md#ssh-없는-transport)).
+- SSH 없는 조합은 검사 단계 `scripts/check.sh transport-no-ssh`가 본다: `--no-default-features`의 clippy·시험·문서(깨진 문서 링크는 실패)와, 그 `cargo tree`에 `tasty-net-ssh`가 없는지(기본 feature의 그래프에는 있는지 대조). CI는 세 OS의 clippy·test 잡에서 부른다([CI](../dev-guide/ci.md#ssh-없는-transport)).
 
 ### 2단계: 내장 백엔드 (이식 크레이트 뒤)
 
