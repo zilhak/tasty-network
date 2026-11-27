@@ -264,7 +264,8 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 
 위 절의 `RequestClient`와 그 오류는 이 레포가 갖는다(`crates/tasty-net-transport/src/request.rs`). 메서드와 응답의 뜻은 소비자 몫이다. 이 레포는 요청 ID로 응답을 잇는 일, 호출마다의 시간 제한, 채널 닫기, 오류 분류를 맡는다.
 
-- 여는 길은 `dial_request(conn, config, cancel) -> Result<RequestClient, HandshakeError>`(`handshake.rs:913`)다. 호출은 `RequestClient::call(method, params, timeout)`(`request.rs:157`)이고, 닫기는 `RequestClient`를 놓는 것(보내는 쪽을 닫고 남은 응답을 기다린 뒤 읽기 스레드를 거둔다)이나 `closer()`다.
+- 여는 길은 `dial_request(conn, config, cancel) -> Result<RequestClient, HandshakeError>`(`handshake.rs:913`)다. 호출은 `RequestClient::call(method, params, timeout)`(`request.rs:157`)이다. `timeout`은 요청을 쓴 뒤 응답을 기다리는 시간에만 걸린다. 쓰기 잠금을 잡고 요청을 쓰는 시간은 들지 않는다(`request.rs:166`–`:183`).
+- 닫기: `RequestClient`를 놓으면 보내는 쪽을 닫고, 읽기 쪽이 끝나기를 drain 상한까지 기다린다. 상한을 넘으면 링크를 강제로 닫고, 읽기 스레드를 거둔다(`request.rs:240`–`:248`, `channel.rs:756`–`:768`). `closer()`는 링크 닫기 핸들(`LinkCloser`)의 복제를 돌려줄 뿐이고, 바로 닫으려면 그 핸들의 `force_close`를 부른다(`request.rs:192`–`:194`, `end.rs:298`–`:305`).
 - 상대 `caps`: `dial_request`는 상대가 `net.request`를 광고했는지를 열기 조건으로 보지 않는다. 상대 `caps`는 handshake 뒤 `RequestClient::peer().caps()`(`request.rs:187`, `link.rs:112`)로 본다. 기능을 쓰기 전에 상대 `caps`를 보는 일은 소비자 몫이다([handshake v2](handshake.md) "capability").
 - 오류 `RequestError`(`request.rs:33`–`:47`): `Remote`(상대의 `error` 값), `TimedOut`(채널은 계속 쓸 수 있다), `Closed`, `Io`, `Protocol`, `ResponseTooLarge`.
 - 응답 크기 상한: 응답 하나는 프레임 하나(`MAX_FRAME_LEN`, 1 MiB)에 든다. 받는 쪽 `RequestServer`는 직렬화한 응답이 그보다 길면 그 응답 대신 `{id, error: {code: "net.response_too_large"}}`로 답하고(`request.rs:305`–`:309`), dialer는 그 코드를 `ResponseTooLarge`로 바꾼다(`:209`–`:214`). 이 상한은 프레임 와이어 형식에서 나온 값이라 설정값이 아니다([크레이트 구성](crates.md#설정값-규칙)이 프레임 상한을 빼는 것과 같은 이유다).
