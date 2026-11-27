@@ -408,6 +408,13 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | ALPN | `tasty-net/2`, `tasty-rendezvous/1` | 아래 "인증", [버전·호환](versioning.md) |
 | QUIC 종료 코드 | 기기 사이 0·1·4, 조정 연결 0~6 | [handshake v2](handshake.md#quic-종료-코드), [rendezvous](rendezvous.md#메시지-표) |
 | ed25519 SPKI 앞머리 | 12 B | RFC 8410, 아래 "인증" |
+| ed25519 PKCS#8 v1 앞머리, 키 길이 | 16 B, 32 B | RFC 8410 §7, RFC 8032 |
+| STUN 메시지 종류 | Binding 요청 0x0001, 성공 응답 0x0101, 종류 위 두 비트 0 | RFC 8489 §5·§6 |
+| STUN 속성 형식 | `XOR-MAPPED-ADDRESS` 0x0020, 주소족 IPv4 0x01·IPv6 0x02, 속성 머리 4 B·4 B 정렬, 0x8000 미만은 이해 필수, 트랜잭션 ID 12 B | RFC 8489 §5·§14·§14.2 |
+| 조정 프로토콜 판 `proto` | 1 | [rendezvous](rendezvous.md#메시지-표) `hello` |
+| QUIC 판 | v1 (0x00000001) | RFC 9000 §15, 아래 고정값 `quic.supported_versions` |
+| 펀칭 토큰 글자 | 소문자 hex 32자(16바이트, 바이트마다 두 자) | [rendezvous](rendezvous.md#메시지-표) `punch_go` |
+| 호스트 후보 IPv6 범위 | `2000::/3` | [rendezvous](rendezvous.md#후보-주소-규칙) |
 
 ## 연결 정보
 
