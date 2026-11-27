@@ -84,7 +84,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 - 길이 상한은 서버 설정 `max_message_bytes`(기본 16 KiB)다. 설정값은 1 KiB 이상 1 MiB 이하만 받는다(u32와 모든 플랫폼의 `usize`에 들어간다). 읽는 쪽은 길이 4바이트를 다 받은 뒤 상한과 비교하고, 넘으면 본문을 읽거나 버퍼를 잡기 전에 `malformed`로 닫는다.
 - 기기 쪽 수신 상한과 기한은 기기 설정이다. `welcome`을 받기 전에도 같은 값을 쓴다(첫 프레임을 읽기 전에는 서버 값을 알 수 없기 때문이다). 수신 상한은 `rendezvous.max_message_bytes`(기본 64 KiB, 1 KiB–1 MiB), 프레임 기한은 `rendezvous.frame_timeout`(기본 5 s, 서버 `frame_timeout`에 대응)이다. 넘으면 기기는 연결을 닫고 `io`(분류 `malformed`)로 backoff에 들어간다.
 - 협상 뒤: `welcome`을 받으면 기기는 서버에 보내는 프레임을 `welcome.limits.max_message_bytes` 이하로 만든다. 수신 상한은 기기 값 그대로다. 서버 `max_message_bytes`가 기기 `rendezvous.max_message_bytes`보다 크면 `server_limits_mismatch`(서버가 기기가 받지 못할 크기를 보낼 수 있다)다.
-- 부분 읽기: 한 번의 읽기에 프레임 일부만 오거나 여러 프레임이 붙어 와도 된다. 읽는 쪽은 프레임 경계로 다시 자른다. 첫 바이트를 받은 뒤 `frame_timeout`(서버 설정, 기본 5 s) 안에 그 프레임이 끝나지 않으면 `malformed`로 닫는다. 프레임 중간에 스트림이 끝나면 `malformed`로 본다.
+- 부분 읽기: 한 번의 읽기에 프레임 일부만 오거나 여러 프레임이 붙어 와도 된다. 읽는 쪽은 프레임 경계로 다시 자른다. 첫 바이트를 받은 뒤 `frame_timeout`(서버 설정, 기본 5 s) 안에 그 프레임이 끝나지 않으면 `malformed`로 닫는다. 등록 전 첫 프레임(`hello`)도 같다: `hello_timeout`은 접속부터 첫 바이트까지를 재고, 그때까지 한 바이트도 오지 않으면 `hello_timeout`, 시작한 프레임이 `frame_timeout` 안에 끝나지 않으면 `hello_timeout`이 지났더라도 `malformed`다. 프레임 중간에 스트림이 끝나면 `malformed`로 본다.
 - 최상위 키 `type`으로 메시지를 가른다. 모르는 `type`은 `malformed`, 모르는 필드는 버린다.
 - 본문의 최상위는 JSON 객체다. 배열 등 다른 값은 `malformed`다. 아래 표의 필드는 모두 필수이고 빠지면 `malformed`다(목록은 비어 있어도 된다). 예외는 `nat_report.host_candidates`(없으면 아래와 같이 둔다), `punch_go.request_id`(A에게만), 거절·실패일 때만 오는 `reason`이다. `punch_result`는 `ok`가 거짓일 때만 `reason`을 가진다. `ok: true`에 `reason`이 있거나 `ok: false`에 없으면 `malformed`다.
 - 주소는 `"203.0.113.5:3478"`·`"[2001:db8::1]:3478"` 형식 문자열이다. 시간 값은 밀리초 정수(`*_ms`)다.

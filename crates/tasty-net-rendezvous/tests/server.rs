@@ -982,6 +982,19 @@ async fn frame_timeout_closes() {
     // No hello: hello_timeout.
     let d = Device::open(&server, &key(3)).await;
     assert_eq!(d.closed_with().await, code(CloseCode::HelloTimeout));
+    // A hello that started and did not end is malformed, even past hello_timeout.
+    let mut s = local_settings();
+    s.set("hello_timeout", ms(300)).unwrap();
+    s.set("frame_timeout", ms(800)).unwrap();
+    let slow = start(s).await;
+    let mut d = Device::open(&slow, &key(5)).await;
+    let started = tokio::time::Instant::now();
+    d.send.write_all(&[0, 0]).await.unwrap();
+    assert_eq!(d.closed_with().await, code(CloseCode::Malformed));
+    assert!(started.elapsed() >= Duration::from_millis(800));
+    // Nothing at all on that server: hello_timeout.
+    let d = Device::open(&slow, &key(6)).await;
+    assert_eq!(d.closed_with().await, code(CloseCode::HelloTimeout));
     // Another protocol number.
     let mut d = Device::open(&server, &key(4)).await;
     d.send(&DeviceMessage::Hello(Hello {

@@ -9,6 +9,7 @@ use std::fmt;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Instant;
 
 /// The length prefix size.
 pub const FRAME_HEADER_LEN: usize = 4;
@@ -29,6 +30,8 @@ pub enum FrameError {
     Truncated,
     /// The frame did not end within the frame deadline after its first byte.
     Timeout,
+    /// No byte of a frame arrived by the deadline for the first byte.
+    Idle,
     /// The stream failed.
     Io(std::io::Error),
 }
@@ -42,6 +45,7 @@ impl fmt::Display for FrameError {
             }
             FrameError::Truncated => write!(f, "stream ended inside a frame"),
             FrameError::Timeout => write!(f, "frame did not end within the frame deadline"),
+            FrameError::Idle => write!(f, "no frame started by the deadline"),
             FrameError::Io(e) => write!(f, "frame stream failed: {e}"),
         }
     }
@@ -105,8 +109,28 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     limit: u32,
     frame_timeout: Duration,
 ) -> Result<Option<Vec<u8>>, FrameError> {
+    read_frame_by(reader, limit, frame_timeout, None).await
+}
+
+/// [`read_frame`] where the first byte must arrive by `first_byte_by` ([`FrameError::Idle`]
+/// otherwise). Once it has, only `frame_timeout` bounds the frame: a frame that started and
+/// did not end is [`FrameError::Timeout`] even when `first_byte_by` passes meanwhile.
+pub async fn read_frame_by<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: u32,
+    frame_timeout: Duration,
+    first_byte_by: Option<Instant>,
+) -> Result<Option<Vec<u8>>, FrameError> {
     let mut header = [0; FRAME_HEADER_LEN];
-    let first = reader.read(&mut header).await.map_err(FrameError::Io)?;
+    let read = reader.read(&mut header);
+    let first = match first_byte_by {
+        Some(at) => match tokio::time::timeout_at(at, read).await {
+            Ok(got) => got,
+            Err(_) => return Err(FrameError::Idle),
+        },
+        None => read.await,
+    }
+    .map_err(FrameError::Io)?;
     if first == 0 {
         return Ok(None);
     }
@@ -283,6 +307,31 @@ mod tests {
             read_frame(&mut r, LIMIT, DEADLINE).await,
             Err(FrameError::Timeout)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_byte_deadline_is_apart_from_the_frame_deadline() {
+        let start = Instant::now();
+        let by = Some(start + DEADLINE / 5);
+        // No byte by the deadline: idle.
+        let mut r = reader(Vec::new(), false);
+        assert!(matches!(
+            read_frame_by(&mut r, LIMIT, DEADLINE, by).await,
+            Err(FrameError::Idle)
+        ));
+        assert_eq!(start.elapsed(), DEADLINE / 5);
+        // A frame that started is bounded by the frame deadline only, past the first-byte one.
+        let start = Instant::now();
+        let mut r = reader(vec![vec![0, 0]], false);
+        assert!(matches!(
+            read_frame_by(&mut r, LIMIT, DEADLINE, Some(start + DEADLINE / 5)).await,
+            Err(FrameError::Timeout)
+        ));
+        assert_eq!(start.elapsed(), DEADLINE);
+        // A whole frame within the deadlines.
+        let mut r = reader(vec![encode_frame(b"{}", LIMIT).unwrap()], true);
+        let got = read_frame_by(&mut r, LIMIT, DEADLINE, Some(Instant::now() + DEADLINE)).await;
+        assert_eq!(got.unwrap(), Some(b"{}".to_vec()));
     }
 
     #[tokio::test]

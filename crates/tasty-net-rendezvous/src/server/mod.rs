@@ -32,7 +32,7 @@ use crate::settings::{
 };
 use crate::tls::{self, TlsError, TlsOptions};
 use crate::wire::demux::{PacketClass, classify};
-use crate::wire::frame::{FrameError, read_frame, write_frame};
+use crate::wire::frame::{FrameError, read_frame, read_frame_by, write_frame};
 use crate::wire::message::{
     CancelReason, DeviceMessage, Limits, ReflexiveChanged, ServerMessage, Welcome,
 };
@@ -713,19 +713,21 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
         close(&conn, CloseCode::AccessDenied);
         return;
     }
-    let hello = until(deadline, async {
-        let (send, mut recv) = conn
-            .accept_bi()
+    // hello_timeout bounds the time to the first byte of the hello; a hello that started is
+    // bounded by frame_timeout, and one that does not end in time is malformed.
+    let hello = async {
+        let (send, mut recv) = until(deadline, conn.accept_bi())
             .await
+            .ok_or(HelloFailure::Timeout)?
             .map_err(|_| HelloFailure::Connection)?;
-        match read_frame(&mut recv, p.max_message_bytes, p.frame_timeout).await {
+        match read_frame_by(&mut recv, p.max_message_bytes, p.frame_timeout, deadline).await {
             Ok(Some(body)) => Ok((send, recv, body)),
             Ok(None) => Err(HelloFailure::Ended),
+            Err(FrameError::Idle) => Err(HelloFailure::Timeout),
             Err(e) => Err(HelloFailure::Frame(e.to_string())),
         }
-    })
-    .await
-    .unwrap_or(Err(HelloFailure::Timeout));
+    }
+    .await;
     let (send, recv, body) = match hello {
         Ok(got) => got,
         Err(HelloFailure::Timeout) => {
