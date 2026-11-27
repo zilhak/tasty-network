@@ -474,12 +474,22 @@ pub(crate) enum TildeError {
 /// to the configured ssh folder when [`Account::ssh_dir`] is given (docs/design/
 /// ssh-backends.md "내장 백엔드가 읽는 파일").
 pub(crate) fn tilde_expand(filename: &str, account: &Account) -> Result<String, TildeError> {
+    let (head, rest) = tilde_split(filename, account)?;
+    Ok(format!("{head}{rest}"))
+}
+
+/// [`tilde_expand`] in two parts: the folder that replaces the `~` part and the rest of
+/// `filename` after it. `glob` needs them apart (`GLOB_TILDE` adds the home after quoting).
+pub(crate) fn tilde_split<'a>(
+    filename: &'a str,
+    account: &Account,
+) -> Result<(String, &'a str), TildeError> {
     let Some(copy) = filename.strip_prefix('~') else {
-        return Ok(filename.to_string());
+        return Ok((String::new(), filename));
     };
     if let (Some(dir), Some(rest)) = (&account.ssh_dir, filename.strip_prefix("~/.ssh/")) {
         let slash = if dir.ends_with('/') { "" } else { "/" };
-        return Ok(format!("{dir}{slash}{rest}"));
+        return Ok((format!("{dir}{slash}"), rest));
     }
     let (user, path) = if copy.is_empty() {
         (None, None)
@@ -506,7 +516,7 @@ pub(crate) fn tilde_expand(filename: &str, account: &Account) -> Result<String, 
     } else {
         ""
     };
-    Ok(format!("{home}{slash}{}", path.unwrap_or("")))
+    Ok((format!("{home}{slash}"), path.unwrap_or("")))
 }
 
 /// Why `%` or `${}` expansion failed.

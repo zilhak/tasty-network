@@ -50,8 +50,9 @@
 //! `!` is the only negation of a set; `*` does not match a leading `.`; `.` and `..` are
 //! names like others; a part without pattern characters is kept as written (so a trailing
 //! `/` needs a folder); the results are sorted by bytes (`strcmp`). The flags of the call
-//! leave out `GLOB_BRACE`, `GLOB_NOCHECK`, `GLOB_MARK` and the limits. `GLOB_TILDE` is done by
-//! the caller with the configured home (`globtilde`, `:364`–`:410`).
+//! leave out `GLOB_BRACE`, `GLOB_NOCHECK`, `GLOB_MARK` and the limits. For `GLOB_TILDE` the
+//! caller gives the configured home, and it is put in front after quoting, where
+//! `globtilde` (`:364`–`:410`) puts it.
 
 use std::path::PathBuf;
 
@@ -136,14 +137,23 @@ const CLASSES: &[(&str, ClassTest)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GlobFailed;
 
-/// The paths that match `pattern`, sorted. An empty list is `GLOB_NOMATCH`.
+/// The paths that match `pattern`, sorted. An empty list is `GLOB_NOMATCH`. Only the
+/// Unix tests use it.
+#[cfg(all(test, unix))]
 pub(crate) fn glob(pattern: &str) -> Result<Vec<PathBuf>, GlobFailed> {
+    glob_tilde("", pattern)
+}
+
+/// [`glob`] of `pattern` after `home`, the folder `GLOB_TILDE` put in place of a leading
+/// `~` part. As `globtilde` (`glob.c:364`-`:410`) adds it after `glob` has protected the
+/// quoted characters (`:206`-`:219`), a `\` in `home` is a plain character.
+pub(crate) fn glob_tilde(home: &str, pattern: &str) -> Result<Vec<PathBuf>, GlobFailed> {
     let bytes = pattern.as_bytes();
-    if bytes.len() >= PATH_MAX {
+    if home.len() + bytes.len() >= PATH_MAX {
         return Ok(Vec::new());
     }
+    let mut patbuf: Vec<Char> = home.bytes().map(Char::from).collect();
     // Protect the quoted characters.
-    let mut patbuf: Vec<Char> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&b) = bytes.get(i) {
         i += 1;

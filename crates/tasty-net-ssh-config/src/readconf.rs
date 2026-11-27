@@ -83,7 +83,7 @@ use crate::matching::{ListMatch, match_hostname, match_pattern, match_pattern_li
 use crate::misc::{
     self, Account, ExpandError, Token, Uri, WHITESPACE, a2port, a2tun, argv_split, atoi_err,
     convtime, expand, hpdelim, parse_ipqos, parse_pattern_interval, parse_user_host_port,
-    setenv_in_list, strdelim, tilde_expand, valid_domain, valid_env_name,
+    setenv_in_list, strdelim, valid_domain, valid_env_name,
 };
 use crate::options::{
     AddKeys, AddressFamily, Canonicalize, Compression, ControlMaster, Digest, EscapeChar, Flag,
@@ -2094,9 +2094,9 @@ impl<'a> Reader<'a> {
             // GLOB_TILDE (`glob.c:364`-`:410`). Without the home the files are missing
             // (GLOB_NOMATCH, the line goes on), never a `~` folder of the working directory.
             // Another user's home is not looked up: OpenSSH would read files from it.
-            let pattern = if pattern.starts_with('~') {
-                match tilde_expand(&pattern, &self.env.account) {
-                    Ok(p) => p,
+            let (home, pattern) = if pattern.starts_with('~') {
+                match misc::tilde_split(&pattern, &self.env.account) {
+                    Ok((home, rest)) => (home, rest.to_string()),
                     Err(misc::TildeError::NoHome) => continue,
                     Err(misc::TildeError::NoSuchUser(u)) => {
                         return Err(LineErr::Fatal(fatal(
@@ -2108,10 +2108,10 @@ impl<'a> Reader<'a> {
                     }
                 }
             } else {
-                pattern
+                (String::new(), pattern)
             };
-            let Ok(paths) = crate::glob::glob(&pattern) else {
-                return bad(format!("glob failed for {pattern}."));
+            let Ok(paths) = crate::glob::glob_tilde(&home, &pattern) else {
+                return bad(format!("glob failed for {home}{pattern}."));
             };
             let oactive = *active;
             for path in paths {

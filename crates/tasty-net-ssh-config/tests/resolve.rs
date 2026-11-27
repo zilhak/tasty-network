@@ -702,6 +702,32 @@ fn relative_include_goes_under_the_ssh_folder() {
     assert_eq!(r.options.port, Some(2222));
 }
 
+// Unix only: a file name with `\` and a home given with `/`.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_the_home_is_a_plain_character() {
+    // `globtilde` adds the home after the quoted characters are protected, so its `\` is
+    // not an escape. Both the home and the ssh folder are put in that way.
+    for ssh_dir in [false, true] {
+        let home = folder().join("back\\slash");
+        std::fs::create_dir_all(home.join(".ssh")).expect("the ssh folder");
+        write(&home, ".ssh/sub.conf", "Port 2222\n");
+        let top = write(&home, "config", "Include sub.conf\n");
+        let mut ctx = context(Vec::new());
+        ctx.home = Some(home.display().to_string());
+        if ssh_dir {
+            ctx.ssh_dir = Some(home.join(".ssh").display().to_string());
+        }
+        let r = ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Only(top),
+        })
+        .expect("load")
+        .resolve("web", &ctx);
+        assert_eq!(refusal_kind(&r), None);
+        assert_eq!(r.options.port, Some(2222), "ssh_dir given: {ssh_dir}");
+    }
+}
+
 #[test]
 fn paths_under_an_unknown_home() {
     let mut ctx = context(Vec::new());
