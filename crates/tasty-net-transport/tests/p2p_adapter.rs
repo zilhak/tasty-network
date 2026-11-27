@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use tasty_net_frame::{ReadFailure, StreamFrame, StreamTag};
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_p2p::settings::Value as P2pValue;
-use tasty_net_p2p::{P2pCloseReason, P2pConfig, P2pConnectError, P2pEndpoint, PairingList};
+use tasty_net_p2p::{
+    EndpointPhase, P2pCloseReason, P2pConfig, P2pConnectError, P2pEndpoint, PairingList,
+};
 use tasty_net_rendezvous::packet_io::{PacketIo, UdpPacketIo};
 use tasty_net_rendezvous::server::{Server, ServerConfig};
 use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
@@ -796,6 +798,13 @@ fn connecting_to_this_device_is_a_self_attach() {
         .expect_err("self");
     assert!(matches!(error, ConnectError::SelfAttach), "{error:?}");
     assert!(!HandshakeError::Connect(error).is_retryable());
+    // Closed in the middle of its registration handshake, the endpoint's connection to the
+    // server is dropped without the server hearing of it: the server's side stays until the
+    // server's idle timeout (45 s), and the server's shutdown at the end of the test waits
+    // for it. Closing after the registration ends that connection cleanly.
+    wait_until("the registration on the server", || {
+        a.status().state == EndpointPhase::Registered
+    });
     a.close();
 }
 
