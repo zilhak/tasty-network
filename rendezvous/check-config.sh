@@ -453,7 +453,9 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
         shift 2
         : >"$t/start.log"
         rm -f "${t:?}/out.fifo"
-        mkfifo "$t/out.fifo"
+        mkfifo "$t/out.fifo" 2>/dev/null
+        # FIFO가 없으면(만들지 못하는 파일시스템) 리다이렉션이 일반 파일을 만들어 고아 확인이 빠지므로 실패다.
+        [[ -p "$t/out.fifo" ]] || return 1
         # 가짜의 표준 출력을 FIFO로 받는다. 출력을 쥔 프로세스가 모두 끝나야 읽는 쪽이 끝난다.
         cat "$t/out.fifo" >/dev/null &
         reader=$!
@@ -465,13 +467,15 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
         # 서버 pid는 거두기(wait) 전에 기한을 두고 본다. 끝나지 않는 pid를 기한 없이 기다리지 않는다.
         sleep 0.3
         kill -s KILL "$pid" 2>/dev/null
-        if wait_until 2 gone "$pid"; then
-            wait_until 2 gone "$reader" || left=1
+        # 읽는 쪽은 FIFO의 끝을 읽고 스스로 끝나 종료 상태가 0일 때만 정상이다. 강제 종료로 거두면 실패다.
+        wait_until 2 gone "$pid" || left=1
+        if [[ "$left" == 0 ]] && wait_until 2 gone "$reader"; then
+            wait "$reader" 2>/dev/null || left=1
         else
             left=1
+            kill -s KILL "$reader" 2>/dev/null
+            wait "$reader" 2>/dev/null
         fi
-        kill -s KILL "$reader" 2>/dev/null
-        wait "$reader" 2>/dev/null
         if gone "$pid"; then wait "$pid" 2>/dev/null; fi
         [[ "$rc" == "$want" && "$left" == 0 ]]
     }
