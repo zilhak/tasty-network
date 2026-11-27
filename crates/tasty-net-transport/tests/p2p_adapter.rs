@@ -786,6 +786,29 @@ fn a_cancel_before_the_first_handshake_closes_the_new_connection() {
     drop(conn);
 }
 
+/// Until its first handshake succeeded, a new connection is its attempt's alone: its endpoint
+/// opens no more channels on it (docs/design/transport.md "연결 공유의 시작"). Once shared,
+/// it does.
+#[test]
+fn a_new_connection_takes_no_more_channels_before_its_first_handshake() {
+    let pair = Pair::start(72, Mode::Echo);
+    let cancel = AttemptCancel::new();
+    let conn = pair
+        .connect(&cancel, &ConnectOptions::new())
+        .expect("a channel");
+    let more = conn.endpoint.connect_more(&AttemptCancel::new());
+    assert!(
+        matches!(&more, Err(ConnectError::Io(e)) if e.kind() == io::ErrorKind::NotConnected),
+        "{more:?}"
+    );
+    let endpoint = conn.endpoint.clone();
+    let link = dial_handshake(conn, &pair.dial, Holder::Dialer, None, &cancel).expect("link");
+    endpoint
+        .connect_more(&AttemptCancel::new())
+        .expect("a channel on the shared connection");
+    drop(link);
+}
+
 /// The ACK among the Control frames the accepting side writes on `stream`.
 fn read_ack(stream: &mut tasty_net_p2p::P2pStream) -> Value {
     loop {

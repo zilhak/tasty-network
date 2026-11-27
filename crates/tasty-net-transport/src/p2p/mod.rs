@@ -454,7 +454,15 @@ struct P2pEndpointHandle {
 }
 
 impl EndpointHandle for P2pEndpointHandle {
+    /// A new connection takes more channels only once its first handshake succeeded and it
+    /// is shared (docs/design/transport.md "연결 공유의 시작").
     fn connect_more(&self, cancel: &AttemptCancel) -> Result<RawChannel, ConnectError> {
+        if lock(&self.owned).is_some() {
+            return Err(ConnectError::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "the P2P connection is not shared yet: its first handshake has not succeeded",
+            )));
+        }
         open_channel(&self.state, cancel)
     }
 
