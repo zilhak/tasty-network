@@ -439,10 +439,11 @@ impl Server {
         };
         let dual_stack = Sockets {
             primary: io.primary.dual_stack(),
+            alternate_port: io.alternate_port.dual_stack(),
             alternate_ip: io
                 .alternate_ip
                 .as_ref()
-                .is_some_and(|(a, _)| a.dual_stack()),
+                .map(|(a, b)| (a.dual_stack(), b.dual_stack())),
         };
         check_advertise(&params, &addrs, dual_stack).map_err(StartError::Settings)?;
         let tls_config = tls::server_config(
@@ -580,23 +581,26 @@ impl Drop for Server {
     }
 }
 
-/// Whether the primary socket and the first socket of the second IP take both families.
+/// Whether each socket takes both families (an IPv6 socket with `IPV6_V6ONLY` off).
 #[derive(Clone, Copy)]
 struct Sockets {
     primary: bool,
-    alternate_ip: bool,
+    alternate_port: bool,
+    alternate_ip: Option<(bool, bool)>,
 }
 
 /// The checks of docs/design/rendezvous.md "광고 주소와 바인딩 주소" against the addresses the
 /// sockets are really bound to (they differ from `listen.*` with injected packet I/O) and the
-/// families they take: an IPv6 wildcard socket the OS keeps IPv6 only takes no IPv4 advertising.
+/// families they take. Every socket an advertised IP is sent for must take its family: the
+/// primary IP stands for the primary and the alternate port socket, the second IP for both
+/// sockets of the second IP. An IPv6 wildcard socket the OS keeps IPv6 only takes no IPv4.
 fn check_advertise(
     p: &ServerParams,
     a: &ServerAddrs,
     dual_stack: Sockets,
 ) -> Result<(), SettingsError> {
     let relation = |rule, values| Err(SettingsError::Relation { rule, values });
-    match p.advertise_primary_ip {
+    let primary_ip = match p.advertise_primary_ip {
         None if a.primary.ip().is_unspecified() => {
             return relation(
                 "a wildcard primary socket needs advertise.primary_ip for the alternate STUN \
@@ -607,29 +611,45 @@ fn check_advertise(
                 ],
             );
         }
-        Some(ip) if !advertise_fits(a.primary.ip(), dual_stack.primary, ip) => {
-            return relation(
-                "an advertised IP has an address family the socket it stands for takes (an IPv6 \
-                 socket the OS keeps IPv6 only takes no IPv4)",
-                vec![
-                    ("advertise.primary_ip", Value::Ip(ip)),
-                    ("listen.primary", Value::Address(a.primary)),
-                ],
-            );
+        Some(ip) => ip,
+        None => a.primary.ip(),
+    };
+    let fits = |key: &'static str, ip, sockets: &[(&'static str, SocketAddr, bool)]| {
+        for &(socket_key, addr, dual) in sockets {
+            if !advertise_fits(addr.ip(), dual, ip) {
+                return relation(
+                    "an advertised IP has an address family every socket it stands for takes \
+                     (an IPv6 socket the OS keeps IPv6 only takes no IPv4)",
+                    vec![(key, Value::Ip(ip)), (socket_key, Value::Address(addr))],
+                );
+            }
         }
-        _ => {}
-    }
-    if let (Some(ip), Some((second, _))) = (p.advertise_alternate_ip, a.alternate_ip)
-        && !advertise_fits(second.ip(), dual_stack.alternate_ip, ip)
+        Ok(())
+    };
+    fits(
+        "advertise.primary_ip",
+        primary_ip,
+        &[
+            ("listen.primary", a.primary, dual_stack.primary),
+            (
+                "listen.alternate_port",
+                a.alternate_port,
+                dual_stack.alternate_port,
+            ),
+        ],
+    )?;
+    if let (Some((first, second)), Some((first_dual, second_dual))) =
+        (a.alternate_ip, dual_stack.alternate_ip)
     {
-        return relation(
-            "an advertised IP has an address family the socket it stands for takes (an IPv6 \
-             socket the OS keeps IPv6 only takes no IPv4)",
-            vec![
-                ("advertise.alternate_ip", Value::Ip(ip)),
-                ("listen.alternate_ip", Value::Ip(second.ip())),
+        let ip = p.advertise_alternate_ip.unwrap_or(first.ip());
+        fits(
+            "advertise.alternate_ip",
+            ip,
+            &[
+                ("listen.alternate_ip", first, first_dual),
+                ("listen.alternate_ip", second, second_dual),
             ],
-        );
+        )?;
     }
     Ok(())
 }

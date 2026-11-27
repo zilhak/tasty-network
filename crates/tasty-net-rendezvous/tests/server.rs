@@ -1464,6 +1464,34 @@ async fn ipv6_only_socket_takes_no_ipv4_advertising() {
         other => panic!("expected a settings error, got {other:?}"),
     }
     start("::1").await.expect("an IPv6 advertised IP starts");
+    // A dual-stack primary socket does not make up for an IPv6 only alternate port socket: the
+    // IPv4 alternate STUN address would not reach it.
+    let mut s = local_settings();
+    s.set(
+        "advertise.primary_ip",
+        Value::Ip("127.0.0.1".parse().unwrap()),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(key(100));
+    config.settings = s;
+    let dual: Arc<dyn PacketIo> =
+        Arc::new(UdpPacketIo::bind("[::]:0".parse().unwrap()).await.unwrap());
+    assert!(dual.dual_stack());
+    match Server::start_with_io(
+        config,
+        ServerIo {
+            primary: dual,
+            alternate_port: v6_only().unwrap(),
+            alternate_ip: None,
+        },
+    )
+    .await
+    {
+        Err(StartError::Settings(e)) => {
+            assert!(e.to_string().contains("listen.alternate_port"), "{e}")
+        }
+        other => panic!("expected a settings error, got {other:?}"),
+    }
     // A socket the server binds itself to [::] takes IPv4 too.
     let own = UdpPacketIo::bind("[::]:0".parse().unwrap()).await.unwrap();
     assert!(own.dual_stack());
