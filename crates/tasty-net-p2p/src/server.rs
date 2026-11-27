@@ -19,7 +19,7 @@ use tracing::debug;
 use crate::endpoint::{Core, PunchHold, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
 use crate::error::StopCause;
 use crate::events::{Cause, CauseDetail, EndpointPhase};
-use crate::nat::{self, NatJudgement};
+use crate::nat;
 
 /// How a registration ended or failed.
 enum End {
@@ -321,7 +321,7 @@ async fn registered(
             ),
         );
     }
-    tokio::spawn(rejudge(core.clone()));
+    tokio::spawn(rejudge(core.clone(), generation));
     // The reader owns the receiving side: a frame is never cut by a select.
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let limit = p.max_message_bytes;
@@ -473,7 +473,7 @@ pub(crate) fn dispatch(core: &Arc<Core>, generation: u64, m: ServerMessage) {
         ServerMessage::Welcome(_) => debug!("a second welcome ignored"),
         ServerMessage::ReflexiveChanged(c) => {
             lock(&core.reg).reflexive = Some(crate::socket::canonical(c.reflexive));
-            tokio::spawn(rejudge(core.clone()));
+            tokio::spawn(rejudge(core.clone(), generation));
         }
         ServerMessage::PunchRefused(r) => {
             if let Some(tx) = lock(&core.requests).remove(&r.request_id) {
@@ -515,14 +515,19 @@ pub(crate) fn dispatch(core: &Arc<Core>, generation: u64, m: ServerMessage) {
 }
 
 /// Judge the NAT again and report it (after registering, after `reflexive_changed`, before a
-/// punch retry). Returns the judgement.
+/// punch retry), for registration `generation`: the one that scheduled the judgement.
 ///
-/// A judgement begun on one registration is not written to the next one: the server it
-/// reports to and the STUN servers it asked belong to the registration it began on.
-pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
-    let generation = core.generation();
+/// A judgement belongs to that registration: it reads the STUN servers only while that
+/// registration is still current, and writes and reports its result only if it still is at
+/// the end. A judgement scheduled on one registration that first runs after the next one began
+/// does nothing.
+pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
     let targets: Vec<_> = {
         let r = lock(&core.reg);
+        if core.generation() != Some(generation) {
+            debug!("a judgement of an earlier registration not begun");
+            return;
+        }
         std::iter::once(core.server.addr)
             .chain(r.stun.iter().copied())
             .collect()
@@ -549,23 +554,21 @@ pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
     });
     let changed = {
         let mut r = lock(&core.reg);
-        if core.generation() != generation {
+        if core.generation() != Some(generation) {
             debug!("a judgement of an earlier registration dropped");
-            return j;
+            return;
         }
         let before = r
             .nat
             .as_ref()
             .map(|n| (n.mapping, n.answers.first().and_then(|a| a.reflexive)));
         let changed = before != Some((j.mapping, j.answers.first().and_then(|a| a.reflexive)));
-        r.nat = Some(j.clone());
+        r.nat = Some(j);
         changed && r.phase == Some(EndpointPhase::Registered)
     };
-    let sent = generation.is_some_and(|g| core.send_on(g, report));
-    if sent && changed {
+    if core.send_on(generation, report) && changed {
         core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
     }
-    j
 }
 
 #[cfg(test)]

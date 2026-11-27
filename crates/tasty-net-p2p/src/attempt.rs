@@ -382,10 +382,15 @@ async fn dial_attempts(
         let retry_at = Instant::now() + p.retry_delay;
         t.update(|r| r.retry_at = Some(retry_at.into_std()));
         t.to(AttemptPhase::RetryWait, cause);
-        let judge = tokio::spawn(crate::server::rejudge(core.clone()));
+        // The judgement belongs to the registration current now; without one there is none.
+        let judge = core
+            .generation()
+            .map(|g| tokio::spawn(crate::server::rejudge(core.clone(), g)));
         let waited = tokio::time::timeout_at(end, async {
             tokio::time::sleep_until(retry_at).await;
-            judge.await.is_ok()
+            if let Some(judge) = judge {
+                let _judged = judge.await.is_ok();
+            }
         });
         if waited.await.is_err() {
             return Err(bound_elapsed(t, last_mode));

@@ -1340,6 +1340,21 @@ mod tests {
     }
 
     fn stand_in(seed: u8, peer: DeviceId, settings: &[(&str, crate::settings::Value)]) -> StandIn {
+        stand_in_with(
+            seed,
+            peer,
+            settings,
+            Arc::new(crate::probe::tests_support::Sink),
+        )
+    }
+
+    /// [`stand_in`] on the packet I/O `io`.
+    fn stand_in_with(
+        seed: u8,
+        peer: DeviceId,
+        settings: &[(&str, crate::settings::Value)],
+        io: Arc<dyn tasty_net_rendezvous::packet_io::PacketIo>,
+    ) -> StandIn {
         let pairing = Arc::new(crate::pairing::PairingList::new());
         pairing.add(peer);
         let mut config = P2pConfig::new(DeviceKey::from_seed([seed; 32]), pairing);
@@ -1348,7 +1363,7 @@ mod tests {
             addr: "192.0.2.10:3478".parse().unwrap(),
             public_key: DeviceKey::from_seed([seed.wrapping_add(100); 32]).id(),
         });
-        config.packet_io = Some(Arc::new(crate::probe::tests_support::Sink));
+        config.packet_io = Some(io);
         // Registration stays Connecting while the test stands in for it.
         config.settings.set(
             "rendezvous.connect_timeout",
@@ -1498,6 +1513,52 @@ mod tests {
         drop(taken);
         assert!(lock(&core.punches).is_empty());
         drop(_enter);
+        ep.close();
+    }
+
+    /// A NAT judgement scheduled on one registration that first runs after the next one began
+    /// reads no STUN server, writes no judgement and reports nothing to either server; the same
+    /// judgement scheduled on the current registration reports to it.
+    #[test]
+    fn a_judgement_scheduled_on_an_earlier_registration_does_nothing() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([29; 32]).id();
+        let io = Arc::new(crate::probe::tests_support::CountingSink::default());
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in_with(
+            28,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(10))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+            io.clone(),
+        );
+        let stun_sent = || io.stun_sent.load(std::sync::atomic::Ordering::SeqCst);
+        // Registered again before the judgement of the first registration runs.
+        let (tx, mut again) = mpsc::unbounded_channel();
+        let next = core.open_link(tx);
+        assert_ne!(next, generation);
+        let sent_before = stun_sent();
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert_eq!(stun_sent(), sent_before, "no STUN request");
+        assert!(lock(&core.reg).nat.is_none());
+        assert!(rx.try_recv().is_err());
+        assert!(again.try_recv().is_err());
+        // The control: scheduled on the current registration, it reports there.
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), next));
+        assert!(
+            stun_sent() > sent_before,
+            "the control asks the STUN servers"
+        );
+        assert!(matches!(again.try_recv(), Ok(DeviceMessage::NatReport(_))));
+        assert!(lock(&core.reg).nat.is_some());
         ep.close();
     }
 

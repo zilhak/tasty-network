@@ -260,4 +260,34 @@ pub(crate) mod tests_support {
             Ok(SocketAddr::from(([10, 0, 0, 2], 5000)))
         }
     }
+
+    /// [`Sink`] that also counts the STUN messages sent (the magic cookie at bytes 4..8).
+    #[derive(Debug, Default)]
+    pub(crate) struct CountingSink {
+        pub(crate) stun_sent: std::sync::atomic::AtomicU64,
+    }
+
+    impl PacketIo for CountingSink {
+        fn poll_recv_from(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
+            Sink.poll_recv_from(cx, buf)
+        }
+        fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Sink.poll_send_ready(cx)
+        }
+        fn try_send_to(&self, buf: &[u8], to: SocketAddr) -> io::Result<()> {
+            let cookie = tasty_net_rendezvous::wire::stun::MAGIC_COOKIE.to_be_bytes();
+            if buf.get(4..8) == Some(&cookie[..]) {
+                self.stun_sent
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Sink.try_send_to(buf, to)
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Sink.local_addr()
+        }
+    }
 }
