@@ -33,7 +33,9 @@
 #   8. stop: docker stop(SIGINT)으로 멈추고 종료 코드 0과 종료 로그를 본다.
 #   9. 결과를 rendezvous-check step=<단계> ok 줄들과 마지막 줄 rendezvous-check result=ok|fail로 쓴다.
 #      result=ok 줄에 기기 구성(devices=same-host-processes), 경로, 실행 sha를 함께 적는다.
-# 컨테이너·볼륨·임시 폴더와 이 검사가 빌드한 이미지는 끝날 때 지운다.
+# 컨테이너·볼륨·이미지 이름은 실행마다 /dev/urandom에서 얻은 조각을 붙여 정하고, 만들기 전에 같은 이름이
+# 없는지 본다. 셋 모두 그 조각을 값으로 한 라벨(tasty.container-check)을 달고, 지울 때는 라벨이 이 실행의
+# 것일 때만 지운다. 컨테이너·볼륨·임시 폴더와 이 검사가 빌드한 이미지는 끝날 때 지운다.
 #
 # 필요한 것: Linux Docker Engine, cargo, python3(빈 포트 고르기), ip(사설 IPv4 찾기).
 # 종료 코드: 0 통과, 1 실패, 2 판정 불가(도구 없음, 빌드 실패, 사설 IPv4 없음, 인자 오류).
@@ -207,19 +209,51 @@ CONTAINER=""
 VOLUME=""
 BUILT_IMAGE=""
 PEER_PIDS=()
+# 이 실행의 이름 조각과 라벨 키. 조각은 main_check가 정한다.
+TOKEN=""
+LABEL=tasty.container-check
+
+# /dev/urandom에서 얻은 16진수 12자.
+new_token() { od -An -N6 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# exists <container|volume|image> <이름>: 그 이름이 있다.
+exists() { docker "$1" inspect "$2" >/dev/null 2>&1; }
+
+# owned <container|volume|image> <이름>: 그 이름이 있고 라벨이 이 실행의 조각이다.
+owned() {
+    local fmt="{{index .Config.Labels \"$LABEL\"}}"
+    [[ "$1" == volume ]] && fmt="{{index .Labels \"$LABEL\"}}"
+    [[ -n "$TOKEN" && "$(docker "$1" inspect -f "$fmt" "$2" 2>/dev/null)" == "$TOKEN" ]]
+}
+
+# remove_owned <container|volume|image> <이름>: 이 실행이 만든 것이면 지운다. 이 실행의 것이 아니면 지우지
+# 않고 실패한다.
+remove_owned() {
+    local kind=$1 name=$2
+    if ! owned "$kind" "$name"; then
+        log "정리: $kind $name은 이 실행의 라벨이 없어 지우지 않는다"
+        return 1
+    fi
+    case "$kind" in
+        container) docker rm -f "$name" >/dev/null 2>&1 ;;
+        volume) docker volume rm "$name" >/dev/null 2>&1 ;;
+        image) docker image rm "$name" >/dev/null 2>&1 ;;
+    esac || { log "정리: $kind $name을 지우지 못했다"; return 1; }
+}
+
 cleanup() {
     local p
     for p in ${PEER_PIDS[@]+"${PEER_PIDS[@]}"}; do
         kill "$p" 2>/dev/null || true
     done
     if [[ -n "$CONTAINER" ]]; then
-        docker rm -f "$CONTAINER" >/dev/null 2>&1 || log "정리: 컨테이너 $CONTAINER를 지우지 못했다"
+        remove_owned container "$CONTAINER"
     fi
     if [[ -n "$VOLUME" ]]; then
-        docker volume rm "$VOLUME" >/dev/null 2>&1 || log "정리: 볼륨 $VOLUME을 지우지 못했다"
+        remove_owned volume "$VOLUME"
     fi
     if [[ -n "$BUILT_IMAGE" ]]; then
-        docker image rm "$BUILT_IMAGE" >/dev/null 2>&1 || log "정리: 이미지 $BUILT_IMAGE를 지우지 못했다"
+        remove_owned image "$BUILT_IMAGE"
     fi
     if [[ -n "$TMP" ]]; then
         rm -rf "${TMP:?}"
@@ -318,6 +352,8 @@ main_check() {
         || unsure "CONTAINER_CHECK_STOP_SECONDS는 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_STOP_SECONDS:-}"
     PEER_WAIT_SECONDS=$((PEER_TIMEOUT + PEER_WAIT_EXTRA))
     TMP=$(mktemp -d) || unsure "임시 폴더를 만들지 못했다"
+    TOKEN=$(new_token)
+    [[ "$TOKEN" =~ ^[0-9a-f]{12}$ ]] || unsure "/dev/urandom에서 이름 조각을 얻지 못했다: '$TOKEN'"
     sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || sha=unknown
     if [[ -n "${P2P_PEER:-}" ]]; then
         [[ -x "$P2P_PEER" ]] || unsure "P2P_PEER가 실행 파일이 아니다: $P2P_PEER"
@@ -333,9 +369,11 @@ main_check() {
         image=$CONTAINER_CHECK_IMAGE
         docker image inspect "$image" >/dev/null 2>&1 || unsure "이미지가 없다: $image"
     else
-        image="tasty-rendezvous:container-check-$$"
-        log "빌드: docker build -f rendezvous/Dockerfile -t $image ."
-        docker build -f "$HERE/Dockerfile" -t "$image" "$ROOT" >"$TMP/image-build.log" 2>&1 || {
+        image="tasty-rendezvous:container-check-$TOKEN"
+        exists image "$image" && unsure "같은 이름의 이미지가 이미 있다: $image"
+        log "빌드: docker build -f rendezvous/Dockerfile --label $LABEL=$TOKEN -t $image ."
+        docker build -f "$HERE/Dockerfile" --label "$LABEL=$TOKEN" -t "$image" "$ROOT" \
+            >"$TMP/image-build.log" 2>&1 || {
             cat "$TMP/image-build.log" >&2
             unsure "이미지 빌드 실패"
         }
@@ -367,8 +405,11 @@ main_check() {
     step_ok "advertise=127.0.0.1:$alternate_port published=127.0.0.1:$primary_port,127.0.0.1:$alternate_port host_ip=private-ipv4"
 
     STEP=keygen
-    VOLUME="tasty-rendezvous-container-check-$$"
-    docker volume create "$VOLUME" >/dev/null || fail_at "볼륨을 만들지 못했다"
+    local volume="tasty-rendezvous-container-check-$TOKEN"
+    # docker volume create는 같은 이름의 볼륨이 있으면 그것을 돌려주므로 먼저 없는지 본다.
+    exists volume "$volume" && fail_at "같은 이름의 볼륨이 이미 있다: $volume"
+    docker volume create --label "$LABEL=$TOKEN" "$volume" >/dev/null || fail_at "볼륨을 만들지 못했다"
+    VOLUME=$volume
     keyout=$(docker run --rm -v "$VOLUME:/var/lib/tasty-rendezvous" "$image" \
         keygen --dir /var/lib/tasty-rendezvous 2>&1) || fail_at "keygen 실패: $keyout"
     pub=$(sed -n 's/^public key: \([0-9a-f]\{64\}\)$/\1/p' <<<"$keyout")
@@ -376,9 +417,10 @@ main_check() {
     step_ok "public_key=$pub"
 
     STEP=start
-    CONTAINER="tasty-rendezvous-container-check-$$"
+    local container="tasty-rendezvous-container-check-$TOKEN"
+    exists container "$container" && fail_at "같은 이름의 컨테이너가 이미 있다: $container"
     # debug 로그는 서버가 본 기기의 반사 주소와 후보를 찍는다(path 단계가 읽는다).
-    docker run -d --name "$CONTAINER" \
+    docker run -d --name "$container" --label "$LABEL=$TOKEN" \
         -p "127.0.0.1:$primary_port:$CONTAINER_PRIMARY_PORT/udp" \
         -p "127.0.0.1:$alternate_port:$CONTAINER_ALTERNATE_PORT/udp" \
         -v "$VOLUME:/var/lib/tasty-rendezvous" \
@@ -387,10 +429,11 @@ main_check() {
         "$image" >"$TMP/run.log" 2>&1 || {
         local r
         r=$(cat "$TMP/run.log")
-        CONTAINER=""
-        docker rm -f "tasty-rendezvous-container-check-$$" >/dev/null 2>&1 || true
+        # 만든 뒤 시작에 실패한 컨테이너는 이 실행의 라벨을 달고 있다. 그때만 정리 대상으로 둔다.
+        owned container "$container" && CONTAINER=$container
         fail_at "컨테이너를 띄우지 못했다: $r"
     }
+    CONTAINER=$container
     rm -f "$TMP/run.log"
     wait_until "$START_SECONDS" server_started "$pub" || fail_at "서버 시작 줄이 ${START_SECONDS}s 안에 나오지 않았다"
     before=$(server_rx) || fail_at "서버 쪽 수신 카운터를 읽지 못했다"
