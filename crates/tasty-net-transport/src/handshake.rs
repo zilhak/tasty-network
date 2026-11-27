@@ -1122,7 +1122,7 @@ fn accept_ssh(
         Started {
             cancel,
             deadline,
-            _registration: registration,
+            registration,
             _permit: permit,
             entry,
         },
@@ -1134,7 +1134,8 @@ fn accept_ssh(
 struct Started<'a> {
     cancel: &'a AttemptCancel,
     deadline: Instant,
-    _registration: Registration,
+    /// Released when the channel is handed on ([`hand_over`]).
+    registration: Registration,
     _permit: Permit,
     /// The channel's connection table entry, with a table: the channel's own on the SSH path,
     /// the QUIC connection's on the P2P path.
@@ -1217,7 +1218,7 @@ fn accept_p2p(
         Started {
             cancel,
             deadline,
-            _registration: registration,
+            registration,
             _permit: permit,
             entry,
         },
@@ -1291,6 +1292,7 @@ fn accept_on(
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
+        hand_over(started.registration, &framed.closer)?;
         if let Some(entry) = &started.entry {
             if own_entry {
                 entry.update(|info| info.parent = parent.entry);
@@ -1374,6 +1376,7 @@ fn accept_on(
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
+        hand_over(started.registration, &framed.closer)?;
         if let Some(entry) = &started.entry {
             entry.channel_up(
                 Counted::Request,
@@ -1479,6 +1482,8 @@ fn accept_on(
             return Err(option_failed(cancel, &*control, e));
         }
     };
+    // A cancel that came first ends the link here: its end revokes the credential.
+    hand_over(started.registration, &closer)?;
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
     let ordered_shared = framed.shared();
@@ -1503,6 +1508,17 @@ fn accept_on(
         link_id,
         _guard: accept.guard,
     })))
+}
+
+/// Takes the accepted channel out of the attempt, in one order with its cancel (as the dialing
+/// side does in `dial_open`): a cancel that came first, also after the ACK went out, closes the
+/// channel here and ends the handshake `Cancelled`, so no channel the cancel closed reaches the
+/// caller.
+fn hand_over(registration: Registration, closer: &LinkCloser) -> Result<(), HandshakeError> {
+    registration.release().map_err(|_| {
+        closer.force_close(EndReason::Forced);
+        HandshakeError::Cancelled
+    })
 }
 
 /// What a failed socket timeout call of a handshake means: before a frame read or write, and

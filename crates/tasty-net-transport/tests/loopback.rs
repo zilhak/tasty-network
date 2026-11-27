@@ -1210,12 +1210,13 @@ fn a_refusal_written_past_the_deadline_times_out() {
     drop(dialer);
 }
 
-/// A TCP channel control that refuses socket options once a cancel shut the socket, as XNU
-/// (macOS) does with `EINVAL` where Linux takes them. The first option call that sets the read
-/// timeout to `mark` runs `hook` before it answers.
+/// A TCP channel control that, with `refuses`, refuses socket options once a cancel shut the
+/// socket, as XNU (macOS) does with `EINVAL` where Linux takes them. The first option call that
+/// sets the read timeout to `mark` runs `hook` before it answers.
 struct ShutRefusesOptions {
     stream: SharedTcp,
     wake: Arc<dyn ChannelControl>,
+    refuses: bool,
     shut: std::sync::atomic::AtomicBool,
     mark: Duration,
     hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -1223,7 +1224,7 @@ struct ShutRefusesOptions {
 
 impl ShutRefusesOptions {
     fn refused(&self) -> io::Result<()> {
-        if self.shut.load(Ordering::SeqCst) {
+        if self.refuses && self.shut.load(Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Invalid argument",
@@ -1261,13 +1262,24 @@ impl ChannelControl for ShutRefusesOptions {
 }
 
 /// A cancel that comes after the ACK, while the accepting handshake hands the channel on as a
-/// link, is `Cancelled` too, also where the OS then refuses the link's socket timeouts on the
-/// shut socket (macOS). No link reaches the caller, and the dialer, which got its ACK, sees
-/// the channel close. The cancel is given from inside the first call that sets the link's
-/// read timeout (a value no handshake step uses: its timeouts are the time left of a shorter
+/// link, is `Cancelled` too, where the OS then refuses the link's socket timeouts on the shut
+/// socket (macOS). No link reaches the caller, and the dialer, which got its ACK, sees the
+/// channel close. The cancel is given from inside the first call that sets the link's read
+/// timeout (a value no handshake step uses: its timeouts are the time left of a shorter
 /// handshake deadline).
 #[test]
 fn a_cancel_while_the_link_is_handed_over_is_cancelled() {
+    cancel_while_the_link_is_handed_over(true);
+}
+
+/// [`a_cancel_while_the_link_is_handed_over_is_cancelled`] where the OS takes the timeouts on
+/// the shut socket (Linux, and a P2P stream): the hand-over itself sees the cancel came first.
+#[test]
+fn a_cancel_while_the_link_is_handed_over_is_cancelled_where_the_options_work() {
+    cancel_while_the_link_is_handed_over(false);
+}
+
+fn cancel_while_the_link_is_handed_over(refuses: bool) {
     const LINK_READ: Duration = Duration::from_millis(9_876);
     let link_timeouts = LinkTimeouts {
         read_timeout: LINK_READ,
@@ -1289,6 +1301,7 @@ fn a_cancel_while_the_link_is_handed_over_is_cancelled() {
         let control = Arc::new(ShutRefusesOptions {
             stream: shared.clone(),
             wake: tcp.control(),
+            refuses,
             shut: std::sync::atomic::AtomicBool::new(false),
             mark: LINK_READ,
             hook: std::sync::Mutex::new(Some(Box::new(move || canceller.cancel()))),
