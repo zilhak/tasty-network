@@ -470,65 +470,110 @@ fn parse_forward(
     Some(fwd)
 }
 
-/// `addr_match_cidr_list(NULL, list)`: whether a `Match localnetwork` list is valid, or
-/// `Err` when an entry is read differently by the C libraries and this OS has no rule
-/// ([`misc::numeric_host`]).
-fn valid_cidr_list(list: &str) -> Result<bool, String> {
-    // A bad entry makes the list bad whatever an earlier entry was read as.
-    let mut unknown = None;
-    for cp in list.split(',') {
-        match valid_cidr_entry(cp) {
-            Ok(true) => {}
-            Ok(false) => return Ok(false),
-            Err(m) => {
-                unknown.get_or_insert(m);
-            }
-        }
-    }
-    unknown.map_or(Ok(true), Err)
+/// What `addr_match_cidr_list(NULL, list)` gives for a `Match localnetwork` list.
+#[derive(Debug, PartialEq, Eq)]
+enum CidrList {
+    Valid,
+    /// `Invalid network list`.
+    Invalid,
+    /// Valid for one C library and invalid for another, or an entry depends on the
+    /// interfaces ([`misc::Reading::Scoped`]); the reason.
+    Unknown(String),
 }
 
-/// One entry of [`valid_cidr_list`].
-fn valid_cidr_entry(cp: &str) -> Result<bool, String> {
+/// `addr_match_cidr_list(NULL, list)` by the C library of this OS, or by every library
+/// with a rule on an OS without one ([`misc::Libc::current`]).
+fn valid_cidr_list(list: &str) -> CidrList {
+    match misc::Libc::current() {
+        Some(l) => valid_cidr_list_by(list, &[l]),
+        None => valid_cidr_list_by(list, misc::Libc::ALL),
+    }
+}
+
+/// [`valid_cidr_list`] as `libcs` read the addresses: invalid or valid when every library
+/// gives that, else unknown.
+fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
+    let mut entries = Vec::new();
+    for cp in list.split(',') {
+        match cidr_entry(cp) {
+            Some((addr, mask)) => {
+                let readings: Vec<(misc::Libc, misc::Reading)> = libcs
+                    .iter()
+                    .map(|l| (*l, misc::numeric_host_of(*l, addr, misc::Family::Any)))
+                    .collect();
+                entries.push((addr, mask, readings));
+            }
+            // Known before the address is read: invalid for every library.
+            None => return CidrList::Invalid,
+        }
+    }
+    // `Some(valid)` for one library, `None` when an entry depends on the interfaces and no
+    // entry is invalid.
+    let verdict = |libc: misc::Libc| -> Option<bool> {
+        let mut scoped = false;
+        for (_, mask, readings) in &entries {
+            match readings.iter().find(|(l, _)| *l == libc).map(|(_, r)| *r) {
+                Some(misc::Reading::Address(ip)) if cidr_fits(ip, *mask) => {}
+                Some(misc::Reading::Scoped) => scoped = true,
+                _ => return Some(false),
+            }
+        }
+        (!scoped).then_some(true)
+    };
+    let verdicts: Vec<Option<bool>> = libcs.iter().map(|l| verdict(*l)).collect();
+    if verdicts.iter().all(|v| *v == Some(false)) {
+        return CidrList::Invalid;
+    }
+    if verdicts.iter().all(|v| *v == Some(true)) {
+        return CidrList::Valid;
+    }
+    let why: Vec<String> = entries
+        .iter()
+        .filter(|(_, _, r)| misc::settled(r).is_none())
+        .map(|(addr, _, r)| misc::unsettled(addr, r))
+        .collect();
+    CidrList::Unknown(why.join("; "))
+}
+
+/// The checks of one entry that do not need its address (`addr_match_cidr_list` and the
+/// mask of `addr_pton_cidr`, `addr.c:471`-`:477`, before `addr_pton`): the address text and
+/// the mask length, or `None` when the entry is invalid.
+fn cidr_entry(cp: &str) -> Option<(&str, Option<u32>)> {
     if cp.is_empty() || cp.len() > CIDR_ENTRY_MAX {
-        return Ok(false);
+        return None;
     }
     if !cp
         .bytes()
         .all(|c| c.is_ascii_hexdigit() || c == b'.' || c == b':' || c == b'/')
     {
-        return Ok(false);
+        return None;
     }
-    let (addr, mask) = match cp.split_once('/') {
-        Some((a, m)) => (a, Some(m)),
-        None => (cp, None),
-    };
-    // `addr_pton`: `getaddrinfo(AI_NUMERICHOST)` for any family.
-    let Some(ip) = misc::numeric_host(addr, misc::Family::Any)? else {
-        return Ok(false);
-    };
+    match cp.split_once('/') {
+        None => Some((cp, None)),
+        Some((addr, m)) => {
+            let len = misc::strtonum(m, 0, i64::from(i32::MAX))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok())?;
+            Some((addr, Some(len)))
+        }
+    }
+}
+
+/// `masklen_valid` and `addr_host_is_all0s` of `addr_pton_cidr`: the mask fits the family and
+/// the host part under it is zero.
+fn cidr_fits(ip: std::net::IpAddr, mask: Option<u32>) -> bool {
     let bits = if ip.is_ipv4() { IPV4_BITS } else { IPV6_BITS };
-    let len = match mask {
-        None => bits,
-        Some(m) => match misc::strtonum(m, 0, i64::from(i32::MAX))
-            .ok()
-            .and_then(|v| u32::try_from(v).ok())
-        {
-            Some(v) => v,
-            None => return Ok(false),
-        },
-    };
+    let len = mask.unwrap_or(bits);
     if len > bits {
-        return Ok(false);
+        return false;
     }
-    // The host part under the mask must be zero.
     let value: u128 = match ip {
         std::net::IpAddr::V4(a) => u128::from(u32::from(a)),
         std::net::IpAddr::V6(a) => u128::from(a),
     };
     // A zero length leaves every bit to the host part (a shift by 128 would overflow).
     let host_mask = 1u128.checked_shl(bits - len).map_or(u128::MAX, |b| b - 1);
-    Ok(value & host_mask == 0)
+    value & host_mask == 0
 }
 
 /// `strtol(s, &end, 8)` with the C rules: leading space and sign, then octal digits up to the
@@ -818,10 +863,21 @@ impl<'a> Reader<'a> {
                     }
                 }
             } else if is("localnetwork") {
-                // A list this OS reads in a way this crate does not know is not known to be
-                // bad; the criterion is not known either way.
-                if valid_cidr_list(&arg) == Ok(false) {
-                    return bad(format!("Invalid network list \"{arg}\""));
+                match valid_cidr_list(&arg) {
+                    CidrList::Valid => {}
+                    CidrList::Invalid => return bad(format!("Invalid network list \"{arg}\"")),
+                    // `ssh` stops on an invalid list whatever the other criteria give
+                    // (`readconf.c:829`-`:833`), so a list this crate cannot judge is refused
+                    // even when the block does not apply.
+                    CidrList::Unknown(why) => self.refuse(Refusal {
+                        kind: RefusalKind::Undeterminable,
+                        keyword: Some("match localnetwork".to_string()),
+                        origin: Some(origin.clone()),
+                        message: format!(
+                            "Match localnetwork: whether the list \"{arg}\" is valid is not \
+                             known: {why}"
+                        ),
+                    }),
                 }
                 unknown.get_or_insert("localnetwork");
                 None
@@ -2306,7 +2362,11 @@ mod tests {
 
     #[test]
     fn cidr_lists() {
-        let cidr = |l: &str| valid_cidr_list(l).expect("read alike by every C library");
+        let cidr = |l: &str| match valid_cidr_list(l) {
+            CidrList::Valid => true,
+            CidrList::Invalid => false,
+            CidrList::Unknown(m) => panic!("read alike by every C library: {l}: {m}"),
+        };
         assert!(cidr("192.0.2.0/24,2001:db8::/32"));
         assert!(!cidr("192.0.2.1/24"));
         assert!(!cidr("192.0.2.0/33"));
@@ -2317,6 +2377,54 @@ mod tests {
         assert!(cidr("0.0.0.0/0"));
         assert!(!cidr("1::/0"));
         assert!(!cidr("128.0.0.0/0"));
+    }
+
+    /// `Match localnetwork` lists as each C library reads them, and on an OS without a rule
+    /// (all three): `V` valid, `I` invalid, `?` unknown.
+    #[test]
+    fn cidr_lists_of_each_c_library() {
+        use misc::Libc;
+        let cases: &[(&str, [char; 4])] = &[
+            // Valid for glibc and Darwin, not an address for bionic.
+            ("127.0/8", ['V', 'I', 'V', '?']),
+            ("192.0.2.0/24,127.0/8", ['V', 'I', 'V', '?']),
+            // Valid everywhere, at different addresses (8.0.0.0 and 10.0.0.0).
+            ("010.0.0.0/8", ['V', 'V', 'V', 'V']),
+            // The mask is judged before the address (`addr_pton_cidr`).
+            ("127.1/abc", ['I'; 4]),
+            ("127.0/8,192.0.2.0/abc", ['I'; 4]),
+            // Too long a mask for any reading.
+            ("127.1/33", ['I'; 4]),
+            // Invalid for every library: the list is invalid.
+            ("127.0/8,192.0.2.1/24", ['I'; 4]),
+            // Darwin takes the second word as the interface.
+            ("fe80:1::/16", ['I', 'I', '?', '?']),
+            ("fe80:1::/32", ['V', 'V', '?', '?']),
+            ("fe80::/10", ['V'; 4]),
+        ];
+        let letter = |c: CidrList| match c {
+            CidrList::Valid => 'V',
+            CidrList::Invalid => 'I',
+            CidrList::Unknown(m) => {
+                assert!(!m.is_empty());
+                '?'
+            }
+        };
+        for (list, want) in cases {
+            for (libc, want) in Libc::ALL.iter().zip(want) {
+                assert_eq!(
+                    letter(valid_cidr_list_by(list, &[*libc])),
+                    *want,
+                    "{} {list}",
+                    libc.name()
+                );
+            }
+            assert_eq!(
+                letter(valid_cidr_list_by(list, Libc::ALL)),
+                want[3],
+                "no rule: {list}"
+            );
+        }
     }
 
     #[test]

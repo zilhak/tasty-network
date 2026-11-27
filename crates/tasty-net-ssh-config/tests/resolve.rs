@@ -1012,3 +1012,40 @@ fn a_numeric_host_follows_the_c_library_of_this_os() {
         }
     }
 }
+
+#[test]
+fn a_localnetwork_list_is_judged_whatever_the_match_gives() {
+    // The other criterion is false, so only the validity of the list can stop `ssh`.
+    let r = resolve(
+        "Match host nomatch localnetwork 127.0/8\n    Port 2222\n",
+        "example",
+    );
+    let want =
+        if cfg!(all(target_os = "linux", target_env = "gnu")) || cfg!(target_vendor = "apple") {
+            // A valid list: the block does not apply.
+            None
+        } else if cfg!(target_os = "android") {
+            // bionic does not read 127.0 as an address: `Invalid network list`.
+            Some(RefusalKind::ConfigError)
+        } else {
+            // No rule, and the libraries do not agree on whether the list is valid.
+            Some(RefusalKind::Undeterminable)
+        };
+    assert_eq!(refusal_kind(&r), want, "{:?}", r.refusal);
+    if want == Some(RefusalKind::Undeterminable) {
+        let f = r.refusal.expect("a refusal");
+        assert_eq!(f.keyword.as_deref(), Some("match localnetwork"));
+        assert!(f.message.contains("bionic not an address"), "{}", f.message);
+    }
+    // A bad mask is known before the address is read: a list error on every OS.
+    let r = resolve(
+        "Match originalhost other localnetwork 127.1/abc\n",
+        "example",
+    );
+    assert_eq!(
+        refusal_kind(&r),
+        Some(RefusalKind::ConfigError),
+        "{:?}",
+        r.refusal
+    );
+}
