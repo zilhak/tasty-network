@@ -144,7 +144,11 @@ impl RedialerConfig {
         } else {
             (initial * self.multiplier().powf(steps)).min(max)
         };
-        let u = if u.is_nan() { 0.0 } else { u.clamp(-1.0, 1.0) };
+        let u = if u.is_nan() {
+            NO_JITTER
+        } else {
+            u.clamp(-1.0, 1.0)
+        };
         let wait = (base * (1.0 + u * self.jitter())).clamp(0.0, max);
         Duration::try_from_secs_f64(wait)
             .map_or_else(|_| self.max_delay(), |w| w.min(self.max_delay()))
@@ -414,13 +418,16 @@ fn progress(pending: &EntryRef, clock: &dyn Clock, number: u64, wait: Option<Dur
     });
 }
 
+/// The random value in [−1, 1] that leaves a wait as the formula gives it.
+const NO_JITTER: f64 = 0.0;
+
 /// A uniform value in [−1, 1]; without the OS random source, no jitter.
 fn jitter_unit() -> f64 {
     match random_unit() {
         Ok(unit) => unit * 2.0 - 1.0,
         Err(error) => {
             tracing::debug!(%error, "no random value for the redial jitter");
-            0.0
+            NO_JITTER
         }
     }
 }

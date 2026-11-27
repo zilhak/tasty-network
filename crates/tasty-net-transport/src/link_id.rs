@@ -9,28 +9,34 @@ use sha2::{Digest, Sha256};
 /// hash made from the same bytes.
 const DOMAIN: &[u8] = b"tasty-net link id v1";
 
+/// The length of a link ID: the first 16 bytes of the digest (topology's link ID length).
+const LINK_ID_LEN: usize = 16;
+
+/// The length of a bulk credential (docs/design/handshake.md "bulk 자격").
+const CREDENTIAL_LEN: usize = 32;
+
 /// The identifier of one attach link, the same on both ends: the first 16 bytes of
 /// SHA-256(`tasty-net link id v1` ‖ the link's 32-byte bulk credential). Each end computes it
 /// after the success ACK; it is never sent on the wire. Its text form is 32 lowercase hex
 /// digits. topology takes the bytes with `LinkId::from_bytes`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LinkId([u8; 16]);
+pub struct LinkId([u8; LINK_ID_LEN]);
 
 impl LinkId {
     /// The ID of the link whose bulk credential is `credential`.
-    pub(crate) fn of_credential(credential: &[u8; 32]) -> Self {
+    pub(crate) fn of_credential(credential: &[u8; CREDENTIAL_LEN]) -> Self {
         let digest = Sha256::new()
             .chain_update(DOMAIN)
             .chain_update(credential)
             .finalize();
-        let mut id = [0u8; 16];
+        let mut id = [0u8; LINK_ID_LEN];
         let len = id.len();
         id.copy_from_slice(&digest[..len]);
         Self(id)
     }
 
     /// The 16 bytes.
-    pub fn as_bytes(&self) -> &[u8; 16] {
+    pub fn as_bytes(&self) -> &[u8; LINK_ID_LEN] {
         &self.0
     }
 
