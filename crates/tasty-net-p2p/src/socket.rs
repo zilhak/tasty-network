@@ -281,6 +281,12 @@ impl ProbeSession {
         candidates: Vec<RemoteCandidate>,
         max_candidates: usize,
     ) -> Self {
+        // `host_only` probes host candidates only, also when the server sends others
+        // (docs/design/p2p.md "펀칭 절차" 4, 6).
+        let candidates = candidates
+            .into_iter()
+            .filter(|c| mode != PunchMode::HostOnly || c.kind == RemoteKind::Host)
+            .collect();
         ProbeSession {
             peer,
             token_local,
@@ -605,5 +611,47 @@ mod tests {
             1,
             "no peer reflexive in host_only"
         );
+    }
+
+    #[test]
+    fn host_only_probes_host_candidates_only() {
+        let peer_id = tasty_net_identity::DeviceKey::from_seed([3; 32]).id();
+        let host: SocketAddr = "10.0.0.9:6000".parse().unwrap();
+        let reflexive: SocketAddr = "203.0.113.9:6000".parse().unwrap();
+        let given = vec![
+            RemoteCandidate {
+                addr: reflexive,
+                kind: RemoteKind::ServerReflexive,
+            },
+            RemoteCandidate {
+                addr: host,
+                kind: RemoteKind::Host,
+            },
+            RemoteCandidate {
+                addr: reflexive,
+                kind: RemoteKind::ReportedReflexive,
+            },
+        ];
+        let session = |mode| {
+            ProbeSession::new(
+                peer_id,
+                PunchToken([1; 16]),
+                PunchToken([2; 16]),
+                mode,
+                std::time::Duration::from_secs(1),
+                given.clone(),
+                8,
+            )
+        };
+        let host_only = session(PunchMode::HostOnly);
+        assert_eq!(
+            host_only.candidates(),
+            vec![RemoteCandidate {
+                addr: host,
+                kind: RemoteKind::Host,
+            }]
+        );
+        assert!(host_only.candidate(reflexive).is_none());
+        assert_eq!(session(PunchMode::All).candidates(), given);
     }
 }
