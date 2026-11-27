@@ -1262,13 +1262,45 @@ impl KnownHosts {
     /// signature it has checked. This function does not check that an ECDSA point is on its
     /// curve or that the CA signature of a certificate is valid (docs/design/ssh-backends.md
     /// "OpenSSH 해석 이식 크레이트").
+    ///
+    /// This is [`KnownHosts::check_with_address`] without an address: the verdict when
+    /// `CheckHostIP` does not apply.
     pub fn check(&self, query: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict {
+        self.check_with_address(query, None, key_blob)
+    }
+
+    /// [`KnownHosts::check`] when `CheckHostIP` applies: `address` is the numeric address the
+    /// host was reached at (as [`HostKeyQuery::for_address`] takes it). `ssh` makes the
+    /// look-up without the port by calling `check_host_key` again with port 0
+    /// (`sshconnect.c:1181`-`:1193`), so that call also checks the address without its port
+    /// (`sshconnect.c:1036`-`:1037`, `:1058`-`:1068`) and fails when the address names the host with
+    /// another key (`HOST_CHANGED`, `sshconnect.c:1429`-`:1454`). Here the [`HostKeyVerdict::Match`]
+    /// of the look-up without the port is taken only when the address without its port does
+    /// not give [`HostKeyVerdict::Mismatch`]; otherwise the first verdict stays. `ssh` passes
+    /// that case when `StrictHostKeyChecking` is `no` (it only warns), so this rejects more
+    /// there. A certificate is not checked by address, as `ssh` does not load the address
+    /// lines for one (`sshconnect.c:1058`). The address check of the name with the port is
+    /// the caller's, with [`HostKeyQuery::for_address`].
+    pub fn check_with_address(
+        &self,
+        query: &HostKeyQuery,
+        address: Option<&str>,
+        key_blob: &[u8],
+    ) -> HostKeyVerdict {
         let verdict = self.check_name(&query.name, key_blob);
         if let (HostKeyVerdict::NotFound | HostKeyVerdict::DistrustedCaLine { .. }, Some(name)) =
             (&verdict, &query.without_port)
         {
             let again = self.check_name(name, key_blob);
-            if matches!(again, HostKeyVerdict::Match { .. }) {
+            let is_cert = parse_blob(key_blob).is_some_and(|k| k.cert);
+            let address_differs = !is_cert
+                && address.is_some_and(|a| {
+                    matches!(
+                        self.check_name(&put_host_port(a, u16::MIN), key_blob),
+                        HostKeyVerdict::Mismatch { .. }
+                    )
+                });
+            if matches!(again, HostKeyVerdict::Match { .. }) && !address_differs {
                 return again;
             }
         }
@@ -1694,6 +1726,58 @@ mod tests {
             HostKeyVerdict::Revoked {
                 file: dir.0.join("known_hosts"),
                 line: 2
+            }
+        );
+    }
+
+    #[test]
+    fn the_retry_without_the_port_checks_the_address_without_the_port() {
+        let a = ed25519_blob(21);
+        let b = ed25519_blob(22);
+        let (ka, kb) = (line("ssh-ed25519", &a), line("ssh-ed25519", &b));
+        let text = format!(
+            "web.example {ka}\n10.0.0.7 {kb}\n[10.0.0.7]:2222 {ka}\n10.0.0.8 {ka}\n\
+             @revoked 10.0.0.9 {ka}\n"
+        );
+        let (dir, kh) = hosts(&text);
+        let file = dir.0.join("known_hosts");
+        let web = HostKeyQuery::for_host("web.example", 2222, None);
+        let matched = HostKeyVerdict::Match {
+            file: file.clone(),
+            line: 1,
+        };
+        // The address without the port has another key: the retry fails, the host stays new.
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.7"), &a),
+            HostKeyVerdict::NotFound
+        );
+        // Without the address (no `CheckHostIP`) the retry takes the line.
+        assert_eq!(kh.check(&web, &a), matched);
+        assert_eq!(kh.check_with_address(&web, None, &a), matched);
+        // The address without the port has the key, has no line, or revokes it: the retry
+        // takes the line (`ssh` fails only on `HOST_CHANGED`).
+        assert_eq!(kh.check_with_address(&web, Some("10.0.0.8"), &a), matched);
+        assert_eq!(kh.check_with_address(&web, Some("10.0.0.10"), &a), matched);
+        assert_eq!(kh.check_with_address(&web, Some("10.0.0.9"), &a), matched);
+        // A certificate is not checked by address.
+        let (dir, kh) = hosts(&format!(
+            "web.example {ka}\n10.0.0.7 {kb}\n",
+            ka = line("ssh-ed25519", &ed25519_blob(4))
+        ));
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.7"), &cert(4)),
+            HostKeyVerdict::Match {
+                file: dir.0.join("known_hosts"),
+                line: 1
+            }
+        );
+        // No retry for port 22: the address is the caller's check.
+        let plain = HostKeyQuery::for_host("web.example", 22, None);
+        assert_eq!(
+            kh.check_with_address(&plain, Some("10.0.0.7"), &ed25519_blob(4)),
+            HostKeyVerdict::Match {
+                file: dir.0.join("known_hosts"),
+                line: 1
             }
         );
     }
