@@ -62,6 +62,11 @@ struct Net {
     sharing: HashMap<DeviceId, Sharing>,
     /// (link sender, receiver, message), delivered first in, first out.
     queue: VecDeque<(DeviceId, DeviceId, Message)>,
+    /// Messages this rule matches are held back until [`Net::release_held`].
+    hold: Option<fn(&DeviceId, &DeviceId, &Message) -> bool>,
+    held: VecDeque<(DeviceId, DeviceId, Message)>,
+    /// Every delivered message as (link sender, receiver, kind, the result's maker).
+    log: Vec<(DeviceId, DeviceId, &'static str, Option<DeviceId>)>,
 }
 
 struct Sends<'a> {
@@ -88,6 +93,9 @@ impl Net {
             links: HashMap::new(),
             sharing: HashMap::new(),
             queue: VecDeque::new(),
+            hold: None,
+            held: VecDeque::new(),
+            log: Vec::new(),
         };
         for n in [R, A, B] {
             let me = SelfInfo {
@@ -155,27 +163,73 @@ impl Net {
 
     /// R explores from `origin`, a neighbor or R itself, and every message is delivered.
     fn explore(&mut self, origin: u8, depth: u32) -> Exploration {
+        let rid = self.start(origin, depth);
+        self.deliver();
+        self.finish(&rid)
+    }
+
+    /// R starts an exploration from `origin`; nothing is delivered yet.
+    fn start(&mut self, origin: u8, depth: u32) -> String {
         let request = ExploreRequest {
             origin: id(origin),
             route: Vec::new(),
             depth,
             timeout: Duration::from_secs(10),
         };
-        let rid = self
-            .with_agent(id(R), |agent, local, out, now| {
-                agent.explore(request, local, out, now)
-            })
-            .unwrap();
+        self.with_agent(id(R), |agent, local, out, now| {
+            agent.explore(request, local, out, now)
+        })
+        .unwrap()
+    }
+
+    /// Delivers messages until none is left but the held ones.
+    fn deliver(&mut self) {
         for _ in 0..10_000 {
             let Some((from, to, message)) = self.queue.pop_front() else {
-                break;
+                return;
             };
+            if self.hold.is_some_and(|hold| hold(&from, &to, &message)) {
+                self.held.push_back((from, to, message));
+                continue;
+            }
+            let (kind, maker) = match &message {
+                Message::Query(_) => ("query", None),
+                Message::Result(part) => ("result", Some(part.from)),
+                Message::Suppressed(_) => ("suppressed", None),
+                Message::Done(_) => ("done", None),
+            };
+            self.log.push((from, to, kind, maker));
             self.with_agent(to, |agent, local, out, now| {
                 agent.on_message(&from, message, local, out, now);
             });
         }
-        assert!(self.queue.is_empty(), "the exploration did not settle");
-        let x = self.agents[&id(R)].exploration(&rid).unwrap().clone();
+        panic!("the exploration did not settle");
+    }
+
+    /// Stops holding messages and queues the held ones.
+    fn release_held(&mut self) {
+        self.hold = None;
+        self.queue.extend(self.held.drain(..));
+    }
+
+    /// Where in the log `receiver` got a message of `kind` on the link from `sender`
+    /// (for a result, the one `maker` made).
+    fn delivered_at(&self, sender: u8, receiver: u8, kind: &str, maker: Option<u8>) -> usize {
+        self.log
+            .iter()
+            .position(|&(f, t, k, m)| {
+                f == id(sender) && t == id(receiver) && k == kind && m == maker.map(id)
+            })
+            .unwrap_or_else(|| panic!("{sender} → {receiver} {kind} was not delivered"))
+    }
+
+    /// The finished exploration of R.
+    fn finish(&self, rid: &str) -> Exploration {
+        assert!(
+            self.queue.is_empty() && self.held.is_empty(),
+            "the exploration did not settle"
+        );
+        let x = self.agents[&id(R)].exploration(rid).unwrap().clone();
         assert_eq!(x.state(), ExplorationState::Finished);
         x
     }
@@ -288,8 +342,9 @@ fn edge_ends(x: &Exploration) -> Vec<(LinkId, DeviceId, DeviceId)> {
 
 #[test]
 fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
-    // A reports R's link 1 under ID 9, and its link to B under ID 1, R's own link ID. B
-    // reports the A → B link under its real ID 2.
+    // A reports R's link 1 under ID 9 (RTT 66), and its link to B under ID 1, R's own link
+    // ID (RTT 77). B reports the A → B link under its real ID 2. R's own end of link 1 has
+    // RTT 5, so the local copy is told apart from both of A's reports.
     let net = || {
         let mut net = Net::new();
         net.link(
@@ -299,6 +354,7 @@ fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
             End::plain(),
             End {
                 link_id: Some(9),
+                rtt_ms: 66,
                 ..End::plain()
             },
         );
@@ -308,6 +364,7 @@ fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
             B,
             End {
                 link_id: Some(1),
+                rtt_ms: 77,
                 ..End::plain()
             },
             End::plain(),
@@ -319,16 +376,67 @@ fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
         e.sort();
         e
     };
-    // R's local view is merged first, A's report comes after it.
-    let local_first = net().explore(R, 2);
-    assert_eq!(edge_ends(&local_first), expected);
-    // A's report comes first; R's local view is merged when A's query visits R.
-    let report_first = net().explore(A, 1);
-    assert_eq!(edge_ends(&report_first), expected);
-    for x in [&local_first, &report_first] {
+    let assert_local_copy = |x: &Exploration| {
         let own = x.edges().iter().find(|e| e.link_id == link_id(1)).unwrap();
-        assert_eq!(own.rtt_ms, Some(5));
-    }
+        assert_eq!(
+            (own.dialer, own.acceptor, own.rtt_ms),
+            (id(R), id(A), Some(5))
+        );
+    };
+
+    // 1. Origin R: R merges its local view when it starts, before any report.
+    let mut first = net();
+    let rid = first.start(R, 2);
+    first.deliver();
+    let local_first = first.finish(&rid);
+    assert_eq!(edge_ends(&local_first), expected);
+    assert_local_copy(&local_first);
+
+    // 2. Origin A, delivered as sent: A forwards its query to R before it sends its own
+    //    result, so R merges its local view (on A's query) before A's report arrives.
+    let mut natural = net();
+    let rid = natural.start(A, 1);
+    natural.deliver();
+    assert!(
+        natural.delivered_at(A, R, "query", None) < natural.delivered_at(A, R, "result", Some(A))
+    );
+    let local_on_revisit = natural.finish(&rid);
+    assert_eq!(edge_ends(&local_on_revisit), expected);
+    assert_local_copy(&local_on_revisit);
+
+    // 3. Origin A, with A's query to R held back: A's report arrives before R merges its
+    //    local view. Before that, link 1 is already R's local copy (from the snapshot of
+    //    the start), not A's report of A → B.
+    let mut report_first = net();
+    report_first.hold =
+        Some(|from, to, m| *from == id(A) && *to == id(R) && matches!(m, Message::Query(_)));
+    let rid = report_first.start(A, 1);
+    report_first.deliver();
+    assert_eq!(report_first.held.len(), 1);
+    report_first.delivered_at(A, R, "result", Some(A));
+    let before_revisit = report_first.agents[&id(R)]
+        .exploration(&rid)
+        .unwrap()
+        .clone();
+    assert_eq!(before_revisit.state(), ExplorationState::Running);
+    assert_local_copy(&before_revisit);
+    assert!(
+        !before_revisit
+            .edges()
+            .iter()
+            .any(|e| e.link_id == link_id(1) && e.touches(&id(B))),
+        "{:?}",
+        before_revisit.edges()
+    );
+    report_first.release_held();
+    report_first.deliver();
+    assert!(
+        report_first.delivered_at(A, R, "result", Some(A))
+            < report_first.delivered_at(A, R, "query", None)
+    );
+    let after_revisit = report_first.finish(&rid);
+    assert_eq!(edge_ends(&after_revisit), expected);
+    assert_local_copy(&after_revisit);
 }
 
 /// R explores from itself over R → `near`, so `near`'s report of the A → B link comes first.
