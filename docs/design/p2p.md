@@ -286,7 +286,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
   4. 와이어 형식 상수: 프로토콜 형식의 정의라 동작값이 아니다(아래 표). 형식 모듈에 모은다.
 - 기본값의 원천은 코드의 기본값 표 하나다(`settings::DEFAULTS`, 키·값·출처 종류를 담는다). `Default` 구현과 `settings()`가 이 표에서 나오고, 시험이 설계 문서의 표를 읽어 이 원천과 값까지 대조한다([CI와 시험 환경](testing.md#설정값-시험)).
 - 코드 안 상수로만 있는 동작값은 두지 않는다. 정적 검사와 기본값 대조 시험이 지킨다([CI와 시험 환경](testing.md#설정값-시험)).
-- 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh·identity의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖). transport에 이번에 새로 정한 연결 목록 값은 처음부터 따른다([전송 추상화](transport.md#연결-목록)).
+- 적용 범위: `tasty-net-p2p`와 `tasty-net-rendezvous`는 처음부터 이 규칙을 따른다. develop에 이미 있는 transport·ssh의 상수(heartbeat 간격, 준비 기한, 출력 상한 등)는 이 규칙에 맞추는 후속 작업으로 둔다(이번 문서 작업 범위 밖). identity는 규칙에 맞췄다([기기 키·토큰](identity.md#설정값)). transport에 이번에 새로 정한 연결 목록 값은 처음부터 따른다([전송 추상화](transport.md#연결-목록)).
 
 ### 이 레포가 정하는 값
 
