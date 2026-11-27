@@ -634,6 +634,8 @@ struct Key {
     public: Vec<Vec<u8>>,
     /// The whole blob (a certificate is compared by it, `cert_compare`).
     blob: Vec<u8>,
+    /// The CA key of a certificate (`signature_key`).
+    ca: Option<Box<Key>>,
 }
 
 impl Key {
@@ -787,9 +789,11 @@ fn parse_blob_internal(blob: &[u8], allow_cert: bool) -> Option<Key> {
             vec![e.to_vec(), n.to_vec()]
         }
     };
-    if imp.cert {
-        cert_body(&mut b)?;
-    }
+    let ca = if imp.cert {
+        Some(Box::new(cert_body(&mut b)?))
+    } else {
+        None
+    };
     if !b.0.is_empty() {
         return None;
     }
@@ -799,6 +803,7 @@ fn parse_blob_internal(blob: &[u8], allow_cert: bool) -> Option<Key> {
         short: imp.short,
         public,
         blob: blob.to_vec(),
+        ca,
     })
 }
 
@@ -807,8 +812,8 @@ fn parse_blob_internal(blob: &[u8], allow_cert: bool) -> Option<Key> {
 /// pairs of strings, the CA key (a key that is not a certificate), the certificate type
 /// (user or host) and the signature type name. `sshkey_verify` of the CA signature
 /// (`:1976`) is not made: that needs the signature algorithms, and the CA is not trusted
-/// here (docs/design/ssh-backends.md "호스트 키 판정").
-fn cert_body(b: &mut Buf<'_>) -> Option<()> {
+/// here (docs/design/ssh-backends.md "호스트 키 판정"). The CA key is returned.
+fn cert_body(b: &mut Buf<'_>) -> Option<Key> {
     b.take(U64_BYTES)?;
     let kind = u32::from_be_bytes(b.take(U32_BYTES)?.try_into().ok()?);
     b.cstring()?;
@@ -822,7 +827,8 @@ fn cert_body(b: &mut Buf<'_>) -> Option<()> {
     let signature = b.string()?;
     // `sshkey_get_sigtype` (`sshkey.c:2119`-`:2142`).
     Buf(signature).cstring()?;
-    if parse_blob_internal(ca, false)?.cert {
+    let ca = parse_blob_internal(ca, false)?;
+    if ca.cert {
         return None;
     }
     if kind != CERT_TYPE_USER && kind != CERT_TYPE_HOST {
@@ -845,7 +851,7 @@ fn cert_body(b: &mut Buf<'_>) -> Option<()> {
             s.string()?;
         }
     }
-    Some(())
+    Some(ca)
 }
 
 /// `b64_pton`: whitespace (`isspace`) anywhere is skipped, the padding is required and the
@@ -1243,8 +1249,9 @@ impl KnownHosts {
     /// Judge the key blob a server sent for `query` (`check_hostkeys_by_key_or_type`,
     /// `hostfile.c:349`-`:405`, over the lines `ssh` loads). A blob that does not read as a
     /// key equals no line. A certificate is not checked against `@cert-authority` lines
-    /// (they are not trusted): it is checked for revocation by its public key and then
-    /// judged as its plain key, as `ssh` does when no authority accepts it
+    /// (they are not trusted): it is checked for revocation by its public key and by its CA
+    /// key, as `check_key_not_revoked` does (`hostfile.c:315`-`:332`), and then judged as its
+    /// plain key, as `ssh` does when no authority accepts it
     /// (`sshconnect.c:1474`-`:1486`). When the verdict is `HOST_NEW` ([`HostKeyVerdict::NotFound`]
     /// or [`HostKeyVerdict::DistrustedCaLine`]) and the query has
     /// [`HostKeyQuery::without_port`], that name is judged too and its
@@ -1296,10 +1303,13 @@ impl KnownHosts {
                 line: place.1,
             };
         }
+        // `check_key_not_revoked` (`hostfile.c:315`-`:332`): an `@revoked` line with the key,
+        // or for a certificate with its CA key (`:325`-`:328`); the first such line.
         if let Some(key) = &key
-            && let Some((e, _)) = lines
-                .iter()
-                .find(|(e, k)| e.marker == Marker::Revoked && key.equal_public(k))
+            && let Some((e, _)) = lines.iter().find(|(e, k)| {
+                e.marker == Marker::Revoked
+                    && (key.equal_public(k) || key.ca.as_ref().is_some_and(|ca| ca.equal_public(k)))
+            })
         {
             return HostKeyVerdict::Revoked {
                 file: e.file.clone(),
@@ -1629,6 +1639,56 @@ mod tests {
             HostKeyVerdict::Revoked {
                 file: dir.0.join("known_hosts"),
                 line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_revoked_ca_key_revokes_its_certificates() {
+        let key = ed25519_blob(4);
+        let ca = ed25519_blob(0xca);
+        let other = ed25519_blob(0xcb);
+        let known = format!("host.example {}\n", line("ssh-ed25519", &key));
+        // `cert(4)` is signed by the CA `0xca`.
+        let (dir, kh) = hosts(&format!("{known}@revoked * {}\n", line("ssh-ed25519", &ca)));
+        assert_eq!(
+            kh.check(&q("host.example"), &cert(4)),
+            HostKeyVerdict::Revoked {
+                file: dir.0.join("known_hosts"),
+                line: 2
+            }
+        );
+        // The plain key is not revoked by the CA key.
+        assert_eq!(
+            kh.check(&q("host.example"), &key),
+            HostKeyVerdict::Match {
+                file: dir.0.join("known_hosts"),
+                line: 1
+            }
+        );
+        // Another CA key revoked: the verdict of the plain key.
+        let (dir, kh) = hosts(&format!(
+            "{known}@revoked * {}\n",
+            line("ssh-ed25519", &other)
+        ));
+        assert_eq!(
+            kh.check(&q("host.example"), &cert(4)),
+            HostKeyVerdict::Match {
+                file: dir.0.join("known_hosts"),
+                line: 1
+            }
+        );
+        // The first `@revoked` line with the key or the CA key is the place.
+        let (dir, kh) = hosts(&format!(
+            "{known}@revoked * {}\n@revoked * {}\n",
+            line("ssh-ed25519", &ca),
+            line("ssh-ed25519", &key)
+        ));
+        assert_eq!(
+            kh.check(&q("host.example"), &cert(4)),
+            HostKeyVerdict::Revoked {
+                file: dir.0.join("known_hosts"),
+                line: 2
             }
         );
     }
