@@ -363,16 +363,38 @@ mod no_replace_rename {
     }
 
     #[test]
-    fn without_the_rename_and_hard_links_publication_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = {
-            let _unsupported = fault::fail_rename(UNSUPPORTED[1]);
-            let _deny = fault::fail_link(libc::EACCES);
-            DeviceKey::load_or_create(dir.path()).unwrap_err()
-        };
-        assert_publish_error(&error);
-        assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
-        assert!(temps_in(dir.path()).is_empty());
+    fn without_the_rename_and_hard_links_publication_fails_with_both_errors() {
+        for code in UNSUPPORTED {
+            let dir = tempfile::tempdir().unwrap();
+            let error = {
+                let _unsupported = fault::fail_rename(code);
+                let _deny = fault::fail_link(libc::EACCES);
+                DeviceKey::load_or_create(dir.path()).unwrap_err()
+            };
+            assert_publish_error(&error);
+            let IdentityError::Io { source, .. } = &error else {
+                unreachable!()
+            };
+            // The kind is the one of the link; the message names both steps and both errors.
+            assert_eq!(source.kind(), io::ErrorKind::PermissionDenied, "{source:?}");
+            let message = source.to_string();
+            for part in [
+                "hard link".to_owned(),
+                "rename".to_owned(),
+                format!("os error {}", libc::EACCES),
+                format!("os error {code}"),
+            ] {
+                assert!(message.contains(&part), "{part:?} missing in {message:?}");
+            }
+            let link = std::error::Error::source(source).unwrap();
+            assert!(
+                link.to_string()
+                    .contains(&format!("os error {}", libc::EACCES)),
+                "{link:?}"
+            );
+            assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
+            assert!(temps_in(dir.path()).is_empty());
+        }
     }
 
     #[test]

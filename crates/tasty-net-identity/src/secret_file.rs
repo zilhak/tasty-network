@@ -210,16 +210,47 @@ pub(crate) enum Published {
 /// tried first (Linux and Android `renameat2` with `RENAME_NOREPLACE`, macOS and iOS
 /// `renamex_np` with `RENAME_EXCL`); where the OS or the file system does not offer it, a hard
 /// link, which never replaces either. `AlreadyExists` means a file is at `target`, and `temp`
-/// is then still there. Any other error is returned as it is.
+/// is then still there. Any other error is returned as it is, except that a hard link which
+/// fails after the OS refused the rename as not offered keeps both errors ([`FallbackError`]).
 pub(crate) fn publish_new(temp: &Path, target: &Path) -> io::Result<Published> {
     #[cfg(test)]
     fault::publish_competitor(target);
     match rename_noreplace(temp, target) {
         Ok(()) => Ok(Published::Renamed),
-        Err(error) if os::no_replace_unsupported(&error) => {
-            hard_link(temp, target).map(|()| Published::Linked)
-        }
+        Err(rename) if os::no_replace_unsupported(&rename) => match hard_link(temp, target) {
+            Ok(()) => Ok(Published::Linked),
+            // Lost to another creator, or no rename was tried at all (Windows and other Unix
+            // systems, whose `rename` error carries no OS error code): the link error as it is.
+            Err(link) if link.kind() == io::ErrorKind::AlreadyExists => Err(link),
+            Err(link) if rename.raw_os_error().is_none() => Err(link),
+            Err(link) => Err(io::Error::new(link.kind(), FallbackError { rename, link })),
+        },
         Err(error) => Err(error),
+    }
+}
+
+/// A hard link that failed after the rename that refuses to replace was refused as not
+/// offered. Both OS errors are in the message; the kind of the outer `io::Error` is the one of
+/// the link, and the link error is the source.
+#[derive(Debug)]
+struct FallbackError {
+    rename: io::Error,
+    link: io::Error,
+}
+
+impl std::fmt::Display for FallbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "hard link failed ({}) after the rename that refuses to replace was not offered ({})",
+            self.link, self.rename
+        )
+    }
+}
+
+impl std::error::Error for FallbackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.link)
     }
 }
 

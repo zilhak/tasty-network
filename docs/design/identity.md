@@ -57,7 +57,7 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 1. 권한을 건 임시 파일(같은 디렉터리, 고유 이름, `create_new`로 만들어 기존 파일·심볼릭 링크를 따라가지 않음)에 키를 쓰고 `sync_all`한다.
 2. 임시 파일을 `device_key` 이름으로 게시한다. 대상이 있으면 실패하고 덮어쓰지 않는 방법만 쓴다(아래 "게시 방법"). 대상을 바꿔 버리는 보통 `rename`은 쓰지 않는다.
 3. 게시가 이름을 옮겼으면 임시 이름은 이미 없다. 하드 링크로 게시했거나, `AlreadyExists`였거나, 그 밖의 오류면 임시 이름을 지운다. 지우지 못하면 `IdentityError::Leftover`다(키가 제자리에 있으면, 곧 하드 링크 게시나 `AlreadyExists`면 `cause`가 없다). `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
-4. OS와 파일 시스템이 덮어쓰지 않는 이름 옮기기도 하드 링크도 지원하지 않으면 `IdentityError::Io`(`FileOp::Publish`)를 돌려준다. 보통 `rename`이나 확인 뒤 쓰기처럼 덜 안전한 방식으로 조용히 바꾸지 않는다.
+4. OS와 파일 시스템이 덮어쓰지 않는 이름 옮기기도 하드 링크도 지원하지 않으면 `IdentityError::Io`(`FileOp::Publish`)를 돌려준다. 이름 옮기기가 "지원하지 않음"으로 실패한 뒤 하드 링크도 실패했으면, 그 오류의 `io::Error`는 종류가 하드 링크 쪽이고, 메시지에 두 단계(하드 링크, 이름 옮기기)와 각 OS 오류 번호가 모두 남는다. 하드 링크 오류는 그 `source`다. 하드 링크가 `AlreadyExists`이면(다른 생성자가 이김) 그대로 돌려준다. 이름 옮기기를 시도하지 않는 OS(Windows·그 밖의 Unix)의 하드 링크 오류도 그대로다. 보통 `rename`이나 확인 뒤 쓰기처럼 덜 안전한 방식으로 조용히 바꾸지 않는다.
 
 알려진 한계(Unix): umask가 소유자 권한 비트를 빼면(예: 0277·0377·0400) 이 크레이트가 새 디렉터리·잠금 파일을 만든 직후 0700·0600을 걸기 전의 짧은 틈이 생긴다. 그 틈에 같은 경로로 들어온 다른 호출은 권한 오류로 실패할 수 있다. 오류 종류는 어디서 막히느냐에 따라 다르다.
 
@@ -72,8 +72,8 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 
 | OS | 먼저 쓰는 방법 | 그 방법이 없을 때 |
 |---|---|---|
-| Linux·Android | `renameat2(AT_FDCWD, 임시, AT_FDCWD, device_key, RENAME_NOREPLACE)`를 `libc::syscall(SYS_renameat2, …)`로 부른다. bionic의 `renameat2` 래퍼는 API 30부터라 minSdk 29에서 쓸 수 없다. 번호는 libc 크레이트의 `SYS_renameat2`(aarch64 276, x86_64 316) | `ENOSYS`(커널 3.15 전)나 `EINVAL`(그 플래그를 모르는 파일 시스템)이면 하드 링크. 그 밖의 오류는 그대로 `Publish` 오류 |
-| macOS·iOS | `renamex_np(임시, device_key, RENAME_EXCL)`(macOS 10.12·iOS 10부터. Rust가 지원하는 가장 낮은 판에 이미 있다) | `ENOTSUP`(그 플래그를 지원하지 않는 파일 시스템)이나 `EINVAL`이면 하드 링크. 그 밖의 오류는 그대로 |
+| Linux·Android | `renameat2(AT_FDCWD, 임시, AT_FDCWD, device_key, RENAME_NOREPLACE)`를 `libc::syscall(SYS_renameat2, …)`로 부른다. bionic의 `renameat2` 래퍼는 API 30부터라 minSdk 29에서 쓸 수 없다. 번호는 libc 크레이트의 `SYS_renameat2`(aarch64 276, x86_64 316) | `ENOSYS`(커널 3.15 전)나 `EINVAL`(그 플래그를 모르는 파일 시스템)이면 하드 링크. 하드 링크도 실패하면 두 오류를 모두 담은 `Publish` 오류(위 4). 그 밖의 오류는 그대로 `Publish` 오류 |
+| macOS·iOS | `renamex_np(임시, device_key, RENAME_EXCL)`(macOS 10.12·iOS 10부터. Rust가 지원하는 가장 낮은 판에 이미 있다) | `ENOTSUP`(그 플래그를 지원하지 않는 파일 시스템)이나 `EINVAL`이면 하드 링크. 하드 링크도 실패하면 Linux와 같다. 그 밖의 오류는 그대로 |
 | Windows | 하드 링크(`std::fs::hard_link` = `CreateHardLinkW`). 이전과 같다 | 해당 없음 |
 | 그 밖의 Unix | 하드 링크 | 해당 없음 |
 
