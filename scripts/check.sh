@@ -8,8 +8,8 @@
 #   scripts/check.sh test [ARGS]    cargo test --workspace. ARGS는 cargo test에 그대로 넘긴다
 #   scripts/check.sh check          cargo check --workspace --all-targets
 #   scripts/check.sh transport-no-ssh
-#                                   tasty-net-transport를 SSH 없이(--no-default-features) clippy·시험하고,
-#                                   그 의존 그래프에 tasty-net-ssh가 없는지 본다
+#                                   그래프 판정 자체 시험 뒤 tasty-net-transport를 SSH 없이(--no-default-features)
+#                                   clippy·시험하고, 그 의존 그래프에 tasty-net-ssh가 없는지 본다
 #   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh p2p-isolation  판정 자체 시험 뒤 P2P 크레이트의 workspace 안 의존 범위 (scripts/check-p2p-isolation.sh)
@@ -39,32 +39,91 @@ cmd_lint() { run cargo clippy --workspace --all-targets --locked -- -D warnings;
 cmd_test() { run cargo test --workspace --locked "$@"; }
 cmd_check() { run cargo check --workspace --all-targets --locked; }
 cmd_shell() { run bash scripts/check-shell-assets.sh; }
-# transport의 의존 그래프(모든 target, 일반·빌드·dev 의존)에 tasty-net-ssh가 있으면 yes, 없으면 no.
+# transport의 의존 그래프(모든 target, 일반·빌드·dev 의존)를 패키지마다 한 줄로 찍는다.
+# 자체 시험이 이 함수를 가짜로 바꿔 끼운다.
+transport_tree() {
+    run cargo tree --locked -p tasty-net-transport "$@" --target all -e normal,build,dev \
+        --prefix none -f '{p}'
+}
+# 그 그래프에 tasty-net-ssh가 있으면 yes, 없으면 no를 찍는다. cargo tree가 실패하거나 출력에
+# tasty-net-transport 줄이 없으면 판정하지 않고 1로 끝난다. 명령 치환 안에서는 errexit가 꺼지므로
+# 종료 코드를 직접 본다.
 transport_tree_has_ssh() {
-    local tree
-    tree=$(run cargo tree --locked -p tasty-net-transport "$@" --target all -e normal,build,dev \
-        --prefix none -f '{p}')
+    local tree rc=0
+    tree=$(transport_tree "$@") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "cargo tree가 실패했다(종료 코드 $rc, 인자: ${*:-기본 feature})" >&2
+        return 1
+    fi
     if ! grep -q '^tasty-net-transport v' <<<"$tree"; then
         echo "cargo tree 출력에 tasty-net-transport가 없다" >&2
         return 1
     fi
     if grep -q '^tasty-net-ssh v' <<<"$tree"; then echo yes; else echo no; fi
 }
-# SSH feature 계약 1단계(docs/design/ssh-backends.md "feature 계약"): SSH 없는 transport가 서고,
-# 그 그래프에 tasty-net-ssh가 없다. 기본 feature의 그래프에 tasty-net-ssh가 보이는지 먼저 확인해
-# 판정이 그 줄을 찾을 수 있는지 대조한다.
-cmd_transport_no_ssh() {
+# 그래프 판정: 기본 feature의 그래프에 tasty-net-ssh가 보이는지 먼저 확인해 판정이 그 줄을 찾을 수
+# 있는지 대조하고, --no-default-features 그래프에 그 줄이 없어야 통과(0)다.
+transport_graph_verdict() {
     local got
-    got=$(transport_tree_has_ssh)
+    if ! got=$(transport_tree_has_ssh); then
+        return 1
+    fi
     if [[ "$got" != yes ]]; then
         echo "대조 실패: 기본 feature의 transport 그래프에서 tasty-net-ssh를 찾지 못했다" >&2
         return 1
     fi
-    got=$(transport_tree_has_ssh --no-default-features)
+    if ! got=$(transport_tree_has_ssh --no-default-features); then
+        return 1
+    fi
     if [[ "$got" != no ]]; then
         echo "실패: --no-default-features의 transport 그래프에 tasty-net-ssh가 있다" >&2
         return 1
     fi
+}
+# 그래프 판정의 자체 시험: 가짜 cargo tree(출력과 종료 코드)를 넣어 통과·실패를 본다.
+transport_no_ssh_self_test() {
+    local root='tasty-net-transport v0.1.0 (/w/crates/tasty-net-transport)'
+    local ssh='tasty-net-ssh v0.1.0 (/w/crates/tasty-net-ssh)'
+    local other='tracing v0.1.44'
+    local failed=0 name want on_out on_rc off_out off_rc got
+    # 이름|기대(0 통과, 1 실패)|기본 출력|기본 종료 코드|SSH 없음 출력|SSH 없음 종료 코드
+    local cases=(
+        "정상: 기본에 있고 SSH 없음에 없다|0|$root;$ssh;$other|0|$root;$other|0"
+        "SSH 없음 그래프에 tasty-net-ssh가 남았다|1|$root;$ssh|0|$root;$ssh|0"
+        "기본 그래프에 tasty-net-ssh가 없다(대조 실패)|1|$root;$other|0|$root;$other|0"
+        "SSH 없음 cargo tree가 루트 줄을 찍고 42로 끝난다|1|$root;$ssh|0|$root|42"
+        "기본 cargo tree가 줄을 다 찍고 101로 끝난다|1|$root;$ssh|101|$root|0"
+        "SSH 없음 출력에 루트 줄이 없다|1|$root;$ssh|0||0"
+    )
+    for c in "${cases[@]}"; do
+        IFS='|' read -r name want on_out on_rc off_out off_rc <<<"$c"
+        got=0
+        (
+            transport_tree() {
+                local out=$on_out rc=$on_rc
+                if [[ " $* " == *" --no-default-features "* ]]; then
+                    out=$off_out
+                    rc=$off_rc
+                fi
+                [[ -n "$out" ]] && tr ';' '\n' <<<"$out"
+                return "$rc"
+            }
+            transport_graph_verdict
+        ) >/dev/null 2>&1 || got=1
+        if [[ "$got" == "$want" ]]; then
+            echo "자체 시험 통과: $name" >&2
+        else
+            echo "자체 시험 실패: $name (기대 $want, 결과 $got)" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+# SSH feature 계약 1단계(docs/design/ssh-backends.md "feature 계약"): 그래프 판정의 자체 시험 뒤,
+# SSH 없는 transport의 그래프에 tasty-net-ssh가 없고(기본 feature 그래프와 대조) 그 조합이 선다.
+cmd_transport_no_ssh() {
+    transport_no_ssh_self_test
+    transport_graph_verdict
     echo "transport --no-default-features 그래프에 tasty-net-ssh 없음(대조: 기본 feature에는 있음)" >&2
     run cargo clippy --locked -p tasty-net-transport --no-default-features --all-targets -- -D warnings
     run cargo test --locked -p tasty-net-transport --no-default-features

@@ -23,7 +23,7 @@
 | `bash scripts/check.sh fmt` | `cargo fmt --all --check` |
 | `bash scripts/check.sh lint` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `bash scripts/check.sh test` | `cargo test --workspace --locked` |
-| `bash scripts/check.sh transport-no-ssh` | `tasty-net-transport`를 `--no-default-features`(SSH 없음)로 clippy·test하고, 그 `cargo tree`에 `tasty-net-ssh`가 없는지 확인(기본 feature 그래프와 대조) |
+| `bash scripts/check.sh transport-no-ssh` | (판정 자체 시험 포함) `tasty-net-transport`를 `--no-default-features`(SSH 없음)로 clippy·test하고, 그 `cargo tree`에 `tasty-net-ssh`가 없는지 확인(기본 feature 그래프와 대조) |
 | `bash scripts/check.sh p2p-isolation` | P2P 크레이트의 workspace 안 의존 범위(자체 시험 포함) |
 | `bash scripts/check.sh no-hidden-constants` | 설정 모듈 밖 숨은 동작값 없음과 설정 표 키 대조(자체 시험 포함, 목록 `scripts/no-hidden-constants.list`) |
 | `bash scripts/check.sh p2p-example-pair` | 서버와 `p2p_peer` 예제 두 개를 루프백에 띄워 펀칭·echo와 세 프로세스 종료를 상한 안에서 확인(자체 시험 포함, `all`에 없고 CI의 clippy·test 잡이 부른다) |
