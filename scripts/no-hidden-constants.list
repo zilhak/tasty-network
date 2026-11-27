@@ -223,18 +223,18 @@ target	crates/tasty-net-ssh/src/
 settings	crates/tasty-net-ssh/src/settings.rs
 table	crates/tasty-net-ssh/src/settings.rs	transport.md	SSH 크레이트 설정값
 allow	crates/tasty-net-ssh/src/system/cancel.rs	next_id.fetch_add(1,	자식 등록 번호를 하나씩 늘린다
-allow	crates/tasty-net-ssh/src/system/discovery.rs	const PORT_COMMAND_EXITED_INSTANCE_CODE: i32 = 3	원격 하위 명령과의 약속: 인스턴스가 끝났다 (transport.md SSH 크레이트 설정값)
-allow	crates/tasty-net-ssh/src/system/discovery.rs	Some(255) |	ssh 종료 코드 255는 연결 실패
+allow	crates/tasty-net-ssh/src/discovery.rs	const PORT_COMMAND_EXITED_INSTANCE_CODE: i32 = 3	원격 하위 명령과의 약속: 인스턴스가 끝났다 (transport.md SSH 크레이트 설정값)
+allow	crates/tasty-net-ssh/src/discovery.rs	Some(255) |	ssh 종료 코드 255는 연결 실패
 allow	crates/tasty-net-ssh/src/system/discovery.rs	nap * 2	발견 폴링 간격을 두 배씩 늘린다(discovery.poll_min에서 poll_max까지)
 allow	crates/tasty-net-ssh/src/system/discovery.rs	[0u8; 8192]	파이프를 한 번에 읽는 버퍼(읽는 단위이지 상한이 아니다)
 allow	crates/tasty-net-ssh/src/system/discovery.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
 allow	crates/tasty-net-ssh/src/system/discovery.rs	const KILLED_EXIT_CODE: Option<i32> = if cfg!(windows) { Some(1) } else { None }	OS: Windows TerminateProcess가 남기는 종료 코드 1
-allow	crates/tasty-net-ssh/src/system/discovery.rs	const SECRET_RUN: usize = 32	stderr 가리기 규칙: 토큰(hex 64자)의 절반 (transport.md SSH 크레이트 설정값)
-allow	crates/tasty-net-ssh/src/system/discovery.rs	cmds[0]	명시 경로 명령의 첫째(cat)
-allow	crates/tasty-net-ssh/src/system/discovery.rs	cmds[1]	명시 경로 명령의 둘째(type)
-allow	crates/tasty-net-ssh/src/system/discovery.rs	-> [String; 2]	명시 경로 명령은 cat과 type 둘
-allow	crates/tasty-net-ssh/src/system/discovery.rs	const AUTO_FALLBACK_CHAIN: [PortMode; 3] = [PortMode::Subcommand, PortMode::FileUnix, PortMode::FileWindows,]	Auto 사슬의 세 단계
-allow	crates/tasty-net-ssh/src/system/discovery.rs	const PRIORITY: [PortDiscoveryFailureKind; 6] = [PortDiscoveryFailureKind::Cancelled, PortDiscoveryFailureKind::RemoteInstanceExited, PortDiscoveryFailureKind::TimedOut, PortDiscoveryFailureKind::SshConnectionFailed, PortDiscoveryFailureKind::RemoteInstanceNotRunning, PortDiscoveryFailureKind::PortParseFailed,]	실패 분류 여섯의 대표 순서
+allow	crates/tasty-net-ssh/src/discovery.rs	const SECRET_RUN: usize = 32	stderr 가리기 규칙: 토큰(hex 64자)의 절반 (transport.md SSH 크레이트 설정값)
+allow	crates/tasty-net-ssh/src/discovery.rs	cmds[0]	명시 경로 명령의 첫째(cat)
+allow	crates/tasty-net-ssh/src/discovery.rs	cmds[1]	명시 경로 명령의 둘째(type)
+allow	crates/tasty-net-ssh/src/discovery.rs	-> [String; 2]	명시 경로 명령은 cat과 type 둘
+allow	crates/tasty-net-ssh/src/discovery.rs	const AUTO_FALLBACK_CHAIN: [PortMode; 3] = [PortMode::Subcommand, PortMode::FileUnix, PortMode::FileWindows,]	Auto 사슬의 세 단계
+allow	crates/tasty-net-ssh/src/discovery.rs	const PRIORITY: [PortDiscoveryFailureKind; 6] = [PortDiscoveryFailureKind::Cancelled, PortDiscoveryFailureKind::RemoteInstanceExited, PortDiscoveryFailureKind::TimedOut, PortDiscoveryFailureKind::SshConnectionFailed, PortDiscoveryFailureKind::RemoteInstanceNotRunning, PortDiscoveryFailureKind::PortParseFailed,]	실패 분류 여섯의 대표 순서
 allow	crates/tasty-net-ssh/src/lib.rs	&path[1..]	앞의 ~ 한 글자를 뗀다
 allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_MINUTE: u64 = 60	OpenSSH 시간 형식의 단위 m
 allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE	OpenSSH 시간 형식의 단위 h

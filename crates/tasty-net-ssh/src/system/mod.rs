@@ -57,9 +57,9 @@ mod tests {
         assert_eq!(p, PathBuf::from("ssh"));
     }
 
-    /// Every tracing event of the system backend names its target, so moving the modules into
-    /// `system` did not change the targets log filters select (the default would be the new
-    /// module path).
+    /// Every tracing event of the system backend, and of the modules it shares with the
+    /// embedded backend, names its target, so moving the modules into and out of `system` did
+    /// not change the targets log filters select (the default would be the new module path).
     #[test]
     fn every_system_event_names_its_target() {
         let sources = [
@@ -68,6 +68,8 @@ mod tests {
             ("discovery.rs", include_str!("discovery.rs")),
             ("spawn.rs", include_str!("spawn.rs")),
             ("tunnel.rs", include_str!("tunnel.rs")),
+            ("../cancel.rs", include_str!("../cancel.rs")),
+            ("../discovery.rs", include_str!("../discovery.rs")),
         ];
         let levels = ["trace", "debug", "info", "warn", "error"];
         let mut events = 0;
@@ -84,8 +86,8 @@ mod tests {
                 }
             }
         }
-        // The scan sees the events: the backend has twenty (one in this file, three in
-        // cancel.rs, ten in discovery.rs, six in tunnel.rs).
+        // The scan sees the events: there are twenty (one in this file, two in cancel.rs, six
+        // in discovery.rs, six in tunnel.rs, one in ../cancel.rs, four in ../discovery.rs).
         assert!(events >= 20, "{events} events found");
     }
 }
