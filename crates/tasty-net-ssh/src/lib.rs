@@ -15,7 +15,9 @@
 //! | [`SshCancel`] ([`SshCancelScope`] is its return type) | consumers that stop a port discovery from another thread |
 //! | [`discover_remote_port`] · [`PortDiscoveryConfig`] · [`decode_port`] · [`PortDecodeError`] | consumers that read the remote record over SSH (the record decoder is passed in) |
 //! | [`detect_port_mode`] | consumers that find which mode reaches a remote host (shell detection) |
-//! | [`SSH_CONNECT_TIMEOUT`] · [`PORT_DISCOVERY_STEP_TIMEOUT`] · [`PORT_DISCOVERY_TOTAL_TIMEOUT`] | consumers that match progress display and messages to the same values |
+//! | [`SshSettings`] ([`settings`]) · [`SshLauncher::with_settings`] · [`SshLauncher::settings`] | consumers that set or show the times, counts and limits of this crate |
+//! | [`SshLauncher::applied_options`] · [`AppliedOption`] · [`OptionSource`] | consumers that show which ssh option value a target runs with and where it comes from |
+//! | [`SSH_CONNECT_TIMEOUT`] · [`PORT_DISCOVERY_STEP_TIMEOUT`] · [`PORT_DISCOVERY_TOTAL_TIMEOUT`] | the defaults of `ssh.connect_timeout`, `discovery.step_timeout` and `discovery.total_timeout`; the values in effect are in [`SshLauncher::settings`] |
 //! | [`PortDiscoveryError`] · [`PortDiscoveryFailureKind`] · [`PortModeParseError`] | consumers that branch on the failure cause (messages come from the kind, `Display` is fixed English) |
 //! | [`PORT_COMMAND_EXITED_INSTANCE_CODE`] | the remote subcommand and port discovery, which share this exit code |
 //! | [`tunnel_drop_totals`] | hosts that measure the time spent releasing tunnels |
@@ -28,27 +30,30 @@
 mod cancel;
 mod discovery;
 mod listener;
+pub mod settings;
 mod spawn;
 mod tunnel;
 
 pub use cancel::{SshCancel, SshCancelScope};
 pub use discovery::{
-    PORT_COMMAND_EXITED_INSTANCE_CODE, PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT,
-    PortDecodeError, PortDiscoveryConfig, PortDiscoveryError, PortDiscoveryFailureKind, PortMode,
-    PortModeParseError, decode_port, detect_port_mode, discover_remote_port,
+    PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
+    PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port, detect_port_mode,
+    discover_remote_port,
 };
 pub use listener::{
     ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
 };
+pub use settings::{
+    PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT, SshSettings,
+};
 pub use spawn::{SpawnFn, SpawnHook, SshLauncher};
 pub use tunnel::{Backoff, SshTunnel, TunnelError, tunnel_drop_totals};
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Default ssh `ConnectTimeout`. It bounds connection setup, not keepalive after it. A
-/// `ConnectTimeout` in the target's extra options comes first and wins.
-pub const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+use settings::Source;
 
 /// Path of the system `ssh` binary.
 ///
@@ -106,30 +111,38 @@ impl SshTarget {
 /// Adds the common ssh `-o` options to `args`.
 ///
 /// - `BatchMode=no`: allows the host key and passphrase prompts of a first connection.
-/// - `ServerAliveInterval=15`, `ServerAliveCountMax=3`: ssh ends itself within about 45 s
+/// - `ServerAliveInterval`, `ServerAliveCountMax` (`ssh.server_alive_interval`,
+///   `ssh.server_alive_count_max`; by default 15 s and 3): ssh ends itself within about 45 s
 ///   after the network drops.
 /// - `StrictHostKeyChecking=accept-new` only with `verify`. Without it no host key option is
 ///   passed, so the user's options, the ssh config, or the ssh default (`ask`) decide.
 /// - `forced`: options the caller requires (`Key=Value`, each after `-o`), such as the tunnel's
 ///   `ExitOnForwardFailure=yes`.
-/// - `ConnectTimeout` ([`SSH_CONNECT_TIMEOUT`]).
+/// - `ConnectTimeout` (`ssh.connect_timeout`, by default [`SSH_CONNECT_TIMEOUT`]).
 ///
 /// ssh uses the **first** value of an option. The options above `extra_options` therefore win
 /// over them, and `ConnectTimeout` goes last so that a user `ConnectTimeout` in
-/// `extra_options` wins over the default. Command line `-o` options also win over the ssh
-/// config file.
+/// `extra_options` wins over the setting. Command line `-o` options also win over the ssh
+/// config file. [`SshLauncher::applied_options`] reports the result.
 pub(crate) fn push_common_opts(
     args: &mut Vec<String>,
     target: &SshTarget,
     verify: bool,
     forced: &[&str],
+    settings: &SshSettings,
 ) {
     args.push("-o".into());
     args.push("BatchMode=no".into());
     args.push("-o".into());
-    args.push("ServerAliveInterval=15".into());
+    args.push(format!(
+        "{SERVER_ALIVE_INTERVAL_OPTION}={}",
+        settings.server_alive_interval().as_secs()
+    ));
     args.push("-o".into());
-    args.push("ServerAliveCountMax=3".into());
+    args.push(format!(
+        "{SERVER_ALIVE_COUNT_MAX_OPTION}={}",
+        settings.server_alive_count_max()
+    ));
     if verify {
         args.push("-o".into());
         args.push("StrictHostKeyChecking=accept-new".into());
@@ -152,7 +165,122 @@ pub(crate) fn push_common_opts(
     }
     // Last, so that the user's value wins (see above).
     args.push("-o".into());
-    args.push(format!("ConnectTimeout={}", SSH_CONNECT_TIMEOUT.as_secs()));
+    args.push(format!(
+        "{CONNECT_TIMEOUT_OPTION}={}",
+        settings.connect_timeout().as_secs()
+    ));
+}
+
+const CONNECT_TIMEOUT_OPTION: &str = "ConnectTimeout";
+const SERVER_ALIVE_INTERVAL_OPTION: &str = "ServerAliveInterval";
+const SERVER_ALIVE_COUNT_MAX_OPTION: &str = "ServerAliveCountMax";
+
+/// The value of the first option `name` in the target's extra options (`Key=Value` or
+/// `Key Value`; ssh compares option names without case), as ssh would read it.
+fn target_option<'a>(target: &'a SshTarget, name: &str) -> Option<&'a str> {
+    target.extra_options.iter().find_map(|opt| {
+        let opt = opt.trim();
+        let split = opt.find(|c: char| c == '=' || c.is_whitespace())?;
+        let (key, rest) = opt.split_at(split);
+        let value = rest.trim_start().trim_start_matches('=').trim();
+        key.eq_ignore_ascii_case(name).then_some(value)
+    })
+}
+
+/// The connect timeout ssh runs with for `target`: the target's own whole-second
+/// `ConnectTimeout` if it has one, otherwise `ssh.connect_timeout`. Port discovery classifies a
+/// slow connection failure with it.
+pub(crate) fn connect_timeout_for(settings: &SshSettings, target: &SshTarget) -> Duration {
+    target_option(target, CONNECT_TIMEOUT_OPTION)
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or_else(|| settings.connect_timeout(), Duration::from_secs)
+}
+
+/// Where the value of an ssh option this crate passes comes from, for one target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionSource {
+    /// The setting of the launcher ([`SshSettings`]), with its own source.
+    Setting(Source),
+    /// The target's `extra_options`, which ssh reads first.
+    Target,
+}
+
+impl OptionSource {
+    /// `default`, `configured` or `target`.
+    pub fn name(self) -> &'static str {
+        match self {
+            OptionSource::Setting(s) => s.name(),
+            OptionSource::Target => "target",
+        }
+    }
+}
+
+impl fmt::Display for OptionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One ssh option as ssh uses it for a target ([`SshLauncher::applied_options`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedOption {
+    /// The setting the option comes from (`ssh.connect_timeout` and so on).
+    pub key: &'static str,
+    /// The ssh option name (`ConnectTimeout` and so on).
+    pub option: &'static str,
+    /// The value ssh uses, as its command line or the target's option writes it (seconds or a
+    /// count).
+    pub value: String,
+    /// Where that value comes from.
+    pub source: OptionSource,
+}
+
+impl fmt::Display for AppliedOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} ({}) = {} ({})",
+            self.key, self.option, self.value, self.source
+        )
+    }
+}
+
+/// The ssh options of [`push_common_opts`] that come from settings, as ssh uses them for
+/// `target`. `ServerAliveInterval` and `ServerAliveCountMax` go before the target's options and
+/// win over them; the target's own `ConnectTimeout` goes before the setting and wins over it.
+pub(crate) fn applied_options(settings: &SshSettings, target: &SshTarget) -> Vec<AppliedOption> {
+    let from_setting = |key, option, value: String| AppliedOption {
+        key,
+        option,
+        value,
+        source: OptionSource::Setting(settings.source(key)),
+    };
+    let connect = match target_option(target, CONNECT_TIMEOUT_OPTION) {
+        Some(value) => AppliedOption {
+            key: settings::CONNECT_TIMEOUT,
+            option: CONNECT_TIMEOUT_OPTION,
+            value: value.to_owned(),
+            source: OptionSource::Target,
+        },
+        None => from_setting(
+            settings::CONNECT_TIMEOUT,
+            CONNECT_TIMEOUT_OPTION,
+            settings.connect_timeout().as_secs().to_string(),
+        ),
+    };
+    vec![
+        from_setting(
+            settings::SERVER_ALIVE_INTERVAL,
+            SERVER_ALIVE_INTERVAL_OPTION,
+            settings.server_alive_interval().as_secs().to_string(),
+        ),
+        from_setting(
+            settings::SERVER_ALIVE_COUNT_MAX,
+            SERVER_ALIVE_COUNT_MAX_OPTION,
+            settings.server_alive_count_max().to_string(),
+        ),
+        connect,
+    ]
 }
 
 /// Expands a leading `~` or `~/` to the home directory. ssh is started without a shell, so
@@ -522,7 +650,7 @@ mod tests {
 
     fn opts(target: &SshTarget, verify: bool) -> Vec<String> {
         let mut args = Vec::new();
-        push_common_opts(&mut args, target, verify, &[]);
+        push_common_opts(&mut args, target, verify, &[], &SshSettings::default());
         args
     }
 

@@ -8,7 +8,7 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{SshTarget, push_common_opts, resolve_ssh_path};
+use crate::{AppliedOption, SshSettings, SshTarget, push_common_opts, resolve_ssh_path};
 
 /// Signature of a custom child creation function.
 pub type SpawnFn = dyn Fn(Command) -> io::Result<Child> + Send + Sync;
@@ -55,13 +55,14 @@ impl fmt::Debug for SpawnHook {
     }
 }
 
-/// How to start `ssh`: the program, whether host keys are checked automatically, and the
-/// child creation hook. Tunnels and port discovery take it.
+/// How to start `ssh`: the program, whether host keys are checked automatically, the child
+/// creation hook, and the settings ([`SshSettings`]). Tunnels and port discovery take it.
 #[derive(Clone, Debug)]
 pub struct SshLauncher {
     program: PathBuf,
     verify: bool,
     spawn_hook: SpawnHook,
+    settings: SshSettings,
     /// This ssh refused `ForkAfterAuthentication` (OpenSSH before 8.7). Shared by clones, so
     /// later tunnels leave the option out at once.
     fork_option_refused: Arc<AtomicBool>,
@@ -74,6 +75,7 @@ impl SshLauncher {
             program: program.into(),
             verify: false,
             spawn_hook: SpawnHook::default(),
+            settings: SshSettings::default(),
             fork_option_refused: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -95,6 +97,26 @@ impl SshLauncher {
     pub fn with_spawn_hook(mut self, hook: SpawnHook) -> Self {
         self.spawn_hook = hook;
         self
+    }
+
+    /// Runs with `settings`: its ssh options, port discovery bounds and tunnel waits. Without
+    /// this call every value is its default.
+    pub fn with_settings(mut self, settings: SshSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// The settings in effect, with their sources ([`SshSettings::entries`]).
+    pub fn settings(&self) -> &SshSettings {
+        &self.settings
+    }
+
+    /// The ssh options from settings as ssh uses them for `target`: `ServerAliveInterval`,
+    /// `ServerAliveCountMax` and `ConnectTimeout`, each with its value and source. The first two
+    /// go before the target's options and win over them; a `ConnectTimeout` in the target's
+    /// options wins over the setting (source `target`).
+    pub fn applied_options(&self, target: &SshTarget) -> Vec<AppliedOption> {
+        crate::applied_options(&self.settings, target)
     }
 
     pub fn program(&self) -> &Path {
@@ -129,7 +151,7 @@ impl SshLauncher {
         after: &[&str],
     ) -> Command {
         let mut args: Vec<String> = Vec::new();
-        push_common_opts(&mut args, target, self.verify, forced);
+        push_common_opts(&mut args, target, self.verify, forced, &self.settings);
         args.extend(before.iter().cloned());
         args.push(target.destination.clone());
         args.extend(after.iter().map(|a| (*a).to_string()));

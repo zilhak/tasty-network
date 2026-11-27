@@ -11,16 +11,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{kill_and_reap, recover_mutex};
-use crate::listener::{ListenerVerdict, StderrMarks, relay_stderr};
+use crate::listener::{ListenerVerdict, StderrMarks, VerdictTiming, relay_stderr};
+use crate::settings::SshSettings;
 use crate::{SshLauncher, SshTarget};
-
-/// How long `establish` waits for the local end to accept connections.
-const READY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long an ssh that exited before ready may take to pass its last stderr on. The pipe closes
-/// when ssh exits, so the relay thread ends soon. Another process that inherited the pipe
-/// (a ProxyCommand and so on) keeps it open, hence the bound.
-const STDERR_DRAIN_LIMIT: Duration = Duration::from_millis(500);
 
 /// Returns a free local port and the listener holding it. Between dropping the listener and
 /// ssh binding the port, another process can take it.
@@ -83,6 +76,8 @@ pub struct SshTunnel {
     remote_port: u16,
     /// What the stderr relay marked ([`crate::ListenerVerdict`]).
     marks: Arc<StderrMarks>,
+    /// The waits of the verdicts of this tunnel, from its launcher's settings.
+    verdict_timing: VerdictTiming,
 }
 
 /// Options every tunnel forces. They go before the target's extra options, and ssh keeps the
@@ -149,8 +144,8 @@ impl SshTunnel {
     ///
     /// ssh's stderr goes on to this process's stderr (authentication messages stay visible;
     /// a first connection's host key and passphrase prompts go to the terminal directly). The
-    /// child is created through the launcher's [`crate::SpawnHook`]. It blocks for up to a few
-    /// seconds.
+    /// child is created through the launcher's [`crate::SpawnHook`]. It blocks for up to
+    /// `tunnel.ready_timeout` of the launcher's settings (5 s by default).
     pub fn establish(
         launcher: &SshLauncher,
         target: &SshTarget,
@@ -201,6 +196,8 @@ impl SshTunnel {
         // Release the reservation so ssh can bind it. Another process can take it meanwhile.
         let (reservation, local_port) = reserve_local_port().map_err(TunnelError::LocalPort)?;
         drop(reservation);
+        let settings = launcher.settings();
+        let max_line = settings.stderr_max_line();
         let mut cmd = tunnel_command(launcher, target, local_port, remote_port, no_fork_option);
         cmd.stdin(Stdio::null()).stderr(Stdio::piped());
         let mut child = launcher
@@ -214,7 +211,7 @@ impl SshTunnel {
             // tunnel is ready.
             std::thread::Builder::new()
                 .name("ssh-tunnel-stderr".into())
-                .spawn(move || relay_stderr(stderr, sink(), &seen))
+                .spawn(move || relay_stderr(stderr, sink(), &seen, max_line))
                 .map_err(|e| tracing::warn!(%e, "ssh tunnel stderr relay thread could not start"))
                 .ok()
         });
@@ -224,9 +221,10 @@ impl SshTunnel {
             local_port,
             remote_port,
             marks,
+            verdict_timing: VerdictTiming::new(settings),
         };
         // On an error the tunnel drops here and the child is killed and reaped.
-        match tunnel.wait_ready(&mut stderr_relay) {
+        match tunnel.wait_ready(&mut stderr_relay, settings) {
             Ok(()) => Ok(tunnel),
             Err(e @ TunnelError::ExitedBeforeReady { .. })
                 if no_fork_option && tunnel.marks.fork_option_refused.load(Ordering::Acquire) =>
@@ -246,14 +244,24 @@ impl SshTunnel {
         )
     }
 
-    /// Polls the local end, checking the deadline and the child's exit between attempts. A
-    /// single `TcpStream::connect` has no timeout of its own.
-    fn wait_ready(&self, stderr_relay: &mut Option<JoinHandle<()>>) -> Result<(), TunnelError> {
-        let deadline = Instant::now() + READY_TIMEOUT;
+    /// Polls the local end every `tunnel.ready_poll` until `tunnel.ready_timeout`, checking the
+    /// deadline and the child's exit between attempts. A single `TcpStream::connect` has no
+    /// timeout of its own.
+    fn wait_ready(
+        &self,
+        stderr_relay: &mut Option<JoinHandle<()>>,
+        settings: &SshSettings,
+    ) -> Result<(), TunnelError> {
+        let ready_timeout = settings.ready_timeout();
+        let deadline = Instant::now() + ready_timeout;
         loop {
             let exited = self.lock_child().try_wait().map_err(TunnelError::Wait)?;
             if let Some(status) = exited {
-                drain_stderr_relay(stderr_relay.take());
+                drain_stderr_relay(
+                    stderr_relay.take(),
+                    settings.stderr_drain_limit(),
+                    settings.stderr_drain_poll(),
+                );
                 return Err(TunnelError::ExitedBeforeReady { status });
             }
             if TcpStream::connect(("127.0.0.1", self.local_port)).is_ok() {
@@ -262,10 +270,10 @@ impl SshTunnel {
             if Instant::now() >= deadline {
                 return Err(TunnelError::ReadyTimeout {
                     local_port: self.local_port,
-                    waited: READY_TIMEOUT,
+                    waited: ready_timeout,
                 });
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(settings.ready_poll());
         }
     }
 
@@ -298,19 +306,26 @@ impl SshTunnel {
     /// before opening that channel; it counts only ssh refusals after this call
     /// ([`ListenerVerdict`]). It stays usable after the tunnel moved elsewhere or dropped.
     pub fn listener_verdict(&self) -> ListenerVerdict {
-        ListenerVerdict::new(self.remote_port, Arc::clone(&self.marks))
+        ListenerVerdict::new(
+            self.remote_port,
+            Arc::clone(&self.marks),
+            self.verdict_timing,
+        )
     }
 }
 
-/// Waits up to [`STDERR_DRAIN_LIMIT`] for the relay of an ssh that exited before ready, so its
-/// last stderr (an authentication refusal and so on) reaches the user before the error.
-fn drain_stderr_relay(relay: Option<JoinHandle<()>>) {
+/// Waits up to `limit` (`tunnel.stderr_drain_limit`), looking every `poll`, for the relay of an
+/// ssh that exited before ready, so its last stderr (an authentication refusal and so on)
+/// reaches the user before the error. The pipe closes when ssh exits, so the relay thread ends
+/// soon. Another process that inherited the pipe (a ProxyCommand and so on) keeps it open, hence
+/// the bound.
+fn drain_stderr_relay(relay: Option<JoinHandle<()>>, limit: Duration, poll: Duration) {
     let Some(relay) = relay else {
         return;
     };
-    let deadline = Instant::now() + STDERR_DRAIN_LIMIT;
+    let deadline = Instant::now() + limit;
     while !relay.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(poll);
     }
     if !relay.is_finished() {
         tracing::debug!("ssh tunnel stderr relay still open after the tunnel exited");
@@ -352,26 +367,35 @@ impl Drop for SshTunnel {
     }
 }
 
-/// Reconnect wait that doubles up to a maximum. [`Backoff::reset`] returns to the minimum after
-/// a success. When to reconnect is the consumer's decision.
+/// Reconnect wait that grows by a factor up to a maximum. [`Backoff::reset`] returns to the
+/// minimum after a success. When to reconnect is the consumer's decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Backoff {
     cur: Duration,
     min: Duration,
     max: Duration,
+    factor: u32,
 }
 
 impl Backoff {
-    /// Starts at 500 ms, at most 30 s.
+    /// The default settings: starts at 500 ms, doubles, at most 30 s.
     pub fn new() -> Self {
+        Self::from_settings(&SshSettings::default())
+    }
+
+    /// Starts at `backoff.initial`, multiplies by `backoff.multiplier`, at most
+    /// `backoff.max_delay`.
+    pub fn from_settings(settings: &SshSettings) -> Self {
+        let min = settings.backoff_initial();
         Self {
-            cur: Duration::from_millis(500),
-            min: Duration::from_millis(500),
-            max: Duration::from_secs(30),
+            cur: min,
+            min,
+            max: settings.backoff_max_delay(),
+            factor: settings.backoff_multiplier(),
         }
     }
 
-    /// Sleeps for the current interval, then doubles it (up to the maximum).
+    /// Sleeps for the current interval, then multiplies it by the factor (up to the maximum).
     pub fn sleep(&mut self) {
         std::thread::sleep(self.cur);
         self.advance();
@@ -383,10 +407,14 @@ impl Backoff {
         self.cur
     }
 
-    /// Moves to the next interval without sleeping (doubles, up to the maximum).
-    /// [`Backoff::sleep`] is this plus a blocking sleep.
+    /// Moves to the next interval without sleeping (multiplies by the factor, up to the
+    /// maximum). [`Backoff::sleep`] is this plus a blocking sleep.
     pub fn advance(&mut self) {
-        self.cur = (self.cur * 2).min(self.max);
+        self.cur = self
+            .cur
+            .checked_mul(self.factor)
+            .unwrap_or(self.max)
+            .min(self.max);
     }
 
     /// Returns to the minimum after a successful connection.
@@ -406,6 +434,40 @@ mod tests {
     use super::*;
     use crate::SpawnHook;
     use std::sync::atomic::AtomicUsize;
+
+    /// `backoff.*` give the first wait, the factor and the cap.
+    #[test]
+    fn backoff_takes_its_settings() {
+        use crate::settings::Value;
+        let mut settings = SshSettings::new();
+        settings
+            .set(
+                "backoff.initial",
+                Value::Duration(Duration::from_millis(100)),
+            )
+            .unwrap()
+            .set("backoff.multiplier", Value::Count(3))
+            .unwrap()
+            .set(
+                "backoff.max_delay",
+                Value::Duration(Duration::from_millis(500)),
+            )
+            .unwrap();
+        let mut b = Backoff::from_settings(&settings);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(b.current());
+            b.advance();
+        }
+        let ms = Duration::from_millis;
+        assert_eq!(seen, [ms(100), ms(300), ms(500), ms(500)]);
+        b.reset();
+        assert_eq!(b.current(), ms(100));
+        assert_eq!(
+            Backoff::from_settings(&SshSettings::default()),
+            Backoff::new()
+        );
+    }
 
     #[test]
     fn backoff_grows_and_resets() {
@@ -443,7 +505,7 @@ mod tests {
         assert!(spawn.source().is_some());
         let timeout = TunnelError::ReadyTimeout {
             local_port: 4000,
-            waited: READY_TIMEOUT,
+            waited: Duration::from_secs(5),
         };
         assert!(timeout.source().is_none());
         for e in [spawn, timeout] {
@@ -894,6 +956,31 @@ mod tests {
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
+        }
+
+        /// `tunnel.ready_timeout` of the launcher bounds the wait for the local end.
+        #[test]
+        fn the_ready_timeout_comes_from_the_settings() {
+            let ssh = Script::new("never-ready", "#!/bin/sh\nexec sleep 10\n");
+            let mut settings = crate::SshSettings::new();
+            settings
+                .set(
+                    "tunnel.ready_timeout",
+                    crate::settings::Value::Duration(Duration::from_millis(300)),
+                )
+                .unwrap();
+            let launcher = SshLauncher::new(ssh.path()).with_settings(settings);
+            let started = Instant::now();
+            let error = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), 45123)
+                .err()
+                .expect("the fake never forwards");
+            match error {
+                TunnelError::ReadyTimeout { waited, .. } => {
+                    assert_eq!(waited, Duration::from_millis(300));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
         }
 
         /// An ssh that exits at once gives an error, its last stderr lines are passed on before

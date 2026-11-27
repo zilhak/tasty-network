@@ -12,17 +12,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
-use crate::{SSH_CONNECT_TIMEOUT, SpawnHook, SshLauncher, SshTarget};
-
-/// Upper bound for one discovery step: the spawn hook, the wait for the child, and output
-/// collection share it. When it expires the child is killed and reaped. Spawning itself and the
-/// reap after a kill have no bound of their own.
-pub const PORT_DISCOVERY_STEP_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Time budget the steps of one discovery call share. Each step gets the smaller of the step
-/// bound and what is left. When the budget is used up no new child is started. Spawning itself
-/// and the reap after a kill are not guaranteed to fit in it.
-pub const PORT_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
+use crate::settings::SshSettings;
+use crate::{SpawnHook, SshLauncher, SshTarget, connect_timeout_for};
 
 /// Exit code of the remote subcommand when the instance that wrote the record has exited.
 /// It differs from the general failure 1 and the usage error 2, so discovery can settle on
@@ -356,13 +347,14 @@ fn classify_by_exit_code(code: Option<i32>) -> PortDiscoveryFailureKind {
     }
 }
 
-/// A connection failure that took at least the connect timeout is reported as a timeout. This
-/// is an estimate from exit code and time.
+/// A connection failure that took at least the connect timeout in effect is reported as a
+/// timeout. This is an estimate from exit code and time.
 fn refine_with_elapsed(
     kind: PortDiscoveryFailureKind,
     elapsed: Duration,
+    connect_timeout: Duration,
 ) -> PortDiscoveryFailureKind {
-    if kind == PortDiscoveryFailureKind::SshConnectionFailed && elapsed >= SSH_CONNECT_TIMEOUT {
+    if kind == PortDiscoveryFailureKind::SshConnectionFailed && elapsed >= connect_timeout {
         return PortDiscoveryFailureKind::TimedOut;
     }
     kind
@@ -386,10 +378,41 @@ impl Deadline {
         self.at.saturating_duration_since(Instant::now())
     }
 
-    /// The bound for this step: the smaller of the step bound and the rest of the budget.
-    /// `Duration::ZERO` means the budget is used up (no ssh is started).
-    fn step_budget(self) -> Duration {
-        PORT_DISCOVERY_STEP_TIMEOUT.min(self.remaining())
+    /// The bound for this step: the smaller of the step bound `step` and the rest of the
+    /// budget. `Duration::ZERO` means the budget is used up (no ssh is started).
+    fn step_budget(self, step: Duration) -> Duration {
+        step.min(self.remaining())
+    }
+}
+
+/// The values one discovery call runs with: the launcher's settings, and the connect timeout
+/// ssh uses for the target ([`connect_timeout_for`]).
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    step_timeout: Duration,
+    connect_timeout: Duration,
+    output_limit: usize,
+    stderr_limit: usize,
+    stderr_detail_limit: usize,
+    overflow_exit_grace: Duration,
+    stderr_grace: Duration,
+    poll_min: Duration,
+    poll_max: Duration,
+}
+
+impl Limits {
+    fn new(settings: &SshSettings, target: &SshTarget) -> Self {
+        Self {
+            step_timeout: settings.step_timeout(),
+            connect_timeout: connect_timeout_for(settings, target),
+            output_limit: settings.output_limit(),
+            stderr_limit: settings.stderr_limit(),
+            stderr_detail_limit: settings.stderr_detail_limit(),
+            overflow_exit_grace: settings.overflow_exit_grace(),
+            stderr_grace: settings.stderr_grace(),
+            poll_min: settings.poll_min(),
+            poll_max: settings.poll_max(),
+        }
     }
 }
 
@@ -510,15 +533,16 @@ enum WaitEnd {
 
 /// Waits for the child until `deadline`, asking `stop` on every poll.
 ///
-/// The crate has no async runtime, so it polls `try_wait`. The interval starts at 5 ms and
-/// doubles up to 50 ms: little delay on the normal path (hundreds of ms), few wakeups on long
-/// waits.
+/// The crate has no async runtime, so it polls `try_wait`. The interval starts at
+/// `discovery.poll_min` (5 ms) and doubles up to `discovery.poll_max` (50 ms): little delay on
+/// the normal path (hundreds of ms), few wakeups on long waits.
 fn wait_with_timeout(
     owner: &mut ChildOwner,
     deadline: Instant,
     stop: &mut dyn FnMut() -> bool,
+    limits: Limits,
 ) -> WaitEnd {
-    let mut nap = Duration::from_millis(5);
+    let mut nap = limits.poll_min;
     loop {
         if owner.is_cancelled() {
             return WaitEnd::Ended;
@@ -535,14 +559,9 @@ fn wait_with_timeout(
             return WaitEnd::Expired;
         }
         std::thread::sleep(nap.min(left));
-        nap = (nap * 2).min(Duration::from_millis(50));
+        nap = (nap * 2).min(limits.poll_max);
     }
 }
-
-/// A discovery command's stdout beyond this many bytes is refused. A record is small.
-const OUTPUT_LIMIT: usize = 64 * 1024;
-/// Only this much of stderr is kept for the detail. The rest is read and dropped.
-const STDERR_LIMIT: usize = 16 * 1024;
 
 /// What a reader thread read from one pipe.
 #[derive(Default)]
@@ -609,16 +628,32 @@ type Readers = (
     Option<mpsc::Receiver<Captured>>,
 );
 
-fn start_readers(child: &mut Child) -> std::io::Result<Readers> {
+/// stdout beyond `discovery.output_limit` is refused (a record is small); of stderr only
+/// `discovery.stderr_limit` is kept for the detail, and the rest is read and dropped.
+fn start_readers(child: &mut Child, limits: Limits) -> std::io::Result<Readers> {
     let stdout = child
         .stdout
         .take()
-        .map(|p| spawn_reader(p, OUTPUT_LIMIT, OnOverflow::Stop, "ssh-discovery-stdout"))
+        .map(|p| {
+            spawn_reader(
+                p,
+                limits.output_limit,
+                OnOverflow::Stop,
+                "ssh-discovery-stdout",
+            )
+        })
         .transpose()?;
     let stderr = child
         .stderr
         .take()
-        .map(|p| spawn_reader(p, STDERR_LIMIT, OnOverflow::Drain, "ssh-discovery-stderr"))
+        .map(|p| {
+            spawn_reader(
+                p,
+                limits.stderr_limit,
+                OnOverflow::Drain,
+                "ssh-discovery-stderr",
+            )
+        })
         .transpose()?;
     Ok((stdout, stderr))
 }
@@ -631,7 +666,7 @@ struct Stdout {
 }
 
 impl Stdout {
-    /// Whether the output already passed [`OUTPUT_LIMIT`]. It does not wait.
+    /// Whether the output already passed `discovery.output_limit`. It does not wait.
     fn overflowed(&mut self) -> bool {
         if self.early.is_none()
             && let Some(rx) = &self.rx
@@ -642,10 +677,15 @@ impl Stdout {
         self.early.as_ref().is_some_and(|c| c.overflowed)
     }
 
-    fn collect(self, deadline: Instant, what: &str) -> Result<Captured, PortDiscoveryError> {
+    fn collect(
+        self,
+        deadline: Instant,
+        what: &str,
+        poll: Duration,
+    ) -> Result<Captured, PortDiscoveryError> {
         match (self.early, self.rx) {
             (Some(captured), _) => settled(captured, what),
-            (None, Some(rx)) => collect(&rx, deadline, what),
+            (None, Some(rx)) => collect(&rx, deadline, what, poll),
             (None, None) => Ok(Captured::default()),
         }
     }
@@ -665,10 +705,6 @@ fn cut_off(owner: ChildOwner, what: &str, budget: Duration) -> PortDiscoveryErro
     }
 }
 
-/// How long a child whose stdout passed the limit may take to exit on its own (it usually fails
-/// writing to the pipe just closed) before it is killed.
-const OVERFLOW_EXIT_GRACE: Duration = Duration::from_millis(100);
-
 /// The exit code `Child::kill` leaves: none on Unix (the child dies by SIGKILL), 1 on Windows
 /// (`TerminateProcess` with exit code 1).
 const KILLED_EXIT_CODE: Option<i32> = if cfg!(windows) { Some(1) } else { None };
@@ -681,20 +717,22 @@ fn exited_on_its_own(code: Option<i32>, killed_code: Option<i32>) -> bool {
 }
 
 /// After stdout passed the limit: the child's own exit status if it has ended (or ends within
-/// [`OVERFLOW_EXIT_GRACE`], within the deadline, or just before the kill), so an exit code such
-/// as 3 still decides the class. `None` means the kill ended it.
+/// `discovery.overflow_exit_grace`, within the deadline, or just before the kill), so an exit
+/// code such as 3 still decides the class. `None` means the kill ended it. The grace is there
+/// because such a child usually fails writing to the pipe just closed and exits on its own.
 fn exit_after_overflow(
     owner: ChildOwner,
     deadline: Instant,
     what: &str,
+    limits: Limits,
 ) -> Result<Option<ExitStatus>, PortDiscoveryError> {
     let mut child = owner.finish(what)?;
-    let until = deadline.min(Instant::now() + OVERFLOW_EXIT_GRACE);
+    let until = deadline.min(Instant::now() + limits.overflow_exit_grace);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) if Instant::now() < until && !cancel_requested() => {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(limits.poll_min);
             }
             _ => break,
         }
@@ -716,29 +754,27 @@ fn exit_after_overflow(
     }
 }
 
-/// The refusal of an output past [`OUTPUT_LIMIT`].
-fn output_too_long(what: &str) -> PortDiscoveryError {
+/// The refusal of an output past `limit` (`discovery.output_limit`).
+fn output_too_long(what: &str, limit: usize) -> PortDiscoveryError {
     PortDiscoveryError::new(
         PortDiscoveryFailureKind::PortParseFailed,
-        format!("{what}: the output is longer than {OUTPUT_LIMIT} bytes"),
+        format!("{what}: the output is longer than {limit} bytes"),
     )
 }
 
-/// How long a failed command's stderr is waited for after the command exited. stderr only
-/// feeds the diagnostic detail, so a descendant holding it open does not keep the lookup.
-const STDERR_GRACE: Duration = Duration::from_millis(500);
-
-/// Waits for a reader's result until `deadline`, stopping early on cancellation. A result that
-/// already arrived is taken even at the deadline. The cancel flag is read after every receive
-/// attempt, whatever it gave, so a cancel that meets the result or the deadline is `Cancelled`.
+/// Waits for a reader's result until `deadline`, stopping early on cancellation and looking at
+/// the cancel flag at least every `poll`. A result that already arrived is taken even at the
+/// deadline. The cancel flag is read after every receive attempt, whatever it gave, so a cancel
+/// that meets the result or the deadline is `Cancelled`.
 fn collect(
     rx: &mpsc::Receiver<Captured>,
     deadline: Instant,
     what: &str,
+    poll: Duration,
 ) -> Result<Captured, PortDiscoveryError> {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        let received = match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+        let received = match rx.recv_timeout(left.min(poll)) {
             Ok(captured) => captured,
             Err(mpsc::RecvTimeoutError::Disconnected) => Captured::default(),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -772,7 +808,7 @@ fn settled(captured: Captured, what: &str) -> Result<Captured, PortDiscoveryErro
 /// stdout on exit 0.
 ///
 /// stdout and stderr are read while the child runs, so a large output cannot block it. stdout
-/// over [`OUTPUT_LIMIT`] is refused as [`PortDiscoveryFailureKind::PortParseFailed`] as soon as
+/// over `discovery.output_limit` is refused as [`PortDiscoveryFailureKind::PortParseFailed`] as soon as
 /// it passes the limit: the child is cut off then, even if it would write forever. The
 /// bound and cancellation also cover the wait for the pipes to close after the child exits (a
 /// descendant can hold them). One deadline, taken before the spawn, covers the spawn hook, the
@@ -781,13 +817,15 @@ fn settled(captured: Captured, what: &str) -> Result<Captured, PortDiscoveryErro
 /// `Cancelled`.
 ///
 /// A failed command keeps the class and exit code its exit gives. Its stderr is only waited for
-/// up to [`STDERR_GRACE`] (within the deadline); if it does not arrive, or cancellation comes,
-/// the detail goes without it.
+/// up to `discovery.stderr_grace` (within the deadline): stderr only feeds the diagnostic
+/// detail, so a descendant holding it open does not keep the lookup. If it does not arrive, or
+/// cancellation comes, the detail goes without it.
 fn run_capture_with_budget(
     mut cmd: Command,
     budget: Duration,
     what: &str,
     spawn: &SpawnHook,
+    limits: Limits,
 ) -> Result<String, PortDiscoveryError> {
     // Cancellation before the budget: when both hold, "the user stopped it" is the more exact
     // fact. Neither starts a new ssh.
@@ -811,7 +849,7 @@ fn run_capture_with_budget(
             format!("{what}: spawn failed: {e}"),
         )
     })?;
-    let (stdout, stderr_rx) = match start_readers(&mut child) {
+    let (stdout, stderr_rx) = match start_readers(&mut child, limits) {
         Ok(rx) => rx,
         Err(e) => {
             kill_and_reap(&mut child);
@@ -828,11 +866,12 @@ fn run_capture_with_budget(
         early: None,
     };
     let mut owner = ChildOwner::adopt(child, what)?;
-    let status = match wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed()) {
+    let status = match wait_with_timeout(&mut owner, deadline, &mut || stdout.overflowed(), limits)
+    {
         WaitEnd::Expired => return Err(cut_off(owner, what, budget)),
-        WaitEnd::Stopped => match exit_after_overflow(owner, deadline, what)? {
+        WaitEnd::Stopped => match exit_after_overflow(owner, deadline, what, limits)? {
             Some(status) => status,
-            None => return Err(output_too_long(what)),
+            None => return Err(output_too_long(what, limits.output_limit)),
         },
         WaitEnd::Ended => {
             let mut child = owner.finish(what)?;
@@ -845,7 +884,7 @@ fn run_capture_with_budget(
         }
     };
     let wait_for = |rx: Option<mpsc::Receiver<Captured>>, until: Instant| match rx {
-        Some(rx) => collect(&rx, until, what),
+        Some(rx) => collect(&rx, until, what, limits.poll_max),
         None => Ok(Captured::default()),
     };
     // A child that succeeded with too much output, or was killed by a signal after its stdout
@@ -855,29 +894,34 @@ fn run_capture_with_budget(
         return Err(if cancel_requested() {
             cancelled_error(what)
         } else {
-            output_too_long(what)
+            output_too_long(what, limits.output_limit)
         });
     }
     if !status.success() {
         // The exit settles the class; stderr is only a diagnostic and cannot override it.
         let code = status.code();
         let elapsed = started.elapsed();
-        let stderr = match wait_for(stderr_rx, deadline.min(Instant::now() + STDERR_GRACE)) {
-            Ok(stderr) => {
-                sanitize_stderr(&String::from_utf8_lossy(&stderr.bytes), stderr.overflowed)
-            }
+        let stderr = match wait_for(
+            stderr_rx,
+            deadline.min(Instant::now() + limits.stderr_grace),
+        ) {
+            Ok(stderr) => sanitize_stderr(
+                &String::from_utf8_lossy(&stderr.bytes),
+                stderr.overflowed,
+                limits.stderr_detail_limit,
+            ),
             Err(e) => format!("(stderr not collected: {})", e.kind()),
         };
         let mut error = PortDiscoveryError::new(
-            refine_with_elapsed(classify_by_exit_code(code), elapsed),
+            refine_with_elapsed(classify_by_exit_code(code), elapsed, limits.connect_timeout),
             format!("{what}: code={code:?} elapsed={elapsed:?}: {stderr}"),
         );
         error.exit_code = code;
         return Err(error);
     }
-    let stdout = stdout.collect(deadline, what)?;
+    let stdout = stdout.collect(deadline, what, limits.poll_max)?;
     if stdout.overflowed {
-        return Err(output_too_long(what));
+        return Err(output_too_long(what, limits.output_limit));
     }
     Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
@@ -901,19 +945,20 @@ fn decode_output<T, E>(
     })
 }
 
-/// Runs of at least this many token-like characters are removed from stderr.
+/// Runs of at least this many token-like characters are removed from stderr. It is the redaction
+/// rule tied to the token format (64 hex digits), not a setting: half a token is still removed,
+/// and ordinary words and paths are shorter (docs/design/transport.md "SSH 크레이트 설정값").
 const SECRET_RUN: usize = 32;
-/// The stderr kept in a detail is at most this many characters, the `...` of a cut included.
-const STDERR_DETAIL_LIMIT: usize = 512;
 
 /// The stderr text a detail may keep: trimmed, with every run of [`SECRET_RUN`] or more ASCII
 /// letters, digits, `+`, `=`, `_`, or `-` replaced by `<redacted N chars>`, and cut to
-/// [`STDERR_DETAIL_LIMIT`] characters. A failing remote command could print a record (and its
-/// token) to stderr; ordinary messages (paths, "Permission denied") have no such runs.
+/// `detail_limit` characters (`discovery.stderr_detail_limit`), the `...` of a cut included. A
+/// failing remote command could print a record (and its token) to stderr; ordinary messages
+/// (paths, "Permission denied") have no such runs.
 ///
-/// `cut` says the text is the start of a longer stderr ([`STDERR_LIMIT`]). A run at its end may
-/// then be the first part of a token, so it is redacted whatever its length.
-fn sanitize_stderr(stderr: &str, cut: bool) -> String {
+/// `cut` says the text is the start of a longer stderr (`discovery.stderr_limit`). A run at its
+/// end may then be the first part of a token, so it is redacted whatever its length.
+fn sanitize_stderr(stderr: &str, cut: bool, detail_limit: usize) -> String {
     fn token_like(c: char) -> bool {
         c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-')
     }
@@ -947,22 +992,41 @@ fn sanitize_stderr(stderr: &str, cut: bool) -> String {
         flush(&mut out, &mut run);
     }
     const ELLIPSIS: &str = "...";
-    if out.chars().count() <= STDERR_DETAIL_LIMIT {
+    if out.chars().count() <= detail_limit {
         return out;
     }
-    let keep = STDERR_DETAIL_LIMIT - ELLIPSIS.len();
+    let keep = detail_limit.saturating_sub(ELLIPSIS.len());
     match out.char_indices().nth(keep) {
         Some((at, _)) => format!("{}{ELLIPSIS}", &out[..at]),
         None => out,
     }
 }
 
-/// One discovery call: launcher, target, names, and the shared deadline.
+/// One discovery call: launcher, target, names, the shared deadline, and the values in effect.
 struct Probe<'a> {
     launcher: &'a SshLauncher,
     target: &'a SshTarget,
     config: &'a PortDiscoveryConfig,
     deadline: Deadline,
+    limits: Limits,
+}
+
+impl<'a> Probe<'a> {
+    /// A probe with the launcher's settings: the budget `discovery.total_timeout` starts now.
+    fn new(
+        launcher: &'a SshLauncher,
+        target: &'a SshTarget,
+        config: &'a PortDiscoveryConfig,
+    ) -> Self {
+        let settings = launcher.settings();
+        Self {
+            launcher,
+            target,
+            config,
+            deadline: Deadline::after(settings.total_timeout()),
+            limits: Limits::new(settings, target),
+        }
+    }
 }
 
 impl Probe<'_> {
@@ -977,9 +1041,10 @@ impl Probe<'_> {
         let what = format!("ssh({})", self.launcher.program().display());
         let out = run_capture_with_budget(
             cmd,
-            self.deadline.step_budget(),
+            self.deadline.step_budget(self.limits.step_timeout),
             &what,
             self.launcher.spawn_hook(),
+            self.limits,
         )?;
         decode_output(&what, &out, decode)
     }
@@ -1127,8 +1192,10 @@ fn pick_most_informative(mut errors: Vec<PortDiscoveryError>) -> PortDiscoveryEr
 /// An explicit path in `config` is read first and alone. Otherwise `mode` decides; `Auto`
 /// returns the first success, stops at cancellation and at an exited instance, and otherwise
 /// returns the most telling failure. A command that succeeds with output the decoder refuses
-/// is a failure. The steps share [`PORT_DISCOVERY_TOTAL_TIMEOUT`] and each is polled for at
-/// most [`PORT_DISCOVERY_STEP_TIMEOUT`], output collection included. Only spawning itself and
+/// is a failure. The steps share `discovery.total_timeout` of the launcher's settings (by default
+/// [`crate::PORT_DISCOVERY_TOTAL_TIMEOUT`]) and each is polled for at most
+/// `discovery.step_timeout` (by default [`crate::PORT_DISCOVERY_STEP_TIMEOUT`]), output collection
+/// included. Only spawning itself and
 /// the reap after a kill have no bound of their own. It blocks; call it from a worker. A [`SshCancel`] installed on the
 /// calling thread with [`SshCancel::scope`] stops it.
 pub fn discover_remote_port<T, E>(
@@ -1138,12 +1205,7 @@ pub fn discover_remote_port<T, E>(
     config: &PortDiscoveryConfig,
     decode: impl Fn(&str) -> Result<T, E>,
 ) -> Result<T, PortDiscoveryError> {
-    let probe = Probe {
-        launcher,
-        target,
-        config,
-        deadline: Deadline::after(PORT_DISCOVERY_TOTAL_TIMEOUT),
-    };
+    let probe = Probe::new(launcher, target, config);
     if let Some(path) = &config.explicit_port_file {
         return probe.explicit_file(path, &decode);
     }
@@ -1184,12 +1246,7 @@ pub fn detect_port_mode<T, E>(
     config: &PortDiscoveryConfig,
     decode: impl Fn(&str) -> Result<T, E>,
 ) -> Result<PortMode, PortDiscoveryError> {
-    let probe = Probe {
-        launcher,
-        target,
-        config,
-        deadline: Deadline::after(PORT_DISCOVERY_TOTAL_TIMEOUT),
-    };
+    let probe = Probe::new(launcher, target, config);
     detect_first_success(|m| probe.single_mode(m, &decode).map(|_| ()))
 }
 
@@ -1197,7 +1254,97 @@ pub fn detect_port_mode<T, E>(
 mod tests {
     use super::*;
     use crate::test_helper::{Orphan, helper_command, process_exists, process_runs};
+    use crate::{PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The default `discovery.stderr_detail_limit` and `discovery.stderr_limit`
+    /// ([`the_test_limits_are_the_defaults`]).
+    const STDERR_DETAIL_LIMIT: usize = 512;
+    const STDERR_LIMIT: usize = 16 * 1024;
+
+    /// The values of the default settings.
+    fn limits() -> Limits {
+        Limits::new(&SshSettings::default(), &SshTarget::default())
+    }
+
+    // The functions below run with the default settings.
+
+    fn run_capture_with_budget(
+        cmd: Command,
+        budget: Duration,
+        what: &str,
+        spawn: &SpawnHook,
+    ) -> Result<String, PortDiscoveryError> {
+        super::run_capture_with_budget(cmd, budget, what, spawn, limits())
+    }
+
+    fn sanitize_stderr(stderr: &str, cut: bool) -> String {
+        super::sanitize_stderr(stderr, cut, limits().stderr_detail_limit)
+    }
+
+    fn refine_with_elapsed(
+        kind: PortDiscoveryFailureKind,
+        elapsed: Duration,
+    ) -> PortDiscoveryFailureKind {
+        super::refine_with_elapsed(kind, elapsed, limits().connect_timeout)
+    }
+
+    fn collect(
+        rx: &mpsc::Receiver<Captured>,
+        deadline: Instant,
+        what: &str,
+    ) -> Result<Captured, PortDiscoveryError> {
+        super::collect(rx, deadline, what, limits().poll_max)
+    }
+
+    fn wait_with_timeout(
+        owner: &mut ChildOwner,
+        deadline: Instant,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> WaitEnd {
+        super::wait_with_timeout(owner, deadline, stop, limits())
+    }
+
+    /// The connect timeout that classifies a slow failure is the one ssh runs with: a
+    /// `ConnectTimeout` of the target wins over `ssh.connect_timeout`.
+    #[test]
+    fn a_slow_failure_is_judged_by_the_connect_timeout_in_effect() {
+        let failed = PortDiscoveryFailureKind::SshConnectionFailed;
+        let elapsed = Duration::from_secs(15);
+        let mut target = SshTarget::parse("host");
+        let judge = |settings: &SshSettings, target: &SshTarget| {
+            super::refine_with_elapsed(
+                failed,
+                elapsed,
+                Limits::new(settings, target).connect_timeout,
+            )
+        };
+        assert_eq!(
+            judge(&SshSettings::default(), &target),
+            PortDiscoveryFailureKind::TimedOut
+        );
+        let mut longer = SshSettings::new();
+        longer
+            .set(
+                "ssh.connect_timeout",
+                crate::settings::Value::Duration(Duration::from_secs(30)),
+            )
+            .unwrap();
+        assert_eq!(judge(&longer, &target), failed);
+        target.extra_options = vec!["connecttimeout 60".into()];
+        assert_eq!(judge(&SshSettings::default(), &target), failed);
+        target.extra_options = vec!["ConnectTimeout=5".into()];
+        assert_eq!(judge(&longer, &target), PortDiscoveryFailureKind::TimedOut);
+    }
+
+    #[test]
+    fn the_test_limits_are_the_defaults() {
+        let l = limits();
+        assert_eq!(l.stderr_detail_limit, STDERR_DETAIL_LIMIT);
+        assert_eq!(l.stderr_limit, STDERR_LIMIT);
+        assert_eq!(l.step_timeout, PORT_DISCOVERY_STEP_TIMEOUT);
+        assert_eq!(l.connect_timeout, SSH_CONNECT_TIMEOUT);
+    }
 
     /// A command that fails if it is ever started. Tells an early return from a spawn.
     fn unspawnable_command() -> Command {
@@ -1421,13 +1568,13 @@ mod tests {
     #[test]
     fn deadline_step_budget_is_capped_by_remaining_total() {
         let fresh = Deadline::after(PORT_DISCOVERY_TOTAL_TIMEOUT);
-        assert!(fresh.step_budget() <= PORT_DISCOVERY_STEP_TIMEOUT);
+        assert!(fresh.step_budget(PORT_DISCOVERY_STEP_TIMEOUT) <= PORT_DISCOVERY_STEP_TIMEOUT);
         let almost_gone = Deadline::after(Duration::from_millis(50));
-        assert!(almost_gone.step_budget() <= Duration::from_millis(50));
+        assert!(almost_gone.step_budget(PORT_DISCOVERY_STEP_TIMEOUT) <= Duration::from_millis(50));
         let expired = Deadline {
             at: Instant::now() - Duration::from_secs(1),
         };
-        assert!(expired.step_budget().is_zero());
+        assert!(expired.step_budget(PORT_DISCOVERY_STEP_TIMEOUT).is_zero());
     }
 
     #[test]
@@ -2187,7 +2334,7 @@ mod tests {
         };
         assert_eq!(
             early
-                .collect(far, "late cancel")
+                .collect(far, "late cancel", limits().poll_max)
                 .map(|_| ())
                 .unwrap_err()
                 .kind(),
@@ -2462,6 +2609,81 @@ mod tests {
 
         fn target() -> SshTarget {
             SshTarget::parse("fake-host")
+        }
+
+        fn launcher_with(fake: &FakeSsh, values: &[(&str, crate::settings::Value)]) -> SshLauncher {
+            let mut settings = SshSettings::new();
+            for (key, value) in values {
+                settings.set(key, *value).expect("a valid setting");
+            }
+            fake.launcher().with_settings(settings)
+        }
+
+        /// `discovery.output_limit` of the launcher decides which output is too long.
+        #[test]
+        fn the_output_limit_comes_from_the_settings() {
+            use crate::settings::Value;
+            let fake = FakeSsh::new(
+                "output-limit",
+                "head -c 2000 /dev/zero | tr '\\0' x",
+                "exit 1",
+            );
+            let run = |launcher: &SshLauncher| {
+                discover_remote_port(
+                    launcher,
+                    &target(),
+                    PortMode::Subcommand,
+                    &config(),
+                    decode_port,
+                )
+                .expect_err("not a port")
+            };
+            let small = run(&launcher_with(
+                &fake,
+                &[("discovery.output_limit", Value::Bytes(1024))],
+            ));
+            assert_eq!(small.kind(), PortDiscoveryFailureKind::PortParseFailed);
+            assert!(
+                small.detail().contains("longer than 1024 bytes"),
+                "{}",
+                small.detail()
+            );
+            let default = run(&fake.launcher());
+            assert_eq!(default.kind(), PortDiscoveryFailureKind::PortParseFailed);
+            assert!(
+                default.detail().contains("decoder refused"),
+                "{}",
+                default.detail()
+            );
+        }
+
+        /// `discovery.step_timeout` and `discovery.total_timeout` of the launcher bound a call.
+        #[test]
+        fn the_discovery_bounds_come_from_the_settings() {
+            use crate::settings::Value;
+            let fake = FakeSsh::new("bounds", "sleep 10", "sleep 10");
+            let one = Value::Duration(Duration::from_secs(1));
+            let launcher = launcher_with(
+                &fake,
+                &[
+                    ("discovery.step_timeout", one),
+                    ("discovery.total_timeout", one),
+                ],
+            );
+            let started = Instant::now();
+            let err =
+                discover_remote_port(&launcher, &target(), PortMode::Auto, &config(), decode_port)
+                    .expect_err("the fake never answers");
+            let took = started.elapsed();
+            assert_eq!(
+                err.kind(),
+                PortDiscoveryFailureKind::TimedOut,
+                "{}",
+                err.detail()
+            );
+            // One step of 1 s uses up the total of 1 s, so the chain stops there.
+            assert_eq!(fake.calls(), ["netprog port"]);
+            assert!(took < Duration::from_secs(5), "took {took:?}");
         }
 
         /// An exit 3 after an output past the limit still stops Auto at the subcommand.

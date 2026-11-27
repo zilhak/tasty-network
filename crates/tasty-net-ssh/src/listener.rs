@@ -19,10 +19,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// How long to wait after a failure for the stderr line. ssh writes the refusal line and then
-/// closes the local connection, but the caller can see the failure before the relay thread has
-/// handled the line.
-const VERDICT_GRACE: Duration = Duration::from_millis(500);
+use crate::settings::SshSettings;
+
+/// How long to wait after a failure for the stderr line (`tunnel.verdict_grace`), and how often
+/// to look meanwhile (`tunnel.verdict_poll`). ssh writes the refusal line and then closes the
+/// local connection, but the caller can see the failure before the relay thread has handled the
+/// line.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VerdictTiming {
+    grace: Duration,
+    poll: Duration,
+}
+
+impl VerdictTiming {
+    pub(crate) fn new(settings: &SshSettings) -> Self {
+        Self {
+            grace: settings.verdict_grace(),
+            poll: settings.verdict_poll(),
+        }
+    }
+}
 
 /// Whether an ssh stderr line reports a channel that could not open because the connect to the
 /// remote port failed.
@@ -91,10 +107,12 @@ pub fn connection_closed_error(message: impl Into<String>) -> io::Error {
 }
 
 /// Collects stderr bytes into lines and looks for the channel connect failure line.
-#[derive(Default)]
 struct LineScanner {
     line: Vec<u8>,
-    /// The current line lost bytes past [`Self::MAX_LINE`].
+    /// A line longer than this loses its tail (`tunnel.stderr_max_line`). The lines to judge
+    /// are short.
+    max_line: usize,
+    /// The current line lost bytes past `max_line`.
     truncated: bool,
     /// A `\r` was read and not yet kept: it ends the line if `\n` follows (CRLF), so it does
     /// not count toward the line's length.
@@ -102,8 +120,14 @@ struct LineScanner {
 }
 
 impl LineScanner {
-    /// A line longer than this loses its tail. The lines to judge are short.
-    const MAX_LINE: usize = 1024;
+    fn new(max_line: usize) -> Self {
+        Self {
+            line: Vec::new(),
+            max_line,
+            truncated: false,
+            pending_cr: false,
+        }
+    }
 
     fn feed(&mut self, bytes: &[u8], seen: &StderrMarks) {
         for &b in bytes {
@@ -123,7 +147,7 @@ impl LineScanner {
     }
 
     fn keep(&mut self, b: u8) {
-        if self.line.len() < Self::MAX_LINE {
+        if self.line.len() < self.max_line {
             self.line.push(b);
         } else {
             self.truncated = true;
@@ -148,10 +172,15 @@ impl LineScanner {
 
 /// Passes the tunnel ssh's stderr on unchanged and marks the channel connect failure line. It
 /// reads until stderr closes (ssh exits). Reading goes on even if passing on fails; if it
-/// stopped, ssh would block on the pipe.
-pub(crate) fn relay_stderr(mut from: impl Read, mut to: impl Write, seen: &StderrMarks) {
+/// stopped, ssh would block on the pipe. Lines are judged up to `max_line` bytes.
+pub(crate) fn relay_stderr(
+    mut from: impl Read,
+    mut to: impl Write,
+    seen: &StderrMarks,
+    max_line: usize,
+) {
     let mut buf = [0u8; 4096];
-    let mut scanner = LineScanner::default();
+    let mut scanner = LineScanner::new(max_line);
     let mut relaying = true;
     loop {
         let n = match from.read(&mut buf) {
@@ -178,18 +207,19 @@ fn judge_after_failure(
     failures: &AtomicU64,
     baseline: u64,
     failure: &(dyn Error + 'static),
+    timing: VerdictTiming,
 ) -> bool {
     let dropped = is_dropped_connection(failure);
     if !dropped {
         return false;
     }
-    let deadline = Instant::now() + VERDICT_GRACE;
+    let deadline = Instant::now() + timing.grace;
     loop {
         let refused = failures.load(Ordering::Acquire) > baseline;
         if refused || Instant::now() >= deadline {
             return listener_absent(refused, dropped);
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(timing.poll);
     }
 }
 
@@ -207,23 +237,27 @@ pub struct ListenerVerdict {
     marks: Arc<StderrMarks>,
     /// Failure lines seen before this verdict was taken.
     baseline: u64,
+    timing: VerdictTiming,
 }
 
 impl ListenerVerdict {
-    pub(crate) fn new(remote_port: u16, marks: Arc<StderrMarks>) -> Self {
+    pub(crate) fn new(remote_port: u16, marks: Arc<StderrMarks>, timing: VerdictTiming) -> Self {
         let baseline = marks.channel_connect_failures.load(Ordering::Acquire);
         Self {
             remote_port,
             marks,
             baseline,
+            timing,
         }
     }
 
     /// A handle with a fixed observation: whether ssh reported a channel connect failure after
-    /// the verdict was taken. For testing code that uses the verdict without a tunnel.
+    /// the verdict was taken. For testing code that uses the verdict without a tunnel. It waits
+    /// with the default `tunnel.verdict_grace`.
     pub fn with_observation(remote_port: u16, channel_connect_failed: bool) -> Self {
         let marks = Arc::new(StderrMarks::default());
-        let mut verdict = Self::new(remote_port, Arc::clone(&marks));
+        let timing = VerdictTiming::new(&SshSettings::default());
+        let mut verdict = Self::new(remote_port, Arc::clone(&marks), timing);
         if channel_connect_failed {
             marks.channel_connect_failures.store(1, Ordering::Release);
             verdict.baseline = 0;
@@ -233,10 +267,15 @@ impl ListenerVerdict {
 
     /// Whether a request through the tunnel failed with `failure` because nothing listens on the
     /// remote port. The connection must have dropped without an answer and ssh must have
-    /// reported a channel connect failure since this verdict was taken. It waits up to 0.5 s for
-    /// that line.
+    /// reported a channel connect failure since this verdict was taken. It waits up to
+    /// `tunnel.verdict_grace` of the tunnel's launcher (0.5 s by default) for that line.
     pub fn remote_listener_absent(&self, failure: &(dyn Error + 'static)) -> bool {
-        judge_after_failure(&self.marks.channel_connect_failures, self.baseline, failure)
+        judge_after_failure(
+            &self.marks.channel_connect_failures,
+            self.baseline,
+            failure,
+            self.timing,
+        )
     }
 
     /// [`RemoteListenerAbsent`] if the listener is absent ([`Self::remote_listener_absent`]).
@@ -271,6 +310,56 @@ impl Error for RemoteListenerAbsent {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default `tunnel.stderr_max_line`.
+    const MAX_LINE: usize = 1024;
+
+    fn defaults() -> SshSettings {
+        SshSettings::default()
+    }
+
+    // The functions below run with the default settings.
+
+    fn relay_stderr(from: impl Read, to: impl Write, seen: &StderrMarks) {
+        super::relay_stderr(from, to, seen, defaults().stderr_max_line());
+    }
+
+    fn judge_after_failure(
+        failures: &AtomicU64,
+        baseline: u64,
+        failure: &(dyn Error + 'static),
+    ) -> bool {
+        super::judge_after_failure(failures, baseline, failure, VerdictTiming::new(&defaults()))
+    }
+
+    fn verdict(remote_port: u16, marks: Arc<StderrMarks>) -> ListenerVerdict {
+        ListenerVerdict::new(remote_port, marks, VerdictTiming::new(&defaults()))
+    }
+
+    #[test]
+    fn the_test_line_limit_is_the_default() {
+        assert_eq!(defaults().stderr_max_line(), MAX_LINE);
+    }
+
+    /// A smaller `tunnel.stderr_max_line` cuts the judged line sooner.
+    #[test]
+    fn the_line_limit_comes_from_the_settings() {
+        const DIAG: &str =
+            "command-line: line 0: Bad configuration option: forkafterauthentication";
+        let line = format!("{}{DIAG}\n", "x".repeat(300));
+        let judge = |max_line: usize| {
+            let seen = StderrMarks::default();
+            super::relay_stderr(
+                io::Cursor::new(line.clone().into_bytes()),
+                io::sink(),
+                &seen,
+                max_line,
+            );
+            seen.fork_option_refused.load(Ordering::Acquire)
+        };
+        assert!(judge(MAX_LINE));
+        assert!(!judge(256));
+    }
 
     /// An error with a cause, like a context layer of `anyhow`.
     #[derive(Debug)]
@@ -412,8 +501,8 @@ mod tests {
     fn a_fork_refusal_cut_at_the_line_limit_is_not_judged() {
         const DIAG: &str =
             "command-line: line 0: Bad configuration option: forkafterauthentication";
-        let full_line = format!("{}{DIAG}", "x".repeat(LineScanner::MAX_LINE - DIAG.len()));
-        assert_eq!(full_line.len(), LineScanner::MAX_LINE);
+        let full_line = format!("{}{DIAG}", "x".repeat(MAX_LINE - DIAG.len()));
+        assert_eq!(full_line.len(), MAX_LINE);
         let judge = |stderr: String| {
             let seen = StderrMarks::default();
             relay_stderr(io::Cursor::new(stderr.into_bytes()), io::sink(), &seen);
@@ -459,13 +548,13 @@ mod tests {
         let marks = Arc::new(StderrMarks::default());
         let dropped = connection_closed_error("eof");
         marks.channel_connect_failures.store(3, Ordering::Release);
-        let later = ListenerVerdict::new(80, Arc::clone(&marks));
+        let later = verdict(80, Arc::clone(&marks));
         assert!(!later.remote_listener_absent(&dropped), "old refusals only");
         marks
             .channel_connect_failures
             .fetch_add(1, Ordering::AcqRel);
         assert!(later.remote_listener_absent(&dropped));
-        let after = ListenerVerdict::new(80, marks);
+        let after = verdict(80, marks);
         assert!(!after.remote_listener_absent(&dropped));
     }
 

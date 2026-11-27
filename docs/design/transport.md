@@ -128,12 +128,53 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 
 - SSH 터널은 공유 핸들 `SshTunnel`이 소유한다. `SshTransport`는 공유 키 (대상, 발견한 원격 포트, 원격 `instance_id`)마다 공개된 터널을 하나 두고, `connect`·`connect_more`로 연 채널(attach 링크, bulk, 요청 채널)이 각각 그 핸들의 참조를 가진다. 마지막 참조가 사라지면 터널 자식을 끝내고 회수한다. 그래서 attach 없이 연 요청 채널은 자기가 만든 터널을 혼자 소유하고, attach와 터널을 함께 쓰던 요청 채널은 attach가 먼저 닫혀도 계속 쓸 수 있다. 터널 자체가 죽으면 그 위 모든 채널이 `PeerClosed`로 끝난다.
 - 터널 공개는 P2P의 "연결 공유의 시작"과 같은 규칙이다. 새 터널은 그 터널을 만든 시도의 첫 채널 handshake가 성공할 때까지 그 시도의 `AttemptCancel`이 소유하고, 그동안 다른 채널은 쓰지 않는다. 성공하면 공유 목록에 공개하고 `AttemptCancel`에서 뺀다. 그 뒤 시도 취소는 그 시도의 소켓만 닫는다.
-- 새 터널 준비 중 취소는 준비 기한(5초, 옛 OpenSSH는 두 번) 뒤에 `Cancelled`로 돌아온다. `tasty-net-ssh`의 준비 대기가 취소를 받지 않기 때문이다. 준비가 성공했든 실패했든 그 사이 취소가 왔으면 결과는 `Cancelled`이고, 띄운 터널은 회수한다.
+- 새 터널 준비 중 취소는 준비 기한(`tunnel.ready_timeout`, 기본 5초, 옛 OpenSSH는 두 번. 아래 "SSH 크레이트 설정값") 뒤에 `Cancelled`로 돌아온다. `tasty-net-ssh`의 준비 대기가 취소를 받지 않기 때문이다. 준비가 성공했든 실패했든 그 사이 취소가 왔으면 결과는 `Cancelled`이고, 띄운 터널은 회수한다.
 - 공유 키에 발견 결과가 들어가므로, 재발견한 원격 포트나 `instance_id`가 바뀌면 옛 터널은 남은 참조가 있어도 새 연결에 쓰지 않는다. 옛 터널은 남은 참조가 놓일 때 회수된다.
 - 공유 터널에서 채널이 응답 없이 끊겼을 때 "원격 리스너 없음"인지는 채널마다 가린다. 채널을 열기 직전에 `SshTunnel::listener_verdict()`로 받은 판정 핸들로 그 채널의 실패를 판정한다. 그래서 같은 터널에서 이미 세어진 앞선 거절은 뒤에 연 채널의 판정에 섞이지 않는다. 실패 줄은 stderr 중계가 센 시점 기준이라, 중계가 늦으면 앞 채널의 거절이 뒤 채널 판정 핸들을 받은 뒤에 세어져 섞일 수 있다([레포 경계](repo-boundary.md) "포트 발견의 tasty 관례").
 - 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널은 이 레포가 닫는다. 터널은 다른 채널이 쓰고 있으면 남는다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
 - 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum, 그리고 그 결정을 설정값으로 맡길 수 있는 선택지 `Redialer`(아래 "보관 상한과 재연결 도우미")를 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
 - 다시 걸 때는 포트 발견부터 새로 하고, 발견 결과로 공유 키를 다시 만든다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
+
+## SSH 크레이트 설정값
+
+`tasty-net-ssh`는 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 따른다. 기본값의 원천은 코드의 기본값 표 하나다(`tasty_net_ssh::settings::DEFAULTS`). 시험이 아래 표를 읽어 코드와 값·범위까지 대조한다([CI와 시험 환경](testing.md#설정값-시험)).
+
+- 바꾸기: `SshSettings::set(키, 값)`. 모르는 키, 다른 종류의 값(초 단위 항목에 1초로 나누어떨어지지 않는 시간 포함), 범위 밖의 값은 `SettingsError`로 거절하고 아무것도 바꾸지 않는다. 설정은 `SshLauncher::with_settings(settings)`로 런처에 준다. 그 런처로 띄우는 ssh 옵션, 포트 발견, 터널, 판정 핸들이 모두 그 값을 쓴다. `Backoff::from_settings(&settings)`는 `backoff.*`를 쓴다. 설정 없는 `SshLauncher::new`·`Backoff::new()`는 기본값이다. 공개 상수 `SSH_CONNECT_TIMEOUT`·`PORT_DISCOVERY_STEP_TIMEOUT`·`PORT_DISCOVERY_TOTAL_TIMEOUT`은 해당 키의 기본값으로 남는다.
+- 조회: `SshLauncher::settings().entries()`(항목마다 `{key, value, source}`, 출처 `default`·`configured`)와 `get(키)`.
+- 대상마다의 적용값: 앞의 세 키는 ssh 옵션이 된다. 대상의 `extra_options`에 같은 옵션이 있으면 ssh는 먼저 나온 값을 쓴다. 그래서 `ServerAliveInterval`·`ServerAliveCountMax`는 대상 옵션보다 앞에 넘겨 설정값이 이기고, `ConnectTimeout`은 맨 뒤에 넘겨 대상의 값이 이긴다. `SshLauncher::applied_options(&target)`가 옵션마다 `{key, option, value, source}`를 돌려준다. `source`는 `default`·`configured`(설정값이 쓰인다)나 `target`(대상의 `ConnectTimeout`이 쓰인다)이다. 포트 발견이 느린 연결 실패를 시간 초과로 분류할 때도 이 적용값을 쓴다. 연결 목록의 `applied`에 싣는 일은 transport 쪽이 한다.
+- 나머지 키는 런처 하나에 하나다. 대상마다 다른 값이 필요하면 소비자가 대상마다 런처를 만든다.
+
+| 키 | 기본 | 범위 | 근거 |
+|---|---|---|---|
+| `ssh.connect_timeout` | 10 s | 1 s ~ 1 h | ssh `ConnectTimeout`. 연결 맺기만 묶고 그 뒤 keepalive와는 관계없다. 대상의 `ConnectTimeout`이 이긴다(위) |
+| `ssh.server_alive_interval` | 15 s | 1 s ~ 1 h | ssh `ServerAliveInterval`. 아래 횟수와 곱한 약 45초 안에 망이 끊긴 ssh가 스스로 끝난다. 대상 옵션보다 앞이라 이긴다 |
+| `ssh.server_alive_count_max` | 3 | 1 ~ 100 | ssh `ServerAliveCountMax`. 위와 같다 |
+| `discovery.step_timeout` | 20 s | 1 s ~ 1 h | 포트 발견 한 단계(생성 훅, 자식 대기, 출력 수집)의 상한. 지나면 자식을 끝내고 회수한다. `ConnectTimeout`으로 끝나는 연결 실패가 이 상한 전에 스스로 끝나도록 그보다 길게 둔다 |
+| `discovery.total_timeout` | 45 s | 1 s ~ 1 h | 한 발견 호출의 단계들이 나눠 쓰는 예산. 단계마다 단계 상한과 남은 예산 중 짧은 쪽을 받고, 다 쓰면 새 ssh를 띄우지 않는다. 단계 상한의 세 배(Auto의 세 단계)보다 짧아서 전체 대기가 단계 수만큼 늘지 않는다 |
+| `discovery.output_limit` | 64 KiB | 1 KiB ~ 1 MiB | 발견 명령 stdout의 상한. 레코드는 작다. 넘으면 바로 `PortParseFailed`로 거절한다. identity `max_secret_bytes`의 위 끝이 이 기본값이다([기기 키·토큰](identity.md#설정값)) |
+| `discovery.stderr_limit` | 16 KiB | 1 KiB ~ 1 MiB | 진단에 남기는 stderr 앞부분. 나머지는 읽어서 버린다(ssh가 닫힌 파이프에 막히지 않게) |
+| `discovery.stderr_detail_limit` | 512 | 64 ~ 65 536 | 실패 detail에 남기는 stderr 글자 수(자른 표시 `...` 포함) |
+| `discovery.overflow_exit_grace` | 100 ms | 0 ms ~ 10 s | stdout이 상한을 넘은 자식이 스스로 끝나기를 기다리는 시간. 대개 막 닫힌 파이프에 쓰다 실패해 끝나고, 그 종료 코드(3 등)가 분류를 정한다 |
+| `discovery.stderr_grace` | 500 ms | 0 ms ~ 10 s | 실패한 명령의 stderr를 종료 뒤 기다리는 시간(마감 안). stderr는 진단용이라 후손이 열어 두어도 발견을 붙잡지 않는다 |
+| `discovery.poll_min` | 5 ms | 1 ms ~ 1 s | 발견 자식의 종료를 보는 폴링의 첫 간격. 두 배씩 `discovery.poll_max`까지 늘린다. 보통 경로(수백 ms)의 지연이 적고 긴 대기의 깨어남이 적다. 상한을 넘은 뒤 유예 동안의 폴링 간격이기도 하다 |
+| `discovery.poll_max` | 50 ms | 1 ms ~ 1 s | 그 폴링의 가장 긴 간격. 출력을 기다리는 동안 취소를 보는 간격이기도 하다 |
+| `tunnel.ready_timeout` | 5 s | 100 ms ~ 10 min | 터널의 로컬 끝이 연결을 받을 때까지 기다리는 시간. 준비 대기는 취소를 받지 않아, 새 터널 준비 중 취소도 이만큼 뒤에 돌아온다(위 "터널 수명과 재연결") |
+| `tunnel.ready_poll` | 50 ms | 1 ms ~ 1 s | 그 확인 간격 |
+| `tunnel.stderr_drain_limit` | 500 ms | 0 ms ~ 10 s | 준비 전에 끝난 ssh의 마지막 stderr(인증 거절 등)를 오류보다 먼저 넘기려고 기다리는 시간. ssh가 끝나면 파이프가 닫히지만 파이프를 물려받은 다른 프로세스(ProxyCommand 등)가 열어 둘 수 있어 상한을 둔다 |
+| `tunnel.stderr_drain_poll` | 10 ms | 1 ms ~ 1 s | 그 대기 간격 |
+| `tunnel.stderr_max_line` | 1 KiB | 256 B ~ 64 KiB | 터널 stderr 한 줄을 판정할 때 남기는 길이. 판정할 줄(채널 연결 거절, `ForkAfterAuthentication` 거절)은 짧다. 잘린 줄로는 옵션 거절을 판정하지 않는다 |
+| `tunnel.verdict_grace` | 500 ms | 0 ms ~ 10 s | 채널이 응답 없이 끊긴 뒤 ssh의 거절 줄을 기다리는 시간. ssh는 거절 줄을 쓰고 로컬 연결을 닫지만, 호출자가 중계 스레드보다 먼저 실패를 볼 수 있다 |
+| `tunnel.verdict_poll` | 20 ms | 1 ms ~ 1 s | 그 대기 간격 |
+| `backoff.initial` | 500 ms | 1 ms ~ 1 min | `Backoff`의 처음 대기이자 `reset`이 돌아가는 값 |
+| `backoff.multiplier` | 2 | 1 ~ 10 | 단계마다 대기에 곱하는 수 |
+| `backoff.max_delay` | 30 s | 1 ms ~ 1 h | 대기의 상한 |
+
+- `backoff.*`와 transport의 `redial.initial`·`redial.multiplier`·`redial.max_delay`(아래 "보관 상한과 재연결 도우미")는 기본값이 같지만 원천은 따로다. `Backoff`는 소비자가 직접 쓰는 도구이고, `Redialer`는 transport 설정으로 받는다. 한쪽을 바꿔도 다른 쪽은 바뀌지 않는다.
+- 설정이 아닌 값:
+  - stderr 가리기 규칙의 길이 32: 토큰 같은 글자가 32자 이상 이어지면 가린다. 토큰은 hex 64자라 절반도 가려지고, 보통 낱말과 경로는 그보다 짧다. 설정으로 두면 토큰이 새는 값을 고를 수 있어 고정한다.
+  - 종료 코드: ssh의 연결 실패 255, 원격 하위 명령의 "인스턴스 끝남" 3(`PORT_COMMAND_EXITED_INSTANCE_CODE`, 원격 명령과의 약속), Windows의 강제 종료 코드 1.
+  - 그 밖에 형식이나 OS 한계인 값: `CREATE_NO_WINDOW`, 파이프를 한 번에 읽는 버퍼 크기(8 KiB·4 KiB, 읽는 단위일 뿐 상한이 아니다), Auto 사슬의 단계 수, 발견 폴링 간격을 늘리는 배수 2.
+  - 목록은 `scripts/no-hidden-constants.list`의 ssh 줄에 이유와 함께 있다.
 
 ## 동기·비동기 경계
 
