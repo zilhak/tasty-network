@@ -269,9 +269,10 @@ pub struct Resolution {
     /// The `CertificateFile` entries in order, expanded the same way (`ssh.c:2454`-`:2482`).
     pub certificate_files: Vec<KeyFile>,
     /// The known_hosts files `ssh` reads, in its order: `UserKnownHostsFile` (as
-    /// [`Options::user_hostfiles`]), then `GlobalKnownHostsFile` with `~` expanded
-    /// (`ssh.c:1791`-`:1793`). A file under a home that is not known is left out (a missing
-    /// file). Give it to [`crate::KnownHosts::load`].
+    /// [`Options::user_hostfiles`]), then `GlobalKnownHostsFile`, each with `~` expanded once
+    /// more, as `ssh` does after `ssh -G` stops (`ssh.c:1791`-`:1794`): a `~` that `${NAME}`
+    /// gave a user file is expanded here. A file under a home that is not known is left out
+    /// (a missing file). Give it to [`crate::KnownHosts::load`].
     pub known_hosts_files: Vec<PathBuf>,
 }
 
@@ -413,6 +414,11 @@ impl ConfigSet {
                 st.host.clone()
             }
         };
+        // A refused resolution gives no key files (the stage that makes them is the last).
+        if r.refusal.is_some() {
+            st.identity_files.clear();
+            st.certificate_files.clear();
+        }
         let (host_key_checking, host_key_checking_origin) = r
             .strict_values
             .iter()
@@ -825,10 +831,21 @@ impl ConfigSet {
             expand(s, true, Some(&tokens), vars).map_err(|e| expand_refusal(what, e))
         };
         let account = r.env.account.clone();
+        // A refusal of a path names the keyword and its first source.
+        let sources = r.sources.clone();
+        let placed = |mut f: Fatal, what: &str| {
+            f.0.keyword.get_or_insert_with(|| what.to_string());
+            f.0.origin
+                .get_or_insert_with(|| origin_or_default(&sources, what));
+            f
+        };
         // `None`: the file is under a home that is not known.
         let file = |s: &str, what: &str| -> Result<Option<String>, Fatal> {
-            match tilde_path(&account, s, &Origin::Default)? {
-                Some(t) => percent_dollar(&t, what).map(Some),
+            let origin = origin_or_default(&sources, what);
+            match tilde_path(&account, s, &origin).map_err(|e| placed(e, what))? {
+                Some(t) => percent_dollar(&t, what)
+                    .map(Some)
+                    .map_err(|e| placed(e, what)),
                 None => Ok(None),
             }
         };
@@ -838,7 +855,7 @@ impl ConfigSet {
                 Fatal(Refusal {
                     kind: RefusalKind::Undeterminable,
                     keyword: Some(what.to_string()),
-                    origin: None,
+                    origin: Some(origin_or_default(&sources, what)),
                     message: format!("{what}: the path needs the home folder, which is not known"),
                 })
             })
@@ -888,45 +905,6 @@ impl ConfigSet {
                 r.o.user_hostfiles.push(v);
             }
         }
-        for f in &r.o.user_hostfiles {
-            st.known_hosts_files.push(PathBuf::from(f));
-        }
-        for f in &r.o.system_hostfiles {
-            if let Some(p) = tilde_path(&account, f, &Origin::Default)? {
-                st.known_hosts_files.push(PathBuf::from(p));
-            }
-        }
-        // `load_public_identity_files`: `~`, then the `%` tokens and `${NAME}`.
-        let key_file = |(written, by): &(String, ProvidedBy),
-                        origin: Option<&Origin>,
-                        what: &str|
-         -> Result<KeyFile, Fatal> {
-            let origin = origin.cloned().unwrap_or(Origin::Default);
-            let with_origin = |Fatal(mut f): Fatal| {
-                f.origin.get_or_insert_with(|| origin.clone());
-                Fatal(f)
-            };
-            let path = match tilde_path(&account, written, &origin)? {
-                Some(t) => Some(percent_dollar(&t, what).map_err(with_origin)?),
-                None => None,
-            };
-            Ok(KeyFile {
-                written: written.clone(),
-                path,
-                provided_by: *by,
-                origin,
-            })
-        };
-        for (i, f) in r.o.identity_files.iter().enumerate() {
-            if !f.0.eq_ignore_ascii_case("none") {
-                let k = key_file(f, r.identity_origins.get(i), "identityfile")?;
-                st.identity_files.push(k);
-            }
-        }
-        for (i, f) in r.o.certificate_files.iter().enumerate() {
-            let k = key_file(f, r.certificate_origins.get(i), "certificatefile")?;
-            st.certificate_files.push(k);
-        }
         let setenv = std::mem::take(&mut r.o.setenv);
         for e in setenv {
             let (name, value) = e.split_once('=').unwrap_or((&e, ""));
@@ -942,7 +920,85 @@ impl ConfigSet {
                 }
             }
         }
+        // `ssh -G` stops here (`ssh.c:1612`-`:1615`). What follows is the connection stage of
+        // `ssh`: `load_public_identity_files` (`ssh.c:1646`) and the `~` expansion of the
+        // known_hosts files (`ssh.c:1791`-`:1794`). A failure there stops `ssh` when it
+        // connects, not `ssh -G`, so it comes after every value `ssh -G` shows.
+        self.connection_stage(r, st, &account, &percent_dollar)?;
         Ok(host)
+    }
+
+    /// The connection stage of `ssh` after `ssh -G` stops: the known_hosts files and the key
+    /// files. The lists are kept only when the whole stage succeeds.
+    fn connection_stage(
+        &self,
+        r: &Reader<'_>,
+        st: &mut State,
+        account: &Account,
+        percent_dollar: &dyn Fn(&str, &str) -> Result<String, Fatal>,
+    ) -> Result<(), Fatal> {
+        // A refusal of this stage names the keyword and the line it came from. The key files
+        // come first, as in `ssh`.
+        let place = |mut f: Fatal, keyword: &str, origin: &Origin| {
+            f.0.keyword.get_or_insert_with(|| keyword.to_string());
+            f.0.origin.get_or_insert_with(|| origin.clone());
+            f
+        };
+        // `load_public_identity_files`: `~`, then the `%` tokens and `${NAME}`.
+        let key_file = |(written, by): &(String, ProvidedBy),
+                        origin: Option<&Origin>,
+                        keyword: &str|
+         -> Result<KeyFile, Fatal> {
+            let origin = origin.cloned().unwrap_or(Origin::Default);
+            let path = match tilde_path(account, written, &origin)
+                .map_err(|e| place(e, keyword, &origin))?
+            {
+                Some(t) => {
+                    Some(percent_dollar(&t, keyword).map_err(|e| place(e, keyword, &origin))?)
+                }
+                None => None,
+            };
+            Ok(KeyFile {
+                written: written.clone(),
+                path,
+                provided_by: *by,
+                origin,
+            })
+        };
+        let mut identities = Vec::new();
+        for (i, f) in r.o.identity_files.iter().enumerate() {
+            if !f.0.eq_ignore_ascii_case("none") {
+                identities.push(key_file(f, r.identity_origins.get(i), "identityfile")?);
+            }
+        }
+        let mut certificates = Vec::new();
+        for (i, f) in r.o.certificate_files.iter().enumerate() {
+            certificates.push(key_file(
+                f,
+                r.certificate_origins.get(i),
+                "certificatefile",
+            )?);
+        }
+        let mut known_hosts = Vec::new();
+        // `tilde_expand_paths` over both lists (`ssh.c:1791`-`:1794`): the user files were
+        // already expanded for `ssh -G` (`ssh.c:1535`-`:1546`), and a `~` that `${NAME}` or
+        // a `%` token gave is expanded now.
+        for (keyword, list) in [
+            ("userknownhostsfile", &r.o.user_hostfiles),
+            ("globalknownhostsfile", &r.o.system_hostfiles),
+        ] {
+            let origin = origin_or_default(&r.sources, keyword);
+            for f in list {
+                let p = tilde_path(account, f, &origin).map_err(|e| place(e, keyword, &origin))?;
+                if let Some(p) = p {
+                    known_hosts.push(PathBuf::from(p));
+                }
+            }
+        }
+        st.known_hosts_files = known_hosts;
+        st.identity_files = identities;
+        st.certificate_files = certificates;
+        Ok(())
     }
 }
 
@@ -998,6 +1054,14 @@ fn tilde_path(account: &Account, s: &str, origin: &Origin) -> Result<Option<Stri
             message: format!("the home of user {u} is not known"),
         })),
     }
+}
+
+/// The first source of a keyword (as `ssh -G` names it), or the OpenSSH default.
+fn origin_or_default(sources: &[ValueSource], keyword: &str) -> Origin {
+    sources
+        .iter()
+        .find(|s| s.keyword == keyword)
+        .map_or(Origin::Default, |s| s.origin.clone())
 }
 
 fn push_source(r: &mut Reader<'_>, op: Op, value: &str, origin: &Origin) {

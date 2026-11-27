@@ -10,6 +10,8 @@ bad.example.com
 deploy@WEB.Example.COM
 ssh://user@uri.example.com:2201
 -o IdentityFile=~/.ssh/id_%h web
+-o IdentityFile=/k/${TASTY_UNSET_KEY_FILE} web => connect-refused config_error identityfile
+-o CertificateFile=/k/${TASTY_UNSET_KEY_FILE} web => connect-refused config_error certificatefile
 -N web
 -N -o UpdateHostKeys=ask web
 -o RequestTTY=force -N web

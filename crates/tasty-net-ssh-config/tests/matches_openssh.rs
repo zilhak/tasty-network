@@ -8,6 +8,10 @@
 //!   [`Resolution::dump_client_config`], and the resolution is not refused;
 //! - `also-refused <kind>`: the same, and this crate refuses the resolution with that kind
 //!   (`security_not_implemented` or `undeterminable`, a refusal OpenSSH does not make);
+//! - `connect-refused <kind> <keyword>`: the same, and this crate refuses with that kind and
+//!   keyword at the connection stage, which `ssh` reaches after `ssh -G` stops
+//!   (`ssh.c:1612`-`:1615`, then `load_public_identity_files` at `ssh.c:1646`): OpenSSH makes
+//!   that refusal when it connects;
 //! - `refused <kind> <place> [<keyword>]`: the reference client exits with 255 and its error
 //!   output names the place, and this crate refuses with that kind at that place (and keyword).
 //!   The place is `<file>:<line>` with the file relative to the fixture folder,
@@ -188,6 +192,10 @@ fn first_difference(want: &str, got: &str) -> String {
 enum Expect {
     Same,
     AlsoRefused(RefusalKind),
+    ConnectRefused {
+        kind: RefusalKind,
+        keyword: String,
+    },
     Refused {
         kind: RefusalKind,
         place: Place,
@@ -227,6 +235,10 @@ fn parse_expect(text: &str) -> Result<Expect, String> {
             }
             Ok(Expect::AlsoRefused(kind))
         }
+        ["connect-refused", kind, keyword] => Ok(Expect::ConnectRefused {
+            kind: kind_of(kind)?,
+            keyword: keyword.to_string(),
+        }),
         ["refused", kind, place, rest @ ..] if rest.len() <= 1 => {
             let place = if *place == "command-line" {
                 Place::CommandLine
@@ -267,18 +279,20 @@ fn check_case(
 ) -> Result<bool, String> {
     let last = stderr.lines().last().unwrap_or("");
     match expect {
-        Expect::Same | Expect::AlsoRefused(_) => {
+        Expect::Same | Expect::AlsoRefused(_) | Expect::ConnectRefused { .. } => {
             if !out.status.success() {
                 return Err(format!("ssh fails ({last}) but the case expects success"));
             }
-            let want_kind = match expect {
-                Expect::AlsoRefused(k) => Some(*k),
-                _ => None,
+            let (want_kind, want_keyword) = match expect {
+                Expect::AlsoRefused(k) => (Some(*k), None),
+                Expect::ConnectRefused { kind, keyword } => (Some(*kind), Some(keyword.as_str())),
+                _ => (None, None),
             };
             let got_kind = r.refusal.as_ref().map(|f| f.kind);
-            if got_kind != want_kind {
+            let got_keyword = r.refusal.as_ref().and_then(|f| f.keyword.as_deref());
+            if got_kind != want_kind || (want_keyword.is_some() && got_keyword != want_keyword) {
                 return Err(format!(
-                    "port refusal {:?} ({}), the case expects {want_kind:?}",
+                    "port refusal {:?} {got_keyword:?} ({}), the case expects {want_kind:?} {want_keyword:?}",
                     got_kind,
                     r.refusal
                         .as_ref()

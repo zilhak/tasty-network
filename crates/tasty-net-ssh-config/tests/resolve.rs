@@ -1239,6 +1239,89 @@ fn an_unset_variable_in_a_key_file_refuses() {
 }
 
 #[test]
+fn a_refused_key_file_leaves_no_key_files() {
+    // The first entry expands, the second does not: the lists are empty, not cut.
+    let r = resolve(
+        "Host web\n  IdentityFile /k/one\n  IdentityFile /k/${TASTY_UNSET_FOR_TEST}\n  \
+         CertificateFile /c/one\n",
+        "web",
+    );
+    let f = r.refusal.as_ref().expect("refused");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(
+        refusal_place(&r),
+        (Some("identityfile".to_string()), Some(3))
+    );
+    assert!(r.identity_files.is_empty(), "{:?}", r.identity_files);
+    assert!(r.certificate_files.is_empty(), "{:?}", r.certificate_files);
+    // `ssh -G` shows the values (`ssh.c:1612`-`:1615` comes before `ssh.c:1646`).
+    assert_eq!(r.options.identity_files.len(), 2);
+    let dump = r.dump_client_config().expect("a dump");
+    assert!(
+        dump.contains("identityfile /k/${TASTY_UNSET_FOR_TEST}"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn path_refusals_name_the_keyword_and_line() {
+    for (keyword, line) in [
+        ("IdentityFile", "identityfile"),
+        ("CertificateFile", "certificatefile"),
+        ("UserKnownHostsFile", "userknownhostsfile"),
+        ("GlobalKnownHostsFile", "globalknownhostsfile"),
+        ("ControlPath", "controlpath"),
+        ("RevokedHostKeys", "revokedhostkeys"),
+    ] {
+        let r = resolve(
+            &format!("Host web\n  User alice\n  {keyword} ~other_user/x\n"),
+            "web",
+        );
+        assert_eq!(
+            refusal_kind(&r),
+            Some(RefusalKind::Undeterminable),
+            "{keyword}"
+        );
+        assert_eq!(
+            refusal_place(&r),
+            (Some(line.to_string()), Some(3)),
+            "{keyword}"
+        );
+    }
+    let r = resolve(
+        "Host web\n  UserKnownHostsFile /k/${TASTY_UNSET_FOR_TEST}\n",
+        "web",
+    );
+    assert_eq!(refusal_kind(&r), Some(RefusalKind::ConfigError));
+    assert_eq!(
+        refusal_place(&r),
+        (Some("userknownhostsfile".to_string()), Some(2))
+    );
+}
+
+#[test]
+fn a_tilde_from_a_variable_is_expanded_for_the_lookup() {
+    let dir = folder();
+    let path = write(
+        &dir,
+        "config",
+        "Host web\n  UserKnownHostsFile ${KH_PATH}\n",
+    );
+    let mut ctx = context(Vec::new());
+    ctx.env.insert("KH_PATH".to_string(), "~/kh".to_string());
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(path),
+    })
+    .expect("load")
+    .resolve("web", &ctx);
+    assert!(r.refusal.is_none(), "{:?}", r.refusal);
+    // `ssh -G` shows the value after `${}` (`ssh.c:1535`-`:1546`); the lookup expands the
+    // `~` it gave (`ssh.c:1791`-`:1794`).
+    assert_eq!(r.options.user_hostfiles, vec!["~/kh".to_string()]);
+    assert_eq!(r.known_hosts_files[0], PathBuf::from("/home/tester/kh"));
+}
+
+#[test]
 fn known_hosts_files_and_query() {
     let r = resolve(
         "Host web\n  Port 2222\n  UserKnownHostsFile ~/kh %d/kh2\n  \
