@@ -116,7 +116,10 @@ install_main() {
 
     # 목적지는 mkdir로 이 실행이 만들 때만 쓴다. 그 사이 무언가 생겼으면(빈 폴더 포함, 같은 PREFIX의
     # 동시 설치) 실패하고 그 자리는 건드리지 않는다. 만든 뒤에는 푼 NDK의 항목을 그 안으로 옮긴다(같은
-    # 파일 시스템 안의 이름 바꾸기). 다 옮기기 전에 끝나면 cleanup이 만든 목적지를 지운다.
+    # 파일 시스템 안의 이름 바꾸기). 다른 실행의 ndk_ok가 읽는 source.properties는 나머지를 다 옮기고
+    # clang을 확인한 뒤 맨 마지막에 옮긴다. 그 전에는 다른 실행이 이 목적지를 받아들이지 않고 2로 끝나므로,
+    # 그때까지는 실패하면 cleanup이 만든 목적지를 지워도 된다. source.properties를 옮기는 순간부터는
+    # 지우지 않는다.
     if ! mkdir -- "$dest" 2>/dev/null; then
         say "$dest를 만들지 못했다(그 사이 같은 자리에 무언가 생겼거나 만들 수 없다). 그 자리는 그대로 두고 멈춘다."
         return 2
@@ -124,13 +127,25 @@ install_main() {
     CLAIMED_DEST=$dest
     for e in "$tmp/x/$NAME"/* "$tmp/x/$NAME"/.[!.]* "$tmp/x/$NAME"/..?*; do
         [ -e "$e" ] || [ -L "$e" ] || continue
+        [ "$e" = "$tmp/x/$NAME/source.properties" ] && continue
         mv -- "$e" "$dest/" || { say "$dest로 옮기지 못했다."; return 2; }
     done
-    if [ -e "$dest/$NAME" ] || ! ndk_ok "$dest"; then
+    if [ -e "$dest/$NAME" ] || [ -e "$dest/source.properties" ] \
+        || [ ! -f "$dest/$CLANG_REL" ] || [ ! -x "$dest/$CLANG_REL" ]; then
         say "옮긴 뒤 $dest가 고정 판의 NDK가 아니다."
         return 2
     fi
     CLAIMED_DEST=""
+    if ! mv -- "$tmp/x/$NAME/source.properties" "$dest/source.properties"; then
+        # source.properties가 없으니 다른 실행이 받아들였을 수 없다.
+        say "$dest로 source.properties를 옮기지 못했다."
+        rm -rf -- "${dest:?}"
+        return 2
+    fi
+    if ! ndk_ok "$dest"; then
+        say "옮긴 뒤 $dest가 고정 판의 NDK가 아니다. 다른 실행이 이미 받았을 수 있어 그 자리는 그대로 둔다."
+        return 2
+    fi
     say "설치했다: $dest (Pkg.Revision $NDK_REVISION)"
     echo "$dest"
 }
@@ -153,6 +168,8 @@ def make(kind):
     r = "29.0.1" if kind == "oldrev" else rev
     with zipfile.ZipFile(f"{work}/{kind}.zip", "w") as z:
         z.writestr(f"{top}/source.properties", f"Pkg.Desc = Android NDK\nPkg.Revision = {r}\n")
+        # 실제 아카이브처럼 toolchains 뒤에 옮길 항목(wrap.sh)을 둔다.
+        z.writestr(f"{top}/wrap.sh", "#!/bin/sh\n")
         if kind == "clangdir":
             info = zipfile.ZipInfo(f"{top}/{clang}/")
             info.external_attr = (0o40755 << 16)
@@ -165,9 +182,11 @@ for k in ("good", "noclang", "oldrev", "noname", "clangdir"):
     make(k)
 PY
     # 이름#기대 종료 코드#PREFIX 준비(fresh·again·emptydir·otherfiles·file·badrev·noclangdest·clangdirdest·
-    # bad-sum·race·race-empty·quote)#아카이브
+    # bad-sum·race·race-empty·quote·filling·filling-fail)#아카이브
     # (race는 받는 동안 목적지에 파일이 든 폴더가, race-empty는 빈 폴더가 생긴다. quote는 PREFIX에 작은따옴표가
-    # 든다. 어느 경우든 끝난 뒤 PREFIX에 임시 폴더 .install-ndk.*가 남으면 실패다)
+    # 든다. filling은 목적지를 채우는 중(wrap.sh를 옮기기 직전)에 같은 PREFIX로 다른 호출을 하고, 그
+    # 호출이 2가 아니면 실패다. filling-fail은 거기에 더해 wrap.sh 옮기기가 실패한다. 어느 경우든 끝난 뒤
+    # PREFIX에 임시 폴더 .install-ndk.*가 남으면 실패다)
     local cases=(
         "빈 PREFIX에 설치한다#0#fresh#good"
         "같은 판이 이미 있다#0#again#good"
@@ -185,6 +204,8 @@ PY
         "목적지의 clang 자리가 폴더다#2#clangdirdest#good"
         "아카이브의 clang 자리가 폴더다#2#fresh#clangdir"
         "PREFIX에 작은따옴표가 든다#0#quote#good"
+        "채우는 중인 목적지를 다른 호출이 본다#0#filling#good"
+        "채우는 중 실패하고 다른 호출이 그 목적지를 본다#2#filling-fail#good"
     )
     for c in "${cases[@]}"; do
         IFS='#' read -r name want setup archive <<<"$c"
@@ -215,6 +236,22 @@ PY
             # shellcheck disable=SC2329  # install_main이 부른다
             host_ok() { return 0; }
             # shellcheck disable=SC2329  # install_main이 부른다
+            # shellcheck disable=SC2329  # install_main이 부른다
+            mv() {
+                local a
+                for a in "$@"; do
+                    case "$a" in
+                        */wrap.sh)
+                            if [ "$setup" = filling ] || [ "$setup" = filling-fail ]; then
+                                (INSTALL_TMP="" CLAIMED_DEST="" PREFIX="$pfx" install_main >/dev/null 2>&1)
+                                echo "$?" >"$work/other.rc"
+                                [ "$setup" = filling-fail ] && return 1
+                            fi
+                            ;;
+                    esac
+                done
+                command mv "$@"
+            }
             fetch() {
                 cp "$work/$archive.zip" "$1"
                 if [ "$setup" = race ]; then mkdir "$dest" && : >"$dest/partial"; fi
@@ -228,6 +265,12 @@ PY
         if [ "$got" = 0 ] && { [ "$out" != "$dest" ] || [ "$(revision_of "$dest")" != "$NDK_REVISION" ] \
             || [ ! -f "$dest/$CLANG_REL" ] || [ ! -x "$dest/$CLANG_REL" ] || [ -e "$dest/$NAME" ]; }; then
             got="0(찍은 폴더 '$out'이 고정 판의 NDK가 아님)"
+        fi
+        if [ "$setup" = filling ] || [ "$setup" = filling-fail ]; then
+            if [ "$(cat "$work/other.rc" 2>/dev/null)" != 2 ]; then
+                got="$got(채우는 중 다른 호출의 결과 $(cat "$work/other.rc" 2>/dev/null), 기대 2)"
+            fi
+            rm -f "$work/other.rc"
         fi
         left=$(find "$pfx" -maxdepth 1 -name '.install-ndk.*' | wc -l)
         [ "$left" -eq 0 ] || got="$got(임시 폴더 ${left}개가 남음)"
