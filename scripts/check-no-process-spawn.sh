@@ -104,6 +104,11 @@ def parse_use_tree(toks, i, prefix, out):
     path = list(prefix)
     if i < len(toks) and toks[i][1] == "::":
         i += 1
+    if (not path and i + 2 < len(toks) and toks[i][1] == "$" and toks[i + 1][1] == "crate"
+            and toks[i + 2][1] == "::"):
+        # 매크로 본문의 use $crate::…는 crate::…처럼 매크로가 정의된 크레이트 안의 지역 경로다.
+        path = ["$crate"]
+        i += 3
     while i < len(toks):
         k, t, line = toks[i]
         if t == "*":
@@ -472,6 +477,11 @@ def self_test():
         ("crate::std::process::Command(이 크레이트의 std 모듈)", "fn f() { crate::std::process::Command::new(\"x\"); }\n"),
         ("self::std::process::Command(이 모듈 아래 std 모듈)", "fn f() { self::std::process::Command::new(\"x\"); }\n"),
         ("super::tokio::process::Command(윗 모듈의 tokio 모듈)", "fn f() { super::tokio::process::Command::new(\"x\"); }\n"),
+        ("use $crate::std::process::Command;(매크로가 정의된 크레이트의 std 모듈)",
+         "mod std { pub mod process { pub struct Command; } }\n"
+         "macro_rules! m { () => { use $crate::std::process::Command; }; }\n"),
+        ("use $crate::{a, std::process::Command};",
+         "macro_rules! m { () => { use $crate::{a, std::process::Command}; }; }\n"),
         ("$crate::std::process::Command(매크로가 정의된 크레이트의 std 모듈)",
          "macro_rules! m { () => { $crate::std::process::Command::new(\"x\") }; }\n"),
         ("정밀 캡처 impl Copy + use<'a>는 import가 아니다",
