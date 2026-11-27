@@ -18,7 +18,8 @@ SUFFIX = re.compile(r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32
 PUNCT3 = ("<<=", ">>=", "...", "..=")
 PUNCT2 = ("::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
           "%=", "^=", "&=", "|=", "<<", ">>", "..")
-RAW_STR = re.compile(r"b?r(#*)\"")
+# raw 문자열의 시작: r"…", r#"…"#, raw 바이트 br…, raw C cr…(같은 수의 #로 닫는다).
+RAW_STR = re.compile(r"[bc]?r(#*)\"")
 RAW_IDENT = re.compile(r"r#([A-Za-z_][A-Za-z0-9_]*)")
 # Rust의 엄격·예약 키워드(2018 이후). raw 식별자 r#<키워드>는 키워드가 아니므로 r#를 남긴다.
 KEYWORDS = {
@@ -32,7 +33,8 @@ KEYWORDS = {
 
 def tokenize(text):
     """(종류, 글자, 줄) 목록. 종류: num, ident, punct, str. 주석은 버린다. raw 식별자 r#name은
-    name으로 읽는다(name이 키워드면 r#name 그대로)."""
+    name으로 읽는다(name이 키워드면 r#name 그대로). 닫히지 않은 블록 주석·문자열·raw 문자열은
+    나머지를 그 안으로 삼지 않고 ScanError."""
     out = []
     i, n, line = 0, len(text), 1
     while i < n:
@@ -54,20 +56,26 @@ def tokenize(text):
                     depth, j = depth - 1, j + 2
                 else:
                     j += 1
+            if depth:
+                raise ScanError(f"{line}행: 블록 주석이 닫히지 않았다")
             line += text.count("\n", i, j)
             i = j
         elif RAW_STR.match(text, i):
             m = RAW_STR.match(text, i)
             close = "\"" + m.group(1)
             j = text.find(close, m.end())
-            j = n if j < 0 else j + len(close)
+            if j < 0:
+                raise ScanError(f"{line}행: raw 문자열이 닫히지 않았다")
+            j += len(close)
             out.append(("str", text[i:j], line))
             line += text.count("\n", i, j)
             i = j
-        elif c == "\"" or text.startswith("b\"", i):
-            j = i + (2 if c == "b" else 1)
+        elif c == "\"" or text.startswith(("b\"", "c\""), i):
+            j = i + (1 if c == "\"" else 2)
             while j < n and text[j] != "\"":
                 j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                raise ScanError(f"{line}행: 문자열이 닫히지 않았다")
             out.append(("str", text[i:j + 1], line))
             line += text.count("\n", i, j)
             i = j + 1
