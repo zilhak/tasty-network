@@ -27,8 +27,13 @@
 //! is not here; the consumer does it with these value types. The crate reads no environment
 //! variable: host key checking is [`SshLauncher::with_verify`].
 
+// An SSH crate without a backend is not built (docs/design/ssh-backends.md "feature 계약").
+#[cfg(not(feature = "system-ssh"))]
+compile_error!("tasty-net-ssh needs the system-ssh or embedded-ssh feature");
+
 mod listener;
 pub mod settings;
+#[cfg(feature = "system-ssh")]
 mod system;
 
 pub use listener::{
@@ -37,14 +42,19 @@ pub use listener::{
 pub use settings::{
     PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT, SshSettings,
 };
+#[cfg(feature = "system-ssh")]
 pub use system::cancel::{SshCancel, SshCancelScope};
+#[cfg(feature = "system-ssh")]
 pub use system::discovery::{
     PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
     PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port, detect_port_mode,
     discover_remote_port,
 };
+#[cfg(feature = "system-ssh")]
 pub use system::resolve_ssh_path;
+#[cfg(feature = "system-ssh")]
 pub use system::spawn::{SpawnFn, SpawnHook, SshLauncher};
+#[cfg(feature = "system-ssh")]
 pub use system::tunnel::{Backoff, SshTunnel, TunnelError, tunnel_drop_totals};
 
 use std::fmt;

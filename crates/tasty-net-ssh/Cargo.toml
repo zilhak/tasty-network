@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# The SSH backend feature contract (docs/design/ssh-backends.md "feature 계약"). system-ssh is
+# the system ssh backend in src/system/; a build without any backend stops with compile_error!.
+default = ["system-ssh"]
+system-ssh = []
+
 [dependencies]
 tracing = "0.1"
 
