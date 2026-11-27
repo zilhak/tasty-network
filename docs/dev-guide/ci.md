@@ -47,7 +47,7 @@
 
 ### iOS
 
-`macos-latest` 러너의 기본 Xcode를 쓴다. Xcode 판은 러너 이미지가 정하고 이 워크플로가 고정하지 않는다. 로그의 SDK·clang 판 줄로 어느 판에서 돌았는지 본다. 배포 대상은 rustc 기본값 그대로다([모바일](../design/mobile.md#대상-target)).
+`macos-latest` 러너의 기본 Xcode를 쓴다. Xcode 판은 러너 이미지가 정하고 이 워크플로가 고정하지 않는다. target마다 그 SDK를 고른다: `aarch64-apple-ios`는 `iphoneos`, `aarch64-apple-ios-sim`은 `iphonesimulator`다. 그 SDK가 없으면 그 target을 건너뛴다(CI에서는 `MOBILE_CHECK_REQUIRE=1`이라 실패). target마다 `mobile-check: <target> SDK <SDK> <판> (<경로>), <clang 판>` 줄을 남기므로 어느 판에서 돌았는지 로그로 본다. `mobile-check`는 시작할 때 가짜 `xcrun`으로 이 선택을 자체 시험한다. 배포 대상은 rustc 기본값 그대로다([모바일](../design/mobile.md#대상-target)).
 
 ### 앱 작업 공간에서 의존 쪽 검사
 

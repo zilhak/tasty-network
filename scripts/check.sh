@@ -204,8 +204,87 @@ mobile_check_target() {
     done 3< <(mobile_combos)
     return "$failed"
 }
+# iOS target의 SDK 이름. 기기 target은 iphoneos, 시뮬레이터 target은 iphonesimulator다.
+mobile_ios_sdk() {
+    case "$1" in
+        aarch64-apple-ios) echo iphoneos ;;
+        aarch64-apple-ios-sim) echo iphonesimulator ;;
+        *) return 1 ;;
+    esac
+}
+# target 하나. 돌렸으면 그 결과를 돌려주고, 건너뛰면 부른 쪽의 skipped에 이유를 넣고 0을 돌려준다.
+mobile_check_one() {
+    local t=$1 ndk sdk
+    if ! mobile_target_installed "$t"; then
+        skipped+=("$t(rustup target add $t)")
+        return 0
+    fi
+    case "$t" in
+        *-linux-android)
+            ndk=${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}
+            if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+                skipped+=("$t(NDK 없음: ANDROID_NDK_ROOT)")
+                return 0
+            fi
+            ( mobile_android_env "$t" "$ndk" && mobile_check_target "$t" )
+            ;;
+        *-apple-ios*)
+            sdk=$(mobile_ios_sdk "$t") || return 1
+            if ! xcrun --sdk "$sdk" --show-sdk-path >/dev/null 2>&1; then
+                skipped+=("$t(Xcode $sdk SDK 없음)")
+                return 0
+            fi
+            echo "mobile-check: $t SDK $sdk $(xcrun --sdk "$sdk" --show-sdk-version 2>/dev/null)" \
+                "($(xcrun --sdk "$sdk" --show-sdk-path 2>/dev/null)), $(xcrun clang --version 2>/dev/null | head -n 1)" >&2
+            mobile_check_target "$t"
+            ;;
+        *) return 1 ;;
+    esac
+}
+# mobile-check 자체의 시험: 가짜 xcrun·target·조합 실행으로 target마다 고른 SDK와 건너뛰기를 본다.
+mobile_check_self_test() {
+    local failed=0 c name sdks t want got
+    # 이름#가짜 xcrun이 아는 SDK(,로 나눈다)#target#기대(checked·skipped)
+    local cases=(
+        "기기 SDK만 있고 기기 target#iphoneos#aarch64-apple-ios#checked"
+        "기기 SDK만 있고 시뮬레이터 target#iphoneos#aarch64-apple-ios-sim#skipped"
+        "시뮬레이터 SDK만 있고 시뮬레이터 target#iphonesimulator#aarch64-apple-ios-sim#checked"
+        "시뮬레이터 SDK만 있고 기기 target#iphonesimulator#aarch64-apple-ios#skipped"
+        "두 SDK가 있고 시뮬레이터 target#iphoneos,iphonesimulator#aarch64-apple-ios-sim#checked"
+        "SDK가 없고 기기 target##aarch64-apple-ios#skipped"
+    )
+    for c in "${cases[@]}"; do
+        IFS='#' read -r name sdks t want <<<"$c"
+        got=$(
+            # shellcheck disable=SC2329  # mobile_check_one이 부른다
+            xcrun() {
+                if [[ "$1" == --sdk ]]; then
+                    [[ ",$sdks," == *",$2,"* ]] || return 1
+                    [[ "$3" == --show-sdk-version ]] && echo 99.0 || echo "/sdk/$2"
+                    return 0
+                fi
+                echo "fake clang"
+            }
+            # shellcheck disable=SC2329
+            mobile_target_installed() { return 0; }
+            ran=""
+            # shellcheck disable=SC2329
+            mobile_check_target() { ran=$1; }
+            skipped=()
+            mobile_check_one "$t" 2>/dev/null || echo "rc=$?"
+            if [[ ${#skipped[@]} -gt 0 ]]; then echo skipped; elif [[ "$ran" == "$t" ]]; then echo checked; fi
+        )
+        if [[ "$got" == "$want" ]]; then
+            echo "mobile-check: 자체 시험 통과: $name" >&2
+        else
+            echo "mobile-check: 자체 시험 실패: $name (기대 $want, 결과 ${got:-없음})" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
+}
 cmd_mobile_check() {
-    local t k ndk skipped=() failed=0 known
+    local t k skipped=() failed=0 known
     if [[ $# -eq 0 ]]; then
         echo "사용: scripts/check.sh mobile-check <target>… (target: ${MOBILE_TARGETS[*]})" >&2
         return 2
@@ -219,31 +298,10 @@ cmd_mobile_check() {
         fi
     done
     [[ -n "$(mobile_combos)" ]] || { echo "mobile-check: scripts/mobile-crates.list에 조합이 없다" >&2; return 2; }
+    mobile_check_self_test || return 1
     run bash scripts/check-mobile-deps.sh --self-test
     for t in "$@"; do
-        if ! mobile_target_installed "$t"; then
-            skipped+=("$t(rustup target add $t)")
-            continue
-        fi
-        case "$t" in
-            *-linux-android)
-                ndk=${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}
-                if [[ -z "$ndk" || ! -d "$ndk" ]]; then
-                    skipped+=("$t(NDK 없음: ANDROID_NDK_ROOT)")
-                    continue
-                fi
-                ( mobile_android_env "$t" "$ndk" && mobile_check_target "$t" ) || failed=1
-                ;;
-            *-apple-ios*)
-                if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
-                    skipped+=("$t(Xcode iOS SDK 없음)")
-                    continue
-                fi
-                echo "mobile-check: iOS SDK $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null)," \
-                    "$(xcrun clang --version 2>/dev/null | head -n 1)" >&2
-                mobile_check_target "$t" || failed=1
-                ;;
-        esac
+        mobile_check_one "$t" || failed=1
     done
     if [[ ${#skipped[@]} -gt 0 ]]; then
         echo "mobile-check: target 없음 — 건너뛴 target: ${skipped[*]}" >&2
