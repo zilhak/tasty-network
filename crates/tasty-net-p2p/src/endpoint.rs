@@ -916,6 +916,7 @@ pub(crate) async fn watch_connection(
     quic: quinn::Connection,
     poll_address: bool,
 ) {
+    tokio::spawn(refuse_uni_streams(quic.clone()));
     let mut tick = tokio::time::interval(core.params.path_poll_interval);
     let mut last = canonical(quic.remote_address());
     let mut shutdown = core.shutdown.subscribe();
@@ -947,6 +948,16 @@ pub(crate) async fn watch_connection(
         cause
     };
     tracked.to(AttemptPhase::Closed, cause);
+}
+
+/// Close every unidirectional stream the peer opens without reading it, until the connection
+/// ends: this crate uses none, and a `quic.max_uni_streams` above 0 only lets quinn take them
+/// (docs/design/p2p.md "설정값"). Stopping a stream gives its credit back to the peer.
+pub(crate) async fn refuse_uni_streams(quic: quinn::Connection) {
+    while let Ok(mut recv) = quic.accept_uni().await {
+        // Application code 0, the default value.
+        let _stopped = recv.stop(quinn::VarInt::default()).is_ok();
+    }
 }
 
 fn close_cause(e: &ConnectionError, conn: &ConnInner) -> Cause {
@@ -1088,5 +1099,61 @@ mod tests {
                 .iter()
                 .all(IpAddr::is_ipv6)
         );
+    }
+
+    /// A peer's unidirectional streams are stopped unread: the peer sees the stop, and the
+    /// credit comes back, so with a limit of 1 the peer opens one stream after another.
+    #[test]
+    fn unidirectional_streams_of_the_peer_are_stopped_unread() {
+        use tasty_net_rendezvous::quic;
+        let mut s = P2pSettings::new();
+        s.set("quic.max_uni_streams", crate::settings::Value::Count(1));
+        let p = s.resolve().unwrap();
+        let options = TlsOptions {
+            max_fragment_size: None,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let server_key = DeviceKey::from_seed([11; 32]);
+            let client_key = DeviceKey::from_seed([12; 32]);
+            let tls = tls::server_config(&server_key, ALPN_P2P, options).unwrap();
+            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+            let server = quinn::Endpoint::server(
+                quic::server_config(&p.quic, crypto),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let addr = server.local_addr().unwrap();
+            let accepting = tokio::spawn(async move {
+                let c = server.accept().await.unwrap().await.unwrap();
+                refuse_uni_streams(c).await;
+            });
+            let client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            let tls = tls::client_config(&client_key, server_key.id(), ALPN_P2P, options).unwrap();
+            let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+            let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+            config.transport_config(Arc::new(quic::transport_config(&p.quic)));
+            let conn = client
+                .connect_with(config, addr, tls::SERVER_NAME)
+                .unwrap()
+                .await
+                .unwrap();
+            for n in 0..3 {
+                let mut send = tokio::time::timeout(Duration::from_secs(5), conn.open_uni())
+                    .await
+                    .unwrap_or_else(|_| panic!("stream {n} waits for credit"))
+                    .unwrap();
+                send.write_all(b"unread").await.unwrap();
+                let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+                    .await
+                    .expect("the peer stops the stream");
+                assert_eq!(stopped.unwrap(), Some(quinn::VarInt::default()));
+            }
+            conn.close(quinn::VarInt::default(), b"");
+            let _done = accepting.await;
+        });
     }
 }
