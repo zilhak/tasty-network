@@ -69,7 +69,8 @@ now_us() {
 
 # wait_until <초> <명령...>: 명령이 성공할 때까지 POLL_SECONDS마다 다시 부른다. 기한은 부른 횟수가
 # 아니라 경과 시각으로 잰다(명령과 sleep에 걸린 시간도 기한에 든다).
-# 기한 안에 성공하면 0, 기한을 넘기면 1.
+# 기한 안에 성공하면 0, 기한을 넘기면 1. 성공도 기한 안에서만 성공이라, 명령이 성공한 뒤 시각을
+# 다시 재서 기한을 넘었으면 1이다.
 wait_until() {
     local limit=$1 end
     shift
@@ -78,6 +79,7 @@ wait_until() {
         [[ "$(now_us)" -lt "$end" ]] || return 1
         sleep "$POLL_SECONDS"
     done
+    [[ "$(now_us)" -le "$end" ]]
 }
 
 # 프로세스 $1이 없다(bash는 끝난 자식을 바로 거두므로 끝난 자식도 없는 것으로 보인다).
@@ -485,6 +487,8 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
         ! wait_until 1 slow_false && [[ $(($(now_us) - start)) -lt 2000000 ]]
     }
     expect ok "wait_until: 기한을 경과 시각으로 잰다" wait_slow
+    late_true() { sleep 0.25; true; }
+    expect fail "wait_until: 기한 0.05 s에 0.25 s 뒤 성공하면 실패" wait_until 0.05 late_true
     expect ok "now_us: 늘어나는 마이크로초" test "$(now_us)" -gt 1000000000000000
     now_from_date() { local a b; a=$(now_us); b=$(unset EPOCHREALTIME; now_us); [[ "$b" -ge "$a" && $((b - a)) -lt 5000000 ]]; }
     expect ok "now_us: EPOCHREALTIME이 없으면 date로 같은 단위" now_from_date
