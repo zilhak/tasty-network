@@ -21,9 +21,11 @@ use std::time::{Duration, Instant};
 use support::process::{Transcript, is_running, log, terminate, wait_all_gone};
 use support::scene::{
     DropReport, LOCAL_STEP, SSH_STEP, Scene, connect_and_check, echo, number, one_at_a_time,
+    transcript_line,
 };
 use support::table::{FORWARD, check_reconnected, check_tunnel_entries, dialer_instance};
 use tasty_net_demo::field;
+use tasty_net_demo::table::decode_value;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 
 #[test]
@@ -406,6 +408,54 @@ fn quit_waits_for_the_detaching_writer() {
     drop(dialer);
     let released = server.expect_prefix("server released ", LOCAL_STEP);
     assert_eq!(field(&released, "live"), Some("0"), "{released}");
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// The values of the channel lines go through the snapshot encoding: the server's instance ID
+/// in `dialer channels-open instance=` and a called method in `server request method=` hold a
+/// space, `=`, `%` and `"`, and read back unchanged. Without the encoding the space would cut
+/// the value and the decoding of `%` would fail.
+#[test]
+fn channel_lines_encode_their_values() {
+    const SERVER_ID: &str = "desk a=1%2\"b";
+    const METHOD: &str = "no such=method%\"x";
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (server, ready) = scene.start_server_with(&["--instance-id", SERVER_ID]);
+    assert_eq!(ready.instance, SERVER_ID, "the ready line keeps the ID");
+    let record = scene.record.clone();
+    let mut dialer = scene.start_dialer_with(&record, &["--channels", "--also-call", METHOD], &[]);
+    scene.connected(&mut dialer);
+    let value = |line: &str, key: &str| {
+        field(line, key)
+            .and_then(decode_value)
+            .unwrap_or_else(|| panic!("no {key}= value in {line:?}"))
+    };
+    // The request channel discovers the record over SSH and runs a handshake.
+    let call = dialer.expect_prefix("dialer call ", SSH_STEP);
+    assert_eq!(value(&call, "method"), METHOD, "{call}");
+    assert_eq!(
+        field(&call, "answer"),
+        Some("error"),
+        "the server knows no such method"
+    );
+    let open = dialer.expect_prefix("dialer channels-open ", LOCAL_STEP);
+    assert_eq!(value(&open, "instance"), SERVER_ID, "{open}");
+    // The server answers in the request channel's thread, so its lines are looked for in the
+    // transcript. The first request is the method of `--also-call`.
+    let request = transcript_line(&server, "server request method=");
+    assert_eq!(value(&request, "method"), METHOD, "{request}");
+    let methods: Vec<String> = server
+        .transcript
+        .lines()
+        .into_iter()
+        .filter(|l| l.starts_with("server request method="))
+        .map(|l| value(&l, "method"))
+        .collect();
+    assert_eq!(methods, [METHOD, "system.info"], "{methods:?}");
+
+    scene.quit_dialer(dialer);
     Scene::stop_server(server);
     scene.finish();
 }

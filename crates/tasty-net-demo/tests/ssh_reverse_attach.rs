@@ -16,7 +16,9 @@ mod support;
 use std::time::Duration;
 
 use support::process::{Proc, log, terminate};
-use support::scene::{LOCAL_STEP, Ready, SSH_STEP, Scene, echo, number, one_at_a_time};
+use support::scene::{
+    LOCAL_STEP, Ready, SSH_STEP, Scene, echo, number, one_at_a_time, transcript_line,
+};
 use support::table::{
     ROLE_REVERSED, check_reconnected, check_tunnel_entries, dialer_instance, in_state, local_links,
     read_table, wait_table,
@@ -385,27 +387,6 @@ fn matching_links(server: &mut Proc, dialer: &mut Proc, links: usize) -> Vec<[St
     );
     assert_ne!(near.device, far.device);
     near_links
-}
-
-/// The first line of `proc` that starts with `prefix`, waiting for it up to [`SSH_STEP`].
-fn transcript_line(proc: &Proc, prefix: &str) -> String {
-    let deadline = std::time::Instant::now() + SSH_STEP;
-    loop {
-        if let Some(line) = proc
-            .transcript
-            .lines()
-            .into_iter()
-            .find(|l| l.starts_with(prefix))
-        {
-            return line;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no line {prefix:?} within {SSH_STEP:?}\n{}",
-            proc.transcript.render()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 /// Both ends of one role reversed SSH link give the same `LocalLink` input: link ID, dialer,

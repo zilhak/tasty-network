@@ -14,6 +14,7 @@ use super::process::{
 use super::sshd::SshServer;
 use super::{TempDir, ssh_path};
 use tasty_net_demo::field;
+use tasty_net_demo::table::decode_value;
 
 /// Link read timeout of both binaries; a Ping goes every sixth of it.
 pub const READ_TIMEOUT_MS: &str = "3000";
@@ -178,7 +179,9 @@ impl Scene {
         let ready = Ready {
             pid: number(&line, "pid"),
             port: number(&line, "port"),
-            instance: field(&line, "instance").expect("instance").to_string(),
+            instance: field(&line, "instance")
+                .and_then(decode_value)
+                .expect("instance"),
         };
         assert_eq!(ready.pid, server.pid(), "the ready line names the process");
         (server, ready)
@@ -487,4 +490,25 @@ pub fn connect_and_check(
     server.expect_prefix("server attached ", LOCAL_STEP);
     echo(dialer, "hello-1");
     tunnel
+}
+
+/// The first line of `proc` that starts with `prefix`, waiting for it up to [`SSH_STEP`].
+pub fn transcript_line(proc: &Proc, prefix: &str) -> String {
+    let deadline = std::time::Instant::now() + SSH_STEP;
+    loop {
+        if let Some(line) = proc
+            .transcript
+            .lines()
+            .into_iter()
+            .find(|l| l.starts_with(prefix))
+        {
+            return line;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no line {prefix:?} within {SSH_STEP:?}\n{}",
+            proc.transcript.render()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

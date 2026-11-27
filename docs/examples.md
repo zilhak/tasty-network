@@ -6,8 +6,8 @@
 
 | 바이너리 | 하는 일 |
 |---|---|
-| `demo-server` | workspace 제공 쪽 흉내. 루프백 포트에서 handshake v2를 받고, `--record` 자리에 연결 레코드(포트·토큰·인스턴스 ID)를 발행한다. 정방향 링크마다 Control snapshot을 한 번 보내고 Data를 그대로 돌려준다. 역할 반전 제안은 `--proposals accept\|refuse`(기본 `refuse`)로 답하고, 수락한 링크에서는 holder가 되어 dialer의 descriptor를 받고 stdin의 `send <글>` 줄을 가장 최근 링크에 Data로 보내 돌아온 echo를 찍는다. attach 링크 아래의 bulk 채널은 받아 프레임을 그대로 돌려주고, 요청 채널에는 `system.info`에만 자기 인스턴스 ID로 답한다. stdin이 닫히거나 `quit`을 읽으면 레코드를 거두고 끝난다 |
-| `demo-dialer` | SSH로 서버 기기의 레코드를 읽고(`cat`, 그다음 `type`) `-L` 터널을 열어 handshake한다. stdin의 `send <글>` 줄을 Data로 보내고 echo를 찍는다. 링크가 끊기면 transport의 `Redialer`(기본 설정값)로 backoff 뒤 레코드 발견부터 다시 한다. 상대가 거절 ACK로 거절하거나(틀린 토큰, 역할 거절) 상대가 자기 자신이면(`self_attach`) 종료 코드 3으로 끝난다. `Redialer`가 포기하거나(`redial.give_up_after`), 다시 걸 끊김이 아니거나, 거절 사유 없이 다시 걸 수 없는 실패(프로토콜 오류, `quit`에서 오지 않은 취소 등)면 종료 코드 4로 끝난다. `quit`이나 stdin 끝이면 Detach를 보내고 0으로 끝난다. 진행 중인 연결을 `quit`이 취소한 경우도 0이다. `--holder acceptor`면 같은 `-L` 터널 위에서 역할 반전을 제안하고, 수락되면 workspace 제공 쪽이 되어 descriptor를 보낸 뒤 받은 Data를 돌려준다. 끊기면 다시 연결하는 쪽은 그대로 dialer다. `--channels`면 첫 링크가 올라올 때마다(다시 연결한 뒤 포함) 그 아래 bulk 채널과 같은 터널 위 요청 채널을 열고, `--also-holder dialer\|acceptor`면 같은 터널로 그 holder의 두 번째 attach 링크를 첫 링크가 올라올 때마다 연다. 두 번째 링크는 따로 다시 연결하지 않는다 |
+| `demo-server` | workspace 제공 쪽 흉내. 루프백 포트에서 handshake v2를 받고, `--record` 자리에 연결 레코드(포트·토큰·인스턴스 ID)를 발행한다. 정방향 링크마다 Control snapshot을 한 번 보내고 Data를 그대로 돌려준다. 역할 반전 제안은 `--proposals accept\|refuse`(기본 `refuse`)로 답하고, 수락한 링크에서는 holder가 되어 dialer의 descriptor를 받고 stdin의 `send <글>` 줄을 가장 최근 링크에 Data로 보내 돌아온 echo를 찍는다. attach 링크 아래의 bulk 채널은 받아 프레임을 그대로 돌려주고, 요청 채널에는 `system.info`에만 자기 인스턴스 ID로 답한다. `--instance-id`는 인스턴스 ID를 바꾼다. stdin이 닫히거나 `quit`을 읽으면 레코드를 거두고 끝난다 |
+| `demo-dialer` | SSH로 서버 기기의 레코드를 읽고(`cat`, 그다음 `type`) `-L` 터널을 열어 handshake한다. stdin의 `send <글>` 줄을 Data로 보내고 echo를 찍는다. 링크가 끊기면 transport의 `Redialer`(기본 설정값)로 backoff 뒤 레코드 발견부터 다시 한다. 상대가 거절 ACK로 거절하거나(틀린 토큰, 역할 거절) 상대가 자기 자신이면(`self_attach`) 종료 코드 3으로 끝난다. `Redialer`가 포기하거나(`redial.give_up_after`), 다시 걸 끊김이 아니거나, 거절 사유 없이 다시 걸 수 없는 실패(프로토콜 오류, `quit`에서 오지 않은 취소 등)면 종료 코드 4로 끝난다. `quit`이나 stdin 끝이면 Detach를 보내고 0으로 끝난다. 진행 중인 연결을 `quit`이 취소한 경우도 0이다. `--holder acceptor`면 같은 `-L` 터널 위에서 역할 반전을 제안하고, 수락되면 workspace 제공 쪽이 되어 descriptor를 보낸 뒤 받은 Data를 돌려준다. 끊기면 다시 연결하는 쪽은 그대로 dialer다. `--channels`면 첫 링크가 올라올 때마다(다시 연결한 뒤 포함) 그 아래 bulk 채널과 같은 터널 위 요청 채널을 열고(`--also-call <메서드>`면 `system.info` 앞에 그 메서드를 한 번 부른다), `--also-holder dialer\|acceptor`면 같은 터널로 그 holder의 두 번째 attach 링크를 첫 링크가 올라올 때마다 연다. 두 번째 링크는 따로 다시 연결하지 않는다 |
 
 옵션과 stdout에 찍는 사건 줄의 정본은 각 바이너리 소스의 머리 주석이다(`src/bin/demo-server.rs`, `src/bin/demo-dialer.rs`). 사건 줄은 `<누구> <사건> 키=값 ...` 형식이다.
 
@@ -77,6 +77,7 @@ send hello
 | `reconnect_after_server_restart` | 서버를 죽이고 다시 띄우면 dialer가 새로 발견한 레코드(다른 인스턴스 ID)로 다시 붙는다 |
 | `wrong_token_is_rejected_without_retry` | 틀린 토큰은 `token_invalid`로 거절되고 dialer는 시도 한 번으로 끝난다 |
 | `connection_table_reports_ssh_forward` | attach·bulk·요청 채널을 나르는 터널 하나가 dialer에서는 항목 하나(구간 셋, `ssh` 경유, rendezvous 없음), 서버에서는 채널마다 `ssh_inbound` 항목(bulk는 `parent`)이다. 터널을 끊으면 옛 항목은 원인과 함께 `disconnected`, 새 항목은 새 ID로 옛 ID를 가리키고 `reconnecting`에서 `connected`가 된다 |
+| `channel_lines_encode_their_values` | 공백·`=`·`%`·`"`가 든 서버 인스턴스 ID(`--instance-id`)와 요청 메서드(`--also-call`)가 `dialer channels-open instance=`·`server request method=` 줄에서 인코딩되어 그대로 되읽힌다 |
 
 `crates/tasty-net-demo/tests/ssh_reverse_attach.rs`는 역할 반전을 같은 방식으로 확인한다(D3). 두 파일은 같은 시험 도우미(`tests/support/`)를 쓴다.
 

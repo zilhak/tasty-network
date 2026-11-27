@@ -16,19 +16,23 @@
 //! A request channel answers `system.info` with this end's instance ID and refuses every
 //! other method.
 //!
+//! `--instance-id` replaces the instance ID (default `demo-server-<pid>-<random hex>`, fresh
+//! per start); a test gives one with characters that the event values must encode.
+//!
 //! A Detach frame ends a link. The server ends when its stdin closes or reads `quit`, and then
 //! retires its record. The stdin line `table` prints the connection table (one `ssh_inbound`
 //! entry per accepted channel) in the lines of `tasty_net_demo::table`.
 //!
 //! ```text
 //! demo-server --record <path> [--proposals accept|refuse] [--read-timeout-ms <ms>]
+//!             [--instance-id <id>]
 //! ```
 //!
 //! Events on stdout (one per line):
 //!
 //! | Line | When |
 //! |------|------|
-//! | `server ready pid=<pid> port=<port> instance=<id>` | the record is published |
+//! | `server ready pid=<pid> port=<port> instance=<id>` | the record is published (the value encoded as in `tasty_net_demo::table`) |
 //! | `server proposal peer=<instance> answer=<accept\|refuse>` | a peer proposed that this end holds |
 //! | `server attached client=<n> live=<links> peer=<instance>` | the domain check took an attach link |
 //! | `server roles client=<n> local=acceptor launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | an attach link is up (`<side>` is `dialer` or `acceptor`) |
@@ -68,8 +72,8 @@ use tasty_net_transport::{
     accept_handshake, read_first_line,
 };
 
-const USAGE: &str =
-    "usage: demo-server --record <path> [--proposals accept|refuse] [--read-timeout-ms <ms>]";
+const USAGE: &str = "usage: demo-server --record <path> [--proposals accept|refuse] [--read-timeout-ms <ms>] \
+[--instance-id <id>]";
 
 /// The writers of the links this end holds, newest last, for the stdin `send` lines.
 type Held = Arc<Mutex<Vec<(u32, ChannelWriter)>>>;
@@ -180,7 +184,7 @@ impl RequestHandler for Requests {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse(std::env::args_os().skip(1), &[])?;
-    args.check_known(&["record", "proposals", "read-timeout-ms"])?;
+    args.check_known(&["record", "proposals", "read-timeout-ms", "instance-id"])?;
     let record_path = PathBuf::from(args.required("record")?);
     let accept_proposals = match args.value("proposals").unwrap_or("refuse") {
         "accept" => true,
@@ -197,12 +201,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let device = key.id().to_string();
     let token = ConnectionToken::issue()?;
     // A fresh ID per start, so a dialer can tell a restarted server from the old one.
-    let nonce = ConnectionToken::issue()?;
-    let instance_id = format!(
-        "demo-server-{}-{}",
-        std::process::id(),
-        &nonce.expose_hex()[..8]
-    );
+    let instance_id = match args.value("instance-id") {
+        Some(id) => id.to_string(),
+        None => {
+            let nonce = ConnectionToken::issue()?;
+            format!(
+                "demo-server-{}-{}",
+                std::process::id(),
+                &nonce.expose_hex()[..8]
+            )
+        }
+    };
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
@@ -219,8 +228,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let publication = Arc::new(Mutex::new(Some(record.publish(&record_path)?)));
     emit(&format!(
-        "server ready pid={} port={port} instance={instance_id}",
-        std::process::id()
+        "server ready pid={} port={port} instance={}",
+        std::process::id(),
+        encode_value(&instance_id)
     ));
 
     let held: Held = Arc::default();

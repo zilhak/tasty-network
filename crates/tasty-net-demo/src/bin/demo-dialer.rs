@@ -27,7 +27,9 @@
 //!
 //! `--channels` opens, every time the first link comes up (the first connection and each one
 //! after a loss), a bulk channel under it and a request channel through the same tunnel, and
-//! calls `system.info` once on the request channel. Both stay open until that link ends. The
+//! calls `system.info` once on the request channel (`--also-call <method>` calls that method
+//! first, a test's way to send a method name the server does not know). Both stay open until
+//! that link ends. The
 //! bulk channel is opened only under the first link, never under the second one.
 //! `--also-holder dialer|acceptor` opens a second attach link with that holder through the
 //! same tunnel every time the first link comes up, so one tunnel carries links of both
@@ -52,7 +54,7 @@
 //!             [--ssh-port <port>] [--identity <file>] [--option Key=Value]...
 //!             [--ssh <program>] [--verify-host-keys] [--read-timeout-ms <ms>]
 //!             [--holder dialer|acceptor] [--instance-id <id>]
-//!             [--channels] [--also-holder dialer|acceptor]
+//!             [--channels] [--also-call <method>] [--also-holder dialer|acceptor]
 //! ```
 //!
 //! Events on stdout (one per line):
@@ -65,6 +67,7 @@
 //! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded |
 //! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
 //! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered (the value encoded as in `tasty_net_demo::table`) |
+//! | `dialer call method=<method> answer=<result\|error>` | `--channels --also-call`: the request channel answered that method (the value encoded as in `tasty_net_demo::table`) |
 //! | `dialer channels-failed error=<text>` | `--channels`: opening them failed; the link stays |
 //! | `dialer extra-connected holder=<holder> link_id=<hex>` | `--also-holder`: the second link is up |
 //! | `dialer extra-failed error=<text>` | `--also-holder`: the second link did not come up |
@@ -100,14 +103,14 @@ use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTa
 use tasty_net_transport::{
     AttemptCancel, BulkChannel, ChannelReader, ChannelWriter, ConnectError, ConnectOptions,
     ConnectionId, ConnectionTable, DialConfig, EndReason, HandshakeError, Holder, Link, LinkCloser,
-    LinkId, LinkTimeouts, RedialError, Redialer, RedialerConfig, RequestClient, Side, SshTransport,
-    Transport, dial_handshake, dial_request,
+    LinkId, LinkTimeouts, RedialError, Redialer, RedialerConfig, RequestClient, RequestError, Side,
+    SshTransport, Transport, dial_handshake, dial_request,
 };
 
 const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remote path> \
 [--ssh-port <port>] [--identity <file>] [--option Key=Value]... [--ssh <program>] \
 [--verify-host-keys] [--read-timeout-ms <ms>] [--holder dialer|acceptor] [--instance-id <id>] \
-[--channels] [--also-holder dialer|acceptor]";
+[--channels] [--also-call <method>] [--also-holder dialer|acceptor]";
 
 /// Exit code when a refusal ends the dialer without another attempt.
 const EXIT_REJECTED: u8 = 3;
@@ -174,6 +177,8 @@ struct Dial {
     config: DialConfig,
     timeouts: LinkTimeouts,
     instance_id: String,
+    /// `--also-call`: a method the request channel calls before `system.info`.
+    also_call: Option<String>,
 }
 
 fn parse_holder(args: &Args, name: &str) -> Result<Option<Holder>, tasty_net_demo::UsageError> {
@@ -203,6 +208,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         "holder",
         "instance-id",
         "channels",
+        "also-call",
         "also-holder",
     ])?;
     let holder = parse_holder(&args, "holder")?.unwrap_or(Holder::Dialer);
@@ -254,6 +260,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         config: DialConfig::new(key, instance_id.clone()).with_timeouts(timeouts),
         timeouts,
         instance_id,
+        also_call: args.value("also-call").map(str::to_string),
     };
 
     emit(&format!("dialer pid={}", std::process::id()));
@@ -517,6 +524,24 @@ fn channels(link: &Link, dial: &Dial, cancel: &AttemptCancel) -> Option<Channels
         .and_then(|conn| dial_request(conn, &dial.config, cancel))
         .map_err(|e| failed(&e))
         .ok()?;
+    if let Some(method) = &dial.also_call {
+        let answer = match requests.call(
+            method,
+            serde_json::json!({}),
+            dial.timeouts.handshake_timeout,
+        ) {
+            Ok(_) => "result",
+            Err(RequestError::Remote(_)) => "error",
+            Err(error) => {
+                failed(&error);
+                return None;
+            }
+        };
+        emit(&format!(
+            "dialer call method={} answer={answer}",
+            encode_value(method)
+        ));
+    }
     let answer = requests
         .call(
             "system.info",
