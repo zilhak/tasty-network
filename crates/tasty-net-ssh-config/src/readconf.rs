@@ -2153,17 +2153,32 @@ fn outcome(result: bool, unknown: Option<&'static str>) -> MatchOutcome {
 /// caller has judged the owner and mode, as OpenSSH reads no line of a refused file.
 #[derive(Debug, Clone)]
 pub(crate) struct OpenFile {
-    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+    /// `None`: a folder the OS does not open as a file; it reads as an empty file.
+    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
     /// Owner and mode, for `CHECKPERM` (Unix).
     pub(crate) owner_mode: Option<(u32, u32)>,
 }
 
 impl OpenFile {
     pub(crate) fn open(path: &Path) -> std::io::Result<OpenFile> {
-        let file = std::fs::File::open(path)?;
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            // Windows opens a folder only with `FILE_FLAG_BACKUP_SEMANTICS`, which
+            // `File::open` does not ask for. Unix opens it, and it reads as an empty file
+            // there; a folder that does not open is the same empty file.
+            Err(e) => {
+                return match std::fs::metadata(path) {
+                    Ok(meta) if meta.is_dir() => Ok(OpenFile {
+                        file: None,
+                        owner_mode: owner_mode(&meta),
+                    }),
+                    _ => Err(e),
+                };
+            }
+        };
         let meta = file.metadata()?;
         Ok(OpenFile {
-            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+            file: Some(std::sync::Arc::new(std::sync::Mutex::new(file))),
             owner_mode: owner_mode(&meta),
         })
     }
@@ -2173,7 +2188,8 @@ impl OpenFile {
     pub(crate) fn text(&self) -> String {
         use std::io::{Read as _, Seek as _};
         let mut bytes = Vec::new();
-        if let Ok(mut file) = self.file.lock()
+        if let Some(file) = &self.file
+            && let Ok(mut file) = file.lock()
             && file.rewind().is_ok()
         {
             // `read_to_end` keeps what it read before an error.
@@ -2274,5 +2290,21 @@ mod tests {
             connection_hash(["a", "b", "c", "d", "e"]),
             "03de6c570bfe24bfc328ccd7ca46b76eadaf4334"
         );
+    }
+
+    #[test]
+    fn a_folder_opens_as_an_empty_file() {
+        // On every OS: Unix opens the folder and reading it ends at once; Windows does not
+        // open it.
+        let dir = std::env::temp_dir().join(format!(
+            "tasty-net-ssh-config-folder-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let opened = OpenFile::open(&dir).expect("a folder opens");
+        assert_eq!(opened.text(), "");
+        let missing = OpenFile::open(&dir.join("missing")).expect_err("no such file");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        std::fs::remove_dir_all(&dir).expect("remove the folder");
     }
 }
