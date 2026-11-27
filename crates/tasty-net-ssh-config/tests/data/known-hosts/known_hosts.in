@@ -1,0 +1,35 @@
+# The lines of the ssh-keygen -F comparison (tests/known_hosts_matches_openssh.rs). @NAME@ is
+# "<type> <base64>" of a key the test makes with the reference ssh-keygen, @NAME_B64@ its
+# base64 alone. The lines of to_hash.in follow these, hashed by ssh-keygen -H.
+plain.example @ED1@
+plain.example @EC1@ first comment
+plain.example,alias.example @RS1@
+Mixed.Example @ED2@
+*.wild.example,!no.wild.example @EC2@ wildcard
+[port.example]:2222 @ED1@
+[2001:db8::7]:2222,192.0.2.7 @ED2@
+@revoked revoked.example,plain.example @ED2@
+@revoked	tab.example @ED1@
+@cert-authority *.ca.example @ED1@
+@cert-authority	tabonly.example @ED1@
+@unknown plain.example @ED1@
+@revoked @revoked plain.example @ED1@
+@revoked
+plain.example ssh-rsa @ED1_B64@ type differs
+plain.example ecdsa-sha2-nistp384 @EC1_B64@ curve differs
+plain.example ssh-ed25519 AAAA@@notbase64
+plain.example ssh-ed25519
+plain.example
+plain.example #comment only
+plain.example 1024 35 12345 legacy rsa1
+plain.example ssh-dss AAAAB3NzaC1kc3MAAAA= removed type
+plain.example rsa-sha2-256 @RS1_B64@ rsa alias
+   lead.example	@ED1@   spaces and a tab 
+|1|AAECAwQFBgcICQoLDA0ODxAREhM=|AAAA @ED1@
+|1|AAEC|AAAA @ED1@
+|2|AAECAwQFBgcICQoLDA0ODxAREhM=|IZ1zV0swCfFUvwvqRtiJbYJ0/LA= @ED1@
+|1|AAECAwQFBgcICQoLDA0ODxAREhM=|IZ1zV0swCfFUvwvqRtiJbYJ0/LA= @ED1@ precomputed
+@revoked *.certrev.example @ED1CERT@
+@cert-authority certhost.example @EC1@
+certhost.example @ED1CERT@ host certificate
+@cert-authority bad.ca.example ssh-ed25519 AAAA

@@ -1,0 +1,5 @@
+hashed.example @ED1@
+hashed.example,10.0.0.9 @EC1@ two names
+[hashport.example]:2200 @ED2@
+@revoked hashrev.example @EC2@
+*.nohash.example @ED1@

@@ -81,3 +81,9 @@ address make the resolution refused instead.
 `$TASTY_OPENSSH_REF_DIR/bin/ssh`). A case line may end with `=>` and an expected refusal (its
 kind and the file and line); the file comment of the test has the form. It runs on Linux and macOS and fails without the client when
 `TASTY_OPENSSH_REF_REQUIRED` is set, as in CI; on Windows it does not compare.
+
+`tests/known_hosts_matches_openssh.rs` compares `KnownHosts::entries` with `ssh-keygen -F
+<name> -f <file>` and `ssh-keygen -l -E sha1 -F <name> -f <file>` of the same reference build.
+The file is made by the test from `tests/data/known-hosts/`: the keys are made with the
+reference `ssh-keygen` at each run (no real host keys are kept), and the lines of `to_hash.in`
+are hashed by `ssh-keygen -H`. The same environment values and platforms apply.
