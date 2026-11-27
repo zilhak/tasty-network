@@ -619,6 +619,75 @@ pub(crate) fn valid_domain(name: &str, makelower: bool) -> Result<String, String
     Ok(out.strip_suffix('.').map(str::to_string).unwrap_or(out))
 }
 
+/// The address families `getaddrinfo` is asked for (`AddressFamily`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Family {
+    Any,
+    Inet,
+    Inet6,
+}
+
+/// `getaddrinfo(name, ..., AI_NUMERICHOST)` and `getnameinfo(NI_NUMERICHOST)`: the address
+/// `name` is in numeric form, or `None`. IPv4 takes the `inet_aton(3)` forms (`a.b.c.d`,
+/// `a.b.c`, `a.b`, `a`; each part decimal, `0x` hexadecimal or `0` octal), IPv6 the
+/// `inet_pton(3)` form without a scope (`%`). Written for this crate from those manual pages.
+pub(crate) fn numeric_host(name: &str, family: Family) -> Option<std::net::IpAddr> {
+    if family != Family::Inet6
+        && let Some(a) = inet_aton(name)
+    {
+        return Some(std::net::IpAddr::V4(a));
+    }
+    if family != Family::Inet
+        && let Ok(a) = name.parse::<std::net::Ipv6Addr>()
+    {
+        return Some(std::net::IpAddr::V6(a));
+    }
+    None
+}
+
+/// The largest value of the last part of an `inet_aton` address with 1 to 4 parts.
+const INET_ATON_LAST_MAX: [u32; 4] = [u32::MAX, 0x00ff_ffff, 0xffff, 0xff];
+/// The largest value of a part before the last.
+const INET_ATON_PART_MAX: u32 = 0xff;
+const OCTAL_RADIX: u32 = 8;
+const DECIMAL_RADIX: u32 = 10;
+/// The bits of one byte of an IPv4 address.
+const BITS_PER_PART: usize = 8;
+
+/// `inet_aton(3)` of the whole string.
+fn inet_aton(s: &str) -> Option<std::net::Ipv4Addr> {
+    let parts: Vec<&str> = s.split('.').collect();
+    let last_max = *INET_ATON_LAST_MAX.get(parts.len().wrapping_sub(1))?;
+    let mut value: u32 = 0;
+    for (i, part) in parts.iter().enumerate() {
+        let (digits, radix) = if let Some(h) = part.strip_prefix("0x").or(part.strip_prefix("0X")) {
+            (h, HEX_RADIX)
+        } else if part.len() > 1 && part.starts_with('0') {
+            (part.get(1..).unwrap_or(""), OCTAL_RADIX)
+        } else {
+            (*part, DECIMAL_RADIX)
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        let v = u32::from_str_radix(digits, radix).ok()?;
+        if i + 1 < parts.len() {
+            if v > INET_ATON_PART_MAX {
+                return None;
+            }
+            // Parts before the last are the leading bytes.
+            let shift = BITS_PER_PART * (INET_ATON_LAST_MAX.len() - 1 - i);
+            value |= v << shift;
+        } else {
+            if v > last_max {
+                return None;
+            }
+            value |= v;
+        }
+    }
+    Some(std::net::Ipv4Addr::from(value))
+}
+
 /// `valid_env_name`: one or more letters, digits or `_`.
 pub(crate) fn valid_env_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')

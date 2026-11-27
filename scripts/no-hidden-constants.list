@@ -329,7 +329,12 @@ allow	crates/tasty-net-ssh-config/src/misc.rs	1	다음 글자로 한 칸
 allow	crates/tasty-net-ssh-config/src/misc.rs	2	두 글자 접두(${·%%)
 allow	crates/tasty-net-ssh-config/src/misc.rs	3	urldecode의 %XX 세 글자(misc.c urldecode)
 allow	crates/tasty-net-ssh-config/src/misc.rs	i32::MAX	C int 상한(misc.c atoi_err·convtime)
-allow	crates/tasty-net-ssh-config/src/misc.rs	const HEX_RADIX: u32 = 16	urldecode의 16진수 기수
+allow	crates/tasty-net-ssh-config/src/misc.rs	const HEX_RADIX: u32 = 16	urldecode·inet_aton의 16진수 기수
+allow	crates/tasty-net-ssh-config/src/misc.rs	const OCTAL_RADIX: u32 = 8	inet_aton(3)의 0 접두 8진수
+allow	crates/tasty-net-ssh-config/src/misc.rs	const DECIMAL_RADIX: u32 = 10	inet_aton(3)의 10진수
+allow	crates/tasty-net-ssh-config/src/misc.rs	const BITS_PER_PART: usize = 8	IPv4 주소 한 바이트의 비트 수
+allow	crates/tasty-net-ssh-config/src/misc.rs	const INET_ATON_LAST_MAX: [u32; 4] = [u32::MAX, 0x00ff_ffff, 0xffff, 0xff]	inet_aton(3): 조각 1~4개일 때 마지막 조각의 상한(32·24·16·8비트)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const INET_ATON_PART_MAX: u32 = 0xff	inet_aton(3): 마지막 앞 조각은 한 바이트
 allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_IDENTITY_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_IDENTITY_FILES 100
 allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_CERTIFICATE_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_CERTIFICATE_FILES 100
 allow	crates/tasty-net-ssh-config/src/options.rs	const FORWARD_X11_TIMEOUT: i32 = 1200	readconf.c fill_default_options ForwardX11Timeout 기본 1200초

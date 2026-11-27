@@ -105,7 +105,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::keywords::{KEYWORDS, Op, Treatment, treatment};
-use crate::misc::{Account, ExpandError, TildeError, Token, expand, tilde_expand};
+use crate::misc::{
+    Account, ExpandError, Family, TildeError, Token, expand, numeric_host, tilde_expand,
+};
 use crate::options::{
     Canonicalize, Compression, Flag, ForwardEnd, Jump, LogLevel, Options, ProvidedBy, PubkeyAuth,
     SessionType, StrictHostKey, YesNoAsk, clear_or_none,
@@ -551,17 +553,20 @@ impl ConfigSet {
             })?;
             r.o.hostname = Some(host.clone());
         }
-        let was_addr = is_addr_fast(&host);
+        // `is_addr` (`ssh.c:293`-`:315`) and `resolve_addr` (`:324`-`:367`) ask `getaddrinfo` for
+        // the configured address family.
+        let family = address_family(&r.o);
+        let was_addr = is_addr_fast(&host) || numeric_host(&host, family).is_some();
         if !was_addr {
             host = host.to_ascii_lowercase();
         }
         let canonicalize = r.o.canonicalize_hostname.unwrap_or(Canonicalize::No);
         if canonicalize != Canonicalize::No || was_addr {
-            if let Some(normal) = normalize_address(&host) {
+            if let Some(normal) = numeric_host(&host, family).map(|a| a.to_string()) {
                 if !normal.eq_ignore_ascii_case(&host) {
                     host = normal;
                 }
-            } else if !was_addr && canonicalize != Canonicalize::No {
+            } else if !is_addr_fast(&host) && canonicalize != Canonicalize::No {
                 let direct = clear_or_none(r.o.proxy_command.as_deref()) && jump_is_none(&r.o);
                 if direct || canonicalize == Canonicalize::Always {
                     r.refuse(Refusal {
@@ -900,10 +905,13 @@ fn is_addr_fast(name: &str) -> bool {
         || name.bytes().all(|c| c.is_ascii_digit() || c == b'.')
 }
 
-/// The numeric form `resolve_addr` gives an address (`getnameinfo(NI_NUMERICHOST)`), or
-/// `None` if the name is not an address.
-fn normalize_address(name: &str) -> Option<String> {
-    name.parse::<std::net::IpAddr>().ok().map(|a| a.to_string())
+/// The `ai_family` hint of `is_addr` and `resolve_addr`.
+fn address_family(o: &Options) -> Family {
+    match o.address_family {
+        Some(crate::options::AddressFamily::Inet) => Family::Inet,
+        Some(crate::options::AddressFamily::Inet6) => Family::Inet6,
+        _ => Family::Any,
+    }
 }
 
 /// The `ProxyCommand` that `ProxyJump` makes (`ssh.c:1306`–`:1324`).
@@ -1040,11 +1048,24 @@ mod tests {
         assert!(is_addr_fast("192.0.2.1"));
         assert!(is_addr_fast("::1"));
         assert!(!is_addr_fast("host1"));
+        let n = |s: &str, f| numeric_host(s, f).map(|a| a.to_string());
         assert_eq!(
-            normalize_address("2001:DB8::1").as_deref(),
+            n("2001:DB8::1", Family::Any).as_deref(),
             Some("2001:db8::1")
         );
-        assert_eq!(normalize_address("host"), None);
+        assert_eq!(n("host", Family::Any), None);
+        // The inet_aton(3) forms.
+        assert_eq!(n("127.1", Family::Any).as_deref(), Some("127.0.0.1"));
+        assert_eq!(n("010.0.0.1", Family::Any).as_deref(), Some("8.0.0.1"));
+        assert_eq!(n("0x7F000001", Family::Any).as_deref(), Some("127.0.0.1"));
+        assert_eq!(n("1.2.65535", Family::Any).as_deref(), Some("1.2.255.255"));
+        assert_eq!(n("08.0.0.1", Family::Any), None);
+        assert_eq!(n("1.2.3.256", Family::Any), None);
+        assert_eq!(n("0x", Family::Any), None);
+        assert_eq!(n("1..2", Family::Any), None);
+        // The address family.
+        assert_eq!(n("2001:db8::1", Family::Inet), None);
+        assert_eq!(n("127.1", Family::Inet6), None);
     }
 
     #[test]

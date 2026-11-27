@@ -17,3 +17,10 @@ pct
 ssh://pct
 -o HostKeyAlgorithms=!ssh-rsa web => refused config_error - hostkeyalgorithms
 Web
+127.1
+010.0.0.1
+0x7F000001
+2001:DB8::5
+-o AddressFamily=inet 2001:DB8::5
+-o AddressFamily=inet6 127.1
+-o AddressFamily=inet6 0x7F000001

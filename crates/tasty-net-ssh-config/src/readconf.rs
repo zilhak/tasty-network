@@ -486,7 +486,8 @@ fn valid_cidr_list(list: &str) -> bool {
             Some((a, m)) => (a, Some(m)),
             None => (cp, None),
         };
-        let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
+        // `addr_pton`: `getaddrinfo(AI_NUMERICHOST)` for any family.
+        let Some(ip) = misc::numeric_host(addr, misc::Family::Any) else {
             return false;
         };
         let bits = if ip.is_ipv4() { IPV4_BITS } else { IPV6_BITS };
