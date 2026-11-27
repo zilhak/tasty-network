@@ -857,3 +857,56 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
     let old = table.connection(old_tunnel).expect("kept");
     assert_eq!(old.state, ConnectionState::Disconnected);
 }
+
+#[test]
+fn a_link_lost_under_a_live_tunnel_ends_as_lost_and_is_redialed() {
+    let table = ConnectionTable::default();
+    let fake = FakeSsh::new("lost-link");
+    let cancel = AttemptCancel::new();
+    let ended = |id| {
+        wait_until("the entry ends", || {
+            table
+                .connection(id)
+                .is_some_and(|e| e.state == ConnectionState::Disconnected)
+        });
+        table.connection(id).and_then(|e| e.last_cause)
+    };
+
+    // Contrast: a link this side drops without a failed read was closed here.
+    let server = echo_server(token('a'));
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let transport = fake.transport().with_connections(table.clone());
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let closed = table.connections()[0].id;
+    drop(link);
+    assert_eq!(ended(closed), Some(Cause::ClosedHere));
+
+    // The far end closes the attach socket while the ssh child keeps running: the read
+    // fails, and the consumer then drops the link as usual.
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let mut link =
+        dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let lost = table.connections().last().expect("the second entry").id;
+    let (mut reader, writer) = link.take_ordered().expect("the ordered channel");
+    drop(server);
+    assert!(reader.read_frame().is_err(), "the far end closed");
+    assert!(!fake.tunnel_pids().is_empty(), "the ssh child still runs");
+    drop((reader, writer, link));
+    assert_eq!(ended(lost), Some(Cause::Lost));
+
+    // A lost link is one to redial.
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new()
+            .with_initial(Duration::from_millis(1))
+            .with_max_attempts(1),
+    )
+    .expect("valid");
+    let mut attempted = false;
+    let result = redialer.redial(lost, None, &cancel, |_| {
+        attempted = true;
+        Err::<(), _>(HandshakeError::TimedOut)
+    });
+    assert!(attempted, "{result:?}");
+}

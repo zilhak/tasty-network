@@ -639,6 +639,8 @@ impl EndMark {
         };
         let cause = match self.watch.raised() {
             Some(EndReason::Lost) => Cause::Lost,
+            // A link whose read failed first was lost, though this side closed it after.
+            Some(EndReason::Forced) if self.watch.lost_seen() => Cause::Lost,
             Some(EndReason::Forced) => Cause::ClosedHere,
             None => Cause::Ended,
         };

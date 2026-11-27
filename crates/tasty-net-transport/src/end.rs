@@ -82,6 +82,9 @@ struct CloserInner {
     hooks: Mutex<Vec<CloseHook>>,
     /// The link ended (forced or normal); no channel is adopted any more.
     ended: AtomicBool,
+    /// A read of the link failed before anything ended it here: the peer or the path went
+    /// away, whatever this side does with the link afterwards.
+    lost_seen: AtomicBool,
 }
 
 /// The cloneable closer of one link.
@@ -114,6 +117,7 @@ impl LinkCloser {
                 guards: Mutex::new(Vec::new()),
                 hooks: Mutex::new(Vec::new()),
                 ended: AtomicBool::new(false),
+                lost_seen: AtomicBool::new(false),
             }),
         }
     }
@@ -273,6 +277,25 @@ impl CloserWatch {
     /// gone.
     pub(crate) fn raised(&self) -> Option<EndReason> {
         self.0.upgrade().and_then(|inner| inner.end.raised())
+    }
+
+    /// Notes that a read failed. A link this side already closed or that already ended
+    /// normally does not count it: the failure is the end's result, not a loss.
+    pub(crate) fn note_read_failure(&self) {
+        if let Some(inner) = self.0.upgrade()
+            && !inner.end.is_ending()
+            && !inner.ended.load(Ordering::Acquire)
+        {
+            inner.lost_seen.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether a read failed before the link was ended here
+    /// ([`CloserWatch::note_read_failure`]).
+    pub(crate) fn lost_seen(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|inner| inner.lost_seen.load(Ordering::Acquire))
     }
 }
 

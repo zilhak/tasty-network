@@ -18,7 +18,7 @@ use tasty_net_frame::{
 use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
 
 use crate::connection_table::{EntryRef, Joined};
-use crate::end::{EndReason, LinkCloser};
+use crate::end::{CloserWatch, EndReason, LinkCloser};
 use crate::heartbeat::{Heartbeat, HeartbeatPolicy};
 use crate::lock::lock;
 use crate::reject::P2pCloseReason;
@@ -239,6 +239,7 @@ impl RawChannel {
             on_normal_end: Mutex::new(NormalEnd::default()),
             heartbeat: Mutex::new(HeartbeatSlot::Stopped),
             heartbeat_stopped: Condvar::new(),
+            closer: closer.watch(),
         });
         let out = Arc::new(Outbox {
             state: Mutex::new(OutState {
@@ -372,6 +373,8 @@ pub(crate) struct ChannelShared {
     /// close, the writer's drop, or the link's drop. A later caller waits for that join.
     heartbeat: Mutex<HeartbeatSlot>,
     heartbeat_stopped: Condvar,
+    /// The link's closer, told when a read fails.
+    closer: CloserWatch,
 }
 
 /// Where the heartbeat thread of a channel is: running, being joined by one caller (taken
@@ -576,6 +579,7 @@ impl ChannelReader {
                 Err(error) => {
                     let failed = ReadError::from_io(error);
                     self.failed = Some(failed.clone());
+                    self.shared.closer.note_read_failure();
                     return Err(failed);
                 }
             }
