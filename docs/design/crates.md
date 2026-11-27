@@ -14,7 +14,10 @@
 | `tasty-net-rendezvous` | `crates/tasty-net-rendezvous` | 새로 정함(2026-11-27) | 라이브러리: 조정 메시지 형식, STUN 부분 집합 코덱, 펀칭 프로브 형식, raw public key TLS 설정, 서버 본체(상태·상한·접근 정책). 실행 파일 `tasty-rendezvous` | identity |
 | `tasty-net-topology` | `crates/tasty-net-topology` | 가안 그대로 | 노드·엣지 모델, 질의·결과 메시지, 탐색 상태 기계 | frame, identity |
 | `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 전송 계층 두 프로세스 통합 시험(SSH, transport 위 P2P), 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, rendezvous, ssh, identity, frame |
+| `tasty-net-ffi` | `crates/tasty-net-ffi` | 새로 정함(2026-11-27, 후속 작업이 만든다) | UniFFI로 Kotlin·Swift 바인딩을 만드는 경계, FFI용 레코드·오류 enum, 이벤트 끌어오기, 앱 수명 이벤트 전달([모바일](mobile.md#바인딩-층)) | transport, p2p, identity, topology |
 | (크레이트 아님) | `rendezvous/`(지금의 `relay/`를 바꾼다) | 다시 정함(2026-11-27) | rendezvous 서버 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사 스크립트, 자체 운영 안내([rendezvous](rendezvous.md#배포-형태)) | 없음 |
+
+각 크레이트가 모바일 target의 대상인지와 그 근거는 [모바일](mobile.md#크레이트별-판정)에 있다. 모바일 대상이 아닌 것은 `tasty-net-demo`와 rendezvous 실행 파일이다.
 
 가안과 달라진 자리:
 
@@ -39,12 +42,14 @@ p2p        ─> rendezvous, identity
 rendezvous ─> identity
 topology   ─> frame, identity
 demo       ─> transport, p2p, rendezvous, ssh, identity, frame
+ffi        ─> transport, p2p, identity, topology
 frame, ssh, identity ─> (없음)
 ```
 
 - 이 그림에 없는 의존은 만들지 않는다. 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
 - tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
 - feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다.
+- 위 규칙의 예외는 SSH 백엔드 feature 하나다. `tasty-net-ssh`의 `system-ssh`·`embedded-ssh`와 transport의 `ssh`·`system-ssh`·`embedded-ssh`(기본 모두 켬)이고, 계약은 [모바일](mobile.md#feature-계약)에 있다. 모바일 빌드가 다른 프로그램 실행 코드를 빼기 위해서다.
 - 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`·`tasty-net-ssh`를 직접 쓰면 이 의존이 들어오지 않는다.
 
 ## P2P 크레이트 격리
@@ -64,6 +69,7 @@ frame, ssh, identity ─> (없음)
 ## 외부 의존 원칙
 
 - 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(identity의 연결 레코드와 그 파서, transport·topology·rendezvous·p2p), `ed25519-dalek`(identity, 아래), `quinn`·`rustls`·`tokio`(p2p·rendezvous, 정확한 판 고정, [P2P](p2p.md#외부-의존과-고정)·[버전·호환](versioning.md)), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기, rendezvous의 보내기 오류 번호). transport는 서명 대상 해시 `sha2`와 nonce·bulk 자격용 OS 난수 `getrandom`을 쓴다. topology는 질의의 `request_id`·`branch`용 OS 난수 `getrandom`을 쓴다. identity는 이 밖에 OS 난수 `getrandom`(기기 키 seed와 토큰), 상수 시간 비교 `subtle`, Unix의 `libc`(유효 사용자 ID와 `O_NOFOLLOW`)를 쓴다. rendezvous는 펀칭 토큰에 `getrandom`을, 서버 설정 파일(TOML) 파싱에 `toml`을, 작은 차수 공개키 거절에 `ed25519-dalek`(identity와 같은 판)의 `VerifyingKey::is_weak`를, 경로보다 큰 보내기의 오류 번호(`EMSGSIZE`)에 Unix의 `libc`를, IPv6 소켓의 `IPV6_V6ONLY`에 `socket2`를 쓴다. p2p는 페어링 메시지에 `serde`·`serde_json`을, 재연결 지연의 무작위 폭에 `getrandom`을, P2P 소켓의 `IPV6_V6ONLY`와 버퍼 크기에 `socket2`를 쓴다.
+- 모바일 작업에서 더할 예정: `russh`(ssh의 `embedded-ssh`, `default-features = false`, `ring`·`rsa`), `uniffi`(ffi). 판·라이선스와 근거는 [모바일](mobile.md#russh-사실)·[모바일](mobile.md#바인딩-층). `russh-config`는 쓰지 않는다.
 - iroh 계열 의존(`iroh`, `iroh-relay`, `iroh-base`)은 두지 않는다(사용자 결정 2026-11-27, iroh 제거).
 - 기기 키의 ed25519 구현은 `ed25519-dalek`을 직접 쓴다. identity는 `ed25519-dalek` 3.0.0을 정확한 판으로 직접 선언하고 기본 feature와 같은 `fast`·`zeroize`만 켠다. 전에 거치던 `iroh-base` 1.5.0(`key` feature)과 같은 판이라 키 바이트·서명·기기 ID 문자열은 바뀌지 않았다. `iroh-base`의 `relay` feature 몫으로 들어오던 `url`·`idna`·`icu_*`는 빠졌다([기기 키·토큰](identity.md)).
 

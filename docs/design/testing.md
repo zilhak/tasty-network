@@ -135,3 +135,9 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 - 시험이 띄운 프로세스와 임시 파일은 시험 안에서 정리하고 정리를 확인한다.
 - heartbeat 같은 긴 시간 값은 연결별 설정으로 짧게 준다.
 - 문서는 시험이 무엇을 확인하는지 요약만 한다. 정확한 조건은 시험 파일이 정본이다.
+
+## 모바일 cross check와 내장 SSH 백엔드 시험
+
+- 모바일 cross check(CI 잡 `mobile-android`·`mobile-ios`, 검사 단계 `mobile-check`)의 러너·target·크레이트 목록·feature 조합은 [모바일](mobile.md#모바일-cross-check)이 정본이다. 후속 작업이 잡을 만들 때 위 "CI 러너"의 workflow 표에 행을 더한다.
+- 다른 프로그램 실행 금지의 정적 검사 `no-process-spawn`은 [모바일](mobile.md#다른-프로그램-실행-금지)에 있다.
+- 위 "SSH 통합 시험의 sshd"의 시험은 시스템 `ssh` 클라이언트를 쓴다. 같은 흐름을 내장 SSH 백엔드로 돌리는 시험(OpenSSH 클라이언트를 `PATH`에서 뺀 조건), 폴백 선택 시험, `ssh -G` 대조, 지원하지 않는 지시어 표시와 안전한 실패 시험의 자리는 [모바일](mobile.md#시험의-자리-내장-백엔드)에 있다. 서버 쪽은 같은 시험 sshd를 쓴다.

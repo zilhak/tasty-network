@@ -22,6 +22,7 @@
 | [위협 모델](threat-model.md) | 신뢰 경계, 위협별 대응과 맡는 쪽 |
 | [버전·호환](versioning.md) | 크레이트 semver, 태그, tasty가 쓰는 방식, 와이어 버전, CHANGELOG |
 | [CI와 시험 환경](testing.md) | CI 러너, SSH 통합 시험의 sshd, P2P 시험(프로세스 안 서버, 모의 NAT, 크레이트 단독), 설정값 시험, 연결 목록 시험 |
+| [모바일](mobile.md) | Android·iOS target, 크레이트별 판정, 다른 프로그램 실행 금지 범위, SSH 백엔드(시스템 ssh와 내장)·feature 계약·선택 규칙·지시어 지원 표, 앱 수명, 바인딩 층(UniFFI), 모바일 cross check |
 | [동작 수준 기준](done-criteria.md) | "제대로 동작하는 수준" 기준과 판정 규칙, 판정 기록 |
 
 ## 결정 요약
@@ -43,6 +44,8 @@
 | 기본 rendezvous 서버 | 주소·공개키는 소비자(tasty) 설정, 라이브러리 상수 없음. tasty 기본은 hub rendezvous, 사용자 서버를 지정하면 그 하나만 | [rendezvous](rendezvous.md#클라이언트-설정) |
 | CI | GitHub 호스트 러너 세 OS | [CI와 시험 환경](testing.md) |
 | 버전 | workspace 버전 하나, 태그 `v<semver>`(main), tasty는 git + `rev` 고정, `CHANGELOG.md` | [버전·호환](versioning.md) |
+| 모바일 | target 4개(Android 기기·에뮬레이터, iOS 기기·시뮬레이터). iOS는 빌드 검사와 Swift 바인딩 생성 구조까지. 모바일에서 컴파일되는 코드는 다른 프로그램을 실행하지 않는다. 바인딩은 새 크레이트 `tasty-net-ffi`(UniFFI) | [모바일](mobile.md) |
+| SSH 백엔드 | 시스템 ssh와 내장(russh) 둘. `ssh.backend` `auto`(기본, OpenSSH를 찾으면 시스템, 못 찾으면 내장)·`system`·`embedded`. OS로 나누지 않음. 내장은 OpenSSH 파일을 같은 뜻으로 읽고, 지원하지 않는 지시어는 보이며 보안에 걸린 것은 안전한 쪽으로 실패. feature `system-ssh`·`embedded-ssh` | [모바일](mobile.md#ssh-백엔드) |
 | 동작 수준 | D1~D10(세 OS CI, SSH 정방향·역할 반전, P2P, rendezvous 서버, 원격 전체 시험, tasty 의존 없음, P2P 격리, 연결 목록, 설정값 노출). 다른 망 펀칭 실험은 넣지 않음(P1) | [동작 수준 기준](done-criteria.md) |
 
 ## 남은 결정
@@ -60,3 +63,4 @@
 | 판단필요: 서버 신뢰 방식 | hub rendezvous 배포 때 결정(Q1). 지금 설계는 서버 공개키 고정(raw public key)이다. 대안은 도메인 인증서(WebPKI)다. 키 고정은 공용 인증 기관에 기대지 않고 기기 사이와 같은 코드를 쓰지만, 서버 키를 바꾸면 tasty 설정의 공개키도 바꿔야 한다. 추천: 키 고정. 키 교체 절차(새 키를 미리 설정에 더해 두는 두 키 허용)는 hub rendezvous 배포 때 정한다([rendezvous](rendezvous.md#기기-인증)) | hub, tasty |
 | 토폴로지 원격 응답에 실을 workspace 메타데이터 범위(이름·ID) | 미정 | tasty 제품 결정 |
 | 페어링 메시지를 나르는 경로와 승인 화면 | 미정 | tasty 제품 결정 |
+| 판단필요: D11(모바일 target 빌드 검사)과 내장 SSH 백엔드 attach 시험을 동작 수준 기준에 넣을지 | 판단을 올림(2026-11-27). [동작 수준 기준](done-criteria.md)은 정해진 뒤 고친다([모바일](mobile.md#d-기준과의-관계)) | director |
