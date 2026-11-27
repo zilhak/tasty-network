@@ -51,7 +51,7 @@ use crate::transport::{
 
 pub use listener::{P2pInbound, P2pListener};
 
-use conn::{ConnSide, ConnState, OwnedConn, PunchCancel, watch};
+use conn::{ChannelSlot, ConnSide, ConnState, OwnedConn, PunchCancel, watch};
 use table::{Followed, follow, open_entry, take_pending};
 
 /// How often a connection's thread looks at its connection when the endpoint does not show
@@ -261,6 +261,14 @@ fn connect_error(error: P2pError, cancel: &AttemptCancel) -> ConnectError {
     }
 }
 
+/// The error of a channel on a connection that closed.
+fn closed() -> ConnectError {
+    ConnectError::Io(io::Error::new(
+        io::ErrorKind::NotConnected,
+        "the P2P connection is closed",
+    ))
+}
+
 /// Opens a stream on `state` as a new channel.
 fn open_channel(
     state: &Arc<ConnState>,
@@ -269,12 +277,7 @@ fn open_channel(
     if cancel.is_cancelled() {
         return Err(ConnectError::Cancelled);
     }
-    let Some(slot) = state.acquire() else {
-        return Err(ConnectError::Io(io::Error::new(
-            io::ErrorKind::NotConnected,
-            "the P2P connection is closed",
-        )));
-    };
+    let slot = state.acquire().ok_or_else(closed)?;
     let stream = state.conn.open_bi().map_err(ConnectError::Io)?;
     Ok(state.entered(stream::channel(
         stream,
@@ -337,20 +340,26 @@ impl Transport for P2pTransport {
                 let entry = self.start_entry(*target, options);
                 let made =
                     self.new_conn(*target, cancel, entry.clone())
-                        .and_then(|(state, owned)| match open_channel(&state, cancel) {
-                            Ok(channel) => Ok((channel, state, owned)),
-                            Err(error) => {
-                                // No channel holds the new connection: close it here.
-                                state.close(tasty_net_p2p::P2pCloseReason::Closed);
-                                Err(error)
+                        .and_then(|(state, owned)| {
+                            let opened = state
+                                .acquire()
+                                .ok_or_else(closed)
+                                .and_then(|hold| Ok((open_channel(&state, cancel)?, hold)));
+                            match opened {
+                                Ok((channel, hold)) => Ok((channel, state, owned, hold)),
+                                Err(error) => {
+                                    // No channel holds the new connection: close it here.
+                                    state.close(tasty_net_p2p::P2pCloseReason::Closed);
+                                    Err(error)
+                                }
                             }
                         });
-                let (channel, state, owned) = made.inspect_err(|error| {
+                let (channel, state, owned, hold) = made.inspect_err(|error| {
                     if let Some(entry) = &entry {
                         entry.end(Cause::of_connect(error));
                     }
                 })?;
-                (channel, state, Some(owned), None)
+                (channel, state, Some((owned, hold)), None)
             }
         };
         Ok(Connection {
@@ -368,8 +377,11 @@ impl Transport for P2pTransport {
 /// The endpoint of a P2P connection: more channels are more streams on it.
 struct P2pEndpointHandle {
     state: Arc<ConnState>,
-    /// The attempt's registration while the connection is not shared yet.
-    owned: Mutex<Option<Registration>>,
+    /// The attempt's registration while the connection is not shared yet, and a place on the
+    /// connection that keeps it open until the first handshake's result is noted: a failed
+    /// first handshake drops its channel before the caller notes why, and the connection's end
+    /// must not end the entry before that (the endpoint is dropped after the note).
+    owned: Mutex<Option<(Registration, ChannelSlot)>>,
     shared: Shared,
     /// A reconnection waiting on a shared connection, ended if the attempt is dropped
     /// unfinished.
@@ -388,7 +400,7 @@ impl EndpointHandle for P2pEndpointHandle {
     }
 
     fn publish(&self) -> Result<(), Cancelled> {
-        let Some(owned) = lock(&self.owned).take() else {
+        let Some((owned, _hold)) = lock(&self.owned).take() else {
             return Ok(());
         };
         owned.release()?;

@@ -23,7 +23,7 @@ use tasty_net_p2p::{P2pCloseReason, P2pConnection, P2pStream};
 
 use crate::cancel::Cancellable;
 use crate::channel::RawChannel;
-use crate::connection_table::{Cause, ConnectionState, EntryRef};
+use crate::connection_table::{Cause, ConnectionInfo, ConnectionState, EntryRef};
 use crate::lock::lock;
 
 use super::listener::Queue;
@@ -73,6 +73,11 @@ impl ConnState {
         entry: Option<EntryRef>,
         followed: Followed,
     ) -> Arc<Self> {
+        let id = conn.id();
+        if let Some(entry) = &entry {
+            // From here on the entry shows this connection (see `owns_entry`).
+            entry.update(|info| info.p2p_id = Some(id));
+        }
         let state = Arc::new(Self {
             conn,
             side,
@@ -83,6 +88,13 @@ impl ConnState {
         });
         state.follow();
         state
+    }
+
+    /// Whether `info` still shows this connection. A redialer's entry moves on to the next
+    /// attempt (which clears its `p2p_id`); the thread of an earlier connection then no longer
+    /// changes it.
+    fn shown_in(&self, info: &ConnectionInfo) -> bool {
+        info.p2p_id == Some(self.conn.id())
     }
 
     /// `channel` on this connection, in the connection's entry.
@@ -98,6 +110,11 @@ impl ConnState {
         let Some(entry) = &self.entry else {
             return;
         };
+        let mut shown = false;
+        entry.update(|info| shown = self.shown_in(info));
+        if !shown {
+            return;
+        }
         if let Some(info) = self.conn.info() {
             follow(entry, &info, &mut lock(&self.followed));
         }
@@ -107,7 +124,7 @@ impl ConnState {
     /// one its last link or its failed attempt left ([`Cause::Ended`] without one); when the
     /// peer (or `tasty-net-p2p`) closed it, the code it was closed with, and [`Cause::Lost`]
     /// for an end without a code (the idle timeout). A failure noted before the entry was
-    /// connected stays.
+    /// connected stays. An entry that moved on to another connection is left as it is.
     fn end_entry(&self) {
         let Some(entry) = &self.entry else {
             return;
@@ -126,7 +143,7 @@ impl ConnState {
                 None => Cause::Lost,
             },
         };
-        entry.end(cause);
+        entry.end_if(|info| self.shown_in(info), cause);
     }
 
     /// Whether the QUIC connection ended.

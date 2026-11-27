@@ -510,10 +510,18 @@ impl EntryRef {
     /// The end of a failed attempt or of the physical connection: `disconnected` with
     /// `cause`, unless the redialer holds the entry, which then only keeps the cause.
     pub(crate) fn end(&self, cause: Cause) {
+        self.end_if(|_| true, cause);
+    }
+
+    /// [`EntryRef::end`] if `still` holds for the entry, checked in one step with the end.
+    pub(crate) fn end_if(&self, still: impl FnOnce(&ConnectionInfo) -> bool, cause: Cause) {
         self.table.with_state(|state, config| {
             let Some(stored) = state.entries.get_mut(&self.id) else {
                 return;
             };
+            if !still(&stored.info) {
+                return;
+            }
             if stored.held && stored.info.state != ConnectionState::Connected {
                 stored.info.last_cause = Some(cause);
                 return;

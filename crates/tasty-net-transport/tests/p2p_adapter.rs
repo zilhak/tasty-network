@@ -25,11 +25,11 @@ use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
 use tasty_net_transport::settings::SettingSource;
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, Cause, ChannelReader,
-    ChannelWriter, ConnectError, ConnectOptions, Connection, ConnectionId, ConnectionInfo,
-    ConnectionState, ConnectionTable, DialConfig, DomainAccept, DomainPolicy, DomainReject,
-    EdgeTransport, EndReason, HandshakeError, Holder, Link, LinkTimeouts, P2pListener,
-    P2pTransport, PathKind, PeerInfo, Phase, RejectReason, RequestHandler, Transport, Via,
-    dial_handshake, dial_request, domain_code,
+    ChannelWriter, ConnectError, ConnectOptions, Connection, ConnectionEvent, ConnectionId,
+    ConnectionInfo, ConnectionState, ConnectionTable, DialConfig, DomainAccept, DomainPolicy,
+    DomainReject, EdgeTransport, EndReason, HandshakeError, Holder, Link, LinkTimeouts,
+    P2pListener, P2pTransport, PathKind, PeerInfo, Phase, RejectReason, RequestHandler, Transport,
+    Via, dial_handshake, dial_request, domain_code,
 };
 
 /// How long a test waits for something that comes in well under a second on loopback.
@@ -571,6 +571,29 @@ fn rejected_first_stream_ack_is_read() {
         ),
         "{:?}",
         ended.last_cause
+    );
+    // The end itself carries the refusal: the history's last line and the last transition
+    // event, which a consumer such as the redialer goes by.
+    let last = ended.history.last().expect("the history");
+    assert_eq!(last.state, ConnectionState::Disconnected, "{last:?}");
+    assert!(
+        matches!(&last.cause, Some(Cause::Rejected(RejectReason::Domain))),
+        "{:#?}",
+        ended.history
+    );
+    let event = pair
+        .table_a
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            ConnectionEvent::Transition { id, entry } if id == ended.id => Some(entry),
+            _ => None,
+        })
+        .next_back()
+        .expect("the entry's transitions");
+    assert!(
+        matches!(&event.cause, Some(Cause::Rejected(RejectReason::Domain))),
+        "{event:?}"
     );
 }
 
