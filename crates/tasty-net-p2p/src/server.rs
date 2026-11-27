@@ -98,8 +98,9 @@ pub(crate) async fn run(core: Arc<Core>) {
                 "enabled"
             }),
         );
-        let started = Instant::now();
         let end = session(&core).await;
+        // How long the registration that just ended was held; none when it did not register.
+        let held = lock(&core.reg).registered_since.map(|t| t.elapsed());
         clear_registration(&core);
         // The shutdown sets its flag and reports `Off` before it closes the QUIC endpoint, so a
         // session that ended with the closing socket's error ends here without a transition.
@@ -118,9 +119,9 @@ pub(crate) async fn run(core: Arc<Core>) {
             }
             End::Retry(c) => c,
         };
-        let registered_long = lock(&core.reg).registered_at.is_some()
-            && started.elapsed() >= core.params.reconnect.reset_after;
-        if registered_long {
+        // A registration held longer than reset_after starts the failures again
+        // (docs/design/p2p.md "재시도와 포기").
+        if held.is_some_and(|h| h >= core.params.reconnect.reset_after) {
             failures = u64::MIN;
         }
         failures += 1;
@@ -159,6 +160,8 @@ fn clear_registration(core: &Core) {
     let mut r = lock(&core.reg);
     r.limits = None;
     r.mismatch = None;
+    r.registered_at = None;
+    r.registered_since = None;
     r.stun.clear();
 }
 
@@ -266,6 +269,7 @@ async fn registered(
         let mut r = lock(&core.reg);
         r.mismatch = mismatch;
         r.registered_at = Some(SystemTime::now());
+        r.registered_since = Some(Instant::now());
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<DeviceMessage>();
     *lock(&core.link) = Some(Link { tx });

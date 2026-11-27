@@ -141,6 +141,8 @@ pub(crate) struct Registration {
     pub(crate) mismatch: Option<&'static str>,
     pub(crate) nat: Option<NatJudgement>,
     pub(crate) registered_at: Option<SystemTime>,
+    /// When the current registration began, for how long it was held.
+    pub(crate) registered_since: Option<Instant>,
 }
 
 /// The current coordination connection's writer.

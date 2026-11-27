@@ -131,6 +131,50 @@ fn server_reconnect_follows_backoff() {
     assert!(log.wait(&a.ep, LONG, |e| matches!(e, P2pEvent::Transition { to: Phase::Endpoint(EndpointPhase::Registered), cause, .. } if cause.name == "registered")).is_some());
 }
 
+/// A registration that ended does not count as held for the failures after it: once the server
+/// is gone, connect timeouts longer than `reset_after` still add up to `ReconnectExhausted`, and
+/// the status shows no registration time in `Backoff` (docs/design/p2p.md "재시도와 포기").
+#[test]
+fn failures_after_a_registration_add_up() {
+    let w = World::new();
+    let mut s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let a = device(
+        &n,
+        2,
+        1,
+        &s,
+        settings(&[
+            ("rendezvous.connect_timeout", ms(400)),
+            ("rendezvous.reconnect.initial", ms(100)),
+            ("rendezvous.reconnect.jitter", Value::Factor(0.0)),
+            ("rendezvous.reconnect.reset_after", ms(200)),
+            ("rendezvous.reconnect.max_attempts", Value::Count(3)),
+        ]),
+    );
+    registered(&a);
+    assert!(a.ep.status().registered_at.is_some());
+    w.stop(&mut s);
+    let mut log = Log::default();
+    assert!(
+        log.wait(&a.ep, LONG, |e| matches!(
+            e,
+            P2pEvent::Transition {
+                to: Phase::Endpoint(EndpointPhase::Backoff),
+                ..
+            }
+        ))
+        .is_some()
+    );
+    assert_eq!(a.ep.status().registered_at, None);
+    assert!(
+        wait_until(LONG, || a.ep.status().state == EndpointPhase::Stopped),
+        "{:?}",
+        a.ep.status()
+    );
+    assert_eq!(a.ep.status().stopped, Some(StopCause::ReconnectExhausted));
+}
+
 #[test]
 fn reconnect_delay_never_exceeds_max_delay() {
     let w = World::new();
