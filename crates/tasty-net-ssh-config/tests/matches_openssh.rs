@@ -99,27 +99,36 @@ fn local_values(ssh: &Path) -> Local {
     }
 }
 
-/// Clear group and other write on the fixture files: OpenSSH refuses an included file with
-/// them (`CHECKPERM`), and a checkout made under umask 002 has them.
-#[cfg(unix)]
-fn restrict_modes(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
-    const GROUP_OTHER_WRITE: u32 = 0o022;
-    for entry in std::fs::read_dir(dir).expect("fixture folder") {
+/// Copy the fixtures to a new folder and clear group and other write on the copies: OpenSSH
+/// refuses an included file with them (`CHECKPERM`), and a checkout made under umask 002 has
+/// them. The checkout itself is not changed.
+fn copy_fixtures(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("fixture copy folder");
+    for entry in std::fs::read_dir(from).expect("fixture folder") {
         let path = entry.expect("fixture entry").path();
+        let target = to.join(path.file_name().expect("fixture name"));
         if path.is_dir() {
-            restrict_modes(&path);
+            copy_fixtures(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).expect("copy a fixture");
         }
-        let mut perm = std::fs::metadata(&path)
-            .expect("fixture metadata")
-            .permissions();
-        perm.set_mode(perm.mode() & !GROUP_OTHER_WRITE);
-        std::fs::set_permissions(&path, perm).expect("fixture mode");
+        restrict_mode(&target);
     }
 }
 
+#[cfg(unix)]
+fn restrict_mode(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    const GROUP_OTHER_WRITE: u32 = 0o022;
+    let mut perm = std::fs::metadata(path)
+        .expect("fixture metadata")
+        .permissions();
+    perm.set_mode(perm.mode() & !GROUP_OTHER_WRITE);
+    std::fs::set_permissions(path, perm).expect("fixture mode");
+}
+
 #[cfg(not(unix))]
-fn restrict_modes(_: &Path) {}
+fn restrict_mode(_: &Path) {}
 
 fn context(args: &[&str], fixture: &Path, local: &Local) -> (ResolveContext, String) {
     let mut command_line = Vec::new();
@@ -200,8 +209,15 @@ fn matches_ssh_g() {
     );
     let local = local_values(&ssh);
 
-    let root = manifest_dir().join("tests/fixtures");
-    restrict_modes(&root);
+    let source = manifest_dir().join("tests/fixtures");
+    let root = std::env::temp_dir().join(format!(
+        "tasty-net-ssh-config-fixtures-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("remove an old fixture copy");
+    }
+    copy_fixtures(&source, &root);
     let mut fixtures: Vec<PathBuf> = std::fs::read_dir(&root)
         .expect("tests/fixtures")
         .map(|e| e.expect("fixture entry").path())
@@ -297,6 +313,7 @@ fn matches_ssh_g() {
     for f in &failures {
         println!("  {f}");
     }
-    assert!(cases > 0, "no comparison case under {}", root.display());
+    std::fs::remove_dir_all(&root).expect("remove the fixture copy");
+    assert!(cases > 0, "no comparison case under {}", source.display());
     assert!(failures.is_empty(), "{} differences", failures.len());
 }
