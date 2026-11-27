@@ -92,7 +92,7 @@ judge_features() {
     '
 }
 
-# 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지가 있으면 그 경로를
+# 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지나 그 feature 노드가 있으면 그 경로를
 # "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍는다.
 judge_inverted() {
     awk '
@@ -105,7 +105,9 @@ judge_inverted() {
             if (d == 1) { inside = (text == "tokio feature \"process\""); if (inside) found = 1; next }
             if (inside && d > 1) {
                 split(text, w, " ")
-                if (w[1] ~ /^tasty-net-/ && w[2] ~ /^v/) {
+                # 패키지 노드(<이름> v<판>)와 feature 노드(<이름> feature "<f>") 모두 그 크레이트를
+                # 거친 경로다. 크레이트가 자기 feature로 tokio/process를 넘겨 켜면 feature 노드만 남는다.
+                if (w[1] ~ /^tasty-net-/ && (w[2] ~ /^v/ || w[2] == "feature")) {
                     chain = path[1]
                     for (k = 2; k <= d; k++) chain = chain " <- " path[k]
                     if (!(chain in told)) { told[chain] = 1; print "위반: tokio의 process를 켠 경로에 " w[1] "가 있다: " chain }
@@ -168,6 +170,7 @@ self_test() {
     local rc_line='russh-config v0.50.0|'
     local inv_app='0tokio v1.54.1;1tokio feature "process";2app v0.1.0 (/w/app);1tokio feature "rt";2tasty-net-p2p v0.1.0 (/w/p2p);3app v0.1.0 (/w/app)'
     local inv_net='0tokio v1.54.1;1tokio feature "process";2tokio feature "full";3tasty-net-transport v0.1.0 (/w/t);4app v0.1.0 (/w/app);1tokio feature "rt"'
+    local inv_feat='0tokio v1.54.1;1tokio feature "process";2tasty-net-ssh feature "embedded-ssh";3app v0.1.0 (/w/app)'
     local inv_none='0tokio v1.54.1;1tokio feature "rt";2app v0.1.0 (/w/app)'
     local failed=0 name app want st_tree st_trc st_inv st_irc got
     # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드(나무의 줄은 ;로 나눈다)
@@ -183,6 +186,7 @@ self_test() {
         "tasty-net-transport를 거쳐 켠 tokio의 process(앱 기준)#1#1#$root;$tkp#0#$inv_net#0"
         "앱 기준에서도 system-ssh는 실패#1#1#$root;$tk;$ssh_s#0##0"
         "앱 기준에서도 russh-config는 실패#1#1#$root;$rc_line#0##0"
+        "tasty-net-ssh의 feature 노드를 거쳐 켠 tokio의 process(앱 기준)#1#1#$root;$tkp#0#$inv_feat#0"
         "거꾸로 본 나무에 process 노드가 없다(앱 기준)#1#2#$root;$tkp#0#$inv_none#0"
         "거꾸로 본 cargo tree가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_app#101"
     )
