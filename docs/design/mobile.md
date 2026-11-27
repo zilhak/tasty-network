@@ -104,7 +104,7 @@ cargo tree --locked --target <t> -p <크레이트> <그 조합의 feature 인자
 - 실패 조건: `tokio` 줄의 feature에 `process`가 있다, `russh-config` 줄이 있다, `tasty-net-ssh` 줄의 feature에 `system-ssh`가 있다.
 - russh 0.65.4의 일반 의존 tokio feature는 `io-util`·`sync`·`time`과 비 wasm `io-util`·`rt-multi-thread`·`time`·`net`이고 `process`는 dev 의존에만 있다. russh-sftp 4.0.0은 `io-util`·`rt`·`sync`·`time`·`macros`다. 그래서 지금 판에서는 이 검사가 통과해야 한다.
 - 빌드 성공만으로 판정하지 않는 근거: std의 `std::process`는 Android·iOS target에서도 컴파일된다(위 표의 ssh 행이 지금 통과한다).
-- 앱의 최종 의존 그래프(android 요구 #15): 같은 기준을 앱 작업 공간에서도 돌릴 수 있게 이 절을 공개 기준으로 둔다. 대상 target은 `aarch64-linux-android`·`x86_64-linux-android`이고, 명령은 앱 작업 공간에서 앱 cdylib 크레이트를 `-p`로 준 같은 `cargo tree`다(앱의 배포 빌드 feature 인자를 붙인다). 실패 조건 가운데 `russh-config` 줄과 `tasty-net-ssh`의 `system-ssh`는 그대로다. `tokio`의 `process`는 앱 자신이 켤 수 있으므로(다른 프로그램 실행 금지는 앱 코드에 적용되지 않는다, 아래 "바인딩 층") 그 줄만으로 실패로 보지 않는다. `cargo tree --locked --target <t> -e features -i tokio`(feature를 켠 쪽을 거꾸로 보인다)에서 `process`를 켠 경로에 `tasty-net-*` 크레이트가 있을 때만 실패다.
+- 앱의 최종 의존 그래프(android 요구 #15): 같은 기준을 앱 작업 공간에서도 돌릴 수 있게 이 절을 공개 기준으로 둔다. 대상 target은 `aarch64-linux-android`·`x86_64-linux-android`이고, 명령은 앱 작업 공간에서 앱 cdylib 크레이트를 `-p`로 준 같은 `cargo tree`다(앱의 배포 빌드 feature 인자를 붙인다). 실패 조건 가운데 `russh-config` 줄과 `tasty-net-ssh`의 `system-ssh`는 그대로다. `tokio`의 `process`는 앱 자신이 켤 수 있으므로(다른 프로그램 실행 금지는 앱 코드에 적용되지 않는다, 아래 "바인딩 층") 그 줄만으로 실패로 보지 않는다. 같은 앱 패키지·target·배포 feature 인자·일반 의존 범위로 거꾸로 본 `cargo tree --locked --target <t> -p <앱 cdylib 크레이트> <배포 feature 인자> -e normal,features -i tokio`(feature를 켠 쪽을 거꾸로 보인다)에서 `process`를 켠 경로에 `tasty-net-*` 크레이트가 있을 때만 실패다. `-e features`만 주면 Cargo가 빌드·dev 의존도 함께 보이므로 `normal`을 같이 준다([cargo tree](https://doc.rust-lang.org/cargo/commands/cargo-tree.html) `--edges`).
 - 이 검사를 하는 스크립트는 모바일 cross check 작업이 만들고, 앱 작업 공간의 `Cargo.toml` 경로와 크레이트 이름을 인자로 받아 이 레포 밖에서도 같은 조건으로 돈다. 인자 모양은 그 작업이 정한다.
 
 ## 모바일의 SSH
@@ -362,7 +362,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, attach 링크 쪽에도 상대 `caps` 조회를 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
 | Kotlin 패키지 이름의 값 | 후속 작업(바인딩 크레이트). #12: `uniffi.toml`의 `package_name` 값, rlib 링크 시험에서 두 네임스페이스의 Kotlin이 모두 `tasty_mobile_core`를 싣는지 볼지 |
 | 지역망 판정 콜백과 두 오류의 FFI 모양 | 후속 작업(바인딩 크레이트, 내장 SSH 백엔드). #14: 콜백 이름과 인자, 두 변형의 필드, 콜백 안에서 앱이 권한을 요청할 때의 대기 상한, 실행 중 심벌을 찾을 라이브러리와 방법 |
-| 앱 그래프의 의존 쪽 검사 스크립트 | 후속 작업(모바일 cross check). #15: 인자 모양(`Cargo.toml` 경로·크레이트·target·feature), `tokio` `process`를 켠 경로 판정의 출력, 앱 레포 CI에서 부르는 방법 |
+| 앱 그래프의 의존 쪽 검사 스크립트 | 후속 작업(모바일 cross check). #15: 인자 모양(`Cargo.toml` 경로·크레이트·target·feature), `tokio` `process`를 켠 경로 판정의 출력, 그래프에 tokio가 여러 판일 때(`-i tokio@<판>`)와 없을 때(`cargo tree`가 실패한다)의 처리, 앱 레포 CI에서 부르는 방법 |
 | FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
