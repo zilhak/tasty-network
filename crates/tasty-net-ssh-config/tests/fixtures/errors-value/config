@@ -1,6 +1,0 @@
-Host bad-port
-    Port 99999
-Host bad-flag
-    ForwardAgent perhaps
-Host *
-    User someone

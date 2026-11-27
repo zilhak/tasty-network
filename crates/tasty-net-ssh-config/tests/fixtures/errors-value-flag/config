@@ -1,0 +1,5 @@
+# A bad value in a block that does not apply still fails the file.
+Host bad-flag
+    ForwardX11 perhaps
+Host *
+    User someone

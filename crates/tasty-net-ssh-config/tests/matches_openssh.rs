@@ -1,9 +1,17 @@
 //! `ssh -G` comparison (docs/design/ssh-backends.md "시험 목록", "비교 시험의 기준 클라이언트").
 //!
 //! Every folder under `tests/fixtures/` has a `config` and a `cases` file. Each line of `cases`
-//! is the arguments of one `ssh -F <folder>/config -G <arguments>` call (`-o`, `-p`, `-l`, then
-//! the destination). The reference client must print the same text as
-//! [`Resolution::dump_client_config`]; where it fails, the resolution must be refused.
+//! is the arguments of one `ssh -F <folder>/config -G <arguments>` call (`-o`, `-p`, `-l`, `-N`,
+//! then the destination), optionally followed by `=>` and what is expected:
+//!
+//! - nothing: the reference client succeeds, prints the same text as
+//!   [`Resolution::dump_client_config`], and the resolution is not refused;
+//! - `also-refused <kind>`: the same, and this crate refuses the resolution with that kind
+//!   (`security_not_implemented` or `undeterminable`, a refusal OpenSSH does not make);
+//! - `refused <kind> <place> [<keyword>]`: the reference client exits with 255 and its error
+//!   output names the place, and this crate refuses with that kind at that place (and keyword).
+//!   The place is `<file>:<line>` with the file relative to the fixture folder, or
+//!   `command-line` for a `-o` value.
 //!
 //! The reference client is the one `scripts/install-openssh-ref.sh` builds from the base
 //! commit: `$TASTY_OPENSSH_REF_DIR/bin/ssh` or `<workspace>/target/tools/openssh-10.6p2/bin/ssh`,
@@ -19,8 +27,8 @@ use std::path::{Path, PathBuf};
 
 use tasty_net_ssh_config::settings::OPENSSH_VERSION;
 use tasty_net_ssh_config::{
-    CommandLine, CommandLineValue, ConfigFiles, ConfigInputs, ConfigSet, RefusalKind, Resolution,
-    ResolveContext,
+    CommandLine, CommandLineValue, ConfigFiles, ConfigInputs, ConfigSet, Origin, RefusalKind,
+    Resolution, ResolveContext,
 };
 
 /// The environment value the fixtures use for absolute `Include` paths.
@@ -175,6 +183,156 @@ fn first_difference(want: &str, got: &str) -> String {
     "no difference".to_string()
 }
 
+/// What a case expects (see the file comment).
+enum Expect {
+    Same,
+    AlsoRefused(RefusalKind),
+    Refused {
+        kind: RefusalKind,
+        place: Place,
+        keyword: Option<String>,
+    },
+}
+
+enum Place {
+    File { file: String, line: usize },
+    CommandLine,
+}
+
+fn kind_of(name: &str) -> Result<RefusalKind, String> {
+    Ok(match name {
+        "config_error" => RefusalKind::ConfigError,
+        "unknown_keyword" => RefusalKind::UnknownKeyword,
+        "security_not_implemented" => RefusalKind::SecurityNotImplemented,
+        "refuse_connection" => RefusalKind::RefuseConnection,
+        "undeterminable" => RefusalKind::Undeterminable,
+        other => return Err(format!("unknown refusal kind {other:?}")),
+    })
+}
+
+fn parse_expect(text: &str) -> Result<Expect, String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        ["also-refused", kind] => {
+            let kind = kind_of(kind)?;
+            if !matches!(
+                kind,
+                RefusalKind::SecurityNotImplemented | RefusalKind::Undeterminable
+            ) {
+                return Err(format!(
+                    "also-refused takes a refusal OpenSSH does not make, not {kind:?}"
+                ));
+            }
+            Ok(Expect::AlsoRefused(kind))
+        }
+        ["refused", kind, place, rest @ ..] if rest.len() <= 1 => {
+            let place = if *place == "command-line" {
+                Place::CommandLine
+            } else {
+                let (file, line) = place
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("bad place {place:?}"))?;
+                Place::File {
+                    file: file.to_string(),
+                    line: line.parse().map_err(|_| format!("bad line in {place:?}"))?,
+                }
+            };
+            Ok(Expect::Refused {
+                kind: kind_of(kind)?,
+                place,
+                keyword: rest.first().map(|k| k.to_string()),
+            })
+        }
+        _ => Err(format!("bad expectation {text:?}")),
+    }
+}
+
+/// The exit code OpenSSH uses for a configuration error (`exit(255)`, `fatal`).
+const SSH_FAILURE: i32 = 255;
+
+/// `Ok(true)`: the same output; `Ok(false)`: refused as expected; `Err`: the difference.
+fn check_case(
+    expect: &Expect,
+    out: &std::process::Output,
+    stderr: &str,
+    r: &Resolution,
+    fixture: &Path,
+) -> Result<bool, String> {
+    let last = stderr.lines().last().unwrap_or("");
+    match expect {
+        Expect::Same | Expect::AlsoRefused(_) => {
+            if !out.status.success() {
+                return Err(format!("ssh fails ({last}) but the case expects success"));
+            }
+            let want_kind = match expect {
+                Expect::AlsoRefused(k) => Some(*k),
+                _ => None,
+            };
+            let got_kind = r.refusal.as_ref().map(|f| f.kind);
+            if got_kind != want_kind {
+                return Err(format!(
+                    "port refusal {:?} ({}), the case expects {want_kind:?}",
+                    got_kind,
+                    r.refusal
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                ));
+            }
+            let want = String::from_utf8_lossy(&out.stdout).into_owned();
+            match r.dump_client_config() {
+                Ok(got) if got == want => Ok(true),
+                Ok(got) => Err(first_difference(&want, &got)),
+                Err(e) => Err(format!("dump failed: {e}")),
+            }
+        }
+        Expect::Refused {
+            kind,
+            place,
+            keyword,
+        } => {
+            if out.status.code() != Some(SSH_FAILURE) {
+                return Err(format!(
+                    "ssh exits with {:?} ({last}), the case expects {SSH_FAILURE}",
+                    out.status.code()
+                ));
+            }
+            let (want_origin, mark) = match place {
+                Place::File { file, line } => {
+                    let path = fixture.join(file);
+                    let mark = format!("{} line {line}:", path.display());
+                    (Origin::File { path, line: *line }, mark)
+                }
+                Place::CommandLine => (
+                    Origin::CommandLine {
+                        label: "command-line".to_string(),
+                    },
+                    "command-line line 0:".to_string(),
+                ),
+            };
+            if !stderr.contains(&mark) {
+                return Err(format!("ssh error output does not name {mark:?}: {stderr}"));
+            }
+            let Some(f) = &r.refusal else {
+                return Err("ssh refuses, the port does not".to_string());
+            };
+            if f.kind != *kind || f.origin.as_ref() != Some(&want_origin) {
+                return Err(format!(
+                    "port refusal {:?} at {:?} ({f}), the case expects {kind:?} at {want_origin:?}",
+                    f.kind, f.origin
+                ));
+            }
+            if keyword.is_some() && f.keyword != *keyword {
+                return Err(format!(
+                    "port refusal keyword {:?}, the case expects {keyword:?}",
+                    f.keyword
+                ));
+            }
+            Ok(false)
+        }
+    }
+}
+
 #[test]
 fn matches_ssh_g() {
     if cfg!(windows) {
@@ -225,7 +383,7 @@ fn matches_ssh_g() {
         .collect();
     fixtures.sort();
 
-    let (mut cases, mut same, mut both_refused) = (0usize, 0usize, 0usize);
+    let (mut cases, mut same, mut refused_alike) = (0usize, 0usize, 0usize);
     let mut failures = Vec::new();
     for fixture in &fixtures {
         let fixture = fixture.canonicalize().expect("fixture path");
@@ -245,68 +403,43 @@ fn matches_ssh_g() {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
         {
             cases += 1;
-            let args: Vec<&str> = case.split_whitespace().collect();
+            let (call, expect) = match case.split_once("=>") {
+                Some((c, e)) => (c.trim(), parse_expect(e)),
+                None => (case, Ok(Expect::Same)),
+            };
+            let label = format!("{name}: ssh -G {case}");
+            let expect = match expect {
+                Ok(e) => e,
+                Err(e) => {
+                    failures.push(format!("{label}: {e}"));
+                    continue;
+                }
+            };
+            let args: Vec<&str> = call.split_whitespace().collect();
             let out = reference(&ssh, &fixture.join("config"), &args, &fixture);
             let (ctx, target) = context(&args, &fixture, &local);
             let r: Resolution = set.resolve(&target, &ctx);
-            let label = format!("{name}: ssh -G {case}");
-            // Only the errors-* fixtures are meant to fail.
-            let should_fail = name.starts_with("errors-");
-            if out.status.success() == should_fail {
-                failures.push(format!(
-                    "{label}: ssh {} but the fixture expects {}: {}",
-                    if should_fail { "succeeds" } else { "fails" },
-                    if should_fail { "a failure" } else { "success" },
-                    String::from_utf8_lossy(&out.stderr)
-                        .lines()
-                        .last()
-                        .unwrap_or("")
-                ));
-                continue;
-            }
-            if out.status.success() {
-                let want = String::from_utf8_lossy(&out.stdout).into_owned();
-                let config_refusal = r.refusal.as_ref().filter(|f| {
-                    matches!(
-                        f.kind,
-                        RefusalKind::ConfigError
-                            | RefusalKind::UnknownKeyword
-                            | RefusalKind::RefuseConnection
-                    )
-                });
-                if let Some(f) = config_refusal {
-                    failures.push(format!("{label}: ssh accepts, port refuses: {f}"));
-                    continue;
+            // OpenSSH writes `<file> line <n>:`, and `<file>: line <n>:` for an unknown keyword.
+            let stderr = String::from_utf8_lossy(&out.stderr).replace(": line ", " line ");
+            match check_case(&expect, &out, &stderr, &r, &fixture) {
+                Ok(true) => same += 1,
+                Ok(false) => {
+                    refused_alike += 1;
+                    println!(
+                        "{label}: both refuse (ssh: {}; port: {})",
+                        stderr.lines().last().unwrap_or(""),
+                        r.refusal
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    );
                 }
-                match r.dump_client_config() {
-                    Ok(got) if got == want => same += 1,
-                    Ok(got) => failures.push(format!("{label}: {}", first_difference(&want, &got))),
-                    Err(e) => failures.push(format!("{label}: dump failed: {e}")),
-                }
-            } else {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let err = err.lines().last().unwrap_or("").to_string();
-                match &r.refusal {
-                    Some(f)
-                        if matches!(
-                            f.kind,
-                            RefusalKind::ConfigError
-                                | RefusalKind::UnknownKeyword
-                                | RefusalKind::RefuseConnection
-                        ) =>
-                    {
-                        both_refused += 1;
-                        println!("{label}: both refuse (ssh: {err}; port: {f})");
-                    }
-                    other => {
-                        failures.push(format!("{label}: ssh fails ({err}), port gives {other:?}"))
-                    }
-                }
+                Err(e) => failures.push(format!("{label}: {e}")),
             }
         }
     }
     println!(
-        "ssh -G comparison: {} fixtures, {cases} cases, {same} same output, {both_refused} refused by both, {} differences",
+        "ssh -G comparison: {} fixtures, {cases} cases, {same} same output, {refused_alike} refused alike, {} differences",
         fixtures.len(),
         failures.len()
     );
