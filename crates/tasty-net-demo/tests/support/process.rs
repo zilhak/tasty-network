@@ -219,6 +219,14 @@ impl Proc {
         }
     }
 
+    /// Whether the process has exited, without waiting; reaps it when it has.
+    pub fn has_exited(&mut self) -> bool {
+        if self.status.is_none() {
+            self.status = self.child.try_wait().expect("try_wait");
+        }
+        self.status.is_some()
+    }
+
     /// Kills the process and reaps it. With [`Proc::track_children`], first lists its
     /// children. Afterwards waits up to [`OUTPUT_END_LIMIT`] for the stdout reader to pass the
     /// last lines to the transcript.

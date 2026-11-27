@@ -275,6 +275,14 @@ impl Scene {
 
     /// Ends the dialer with `quit` and checks a clean exit.
     fn quit_dialer(&mut self, mut dialer: Proc) {
+        self.before_quit(&dialer);
+        dialer.send_line("quit");
+        let status = dialer.wait_exit(LOCAL_STEP);
+        self.after_quit(&dialer, status);
+    }
+
+    /// Before the dialer's `quit`: tracks its ssh children (reported and listed).
+    fn before_quit(&mut self, dialer: &Proc) {
         self.track_ssh_children();
         let Children { pids, error } = children_of(dialer.pid());
         for child in pids {
@@ -284,15 +292,18 @@ impl Scene {
         if let Some(e) = error {
             panic!("listing the children of the dialer: {e}");
         }
-        dialer.send_line("quit");
-        let status = dialer.wait_exit(LOCAL_STEP);
+    }
+
+    /// After the dialer exited on `quit` with `status`: checks a clean exit and that its ssh
+    /// children are gone.
+    fn after_quit(&mut self, dialer: &Proc, status: std::process::ExitStatus) {
         self.track_ssh_children();
         assert!(
             status.success(),
             "the dialer did not end cleanly: {status}\n{}",
             dialer.transcript.render()
         );
-        self.check_ssh_ended_with(&dialer);
+        self.check_ssh_ended_with(dialer);
     }
 
     /// After the dialer's `quit`, and before the SSH server ends: every ssh child it had is
@@ -765,6 +776,12 @@ fn a_failed_wait_leaves_no_ssh_behind() {
 /// The dialer waits on `quit` until its stdin thread has let the link's writer go, which ends
 /// the tunnel ssh. The test hook keeps the writer 1.5 s longer: the dialer must still end
 /// after that, and leave no ssh.
+///
+/// Only the dialer's own end is timed: from right after `quit` is sent to the moment the
+/// process exited. Listing its children before and checking its ssh after lie outside. The
+/// server's `link-ended ... end=detach` line shows the Detach went through, so the writer's
+/// hold has begun (the writer finishes when the server ends its side); the dialer must still
+/// run then.
 #[test]
 fn quit_waits_for_the_detaching_writer() {
     const HOLD: Duration = Duration::from_millis(1500);
@@ -776,18 +793,34 @@ fn quit_waits_for_the_detaching_writer() {
     let mut dialer =
         scene.start_dialer_with(&record, &[("TASTY_NET_DEMO_HOLD_WRITER_MS", hold.as_str())]);
     connect_and_check(&mut scene, &mut server, &ready, &mut dialer);
+    scene.before_quit(&dialer);
+    dialer.send_line("quit");
     let started = Instant::now();
-    scene.quit_dialer(dialer);
+    let ended = server.expect("\"link-ended ... end=detach\"", LOCAL_STEP, |l| {
+        l.starts_with("server link-ended ") && field(l, "end") == Some("detach")
+    });
+    let detached_after = started.elapsed();
+    let ran_in_hold = !dialer.has_exited();
+    let status = dialer.wait_exit(LOCAL_STEP);
     let took = started.elapsed();
     log(&format!(
-        "the dialer ended {} ms after quit with the writer held {} ms",
+        "the dialer ended {} ms after quit with the writer held {} ms (the server saw the \
+         Detach after {} ms; the dialer ran then: {ran_in_hold})",
         took.as_millis(),
-        HOLD.as_millis()
+        HOLD.as_millis(),
+        detached_after.as_millis()
     ));
+    scene.after_quit(&dialer, status);
+    assert!(
+        ran_in_hold,
+        "the dialer had exited when the server saw its Detach ({ended}), before the writer's \
+         hold ran out"
+    );
     assert!(
         took >= HOLD,
         "the dialer ended {took:?} after quit, before its writer went ({HOLD:?})"
     );
+    drop(dialer);
     let released = server.expect_prefix("server released ", LOCAL_STEP);
     assert_eq!(field(&released, "live"), Some("0"), "{released}");
     Scene::stop_server(server);
