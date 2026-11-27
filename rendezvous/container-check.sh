@@ -42,9 +42,9 @@
 #   P2P_PEER                          p2p_peer 예제 실행 파일. 주면 빌드하지 않는다
 #   CONTAINER_CHECK_IMAGE             서버 이미지. 주면 빌드하지 않고 지우지도 않는다
 #   CONTAINER_CHECK_HOST_IP           기기가 알릴 호스트 IP(사설 IPv4). 기본은 192.0.2.1로 가는 경로의 출발 IP
-#   CONTAINER_CHECK_START_SECONDS     서버 시작 줄을 기다리는 시간. 기본 30
-#   CONTAINER_CHECK_PEER_TIMEOUT      예제의 --timeout(초). 기본 60
-#   CONTAINER_CHECK_STOP_SECONDS      docker stop이 SIGINT 뒤 기다리는 시간. 넘으면 SIGKILL하고 실패. 기본 15
+#   CONTAINER_CHECK_START_SECONDS     서버 시작 줄을 기다리는 시간(초, 1–3600). 기본 30
+#   CONTAINER_CHECK_PEER_TIMEOUT      예제의 --timeout(초, 1–3600). 기본 60
+#   CONTAINER_CHECK_STOP_SECONDS      docker stop이 SIGINT 뒤 기다리는 시간(초, 1–3600). 넘으면 SIGKILL하고 실패. 기본 15
 #   CONTAINER_CHECK_MESSAGE_BYTES     echo할 메시지 크기(바이트, 1–120000). 기본 98304
 set -uo pipefail
 
@@ -55,8 +55,11 @@ START_SECONDS="${CONTAINER_CHECK_START_SECONDS:-30}"
 PEER_TIMEOUT="${CONTAINER_CHECK_PEER_TIMEOUT:-60}"
 STOP_SECONDS="${CONTAINER_CHECK_STOP_SECONDS:-15}"
 MESSAGE_BYTES="${CONTAINER_CHECK_MESSAGE_BYTES:-98304}"
-# 예제는 --timeout 뒤 5초 안에 스스로 끝난다(예제의 WATCHDOG_GRACE). 그 뒤에도 남으면 실패로 끝낸다.
-PEER_WAIT_SECONDS=$((PEER_TIMEOUT + 15))
+# 시간 설정(초)의 상한. 숫자 설정은 main_check 첫머리에서 decimal_in로 검사한 뒤에만 산술에 쓴다.
+SECONDS_MAX=3600
+# 예제는 --timeout 뒤 5초 안에 스스로 끝난다(예제의 WATCHDOG_GRACE). 그 뒤 이만큼 더 기다려도 남으면
+# 실패로 끝낸다.
+PEER_WAIT_EXTRA=15
 # 기다리는 동안 다시 보는 간격(초).
 POLL_SECONDS=0.2
 # 메시지는 예제의 명령행 인자 하나로 넘긴다. Linux의 인자 하나 상한(128 KiB)보다 작게 둔다.
@@ -123,6 +126,16 @@ no_forward_ok() {
     (($1 < $2))
 }
 
+# 글자 $1이 십진수이고 $2–$3 안이면 앞의 0을 뗀 값을 낸다. 아니면 실패한다. 산술식에 넣기 전에 형식과
+# 자릿수(9자리까지)를 보므로 08 같은 값이 8진수로 읽히거나 큰 수가 넘쳐 감기지 않는다.
+decimal_in() {
+    local v
+    [[ "$1" =~ ^[0-9]{1,9}$ ]] || return 1
+    v=$((10#$1))
+    ((v >= $2 && v <= $3)) || return 1
+    echo "$v"
+}
+
 # 명령이 실패한다(자체 시험에서 "실패해야 하는" 사례를 적는다).
 not() { ! "$@"; }
 
@@ -169,6 +182,14 @@ self_test() {
     check not no_forward_ok 98304 98304
     check not no_forward_ok 200000 98304
     check not no_forward_ok '' 98304
+    check test "$(decimal_in 08 1 120000)" = 8
+    check test "$(decimal_in 98304 1 120000)" = 98304
+    check not decimal_in 0 1 120000
+    check not decimal_in 120001 1 120000
+    check not decimal_in 18446744073709649920 1 120000
+    check not decimal_in -5 1 120000
+    check not decimal_in '' 1 120000
+    check not decimal_in 1e3 1 120000
     if [[ "$fails" -eq 0 ]]; then
         log "자체 시험 통과 — 사례 ${n}개"
         echo "rendezvous-check container self-test result=ok"
@@ -286,9 +307,15 @@ main_check() {
     for tool in docker cargo python3 ip git; do
         command -v "$tool" >/dev/null 2>&1 || unsure "$tool이 PATH에 없다"
     done
-    if ! [[ "$MESSAGE_BYTES" =~ ^[0-9]+$ ]] || ((MESSAGE_BYTES < 1 || MESSAGE_BYTES > MESSAGE_BYTES_MAX)); then
-        unsure "CONTAINER_CHECK_MESSAGE_BYTES는 1–$MESSAGE_BYTES_MAX: $MESSAGE_BYTES"
-    fi
+    MESSAGE_BYTES=$(decimal_in "$MESSAGE_BYTES" 1 "$MESSAGE_BYTES_MAX") \
+        || unsure "CONTAINER_CHECK_MESSAGE_BYTES는 1–$MESSAGE_BYTES_MAX의 십진수다: ${CONTAINER_CHECK_MESSAGE_BYTES:-}"
+    START_SECONDS=$(decimal_in "$START_SECONDS" 1 "$SECONDS_MAX") \
+        || unsure "CONTAINER_CHECK_START_SECONDS는 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_START_SECONDS:-}"
+    PEER_TIMEOUT=$(decimal_in "$PEER_TIMEOUT" 1 "$SECONDS_MAX") \
+        || unsure "CONTAINER_CHECK_PEER_TIMEOUT은 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_PEER_TIMEOUT:-}"
+    STOP_SECONDS=$(decimal_in "$STOP_SECONDS" 1 "$SECONDS_MAX") \
+        || unsure "CONTAINER_CHECK_STOP_SECONDS는 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_STOP_SECONDS:-}"
+    PEER_WAIT_SECONDS=$((PEER_TIMEOUT + PEER_WAIT_EXTRA))
     TMP=$(mktemp -d) || unsure "임시 폴더를 만들지 못했다"
     sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || sha=unknown
     if [[ -n "${P2P_PEER:-}" ]]; then
