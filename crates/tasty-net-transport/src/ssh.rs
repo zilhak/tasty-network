@@ -18,8 +18,8 @@ use tasty_net_ssh::{
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 use crate::channel::{ChannelControl, RawChannel};
 use crate::connection_table::{
-    Cause, ConnectionInfo, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, Joined,
-    NewEntry, PathKind, Phase, Segment, Via,
+    Cause, ConnectionInfo, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, JoinGuard,
+    Joined, NewEntry, PathKind, Phase, Segment, Via,
 };
 use crate::lock::lock;
 use crate::reject::TooOldEvidence;
@@ -551,16 +551,6 @@ struct SshEndpoint {
     owned: Mutex<Option<Registration>>,
     /// A reconnection waiting on a shared tunnel, ended if the attempt is dropped unfinished.
     _joined: Option<JoinGuard>,
-}
-
-/// Ends a reconnection entry whose attempt on a shared tunnel was dropped without a
-/// handshake result (a redialer's entry only keeps the cause).
-struct JoinGuard(Joined);
-
-impl Drop for JoinGuard {
-    fn drop(&mut self) {
-        self.0.abandoned();
-    }
 }
 
 impl EndpointHandle for SshEndpoint {

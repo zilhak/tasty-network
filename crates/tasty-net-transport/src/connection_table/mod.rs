@@ -222,6 +222,8 @@ impl ConnectionTable {
             rtt: None,
             applied: Vec::new(),
             redial: None,
+            p2p_id: None,
+            attempt: None,
         };
         state.entries.insert(
             id,
@@ -378,7 +380,6 @@ pub(crate) struct Joined {
 }
 
 impl Joined {
-    #[cfg(feature = "ssh")]
     pub(crate) fn new(pending: EntryRef, into: ConnectionId) -> Self {
         Self {
             pending,
@@ -405,11 +406,20 @@ impl Joined {
 
     /// The channel went without a handshake result: it ends as `ended` (a redialer's entry
     /// only keeps the cause). After a result nothing changes.
-    #[cfg(feature = "ssh")]
     pub(crate) fn abandoned(&self) {
         if !self.settled.load(Ordering::Acquire) {
             self.pending.end(Cause::Ended);
         }
+    }
+}
+
+/// Ends a reconnection entry whose attempt on a shared connection was dropped without a
+/// handshake result (a redialer's entry only keeps the cause).
+pub(crate) struct JoinGuard(pub(crate) Joined);
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        self.0.abandoned();
     }
 }
 
@@ -465,7 +475,6 @@ impl EntryRef {
     }
 
     /// Moves a connection being set up to `phase`, keeping its state.
-    #[cfg(feature = "ssh")]
     pub(crate) fn phase(&self, phase: Phase) {
         self.table.with_state(|state, config| {
             let Some(current) = state.entries.get(&self.id).map(|s| s.info.state) else {
@@ -476,6 +485,24 @@ impl EntryRef {
                 ConnectionState::Connecting | ConnectionState::Reconnecting
             ) {
                 state.transition(config, self.id, current, Some(phase), None);
+            }
+        });
+    }
+
+    /// Moves a connection being set up to `phase` with `cause`, keeping its state. On an entry
+    /// past its setup (`connected`) it only adds `cause` to the history, with the state and
+    /// phase it has; on a `disconnected` entry it does nothing.
+    pub(crate) fn step(&self, phase: Phase, cause: Cause) {
+        self.table.with_state(|state, config| {
+            let Some(current) = state.entries.get(&self.id).map(|s| s.info.state) else {
+                return;
+            };
+            match current {
+                ConnectionState::Connecting | ConnectionState::Reconnecting => {
+                    state.transition(config, self.id, current, Some(phase), Some(cause));
+                }
+                ConnectionState::Connected => state.record(config, self.id, Some(cause)),
+                ConnectionState::Disconnected => {}
             }
         });
     }

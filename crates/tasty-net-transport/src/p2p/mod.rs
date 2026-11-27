@@ -16,24 +16,35 @@
 //! - A handshake refusal, a request channel's end, a link's end and a forced close close their
 //!   streams only. The dialer closes the connection with code 0 after its last channel; the
 //!   accepting side closes it after the drain cap when the dialer did not.
+//! - With a [`ConnectionTable`] every QUIC connection is one `p2p_udp` entry on both sides,
+//!   paired with the P2P connection's number (`P2pConnectionInfo::id`); its links and
+//!   channels are rows and counts of that entry.
 
 mod conn;
 mod listener;
 mod stream;
+mod table;
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use tasty_net_identity::DeviceId;
 use tasty_net_p2p::settings::Value;
-use tasty_net_p2p::{P2pCancel, P2pConnectError, P2pEndpoint, P2pError};
+use tasty_net_p2p::{
+    AttemptPhase, P2pCancel, P2pConnectError, P2pConnection, P2pConnectionInfo, P2pEndpoint,
+    P2pError,
+};
 
 use crate::cancel::{AttemptCancel, Cancelled, Registration};
 use crate::channel::{DEFAULT_DRAIN_CAP, RawChannel};
+use crate::connection_table::{
+    Cause, ConnectionPeer, ConnectionTable, EntryRef, JoinGuard, Joined, Phase,
+};
 use crate::lock::lock;
+use crate::role::Side;
 use crate::transport::{
     ConnectError, ConnectOptions, Connection, DialAuth, Endpoint, EndpointHandle, Transport,
 };
@@ -41,6 +52,7 @@ use crate::transport::{
 pub use listener::{P2pInbound, P2pListener};
 
 use conn::{ConnSide, ConnState, OwnedConn, PunchCancel, watch};
+use table::{Followed, follow, open_entry, take_pending};
 
 /// How often a connection's thread looks at its connection when the endpoint does not show
 /// `path.poll_interval` (its default there).
@@ -67,10 +79,17 @@ type Shared = Arc<Mutex<HashMap<DeviceId, Weak<ConnState>>>>;
 /// The peer must be on this device's pairing list and registered on the same rendezvous
 /// server. Connecting to this device's own ID fails with [`ConnectError::SelfAttach`] before
 /// anything is sent.
+///
+/// With a [`ConnectionTable`] ([`P2pTransport::with_connections`]) every QUIC connection it
+/// punches is one `p2p_udp` entry, made when the attempt starts. A connection that reuses a
+/// shared QUIC connection is on that connection's entry; with
+/// [`ConnectOptions::after`] (or the redialer's entry) it shows as its own `reconnecting`
+/// entry until its handshake, which then ends naming the entry it joined.
 pub struct P2pTransport {
     endpoint: P2pEndpoint,
     shared: Shared,
     poll: Duration,
+    connections: Option<ConnectionTable>,
 }
 
 impl fmt::Debug for P2pTransport {
@@ -90,7 +109,19 @@ impl P2pTransport {
             endpoint,
             shared: Arc::default(),
             poll,
+            connections: None,
         }
+    }
+
+    /// Reports every QUIC connection it punches in `table`.
+    pub fn with_connections(mut self, table: ConnectionTable) -> Self {
+        self.connections = Some(table);
+        self
+    }
+
+    /// The table it reports in, if any.
+    pub fn connections(&self) -> Option<&ConnectionTable> {
+        self.connections.as_ref()
     }
 
     /// The endpoint it dials over.
@@ -113,26 +144,110 @@ impl P2pTransport {
         shared.get(peer).and_then(Weak::upgrade)
     }
 
+    /// The entry of a new attempt: the redialer's, or a new one (`reconnecting` when
+    /// `options` names the previous entry).
+    fn start_entry(&self, peer: DeviceId, options: &ConnectOptions) -> Option<EntryRef> {
+        if let Some(pending) = &options.pending {
+            take_pending(pending);
+            pending.update(|info| info.peer.device_id = Some(peer));
+            return Some(pending.clone());
+        }
+        let table = self.connections.as_ref()?;
+        let peer = ConnectionPeer {
+            device_id: Some(peer),
+            name: options.name.clone(),
+            ..ConnectionPeer::default()
+        };
+        Some(open_entry(table, Side::Dialer, options.previous, peer))
+    }
+
     /// Punches a new connection to `peer`, registered with `cancel` until it is shared.
+    /// `entry` follows the attempt while it runs.
     fn new_conn(
         &self,
         peer: DeviceId,
         cancel: &AttemptCancel,
+        entry: Option<EntryRef>,
     ) -> Result<(Arc<ConnState>, Registration), ConnectError> {
         let punch = P2pCancel::new();
         let punching = cancel
             .register(Arc::new(PunchCancel(punch.clone())))
             .map_err(|_| ConnectError::Cancelled)?;
-        let connected = self.endpoint.connect_with_cancel(peer, &punch);
+        let followed = Mutex::new(Followed::default());
+        let connected = match &entry {
+            Some(entry) => self.punch_followed(peer, &punch, entry, &followed),
+            None => self.endpoint.connect_with_cancel(peer, &punch),
+        };
         drop(punching);
         let conn = connected.map_err(|e| connect_error(e, cancel))?;
-        let state = ConnState::new(conn, ConnSide::Dialer, DEFAULT_DRAIN_CAP);
+        let followed = followed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = ConnState::new(conn, ConnSide::Dialer, DEFAULT_DRAIN_CAP, entry, followed);
         // A cancel that came meanwhile closes the connection here.
         let owned = cancel
             .register(Arc::new(OwnedConn(Arc::clone(&state))))
             .map_err(|_| ConnectError::Cancelled)?;
         watch(Arc::clone(&state), None, self.poll);
         Ok((state, owned))
+    }
+
+    /// Punches to `peer` while a thread copies the attempt into `entry` at every poll
+    /// interval.
+    fn punch_followed(
+        &self,
+        peer: DeviceId,
+        punch: &P2pCancel,
+        entry: &EntryRef,
+        followed: &Mutex<Followed>,
+    ) -> Result<P2pConnection, P2pError> {
+        let done = (Mutex::new(false), Condvar::new());
+        std::thread::scope(|scope| {
+            let follower = std::thread::Builder::new()
+                .name("p2p-punch".into())
+                .spawn_scoped(scope, || {
+                    let mut finished = lock(&done.0);
+                    while !*finished {
+                        finished = done
+                            .1
+                            .wait_timeout(finished, self.poll)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .0;
+                        if *finished {
+                            break;
+                        }
+                        let mut followed = lock(followed);
+                        if let Some(info) = self.attempt_of(peer, followed.id()) {
+                            follow(entry, &info, &mut followed);
+                        }
+                    }
+                });
+            if let Err(error) = follower {
+                // The entry still gets the attempt's history once the connection stands.
+                tracing::debug!(%error, "no thread to follow a P2P attempt");
+            }
+            let connected = self.endpoint.connect_with_cancel(peer, punch);
+            *lock(&done.0) = true;
+            done.1.notify_all();
+            connected
+        })
+    }
+
+    /// The attempt to `peer` an entry follows: the one it followed already, or the newest
+    /// attempt this device dials to `peer`.
+    fn attempt_of(&self, peer: DeviceId, id: Option<u64>) -> Option<P2pConnectionInfo> {
+        self.endpoint
+            .connections()
+            .into_iter()
+            .filter(|info| match id {
+                Some(id) => info.id == id,
+                None => {
+                    info.peer == peer
+                        && info.side == tasty_net_p2p::Side::Dialer
+                        && !matches!(info.state, AttemptPhase::Connected | AttemptPhase::Closed)
+                }
+            })
+            .max_by_key(|info| info.id)
     }
 }
 
@@ -161,13 +276,13 @@ fn open_channel(
         )));
     };
     let stream = state.conn.open_bi().map_err(ConnectError::Io)?;
-    Ok(stream::channel(
+    Ok(state.entered(stream::channel(
         stream,
         &state.conn,
         state.side,
         state.drain_cap,
         slot,
-    ))
+    )))
 }
 
 impl Transport for P2pTransport {
@@ -187,7 +302,6 @@ impl Transport for P2pTransport {
         cancel: &AttemptCancel,
         options: &ConnectOptions,
     ) -> Result<Connection, ConnectError> {
-        let _unused = options;
         if cancel.is_cancelled() {
             return Err(ConnectError::Cancelled);
         }
@@ -201,11 +315,42 @@ impl Transport for P2pTransport {
         if cancel.is_cancelled() {
             return Err(ConnectError::Cancelled);
         }
-        let (channel, state, owned) = match reused {
-            Some((channel, state)) => (channel, state, None),
+        let (channel, state, owned, joined) = match reused {
+            Some((channel, state)) => {
+                // A reconnection stays visible: once its handshake on the shared connection
+                // succeeds it ends naming the entry it joined.
+                let reconnects = options.previous.is_some() || options.pending.is_some();
+                let joined = match (&state.entry, reconnects) {
+                    (Some(shared), true) => self.start_entry(*target, options).map(|pending| {
+                        pending.phase(Phase::Handshake);
+                        Joined::new(pending, shared.id())
+                    }),
+                    _ => None,
+                };
+                let channel = match &joined {
+                    Some(joined) => channel.with_joined(joined.clone()),
+                    None => channel,
+                };
+                (channel, state, None, joined)
+            }
             None => {
-                let (state, owned) = self.new_conn(*target, cancel)?;
-                (open_channel(&state, cancel)?, state, Some(owned))
+                let entry = self.start_entry(*target, options);
+                let made =
+                    self.new_conn(*target, cancel, entry.clone())
+                        .and_then(|(state, owned)| match open_channel(&state, cancel) {
+                            Ok(channel) => Ok((channel, state, owned)),
+                            Err(error) => {
+                                // No channel holds the new connection: close it here.
+                                state.close(tasty_net_p2p::P2pCloseReason::Closed);
+                                Err(error)
+                            }
+                        });
+                let (channel, state, owned) = made.inspect_err(|error| {
+                    if let Some(entry) = &entry {
+                        entry.end(Cause::of_connect(error));
+                    }
+                })?;
+                (channel, state, Some(owned), None)
             }
         };
         Ok(Connection {
@@ -214,6 +359,7 @@ impl Transport for P2pTransport {
                 state,
                 owned: Mutex::new(owned),
                 shared: Arc::clone(&self.shared),
+                _joined: joined.map(JoinGuard),
             })),
         })
     }
@@ -225,6 +371,9 @@ struct P2pEndpointHandle {
     /// The attempt's registration while the connection is not shared yet.
     owned: Mutex<Option<Registration>>,
     shared: Shared,
+    /// A reconnection waiting on a shared connection, ended if the attempt is dropped
+    /// unfinished.
+    _joined: Option<JoinGuard>,
 }
 
 impl EndpointHandle for P2pEndpointHandle {

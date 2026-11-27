@@ -49,6 +49,8 @@ pub enum SettingValue {
     Duration(Duration),
     /// A factor or a fraction.
     Ratio(f64),
+    /// A value a P2P connection was given (`tasty-net-p2p`'s own form, shown as it is).
+    P2p(tasty_net_p2p::settings::Value),
 }
 
 impl fmt::Display for SettingValue {
@@ -62,6 +64,7 @@ impl fmt::Display for SettingValue {
             }
             Self::Duration(d) => write!(f, "{} ns", d.as_nanos()),
             Self::Ratio(r) => write!(f, "{r}"),
+            Self::P2p(value) => write!(f, "{value}"),
         }
     }
 }
@@ -76,14 +79,18 @@ pub enum SettingSource {
     Default,
     /// Given by the consumer.
     Configured,
+    /// The source a P2P connection names for a value it was given (`tasty-net-p2p`'s own,
+    /// `server` included).
+    P2p(tasty_net_p2p::settings::Source),
 }
 
 impl SettingSource {
-    /// `default` or `configured`.
+    /// `default` or `configured`, or the name of the P2P source.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::Configured => "configured",
+            Self::P2p(source) => source.name(),
         }
     }
 }

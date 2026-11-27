@@ -4,23 +4,30 @@
 //! Every test uses its own device keys: one key has one P2P endpoint in a process, and the
 //! tests of this file run in parallel.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::task::{Context, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tasty_net_frame::{ReadFailure, StreamFrame, StreamTag};
 use tasty_net_identity::{DeviceId, DeviceKey};
+use tasty_net_p2p::settings::Value as P2pValue;
 use tasty_net_p2p::{P2pCloseReason, P2pConfig, P2pConnectError, P2pEndpoint, PairingList};
+use tasty_net_rendezvous::packet_io::{PacketIo, UdpPacketIo};
 use tasty_net_rendezvous::server::{Server, ServerConfig};
 use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
+use tasty_net_transport::settings::SettingSource;
 use tasty_net_transport::{
-    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelReader,
-    ChannelWriter, ConnectError, DialConfig, DomainAccept, DomainPolicy, DomainReject, EndReason,
-    HandshakeError, Holder, Link, LinkTimeouts, P2pListener, P2pTransport, PeerInfo, RejectReason,
-    RequestHandler, Transport, dial_handshake, dial_request, domain_code,
+    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, Cause, ChannelReader,
+    ChannelWriter, ConnectError, ConnectOptions, ConnectionId, ConnectionInfo, ConnectionState,
+    ConnectionTable, DialConfig, DomainAccept, DomainPolicy, DomainReject, EdgeTransport,
+    EndReason, HandshakeError, Holder, Link, LinkTimeouts, P2pListener, P2pTransport, PathKind,
+    PeerInfo, Phase, RejectReason, RequestHandler, Transport, Via, dial_handshake, dial_request,
+    domain_code,
 };
 
 /// How long a test waits for something that comes in well under a second on loopback.
@@ -84,12 +91,114 @@ fn timeouts() -> LinkTimeouts {
 }
 
 fn endpoint(server: &Rendezvous, seed: u8, peer: DeviceId) -> P2pEndpoint {
+    endpoint_with(server, seed, peer, None)
+}
+
+/// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers.
+fn endpoint_with(
+    server: &Rendezvous,
+    seed: u8,
+    peer: DeviceId,
+    gate: Option<Arc<Gate>>,
+) -> P2pEndpoint {
     let pairing = Arc::new(PairingList::new());
     pairing.add(peer);
     let mut config = P2pConfig::new(key(seed), pairing);
     config.enabled = true;
     config.server = Some(server.info);
+    if let Some(gate) = gate {
+        config.packet_io = Some(gate);
+        config
+            .settings
+            .set(
+                "quic.keepalive_interval",
+                P2pValue::Duration(Duration::from_millis(300)),
+            )
+            .set("quic.idle_timeout", P2pValue::Duration(IDLE_TIMEOUT));
+    }
     P2pEndpoint::bind(config).expect("bind")
+}
+
+/// The QUIC idle timeout of the endpoints of [`a_silent_peer_ends_the_link_at_the_idle_timeout`].
+const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Packet I/O over a loopback UDP socket that can be shut: once shut it sends and takes
+/// nothing, as a device that went away without a close.
+#[derive(Debug)]
+struct Gate {
+    inner: UdpPacketIo,
+    shut: AtomicBool,
+}
+
+impl Gate {
+    fn bind(server: &Rendezvous) -> Arc<Self> {
+        let inner = server
+            .rt
+            .block_on(UdpPacketIo::bind(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                0,
+            ))))
+            .expect("udp");
+        Arc::new(Self {
+            inner,
+            shut: AtomicBool::new(false),
+        })
+    }
+
+    fn is_shut(&self) -> bool {
+        self.shut.load(Ordering::SeqCst)
+    }
+}
+
+impl PacketIo for Gate {
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        loop {
+            match self.inner.poll_recv_from(cx, buf) {
+                Poll::Ready(Ok(_)) if self.is_shut() => {}
+                other => return other,
+            }
+        }
+    }
+
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr, Option<IpAddr>)>> {
+        loop {
+            match self.inner.poll_recv_with_dst(cx, buf) {
+                Poll::Ready(Ok(_)) if self.is_shut() => {}
+                other => return other,
+            }
+        }
+    }
+
+    fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.inner.poll_send_ready(cx)
+    }
+
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<()> {
+        if self.is_shut() {
+            return Ok(());
+        }
+        self.inner.try_send_to(buf, dest)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+
+    fn dual_stack(&self) -> bool {
+        self.inner.dual_stack()
+    }
 }
 
 /// What the accepting side's domain check does: everything is taken, except an attach whose
@@ -140,6 +249,9 @@ struct Pair {
     transport: P2pTransport,
     dial: DialConfig,
     policy: Arc<Policy>,
+    /// The connection tables of `a` (the dialer) and `b`.
+    table_a: ConnectionTable,
+    table_b: ConnectionTable,
     /// The frames the accepting side read in [`Mode::LastFrameFirst`], and how its read ended.
     read: mpsc::Receiver<(Vec<StreamFrame>, Option<ReadFailure>)>,
     stop: Arc<AtomicBool>,
@@ -149,13 +261,31 @@ struct Pair {
 
 impl Pair {
     fn start(seed: u8, mode: Mode) -> Self {
+        Self::start_with(seed, mode, false).0
+    }
+
+    /// [`Pair::start`]; with `gated`, both endpoints run with short QUIC timers and `b` runs on
+    /// the returned gate.
+    fn start_with(seed: u8, mode: Mode, gated: bool) -> (Self, Option<Arc<Gate>>) {
         let server = Rendezvous::start();
         let (ka, kb) = (key(seed), key(seed + 1));
-        let a = endpoint(&server, seed, kb.id());
-        let b = endpoint(&server, seed + 1, ka.id());
+        let gate = gated.then(|| Gate::bind(&server));
+        let (a, b) = if gated {
+            (
+                endpoint_with(&server, seed, kb.id(), Some(Gate::bind(&server))),
+                endpoint_with(&server, seed + 1, ka.id(), gate.clone()),
+            )
+        } else {
+            (
+                endpoint(&server, seed, kb.id()),
+                endpoint(&server, seed + 1, ka.id()),
+            )
+        };
         let policy = Arc::new(Policy::default());
+        let (table_a, table_b) = (ConnectionTable::default(), ConnectionTable::default());
         let accept = AcceptConfig::new(kb, format!("acceptor-{seed}"), None, policy.clone())
-            .with_timeouts(timeouts());
+            .with_timeouts(timeouts())
+            .with_connections(table_b.clone());
         let listener = P2pListener::new(b.clone(), accept).expect("listener");
         let stop = Arc::new(AtomicBool::new(false));
         let served: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
@@ -177,28 +307,40 @@ impl Pair {
                 }
             })
         };
-        Self {
+        let pair = Self {
             _server: server,
-            transport: P2pTransport::new(a.clone()),
+            transport: P2pTransport::new(a.clone()).with_connections(table_a.clone()),
             a,
             b,
             dial: DialConfig::new(ka, format!("dialer-{seed}")).with_timeouts(timeouts()),
             policy,
+            table_a,
+            table_b,
             read,
             stop,
             accepting: Some(accepting),
             served,
-        }
+        };
+        (pair, gate)
     }
 
     /// Dials an attach link with `ext`, retrying while the peer is not yet registered.
     fn link(&self, ext: Option<&str>) -> Result<Link, HandshakeError> {
+        self.link_with(ext, &ConnectOptions::new())
+    }
+
+    /// [`Pair::link`] whose entry follows `options`.
+    fn link_with(
+        &self,
+        ext: Option<&str>,
+        options: &ConnectOptions,
+    ) -> Result<Link, HandshakeError> {
         let started = Instant::now();
         loop {
             let cancel = AttemptCancel::new();
             let result = self
                 .transport
-                .connect(&self.b.id(), &cancel)
+                .connect_with(&self.b.id(), &cancel, options)
                 .map_err(HandshakeError::Connect)
                 .and_then(|conn| dial_handshake(conn, &self.dial, Holder::Dialer, ext, &cancel));
             match result {
@@ -223,6 +365,20 @@ impl Pair {
     fn connections(&self) -> (usize, usize) {
         (self.a.connections().len(), self.b.connections().len())
     }
+}
+
+/// The entries of `table` that are not `disconnected` (a dial retried while the peer was not
+/// registered leaves ended ones).
+fn live(table: &ConnectionTable) -> Vec<ConnectionInfo> {
+    table
+        .connections()
+        .into_iter()
+        .filter(|e| e.state != ConnectionState::Disconnected)
+        .collect()
+}
+
+fn entry(table: &ConnectionTable, id: ConnectionId) -> ConnectionInfo {
+    table.connection(id).expect("the entry is kept")
 }
 
 impl Drop for Pair {
@@ -682,4 +838,200 @@ fn a_bulk_channel_carries_megabytes() {
     assert!(got == sent, "the bytes match");
     drop(sender.join().expect("sender"));
     assert_eq!(pair.policy.links.load(Ordering::SeqCst), 1);
+}
+
+/// One P2P link is one `p2p_udp` entry on each side, paired with the P2P connection's number,
+/// with the link's `link_id`, the `udp` segment, the rendezvous server, the P2P state history
+/// and the P2P connection's applied values (docs/design/transport.md "필드" P2P column). A bulk
+/// channel on the same QUIC connection is counted on the same entry; the connection's close
+/// ends both entries.
+#[test]
+fn a_p2p_link_shows_one_p2p_udp_entry_with_its_link_id() {
+    let pair = Pair::start(40, Mode::Echo);
+    let link = pair.link(None).expect("link");
+    let link_id = link.link_id();
+    let bulk = link.open_bulk(None).expect("bulk");
+    let mut link = Open::new(link);
+    link.round_trip(b"one");
+
+    let p2p = pair.a.connections();
+    assert_eq!(p2p.len(), 1);
+    let entries = live(&pair.table_a);
+    assert_eq!(entries.len(), 1, "{entries:#?}");
+    let a = &entries[0];
+    assert_eq!(a.path, PathKind::P2pUdp);
+    assert_eq!(a.state, ConnectionState::Connected);
+    assert_eq!(a.local_side, tasty_net_transport::Side::Dialer);
+    assert_eq!(a.p2p_id, Some(p2p[0].id));
+    assert_eq!(a.peer.device_id, Some(pair.b.id()));
+    assert!(a.peer.instance_verified);
+    assert_eq!(a.links.len(), 1);
+    assert_eq!(a.links[0].link_id, link_id);
+    assert_eq!(a.links[0].transport, EdgeTransport::P2pUdp);
+    assert_eq!(a.bulk_channels, 1);
+    assert_eq!(a.segments.len(), 1);
+    assert_eq!(a.segments[0].name, "udp");
+    let local = a.segments[0].local.as_deref().expect("local side");
+    assert!(local.starts_with("local_bind="), "{local}");
+    assert!(local.contains(", local_ip="), "{local}");
+    assert!(local.contains(", local_reflexive="), "{local}");
+    assert_eq!(
+        a.segments[0].remote,
+        p2p[0].remote_addr.map(|addr| addr.to_string())
+    );
+    assert!(a.segments[0].remote.is_some());
+    assert_eq!(
+        a.via,
+        Via::Rendezvous {
+            server: Some(pair._server.info),
+            candidate: p2p[0].remote_candidate.map(|c| c.kind),
+            nat: p2p[0].nat,
+        }
+    );
+    assert!(a.rtt.is_some());
+    assert!(a.attempt.as_ref().is_some_and(|at| at.number >= 1));
+    let phases: Vec<_> = a.history.iter().map(|h| h.phase).collect();
+    assert!(
+        phases.contains(&Some(Phase::P2p(tasty_net_p2p::AttemptPhase::Requesting))),
+        "{phases:?}"
+    );
+    assert!(
+        a.history.iter().any(|h| h.phase == Some(Phase::Handshake)
+            && matches!(&h.cause, Some(Cause::P2p(c)) if c.name == "quic_established")),
+        "{:#?}",
+        a.history
+    );
+    assert!(
+        a.applied.iter().any(|s| s.source.as_str() == "server"),
+        "{:?}",
+        a.applied
+    );
+    assert!(
+        a.applied
+            .iter()
+            .any(|s| s.key == "link.drain_cap" && s.source == SettingSource::Configured),
+        "{:?}",
+        a.applied
+    );
+
+    let p2p_b = pair.b.connections();
+    assert_eq!(p2p_b.len(), 1);
+    wait_until("the accepting entry's bulk count", || {
+        live(&pair.table_b)
+            .first()
+            .is_some_and(|b| b.bulk_channels == 1)
+    });
+    let entries = live(&pair.table_b);
+    assert_eq!(entries.len(), 1, "{entries:#?}");
+    let b = &entries[0];
+    assert_eq!(b.path, PathKind::P2pUdp);
+    assert_eq!(b.state, ConnectionState::Connected);
+    assert_eq!(b.local_side, tasty_net_transport::Side::Acceptor);
+    assert_eq!(b.p2p_id, Some(p2p_b[0].id));
+    assert_eq!(b.peer.device_id, Some(pair.a.id()));
+    assert_eq!(b.links.len(), 1);
+    assert_eq!(b.links[0].link_id, link_id);
+    assert_eq!(
+        b.parent, None,
+        "a bulk channel is on its parent's own entry"
+    );
+
+    let (a_id, b_id) = (a.id, b.id);
+    drop(bulk);
+    drop(link);
+    wait_until("both entries' end", || {
+        entry(&pair.table_a, a_id).state == ConnectionState::Disconnected
+            && entry(&pair.table_b, b_id).state == ConnectionState::Disconnected
+    });
+    // This end closed it after its last link: the link's own end is the cause.
+    let cause = entry(&pair.table_a, a_id).last_cause;
+    assert!(
+        matches!(cause, Some(Cause::Ended | Cause::ClosedHere)),
+        "{cause:?}"
+    );
+}
+
+/// A new punch for a link that reconnects an ended entry is a new entry that names it
+/// (`ConnectOptions::after`) and starts `reconnecting`.
+#[test]
+fn a_reconnection_names_its_previous_entry() {
+    let pair = Pair::start(42, Mode::Echo);
+    let mut first = Open::new(pair.link(None).expect("link"));
+    first.round_trip(b"one");
+    let old = live(&pair.table_a)[0].id;
+    drop(first);
+    wait_until("the first entry's end", || {
+        entry(&pair.table_a, old).state == ConnectionState::Disconnected
+    });
+    wait_until("the first connection's close", || {
+        pair.connections() == (0, 0)
+    });
+    let mut again = Open::new(
+        pair.link_with(None, &ConnectOptions::new().after(old))
+            .expect("reconnect"),
+    );
+    again.round_trip(b"two");
+    let entries = live(&pair.table_a);
+    assert_eq!(entries.len(), 1, "{entries:#?}");
+    let new = &entries[0];
+    assert_ne!(new.id, old);
+    assert_eq!(new.previous, Some(old));
+    assert_eq!(new.state, ConnectionState::Connected);
+    assert_eq!(
+        new.history.first().map(|h| h.state),
+        Some(ConnectionState::Reconnecting)
+    );
+}
+
+/// A reconnection that finds the shared QUIC connection still open uses it: its own entry
+/// ends naming the connection's entry once its handshake succeeded, and the link is a row of
+/// that entry.
+#[test]
+fn a_reconnection_on_the_shared_connection_joins_its_entry() {
+    let pair = Pair::start(44, Mode::Echo);
+    let mut first = Open::new(pair.link(None).expect("link"));
+    first.round_trip(b"one");
+    let shared = live(&pair.table_a)[0].id;
+    let before = pair.table_a.connections().len();
+    let mut second = Open::new(
+        pair.link_with(None, &ConnectOptions::new().after(shared))
+            .expect("reconnect"),
+    );
+    second.round_trip(b"two");
+    let all = pair.table_a.connections();
+    assert_eq!(all.len(), before + 1, "{all:#?}");
+    let joined = all.last().expect("the reconnection's entry");
+    assert_eq!(joined.previous, Some(shared));
+    assert_eq!(joined.state, ConnectionState::Disconnected);
+    assert_eq!(joined.last_cause, Some(Cause::SharedTunnel(shared)));
+    assert_eq!(entry(&pair.table_a, shared).links.len(), 2);
+    assert_eq!(pair.connections(), (1, 1));
+}
+
+/// A link whose peer goes silent (no CONNECTION_CLOSE) ends at the QUIC idle timeout, well
+/// before the link's own read timeout: the read fails as `HeartbeatTimeout`, the link shows no
+/// close code, and the connection's entry ends as lost.
+#[test]
+fn a_silent_peer_ends_the_link_at_the_idle_timeout() {
+    let (pair, gate) = Pair::start_with(46, Mode::Echo, true);
+    let gate = gate.expect("gate");
+    let mut link = pair.link(None).expect("link");
+    let (mut reader, writer) = link.take_ordered().expect("halves");
+    writer.write_frame(StreamTag::Data, b"one").expect("write");
+    assert_eq!(reader.read_frame().expect("echo").payload, b"one");
+    let id = live(&pair.table_a)[0].id;
+    gate.shut.store(true, Ordering::SeqCst);
+    let silent = Instant::now();
+    let failed = reader.read_frame().expect_err("the connection timed out");
+    assert_eq!(failed.failure(), ReadFailure::HeartbeatTimeout);
+    assert!(
+        silent.elapsed() < timeouts().read_timeout,
+        "{:?}: the QUIC idle timeout ends it first",
+        silent.elapsed()
+    );
+    assert_eq!(link.close_reason(), None);
+    wait_until("the entry's end", || {
+        entry(&pair.table_a, id).state == ConnectionState::Disconnected
+    });
+    assert_eq!(entry(&pair.table_a, id).last_cause, Some(Cause::Lost));
 }

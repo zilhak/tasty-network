@@ -1136,7 +1136,8 @@ struct Started<'a> {
     deadline: Instant,
     _registration: Registration,
     _permit: Permit,
-    /// The channel's connection table entry (SSH path, with a table).
+    /// The channel's connection table entry, with a table: the channel's own on the SSH path,
+    /// the QUIC connection's on the P2P path.
     entry: Option<EntryRef>,
 }
 
@@ -1165,11 +1166,29 @@ fn take_permit(
 /// connection's proved remote ID; `scope` names that connection, so a bulk channel is taken
 /// only under an attach link of the same connection.
 pub fn accept_p2p_handshake(
+    channel: RawChannel,
+    remote_id: DeviceId,
+    scope: u64,
+    config: &AcceptConfig,
+    cancel: &AttemptCancel,
+) -> Result<Accepted, HandshakeError> {
+    // The QUIC connection's entry: a failure only notes its cause, the connection's end ends
+    // the entry.
+    let entry = channel.entry().cloned();
+    let accepted = accept_p2p(channel, remote_id, scope, config, cancel, entry.clone());
+    if let (Err(error), Some(entry)) = (&accepted, &entry) {
+        entry.note_cause(Cause::of_handshake(error));
+    }
+    accepted
+}
+
+fn accept_p2p(
     mut channel: RawChannel,
     remote_id: DeviceId,
     scope: u64,
     config: &AcceptConfig,
     cancel: &AttemptCancel,
+    entry: Option<EntryRef>,
 ) -> Result<Accepted, HandshakeError> {
     config.timeouts.check()?;
     let deadline = deadline_after(config.timeouts.handshake_timeout)?;
@@ -1200,7 +1219,7 @@ pub fn accept_p2p_handshake(
             deadline,
             _registration: registration,
             _permit: permit,
-            entry: None,
+            entry,
         },
     )
 }
@@ -1241,6 +1260,9 @@ fn accept_on(
 ) -> Result<Accepted, HandshakeError> {
     let cancel = started.cancel;
     let linger = config.timeouts.drain_cap;
+    // An SSH entry is the channel's own and ends with it; a P2P entry is the QUIC
+    // connection's, which carries the parent link of a bulk channel too.
+    let own_entry = matches!(path, Path::Ssh);
     let kind = ch.kind();
     let control = ch.control();
     let mut io = Io {
@@ -1270,7 +1292,9 @@ fn accept_on(
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
         if let Some(entry) = &started.entry {
-            entry.update(|info| info.parent = parent.entry);
+            if own_entry {
+                entry.update(|info| info.parent = parent.entry);
+            }
             entry.channel_up(
                 Counted::Bulk,
                 &parent.peer,
@@ -1278,7 +1302,9 @@ fn accept_on(
                 Some(&parent.closer),
                 &config.timeouts,
             );
-            entry.end_with(&framed.closer, Some(&parent.closer));
+            if own_entry {
+                entry.end_with(&framed.closer, Some(&parent.closer));
+            }
         }
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
@@ -1356,7 +1382,9 @@ fn accept_on(
                 None,
                 &config.timeouts,
             );
-            entry.end_with(&framed.closer, None);
+            if own_entry {
+                entry.end_with(&framed.closer, None);
+            }
         }
         return Ok(Accepted::Request(RequestServer {
             reader: framed.reader,
@@ -1457,7 +1485,11 @@ fn accept_on(
     let link_id = LinkId::of_credential(&credential);
     if let Some(entry) = &started.entry {
         entry.link_up(&peer, link_id, &closer, &config.timeouts);
-        entry.end_with(&closer, None);
+        if own_entry {
+            entry.end_with(&closer, None);
+        } else {
+            entry.note_end_of(&closer, link_id);
+        }
     }
     Ok(Accepted::Link(Box::new(Link {
         ordered_shared,

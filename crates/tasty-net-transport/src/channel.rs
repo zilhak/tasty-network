@@ -129,7 +129,6 @@ impl RawChannel {
         Ok(channel)
     }
 
-    #[cfg(feature = "ssh")]
     pub(crate) fn with_entry(mut self, entry: EntryRef) -> Self {
         self.entry = Some(entry);
         self
@@ -140,7 +139,6 @@ impl RawChannel {
         self.entry.as_ref()
     }
 
-    #[cfg(feature = "ssh")]
     pub(crate) fn with_joined(mut self, joined: Joined) -> Self {
         self.joined = Some(joined);
         self

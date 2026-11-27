@@ -14,13 +14,16 @@ use tasty_net_p2p::{P2pEndpoint, P2pError};
 
 use crate::cancel::AttemptCancel;
 use crate::channel::RawChannel;
+use crate::connection_table::ConnectionPeer;
 use crate::handshake::{AcceptConfig, Accepted, accept_p2p_handshake};
 use crate::lock::lock;
 use crate::reject::HandshakeError;
+use crate::role::Side;
 use crate::transport::AcceptError;
 
 use super::conn::{ConnSide, ConnState, watch};
 use super::poll_interval;
+use super::table::{Followed, open_entry};
 
 /// The streams the connections' threads took, waiting for [`P2pListener::accept`].
 pub(crate) struct Queue {
@@ -113,7 +116,9 @@ impl P2pInbound {
 impl P2pListener {
     /// Starts taking the connections `endpoint` accepts. `config` is the accepting end of
     /// every handshake on them; its drain cap is also how long an idle accepted connection
-    /// waits for its dialer's close.
+    /// waits for its dialer's close. With a table
+    /// ([`AcceptConfig::with_connections`]) every accepted QUIC connection is one `p2p_udp`
+    /// entry in it, and its channels are on that entry.
     pub fn new(endpoint: P2pEndpoint, config: AcceptConfig) -> io::Result<Self> {
         let queue = Arc::new(Queue {
             items: Mutex::new(QueueState::default()),
@@ -212,7 +217,20 @@ fn accept_connections(
     while !stop.load(Ordering::SeqCst) {
         match endpoint.accept_timeout(Some(poll)) {
             Ok(conn) => {
-                let state = ConnState::new(conn, ConnSide::Acceptor, drain_cap);
+                let entry = config.connections().map(|table| {
+                    let peer = ConnectionPeer {
+                        device_id: Some(conn.remote_device_id()),
+                        ..ConnectionPeer::default()
+                    };
+                    open_entry(table, Side::Acceptor, None, peer)
+                });
+                let state = ConnState::new(
+                    conn,
+                    ConnSide::Acceptor,
+                    drain_cap,
+                    entry,
+                    Followed::default(),
+                );
                 watch(state, Some(Arc::downgrade(queue)), poll);
             }
             Err(P2pError::TimedOut) => {}

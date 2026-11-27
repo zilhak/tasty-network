@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use tasty_net_identity::DeviceId;
-use tasty_net_p2p::P2pConnectError;
+use tasty_net_p2p::{AttemptInfo, AttemptPhase, NatInfo, P2pCloseReason, P2pConnectError};
+use tasty_net_p2p::{RemoteKind, RendezvousServer};
 #[cfg(feature = "ssh")]
 use tasty_net_ssh::PortDiscoveryFailureKind;
 
@@ -133,16 +134,21 @@ pub enum Phase {
     Handshake,
     /// The redialer waits for its next attempt.
     RetryWait,
+    /// A P2P attempt in this state of the P2P state machine (its values are the entry's
+    /// `attempt`).
+    P2p(AttemptPhase),
 }
 
 impl Phase {
-    /// `port_discovery`, `tunnel`, `handshake` or `retry_wait`.
+    /// `port_discovery`, `tunnel`, `handshake` or `retry_wait`, or the P2P state's name
+    /// (`Requesting`, `Punching` and so on).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PortDiscovery => "port_discovery",
             Self::Tunnel => "tunnel",
             Self::Handshake => "handshake",
             Self::RetryWait => "retry_wait",
+            Self::P2p(phase) => phase.name(),
         }
     }
 }
@@ -191,6 +197,11 @@ pub enum Cause {
     /// The P2P endpoint could not make the connection, a self attach included (the attempt
     /// error of `tasty-net-p2p`).
     P2pConnect(P2pConnectError),
+    /// A transition of the P2P connection, as `tasty-net-p2p` names its cause (the punch
+    /// steps, `quic_established`, `remote_address_observed_change` and so on).
+    P2p(tasty_net_p2p::Cause),
+    /// The P2P connection was closed by the peer, or by `tasty-net-p2p`, with this code.
+    P2pClosed(P2pCloseReason),
 }
 
 impl Cause {
@@ -216,6 +227,8 @@ impl Cause {
             Self::SharedTunnel(_) => "shared_tunnel",
             Self::RedialExhausted => "redial_exhausted",
             Self::P2pConnect(_) => "p2p_connect_failed",
+            Self::P2p(cause) => cause.name,
+            Self::P2pClosed(_) => "p2p_closed",
         }
     }
 
@@ -228,6 +241,12 @@ impl Cause {
         match self {
             Self::Rejected(reason) => reason.is_retryable(),
             Self::P2pConnect(error) => error.is_retryable(),
+            Self::P2pClosed(reason) => reason.is_retryable(),
+            Self::P2p(cause) => match &cause.detail {
+                Some(tasty_net_p2p::CauseDetail::Close(reason)) => reason.is_retryable(),
+                Some(tasty_net_p2p::CauseDetail::Connect(error)) => error.is_retryable(),
+                _ => true,
+            },
             Self::PeerTooOld
             | Self::Refused(_)
             | Self::HandshakeFailed(_)
@@ -297,6 +316,8 @@ impl fmt::Display for Cause {
             }
             Self::SharedTunnel(id) => write!(f, "{}: {id}", self.as_str()),
             Self::P2pConnect(error) => write!(f, "{}: {error}", self.as_str()),
+            Self::P2p(cause) => write!(f, "{cause}"),
+            Self::P2pClosed(reason) => write!(f, "{}: {reason}", self.as_str()),
             other => f.write_str(other.as_str()),
         }
     }
@@ -310,9 +331,10 @@ impl fmt::Display for Cause {
 /// | `ssh` | none | the profile's SSH target, `<host>` or `<host>:<port>` as given |
 /// | `remote_listener` | none | the discovered port of the peer's loopback listener |
 /// | `loopback` | the listener's address | the peer's address (the sshd side) |
+/// | `udp` | `local_bind=<addr>, local_ip=<ip>, local_reflexive=<addr>` (`unknown` for a value not known) | the peer address the QUIC connection uses now |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
-    /// `local_forward`, `ssh`, `remote_listener` or `loopback`.
+    /// `local_forward`, `ssh`, `remote_listener`, `loopback` or `udp`.
     pub name: &'static str,
     /// The local address, when the segment has one.
     pub local: Option<String>,
@@ -343,6 +365,15 @@ pub enum Via {
     },
     /// Accepted on a loopback listener.
     Loopback,
+    /// Introduced by a rendezvous server and punched (P2P).
+    Rendezvous {
+        /// The server's address and key, once the P2P connection shows them.
+        server: Option<RendezvousServer>,
+        /// The kind of the peer candidate that succeeded.
+        candidate: Option<RemoteKind>,
+        /// Both NAT mappings and the punch mode.
+        nat: Option<NatInfo>,
+    },
 }
 
 /// The peer of an entry.
@@ -485,6 +516,12 @@ pub struct ConnectionInfo {
     pub applied: Vec<Setting>,
     /// The redialer's progress, when the redialer set this entry up.
     pub redial: Option<RedialProgress>,
+    /// The number of the P2P connection of a `p2p_udp` entry (`P2pConnectionInfo::id`), once
+    /// the attempt shows it.
+    pub p2p_id: Option<u64>,
+    /// The P2P attempt's number and times of a `p2p_udp` entry, as the P2P connection shows
+    /// them.
+    pub attempt: Option<AttemptInfo>,
 }
 
 /// What the table reports as it changes.

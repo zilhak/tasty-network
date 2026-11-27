@@ -11,6 +11,10 @@
 //!   with code 0 itself when it did not come within the drain cap.
 //! - A connection whose attempt was cancelled before its first handshake succeeded is closed by
 //!   the cancel.
+//!
+//! With a connection table the connection is one `p2p_udp` entry. The connection's thread
+//! copies what `tasty-net-p2p` shows of it into the entry at every wake, and ends the entry
+//! when the connection closed.
 
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -18,10 +22,13 @@ use std::time::{Duration, Instant};
 use tasty_net_p2p::{P2pCloseReason, P2pConnection, P2pStream};
 
 use crate::cancel::Cancellable;
+use crate::channel::RawChannel;
+use crate::connection_table::{Cause, ConnectionState, EntryRef};
 use crate::lock::lock;
 
 use super::listener::Queue;
 use super::stream;
+use super::table::{Followed, follow};
 
 /// Which side of the QUIC connection this end is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +48,9 @@ pub(crate) struct ConnState {
     /// waits for the peer's end.
     pub(crate) drain_cap: Duration,
     channels: Mutex<Channels>,
+    /// The connection's entry, with a connection table.
+    pub(crate) entry: Option<EntryRef>,
+    followed: Mutex<Followed>,
 }
 
 #[derive(Default)]
@@ -54,13 +64,69 @@ struct Channels {
 }
 
 impl ConnState {
-    pub(crate) fn new(conn: P2pConnection, side: ConnSide, drain_cap: Duration) -> Arc<Self> {
-        Arc::new(Self {
+    /// The state of `conn`, whose entry is `entry`; the entry follows the connection from
+    /// here on.
+    pub(crate) fn new(
+        conn: P2pConnection,
+        side: ConnSide,
+        drain_cap: Duration,
+        entry: Option<EntryRef>,
+        followed: Followed,
+    ) -> Arc<Self> {
+        let state = Arc::new(Self {
             conn,
             side,
             drain_cap,
             channels: Mutex::new(Channels::default()),
-        })
+            entry,
+            followed: Mutex::new(followed),
+        });
+        state.follow();
+        state
+    }
+
+    /// `channel` on this connection, in the connection's entry.
+    pub(crate) fn entered(&self, channel: RawChannel) -> RawChannel {
+        match &self.entry {
+            Some(entry) => channel.with_entry(entry.clone()),
+            None => channel,
+        }
+    }
+
+    /// Copies what `tasty-net-p2p` shows of the connection into its entry.
+    fn follow(&self) {
+        let Some(entry) = &self.entry else {
+            return;
+        };
+        if let Some(info) = self.conn.info() {
+            follow(entry, &info, &mut lock(&self.followed));
+        }
+    }
+
+    /// Ends the entry of the closed connection. When this end closed it, the cause is the
+    /// one its last link or its failed attempt left ([`Cause::Ended`] without one); when the
+    /// peer (or `tasty-net-p2p`) closed it, the code it was closed with, and [`Cause::Lost`]
+    /// for an end without a code (the idle timeout). A failure noted before the entry was
+    /// connected stays.
+    fn end_entry(&self) {
+        let Some(entry) = &self.entry else {
+            return;
+        };
+        let closing = lock(&self.channels).closing;
+        let (state, recorded) = entry
+            .status()
+            .unwrap_or((ConnectionState::Disconnected, None));
+        // A copied P2P transition is no failure of this end.
+        let failure = recorded.filter(|c| !matches!(c, Cause::P2p(_)));
+        let cause = match failure {
+            Some(cause) if closing || state != ConnectionState::Connected => cause,
+            _ if closing => Cause::Ended,
+            _ => match self.conn.close_reason() {
+                Some(reason) => Cause::P2pClosed(reason),
+                None => Cause::Lost,
+            },
+        };
+        entry.end(cause);
     }
 
     /// Whether the QUIC connection ended.
@@ -159,16 +225,26 @@ impl Cancellable for PunchCancel {
 /// the accepting side each one goes to `queue` as a new channel, or is refused when the
 /// listener is gone. Between streams it closes an idle accepted connection after the drain cap.
 pub(crate) fn watch(state: Arc<ConnState>, queue: Option<Weak<Queue>>, poll: Duration) {
+    let watched = Arc::clone(&state);
     let spawned = std::thread::Builder::new()
         .name("p2p-conn".into())
-        .spawn(move || run(&state, queue.as_ref(), poll));
+        .spawn(move || run(&watched, queue.as_ref(), poll));
     if let Err(error) = spawned {
+        // Without its thread nobody takes its streams or closes it when idle: close it now.
         tracing::debug!(%error, "no thread for a P2P connection");
+        state.close(P2pCloseReason::Closed);
+        state.end_entry();
     }
 }
 
 fn run(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, poll: Duration) {
+    serve(state, queue, poll);
+    state.end_entry();
+}
+
+fn serve(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, poll: Duration) {
     loop {
+        state.follow();
         if state.is_closed() {
             return;
         }
@@ -202,5 +278,5 @@ fn take(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, stream: P2pStream) 
         return;
     };
     let channel = stream::channel(stream, &state.conn, state.side, state.drain_cap, slot);
-    queue.push(Arc::clone(state), channel);
+    queue.push(Arc::clone(state), state.entered(channel));
 }
