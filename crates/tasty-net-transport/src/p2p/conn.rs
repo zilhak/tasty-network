@@ -16,7 +16,7 @@
 //! copies what `tasty-net-p2p` shows of it into the entry at every wake, and ends the entry
 //! when the connection closed.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use tasty_net_p2p::{P2pCloseReason, P2pConnection, P2pStream};
@@ -48,6 +48,9 @@ pub(crate) struct ConnState {
     /// waits for the peer's end.
     pub(crate) drain_cap: Duration,
     channels: Mutex<Channels>,
+    /// Wakes the drain timer of the accepting side when a channel comes or the connection
+    /// closes.
+    channels_changed: Condvar,
     /// The connection's entry, with a connection table.
     pub(crate) entry: Option<EntryRef>,
     followed: Mutex<Followed>,
@@ -83,6 +86,7 @@ impl ConnState {
             side,
             drain_cap,
             channels: Mutex::new(Channels::default()),
+            channels_changed: Condvar::new(),
             entry,
             followed: Mutex::new(followed),
         });
@@ -160,6 +164,8 @@ impl ConnState {
         }
         channels.open += 1;
         channels.idle_since = None;
+        drop(channels);
+        self.channels_changed.notify_all();
         Some(ChannelSlot {
             conn: Arc::clone(self),
         })
@@ -173,29 +179,62 @@ impl ConnState {
     /// Closes the whole connection with `reason`; no new channel takes it.
     pub(crate) fn close(&self, reason: P2pCloseReason) {
         lock(&self.channels).closing = true;
+        self.channels_changed.notify_all();
         self.conn.close(reason);
     }
 
-    fn release(&self) {
-        let close = {
+    fn release(self: &Arc<Self>) {
+        {
             let mut channels = lock(&self.channels);
             channels.open = channels.open.saturating_sub(1);
             if channels.open > 0 {
                 return;
             }
             match self.side {
-                ConnSide::Dialer => {
-                    channels.closing = true;
-                    true
-                }
-                ConnSide::Acceptor => {
-                    channels.idle_since = Some(Instant::now());
-                    false
-                }
+                ConnSide::Dialer => channels.closing = true,
+                ConnSide::Acceptor => channels.idle_since = Some(Instant::now()),
             }
-        };
-        if close {
-            self.conn.close(P2pCloseReason::Closed);
+        }
+        match self.side {
+            ConnSide::Dialer => self.conn.close(P2pCloseReason::Closed),
+            ConnSide::Acceptor => self.close_after_drain_cap(),
+        }
+    }
+
+    /// On the accepting side, once the last channel is gone: closes the connection with code 0
+    /// at the drain cap unless a channel came or it closed first. The connection's thread
+    /// checks the same between its waits for a stream, which may be longer
+    /// (`path.poll_interval`).
+    fn close_after_drain_cap(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("p2p-drain".into())
+            .spawn(move || {
+                let mut channels = lock(&state.channels);
+                loop {
+                    if channels.closing {
+                        return;
+                    }
+                    let Some(since) = channels.idle_since else {
+                        // A channel came.
+                        return;
+                    };
+                    let left = state.drain_cap.saturating_sub(since.elapsed());
+                    if left.is_zero() {
+                        drop(channels);
+                        state.close(P2pCloseReason::Closed);
+                        return;
+                    }
+                    channels = state
+                        .channels_changed
+                        .wait_timeout(channels, left)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .0;
+                }
+            });
+        if let Err(error) = spawned {
+            // The connection's thread still closes it, at its next wake.
+            tracing::debug!(%error, "no thread for the P2P drain timer");
         }
     }
 

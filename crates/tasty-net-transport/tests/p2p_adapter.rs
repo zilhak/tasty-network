@@ -93,18 +93,18 @@ fn timeouts() -> LinkTimeouts {
 }
 
 fn endpoint(server: &Rendezvous, seed: u8, peer: DeviceId) -> P2pEndpoint {
-    endpoint_with(server, seed, peer, None, None)
+    endpoint_with(server, seed, peer, None, &[])
 }
 
 /// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers and a
-/// short `path.poll_interval` (how often the adapter copies an attempt to its entry); with
-/// `streams`, the peer may open at most that many streams at a time on its connections.
+/// short `path.poll_interval` (how often the adapter copies an attempt to its entry); then
+/// `settings`.
 fn endpoint_with(
     server: &Rendezvous,
     seed: u8,
     peer: DeviceId,
     gate: Option<Arc<Gate>>,
-    streams: Option<u64>,
+    settings: &[(&str, P2pValue)],
 ) -> P2pEndpoint {
     let pairing = Arc::new(PairingList::new());
     pairing.add(peer);
@@ -125,10 +125,8 @@ fn endpoint_with(
                 P2pValue::Duration(Duration::from_millis(100)),
             );
     }
-    if let Some(streams) = streams {
-        config
-            .settings
-            .set("quic.max_bidi_streams", P2pValue::Count(streams));
+    for (key, value) in settings {
+        config.settings.set(key, *value);
     }
     P2pEndpoint::bind(config).expect("bind")
 }
@@ -281,32 +279,32 @@ impl Pair {
     /// [`Pair::start`]; with `gated`, both endpoints run with short QUIC timers and `b` runs on
     /// the returned gate.
     fn start_with(seed: u8, mode: Mode, gated: bool) -> (Self, Option<Arc<Gate>>) {
-        Self::start_full(seed, mode, gated, None)
+        Self::start_full(seed, mode, gated, &[])
     }
 
-    /// [`Pair::start`] where `a` may open at most `streams` streams at a time to `b`.
-    fn start_limited(seed: u8, mode: Mode, streams: u64) -> Self {
-        Self::start_full(seed, mode, false, Some(streams)).0
+    /// [`Pair::start`] with these settings on `b`.
+    fn start_set(seed: u8, mode: Mode, b_settings: &[(&str, P2pValue)]) -> Self {
+        Self::start_full(seed, mode, false, b_settings).0
     }
 
     fn start_full(
         seed: u8,
         mode: Mode,
         gated: bool,
-        streams: Option<u64>,
+        b_settings: &[(&str, P2pValue)],
     ) -> (Self, Option<Arc<Gate>>) {
         let server = Rendezvous::start();
         let (ka, kb) = (key(seed), key(seed + 1));
         let gate = gated.then(|| Gate::bind(&server));
         let (a, b) = if gated {
             (
-                endpoint_with(&server, seed, kb.id(), Some(Gate::bind(&server)), None),
-                endpoint_with(&server, seed + 1, ka.id(), gate.clone(), streams),
+                endpoint_with(&server, seed, kb.id(), Some(Gate::bind(&server)), &[]),
+                endpoint_with(&server, seed + 1, ka.id(), gate.clone(), b_settings),
             )
         } else {
             (
                 endpoint(&server, seed, kb.id()),
-                endpoint_with(&server, seed + 1, ka.id(), None, streams),
+                endpoint_with(&server, seed + 1, ka.id(), None, b_settings),
             )
         };
         let policy = Arc::new(Policy::default());
@@ -658,7 +656,12 @@ fn the_refusing_ack_is_followed_by_the_eof_at_once() {
 /// streams ends with its attempt's cancel (docs/design/transport.md "시도 취소, 닫기, 회수").
 #[test]
 fn a_cancel_ends_the_wait_for_a_stream() {
-    let pair = Pair::start_limited(52, Mode::Echo, 1);
+    // `a` may open one stream at a time to `b`.
+    let pair = Pair::start_set(
+        52,
+        Mode::Echo,
+        &[("quic.max_bidi_streams", P2pValue::Count(1))],
+    );
     let _link = pair.link(None).expect("the link takes the one stream");
     assert_eq!(pair.transport.live_connections(), 1);
     let cancel = AttemptCancel::new();
@@ -755,6 +758,92 @@ fn concurrent_attempts_to_one_peer_keep_their_own_entries() {
     let _ended = done_two
         .recv_timeout(PATIENCE)
         .expect("the second attempt's end");
+}
+
+/// The ACK among the Control frames the accepting side writes on `stream`.
+fn read_ack(stream: &mut tasty_net_p2p::P2pStream) -> Value {
+    loop {
+        let frame = tasty_net_frame::read_frame(stream).expect("a frame");
+        if frame.tag != StreamTag::Control {
+            continue;
+        }
+        let message: Value = serde_json::from_slice(&frame.payload).expect("JSON");
+        if message.get("ok").is_some() {
+            return message;
+        }
+    }
+}
+
+/// A dialer straight on `tasty-net-p2p` that opens a stream, sends a line the acceptor refuses
+/// and then neither ends its side nor closes: the connection, its stream and when the
+/// refusing ACK was read.
+fn refused_raw(
+    pair: &Pair,
+) -> (
+    tasty_net_p2p::P2pConnection,
+    tasty_net_p2p::P2pStream,
+    Instant,
+) {
+    let started = Instant::now();
+    let conn = loop {
+        match pair.a.connect(pair.b.id()) {
+            Ok(conn) => break conn,
+            Err(_) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("connect: {error:?}"),
+        }
+    };
+    let mut stream = conn.open_bi().expect("a stream");
+    stream.set_read_timeout(Some(PATIENCE));
+    stream.write_all(b"{}\n").expect("a first line");
+    let ack = read_ack(&mut stream);
+    assert_eq!(ack["ok"], json!(false), "{ack}");
+    (conn, stream, Instant::now())
+}
+
+/// The accepting side closes the connection with code 0 at the drain cap after its last
+/// channel when the dialer does not close it (docs/design/transport.md "연결을 닫는 때").
+#[test]
+fn the_acceptor_closes_an_idle_connection_after_the_drain_cap() {
+    let pair = Pair::start(58, Mode::Echo);
+    let (conn, _stream, acked) = refused_raw(&pair);
+    let closed = conn.wait_closed(PATIENCE).expect("the wait");
+    assert!(
+        closed.is_some(),
+        "the acceptor did not close the connection"
+    );
+    let waited = acked.elapsed();
+    assert_eq!(conn.close_reason(), Some(P2pCloseReason::Closed));
+    assert!(
+        waited >= timeouts().drain_cap,
+        "closed {waited:?} after the ACK, before the drain cap"
+    );
+}
+
+/// The drain cap closes the idle accepted connection also when the connection's thread waits
+/// longer for a stream (`path.poll_interval` past the drain cap).
+#[test]
+fn the_drain_cap_does_not_wait_for_the_poll_interval() {
+    let poll = Duration::from_secs(4);
+    let pair = Pair::start_set(
+        60,
+        Mode::Echo,
+        &[("path.poll_interval", P2pValue::Duration(poll))],
+    );
+    let (conn, _stream, acked) = refused_raw(&pair);
+    let closed = conn.wait_closed(PATIENCE).expect("the wait");
+    assert!(
+        closed.is_some(),
+        "the acceptor did not close the connection"
+    );
+    let waited = acked.elapsed();
+    assert_eq!(conn.close_reason(), Some(P2pCloseReason::Closed));
+    // The refusal's linger and then the drain cap, each `drain_cap` long: well before `poll`.
+    assert!(
+        waited < poll / 2,
+        "closed {waited:?} after the ACK: it waited for the poll interval {poll:?}"
+    );
 }
 
 /// Both sides send a last frame and end their side; each application reads the other's last
@@ -984,7 +1073,6 @@ fn a_stream_the_acceptor_opens_is_refused() {
     let accepted = b.accept_timeout(Some(PATIENCE)).expect("accepted");
     let mut stream = accepted.open_bi().expect("open");
     stream.set_read_timeout(Some(Duration::from_secs(10)));
-    use std::io::{Read, Write};
     let mut byte = [0u8; 1];
     let refused = match stream.write_all(b"from the acceptor") {
         Err(error) => error,
