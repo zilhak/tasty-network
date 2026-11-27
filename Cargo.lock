@@ -1690,7 +1690,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tasty-net-identity",
- "tempfile",
  "tokio",
  "toml",
  "tracing",
