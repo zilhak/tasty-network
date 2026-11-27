@@ -220,6 +220,34 @@ impl fmt::Debug for Core {
     }
 }
 
+/// Move the endpoint state in `reg` to `to` and queue its event; whether it moved. The event
+/// is queued under the state's lock, so the events come in the order of the transitions (the
+/// lock order is the state, then the queue). After the shutdown reported `Off`, `Off` stays the
+/// last state: a server loop that was between two steps when the shutdown began does not move
+/// the endpoint again.
+fn move_endpoint(
+    reg: &Mutex<Registration>,
+    events: &Events,
+    shutting_down: impl FnOnce() -> bool,
+    to: EndpointPhase,
+    cause: Cause,
+) -> bool {
+    let mut r = lock(reg);
+    if r.phase == Some(EndpointPhase::Off) && shutting_down() {
+        return false;
+    }
+    let from = r.phase.replace(to);
+    r.last_cause = Some(cause.clone());
+    events.push(P2pEvent::Transition {
+        subject: crate::events::Subject::Endpoint,
+        from: from.map(Phase::Endpoint),
+        to: Phase::Endpoint(to),
+        cause,
+        at: SystemTime::now(),
+    });
+    true
+}
+
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -268,25 +296,15 @@ impl Core {
 
     /// Move the endpoint state machine.
     pub(crate) fn endpoint_to(&self, to: EndpointPhase, cause: Cause) {
-        let from = {
-            let mut r = lock(&self.reg);
-            // After the shutdown reported `Off`, `Off` stays the last state: a server loop that
-            // was between two steps when the shutdown began does not move the endpoint again.
-            if r.phase == Some(EndpointPhase::Off) && self.is_shutting_down() {
-                return;
-            }
-            let from = r.phase.replace(to);
-            r.last_cause = Some(cause.clone());
-            from
-        };
-        self.events.push(P2pEvent::Transition {
-            subject: crate::events::Subject::Endpoint,
-            from: from.map(Phase::Endpoint),
-            to: Phase::Endpoint(to),
+        if move_endpoint(
+            &self.reg,
+            &self.events,
+            || self.is_shutting_down(),
+            to,
             cause,
-            at: SystemTime::now(),
-        });
-        self.reg_changed.send_modify(|n| *n = n.wrapping_add(1));
+        ) {
+            self.reg_changed.send_modify(|n| *n = n.wrapping_add(1));
+        }
     }
 
     /// Send a message on the coordination connection; whether there is one.
@@ -910,3 +928,73 @@ pub(crate) fn host_candidates(core: &Core) -> Vec<String> {
 
 /// The ALPN of the coordination connection, for [`Core::client_config`].
 pub(crate) const RENDEZVOUS_ALPN: &[u8] = ALPN_RENDEZVOUS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phases one after another as (from, to) of the queued endpoint events.
+    fn chain(events: &Events) -> Vec<(Option<Phase>, Phase)> {
+        events
+            .drain()
+            .into_iter()
+            .filter_map(|e| match e {
+                P2pEvent::Transition { from, to, .. } => Some((from, to)),
+                P2pEvent::Lagged { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Threads moving the endpoint at once: each event starts where the one before it ended,
+    /// and the last event is the state now.
+    #[test]
+    fn endpoint_events_follow_the_order_of_the_transitions() {
+        let reg = Mutex::new(Registration {
+            phase: Some(EndpointPhase::Off),
+            ..Registration::default()
+        });
+        let events = Events::new(100_000);
+        let phases = [
+            EndpointPhase::Connecting,
+            EndpointPhase::Registered,
+            EndpointPhase::Backoff,
+        ];
+        std::thread::scope(|s| {
+            for to in phases {
+                let (reg, events) = (&reg, &events);
+                s.spawn(move || {
+                    for _ in 0..2_000 {
+                        move_endpoint(reg, events, || false, to, Cause::named("enabled"));
+                    }
+                });
+            }
+        });
+        let got = chain(&events);
+        assert_eq!(got.len(), 6_000);
+        assert_eq!(got[0].0, Some(Phase::Endpoint(EndpointPhase::Off)));
+        for w in got.windows(2) {
+            assert_eq!(w[1].0, Some(w[0].1), "{w:?}");
+        }
+        let now = lock(&reg).phase.map(Phase::Endpoint);
+        assert_eq!(got.last().map(|e| Some(e.1)), Some(now));
+    }
+
+    #[test]
+    fn off_stays_the_last_state_during_the_shutdown() {
+        let reg = Mutex::new(Registration {
+            phase: Some(EndpointPhase::Off),
+            ..Registration::default()
+        });
+        let events = Events::new(16);
+        let moved = move_endpoint(
+            &reg,
+            &events,
+            || true,
+            EndpointPhase::Backoff,
+            Cause::named("io"),
+        );
+        assert!(!moved);
+        assert!(chain(&events).is_empty());
+        assert_eq!(lock(&reg).phase, Some(EndpointPhase::Off));
+    }
+}

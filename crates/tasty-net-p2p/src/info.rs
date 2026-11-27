@@ -244,13 +244,13 @@ impl Tracker {
             conn: None,
             history: VecDeque::new(),
         }));
-        lock(&self.records).insert(id, rec.clone());
         let t = Tracked {
             id,
             rec,
             tracker: self.clone(),
         };
-        t.record(None, phase, cause);
+        t.record(&mut lock(&t.rec), None, phase, cause);
+        lock(&self.records).insert(id, t.rec.clone());
         t
     }
 
@@ -280,23 +280,23 @@ impl Tracker {
 }
 
 impl Tracked {
-    fn record(&self, from: Option<AttemptPhase>, to: AttemptPhase, cause: Cause) {
+    /// Record the move to `to` in `r` and queue its event, under the record's lock: the events
+    /// of one attempt come in the order of its transitions (the lock order is the record, then
+    /// the queue).
+    fn record(&self, r: &mut Rec, from: Option<AttemptPhase>, to: AttemptPhase, cause: Cause) {
         let at = SystemTime::now();
-        {
-            let mut r = lock(&self.rec);
-            r.info.state = to;
-            r.info.last_cause = Some(cause.clone());
-            if r.history.len() >= self.tracker.history_limit {
-                r.history.pop_front();
-                r.info.history_dropped += 1;
-            }
-            r.history.push_back(HistoryEntry {
-                from,
-                to,
-                cause: cause.clone(),
-                at,
-            });
+        r.info.state = to;
+        r.info.last_cause = Some(cause.clone());
+        if r.history.len() >= self.tracker.history_limit {
+            r.history.pop_front();
+            r.info.history_dropped += 1;
         }
+        r.history.push_back(HistoryEntry {
+            from,
+            to,
+            cause: cause.clone(),
+            at,
+        });
         self.tracker.events.push(P2pEvent::Transition {
             subject: Subject::Connection(self.id),
             from: from.map(Phase::Attempt),
@@ -313,19 +313,88 @@ impl Tracked {
 
     /// Move to `to`. `Closed` also stops tracking.
     pub(crate) fn to(&self, to: AttemptPhase, cause: Cause) {
-        let from = self.phase();
-        if from == AttemptPhase::Closed {
-            return;
+        {
+            let mut r = lock(&self.rec);
+            if r.info.state == AttemptPhase::Closed {
+                return;
+            }
+            let from = r.info.state;
+            self.record(&mut r, Some(from), to, cause);
+            if to != AttemptPhase::Closed {
+                return;
+            }
+            r.conn = None;
         }
-        self.record(Some(from), to, cause);
-        if to == AttemptPhase::Closed {
-            lock(&self.rec).conn = None;
-            lock(&self.tracker.records).remove(&self.id);
-        }
+        lock(&self.tracker.records).remove(&self.id);
     }
 
     /// Change the values.
     pub(crate) fn update(&self, f: impl FnOnce(&mut Rec)) {
         f(&mut lock(&self.rec));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Threads moving one attempt at once: each event starts where the one before it ended,
+    /// and the record's history and state agree with the events.
+    #[test]
+    fn attempt_events_follow_the_order_of_the_transitions() {
+        let events = Arc::new(Events::new(100_000));
+        let tracker = Arc::new(Tracker::new(events.clone(), 100_000));
+        let peer = tasty_net_identity::DeviceKey::from_seed([7; 32]).id();
+        let t = tracker.start(
+            Side::Dialer,
+            peer,
+            AttemptPhase::Requesting,
+            Cause::named("connect_called"),
+            |_| {},
+        );
+        let phases = [
+            AttemptPhase::Scheduled,
+            AttemptPhase::Punching,
+            AttemptPhase::RetryWait,
+        ];
+        std::thread::scope(|s| {
+            for to in phases {
+                let t = &t;
+                s.spawn(move || {
+                    for _ in 0..2_000 {
+                        t.to(to, Cause::named("punch_go"));
+                    }
+                });
+            }
+        });
+        let got: Vec<(Option<Phase>, Phase)> = events
+            .drain()
+            .into_iter()
+            .filter_map(|e| match e {
+                P2pEvent::Transition { from, to, .. } => Some((from, to)),
+                P2pEvent::Lagged { .. } => None,
+            })
+            .collect();
+        assert_eq!(got.len(), 6_001);
+        assert_eq!(got[0], (None, Phase::Attempt(AttemptPhase::Requesting)));
+        for w in got.windows(2) {
+            assert_eq!(w[1].0, Some(w[0].1), "{w:?}");
+        }
+        let info = &tracker.snapshot()[0];
+        assert_eq!(got.last().map(|e| e.1), Some(Phase::Attempt(info.state)));
+        let history: Vec<_> = info.history.iter().map(|h| (h.from, h.to)).collect();
+        let events: Vec<_> = got
+            .iter()
+            .map(|(from, to)| {
+                let attempt = |p: &Phase| match p {
+                    Phase::Attempt(a) => *a,
+                    Phase::Endpoint(_) => panic!("an endpoint phase"),
+                };
+                (from.as_ref().map(attempt), attempt(to))
+            })
+            .collect();
+        assert_eq!(history, events);
+        t.to(AttemptPhase::Closed, Cause::named("cancelled"));
+        assert!(tracker.snapshot().is_empty());
     }
 }
