@@ -50,7 +50,7 @@
 | `tasty-net-transport` | `embedded-ssh` | 켬 | `["ssh", "tasty-net-ssh/embedded-ssh"]` |
 
 - 기본값은 두 크레이트 모두 `["system-ssh", "embedded-ssh"]`이다. 데스크톱 소비자(tasty)는 기본 그대로 쓰고, OpenSSH가 없는 데스크톱에서도 폴백이 된다.
-- `embedded-ssh`가 기본값에 드는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 커밋부터다(director 2931). 그 전 2단계 커밋의 기본값은 `["system-ssh"]`이고, 내장 백엔드는 그 feature를 켜는 소비자(모바일 조합)만 쓴다.
+- `embedded-ssh`가 기본값에 드는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 커밋부터다(director 2931). 위 표의 `embedded-ssh` 기본 "켬"과 앞 문장은 그 뒤의 상태다. 그 전 2단계 커밋의 기본값은 `["system-ssh"]`이고, 내장 백엔드는 그 feature를 켜는 소비자(모바일 조합)만 쓴다.
 - 모바일 조합은 `--no-default-features --features embedded-ssh`다. 이 단계에서 cross check에 ssh와 transport의 내장 조합 두 행이 더해진다.
 - `tasty-net-ssh-config`는 feature가 없다. `std::process`를 쓰지 않는다.
 - 이 단계가 내장 백엔드 작업과 같은 커밋 묶음에서 들어간다. 그 전에 `embedded-ssh`라는 이름의 빈 feature를 만들지 않는다. 빈 feature를 두면 `--no-default-features --features embedded-ssh`가 백엔드 없는 ssh 크레이트가 되어 `compile_error!` 계약과 어긋난다.
@@ -105,7 +105,7 @@
 - `SshConnector::inspect(&self, target: Option<&SshTarget>, purpose: SshPurpose) -> SshInspection`: 설정 조회의 진단 쪽이다. 연결하지 않고 다른 프로그램을 실행하지 않는다. 아래 [설정 조회](#설정-조회).
 - transport:
   - `SshTransport::from_connector(connector: SshConnector, discovery: PortDiscoveryConfig, mode: PortMode) -> SshTransport`가 새 생성자다. 포트 발견 설정과 포트 방식은 지금처럼 transport 인자로 남는다.
-  - 지금의 `SshTransport::new(launcher: SshLauncher, discovery: PortDiscoveryConfig, mode: PortMode)`(`src/ssh.rs:138`)는 `system-ssh`에서만 있다. 뜻은 `SshTransport::from_connector(SshConnector::new(launcher.settings().clone()).with_launcher(launcher), discovery, mode)`다. 기존 호출은 그대로 컴파일된다. 동작은 런처의 프로그램을 찾을 때 같다(`ssh.backend`의 기본 `auto`가 시스템을 고른다). 2단계 기본 빌드에서 그 프로그램을 찾지 못하면 뜻이 바뀐다: 지금은 자식 생성 실패지만, 새 규칙에서는 `auto`가 내장 백엔드로 연결한다(사용자 결정의 폴백). 이때 런처의 `SpawnHook`과 `with_verify`는 쓰이지 않는다. `with_verify`의 `accept-new`에 해당하는 내장 쪽 값은 순서 3과 같은 자리의 `StrictHostKeyChecking=accept-new`다(런처에서 읽어 커넥터가 같은 값을 넣는다).
+  - 지금의 `SshTransport::new(launcher: SshLauncher, discovery: PortDiscoveryConfig, mode: PortMode)`(`src/ssh.rs:138`)는 `system-ssh`에서만 있다. 뜻은 `SshTransport::from_connector(SshConnector::new(launcher.settings().clone()).with_launcher(launcher), discovery, mode)`다. 기존 호출은 그대로 컴파일된다. 동작은 런처의 프로그램을 찾을 때 같다(`ssh.backend`의 기본 `auto`가 시스템을 고른다). 두 백엔드를 함께 빌드한 경우(기본 빌드로는 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준) 뒤)에 그 프로그램을 찾지 못하면 뜻이 바뀐다: 지금은 자식 생성 실패지만, 새 규칙에서는 `auto`가 내장 백엔드로 연결한다(사용자 결정의 폴백). 이때 런처의 `SpawnHook`과 `with_verify`는 쓰이지 않는다. `with_verify`의 `accept-new`에 해당하는 내장 쪽 값은 순서 3과 같은 자리의 `StrictHostKeyChecking=accept-new`다(런처에서 읽어 커넥터가 같은 값을 넣는다).
 
 ## 선택 규칙
 
@@ -127,7 +127,7 @@
   3. 시스템 백엔드는 발견한 절대 경로로 실행한다. 그래서 선택이 본 파일과 실행한 파일이 같다(Windows `Command`가 실행 파일 폴더·System32를 먼저 보는 규칙을 타지 않는다).
   4. 찾은 파일이 OpenSSH인지는 가리지 않는다. 같은 이름의 다른 클라이언트가 먼저 있으면 그것이 시스템 백엔드가 되고, 그 클라이언트가 옵션을 거절하면 시스템 백엔드의 오류로 끝난다. 알려진 한계다.
 - 고르는 때: 연결 시도마다 한 번 고르고, 그 시도의 포트 발견과 터널은 같은 선택을 쓴다(발견은 시스템, 터널은 내장처럼 갈리지 않는다). 다음 시도는 다시 고르므로 실행 중에 OpenSSH를 설치하거나 지운 것이 반영된다. 이미 연 터널·세션은 처음 고른 백엔드로 끝까지 간다.
-- `auto`의 내장 폴백(위 표 첫 행)이 기본 빌드에 들어오는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 뒤다(아래 2단계 feature의 기본값). 그 전의 tasty 전환 태그는 기본 빌드가 `system-ssh`만이라, `auto`가 OpenSSH를 찾지 못하면 지금처럼 `NotFound`(시스템 ssh 없음)로 끝난다.
+- `auto`의 내장 폴백(위 표 첫 행)은 두 백엔드가 함께 빌드된 빌드에서 동작한다. 그런 빌드를 tasty 릴리스로 내는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 뒤다. 그 전에는 이 레포의 기본 빌드가 `system-ssh`만이고(아래 2단계 feature), 소비자(tasty)도 데스크톱 빌드에서 `embedded-ssh`를 켜지 않는다. 그래서 그 전의 tasty 전환 태그에서 `auto`가 OpenSSH를 찾지 못하면 지금처럼 `NotFound`(시스템 ssh 없음)로 끝난다. tasty에 이 조건을 전하는 길은 이 설계 밖이다.
 - 시스템 백엔드가 실패해도 내장으로 넘어가지 않는다. 폴백은 "찾지 못함"일 때만이다. 인증 실패나 호스트 키 거절을 다른 구현으로 다시 시도하면 사용자가 정한 동작과 다른 결과가 날 수 있다.
 
 ## 연결 정보
@@ -256,7 +256,7 @@ russh 0.65.4는 받은 데이터만큼 수신 창을 먼저 늘리고(`client/en
 - 위 표의 번호는 [옵션 적용 순서](#옵션-적용-순서)의 번호다. 4의 세션 종류와 세션 공유 끄기 `ControlMaster=no`·`ControlPath=none`은 대상 옵션 앞에 넣는다. 그래서 사용자 설정의 `ControlMaster auto`·`ControlPath`가 있어도 기존 다중화 소켓을 쓰지 않는다. 기존 터널 코드가 두 옵션을 함께 두는 근거와 같다(`tunnel.rs:83`–`:96`: 다중화된 연결은 이 자식이 아니라 마스터 프로세스의 것이 된다). 지금의 포트 발견 명령에는 두 옵션이 없다(`discovery.rs`에 `Control` 0건, 대조: `tunnel.rs`의 `TUNNEL_FORCED_OPTIONS`(`:91`)에는 둘 다 있다). 내장 백엔드 작업이 더한다.
 - 그래서 기능마다 SSH 세션과 인증이 따로다. 키에 passphrase가 있으면 기능마다 묻는다(agent가 있으면 묻지 않는다). 자식이 끝나면 세션도 끝난다. 내장 백엔드와 다른 점으로 둔다.
 - 4의 나머지 터널 고정 옵션(`ExitOnForwardFailure`·`ClearAllForwardings`·fork 금지)은 터널 자식에만 붙인다.
-- russh-sftp는 russh에 의존하지 않고 아무 `AsyncRead + AsyncWrite` 스트림을 받는다(아래 [의존 사실](#의존-사실)). 그래서 두 백엔드가 같은 SFTP 구현과 같은 설정값을 쓴다: 두 백엔드 모두 `SftpSession::new`(기본 `Config`를 쓴다, `client/session.rs:39`–`:44`)가 아니라 `new_with_config`에 `sftp.*`로 만든 `Config`를 준다. 시스템 백엔드의 SFTP는 `system-ssh`와 `embedded-ssh`가 함께 켜진 빌드에서만 russh-sftp가 들어온다. `system-ssh`만 켠 1단계 빌드에는 SFTP가 없다. 2단계 기본 빌드는 둘 다 켜므로 데스크톱 소비자는 두 백엔드에서 SFTP를 쓴다. 그래서 `SftpClient`는 `embedded-ssh`가 켜진 빌드에만 있다([공통 항목과 백엔드 전용 항목](#공통-항목과-백엔드-전용-항목)).
+- russh-sftp는 russh에 의존하지 않고 아무 `AsyncRead + AsyncWrite` 스트림을 받는다(아래 [의존 사실](#의존-사실)). 그래서 두 백엔드가 같은 SFTP 구현과 같은 설정값을 쓴다: 두 백엔드 모두 `SftpSession::new`(기본 `Config`를 쓴다, `client/session.rs:39`–`:44`)가 아니라 `new_with_config`에 `sftp.*`로 만든 `Config`를 준다. 시스템 백엔드의 SFTP는 `system-ssh`와 `embedded-ssh`가 함께 켜진 빌드에서만 russh-sftp가 들어온다. `system-ssh`만 켠 1단계 빌드에는 SFTP가 없다. 두 백엔드를 함께 켠 빌드(기본 빌드로는 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준) 뒤)의 데스크톱 소비자는 두 백엔드에서 SFTP를 쓴다. 그 전의 기본 빌드(`system-ssh`만)에는 SFTP가 없다. 그래서 `SftpClient`는 `embedded-ssh`가 켜진 빌드에만 있다([공통 항목과 백엔드 전용 항목](#공통-항목과-백엔드-전용-항목)).
 
 ### 공개 API (`tasty-net-ssh`)
 
@@ -310,8 +310,8 @@ struct SshInspection {
 
   | 빌드 | `settings`·`backend`·`resolver` | `files`·`file_notes`·`target` |
   |---|---|---|
-  | `embedded-ssh`가 있음(2단계 기본, 모바일) | 싣는다. `resolver`는 내장을 고르면 `embedded`, 시스템을 고르거나 선택이 실패하면(`backend`가 `Err`) `embedded_preview` | 싣는다. 시스템 백엔드를 고른 경우에도 내장 해석기로 같은 진단을 싣고, 실제 연결은 `ssh`가 하므로 `target.resolved`는 참고 값이다 |
-  | `system-ssh`만 | 싣는다. `backend`는 [선택 규칙](#선택-규칙)의 결과 그대로다: 찾으면 `Ok`(시스템, 이유와 찾은 경로), 못 찾으면 `Err(NotFound{searched})`. `resolver`는 `not_built` | 비어 있다(`files`·`file_notes`는 빈 목록, `target`은 대상을 주어도 `None`). 지시어 분류는 내장 백엔드의 것이라 이 빌드에는 표시할 미지원 지시어가 없다. 시스템 `ssh -G`를 불러 진단을 채우지 않는다(`inspect`는 다른 프로그램을 실행하지 않는다) |
+  | `embedded-ssh`가 있음(모바일, 내장 폴백 활성 기준 뒤의 기본) | 싣는다. `resolver`는 내장을 고르면 `embedded`, 시스템을 고르거나 선택이 실패하면(`backend`가 `Err`) `embedded_preview` | 싣는다. 시스템 백엔드를 고른 경우에도 내장 해석기로 같은 진단을 싣고, 실제 연결은 `ssh`가 하므로 `target.resolved`는 참고 값이다 |
+  | `system-ssh`만(1단계와 내장 폴백 활성 기준 전의 기본) | 싣는다. `backend`는 [선택 규칙](#선택-규칙)의 결과 그대로다: 찾으면 `Ok`(시스템, 이유와 찾은 경로), 못 찾으면 `Err(NotFound{searched})`. `resolver`는 `not_built` | 비어 있다(`files`·`file_notes`는 빈 목록, `target`은 대상을 주어도 `None`). 지시어 분류는 내장 백엔드의 것이라 이 빌드에는 표시할 미지원 지시어가 없다. 시스템 `ssh -G`를 불러 진단을 채우지 않는다(`inspect`는 다른 프로그램을 실행하지 않는다) |
 - FFI는 이 구조를 그대로 옮겨 낸다([모바일 바인딩 층](mobile.md#바인딩-층)).
 
 ## OpenSSH 해석 이식 크레이트
@@ -667,6 +667,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 메모리 키와 `IdentityFile` 이름 | 후속 작업(내장 SSH 백엔드). 앱 제안(감싼 키 이름이 `IdentityFile ~/.ssh/<이름>`이나 기본 키 자리 이름과 같으면 그 자리의 키로 쓰기)을 대상 옵션과 따로 더할지. `ProxyJump` 홉에 메모리 키를 내밀지(OpenSSH는 점프 홉의 `ssh`에 `-i`를 넘기지 않는다, `ssh.c:1307`–`:1325`). 기본 키 목록을 채우지 않는 것과 `IdentitiesOnly`의 시험 |
 | 메모리 키를 넣는 해석 입구 | 후속 작업(OpenSSH 해석 이식). 메모리 키를 `-i`처럼 명령행 identity로 넣어 기본 키 채움(`readconf.c:2930`–`:2941`)을 OpenSSH와 같게 하는 입구, 결과 API가 사용자가 적은 `IdentityFile`과 기본 키 자리를 구별해 내는지 |
 | 지역망 판정과 차단 사유 | 후속 작업(내장 SSH 백엔드). 지역망으로 볼 주소 범위(사설·링크 로컬 등)를 Android 정의로 확인해 정하기, `.local` 판정을 유효 `HostName`에 하는지, `LocalNetworkDenied`·`LocalNetworkBlocked`를 싣는 오류 타입과 연결 목록 원인 이름, 시험. 판단필요: 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한))은 `unsafe`인데 `tasty-net-ssh`는 `forbid(unsafe_code)`다([크레이트 구성](crates.md#unsafe-규칙)). (가) `tasty-net-ssh`를 identity·transport처럼 `deny(unsafe_code)`로 바꾸고 Android OS 호출 모듈에서만 허용한다. (나) 앱 Rust 크레이트가 소켓 진단 훅을 주고 이 레포는 FD를 넘긴다. 추천: (가). 소켓을 가진 코드가 닫기 전에 읽어야 하고, 훅을 두면 FD의 수명을 앱 코드에 넘기게 된다 |
+| E1을 판정할 CI 조합 | 후속 작업(내장 SSH 백엔드). [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준) E1의 시험은 두 백엔드를 함께 켠 빌드에서만 `auto`가 `not_found`로 내장을 고른다(내장만 켜면 이유가 `system_not_built`). 그 전 기본 조합(`system-ssh`만)으로는 돌지 않는다. 두 백엔드를 켠 시험 단계의 이름과 자리(D1과 같은 CI 실행인지), 세 OS 배치 |
 | 비교 시험의 로컬 계정 읽기 | 후속 작업(OpenSSH 해석 이식). 실행 계정의 passwd 항목(이름·홈)을 시험이 읽는 방법(Linux·macOS) |
 | 터널 채널이 세션 수신 루프를 멈추는 경우 | 알려진 한계. 로컬 쪽이 읽지 않는 터널 채널은 russh 큐를 채워 같은 세션 전체를 멈춘다. 링크 읽기가 늘 읽으므로 막는 장치를 두지 않는다 |
 | android 요구의 세부 API | 후속 작업(내장 SSH 백엔드, 바인딩 크레이트). [android 요구의 자리](#android-요구의-자리) |

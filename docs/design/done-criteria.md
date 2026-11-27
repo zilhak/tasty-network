@@ -64,12 +64,12 @@ D11은 director 2931로 넣었다. 잡이 생기기 전에는 D11이 미실행�
 
 ## 모바일 공개 전 기준
 
-이 절은 tasty 전환 시작 판단에 쓰지 않는다. tasty-android 앱이 내장 SSH 백엔드로 원격에 붙는 기능을 사용자에게 내놓기 전의 조건이다(director 2931). 판정 규칙은 위와 같다(한 sha, `ok` 줄, 미실행은 미충족).
+이 절은 tasty 전환 시작 판단에 쓰지 않는다. tasty-android 앱이 내장 SSH 백엔드로 원격에 붙는 기능을 사용자에게 내놓기 전의 조건이다(director 2931). 판정 규칙은 위와 같다(한 sha, `ok` 줄, 미실행은 미충족). 태그 조건으로 쓸 때의 판정 커밋은 [버전·호환](versioning.md#태그와-브랜치)을 따른다. E1의 시험은 두 백엔드를 함께 켠 빌드에서 돈다. 이 레포의 기본 조합(E1 전에는 `system-ssh`만)으로는 증거가 나오지 않으므로, E1을 판정할 CI 조합은 내장 SSH 백엔드 작업이 만든다([SSH 백엔드 후속 작업](ssh-backends.md#후속-작업과-미정)).
 
 | # | 항목 | 판정 대상 | 확인하는 것(요약) | 증거 형태 |
 |---|---|---|---|---|
-| E1 | 내장 SSH 백엔드 attach | `crates/tasty-net-demo/tests/ssh_attach.rs`·`ssh_reverse_attach.rs`의 D2·D3 흐름을 내장 백엔드로 도는 시험(이름 끝 `_embedded`, [SSH 백엔드 시험 목록](ssh-backends.md#시험-목록) "내장 백엔드 attach"), 같은 목록의 "폴백 선택", "`ssh -G` 대조"(`tasty-net-ssh-config` `tests/matches_openssh.rs`), "`ssh-keygen -F` 대조"(`tests/known_hosts_matches_openssh.rs`), "호스트 키" 시험 (세 OS). 시험은 후속 작업(OpenSSH 해석 이식, 내장 SSH 백엔드)이 만들고, 시험 함수 이름은 그때 이 행에 적는다 | D2·D3의 연결·끊기·재연결·거절 흐름이 OpenSSH 클라이언트 없이 내장 백엔드로 같게 돌고, 백엔드 선택과 설정·known_hosts 해석이 기준 클라이언트와 맞음 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
+| E1 | 내장 SSH 백엔드 attach | `crates/tasty-net-demo/tests/ssh_attach.rs`·`ssh_reverse_attach.rs`의 D2·D3 흐름을 내장 백엔드로 도는 시험(이름 끝 `_embedded`, [SSH 백엔드 시험 목록](ssh-backends.md#시험-목록) "내장 백엔드 attach"), 같은 목록의 "폴백 선택", "`ssh -G` 대조"(`tasty-net-ssh-config` `tests/matches_openssh.rs`), "`ssh-keygen -F` 대조"(`tests/known_hosts_matches_openssh.rs`), "호스트 키" 시험. 적용 OS는 시험 계약대로다: 두 기준 클라이언트 대조는 Linux·macOS([비교 시험의 기준 클라이언트](ssh-backends.md#비교-시험의-기준-클라이언트), Windows는 대조를 돌리지 않는다), 나머지는 세 OS. 시험은 후속 작업(OpenSSH 해석 이식, 내장 SSH 백엔드)이 만들고, 시험 함수 이름은 그때 이 행에 적는다 | D2·D3의 연결·끊기·재연결·거절 흐름이 OpenSSH 클라이언트 없이 내장 백엔드로 같게 돌고, 백엔드 선택과 설정·known_hosts 해석이 기준 클라이언트와 맞음 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
 
 ## 내장 폴백 활성 기준
 
-E1이 충족되기 전에는 `ssh.backend = auto`가 내장 백엔드로 떨어지는 폴백을 켠 릴리스를 내지 않는다(director 2931). 폴백을 켠다는 것은 `embedded-ssh`가 기본 feature에 드는 것이다([SSH 백엔드 feature 계약](ssh-backends.md#2단계-내장-백엔드-이식-크레이트-뒤)). 그 전의 tasty 전환 태그에서는 기본 빌드가 `system-ssh`만이므로 `auto`가 OpenSSH를 찾지 못하면 지금처럼 시스템 ssh 없음 오류로 끝난다([선택 규칙](ssh-backends.md#선택-규칙)).
+E1이 충족되기 전에는 `ssh.backend = auto`가 내장 백엔드로 떨어지는 폴백이 동작하는 빌드를 tasty 릴리스로 내지 않는다(director 2931). 그 폴백은 두 백엔드(`system-ssh`·`embedded-ssh`)가 함께 빌드되면 동작한다([선택 규칙](ssh-backends.md#선택-규칙)). 그래서 이 레포는 E1 전에 `embedded-ssh`를 기본 feature에 넣지 않고([SSH 백엔드 feature 계약](ssh-backends.md#2단계-내장-백엔드-이식-크레이트-뒤)), tasty도 E1 전에는 데스크톱 빌드에서 `embedded-ssh`를 켜지 않는다. 그 전의 tasty 전환 태그에서는 기본 빌드가 `system-ssh`만이므로 `auto`가 OpenSSH를 찾지 못하면 지금처럼 시스템 ssh 없음 오류로 끝난다([선택 규칙](ssh-backends.md#선택-규칙)).
