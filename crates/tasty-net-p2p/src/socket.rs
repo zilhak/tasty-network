@@ -121,6 +121,9 @@ fn bind(addr: SocketAddr, dual: bool, params: &P2pParams) -> io::Result<std::net
     if dual {
         socket.set_only_v6(false)?;
     }
+    // While the endpoint is on, the port is its alone: on Windows another socket could
+    // otherwise bind it too and take its datagrams (docs/design/p2p.md "소켓 하나와 패킷 나누기").
+    tasty_net_rendezvous::packet_io::set_exclusive_address_use(&socket)?;
     if let Some(n) = params.recv_buffer {
         socket.set_recv_buffer_size(n)?;
     }

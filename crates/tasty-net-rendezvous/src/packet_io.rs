@@ -276,6 +276,58 @@ pub fn send_error_is_too_large(e: &io::Error) -> bool {
     too_large.is_some() && e.raw_os_error() == too_large
 }
 
+/// Keep the port of `socket` to it alone; call it before `bind`. On Windows this sets
+/// `SO_EXCLUSIVEADDRUSE`: without it, a socket bound to the same port with default options can
+/// bind while `socket` holds the port, and a datagram to that port may go to either. With it,
+/// every later bind to the port fails while `socket` is open, in both address families of a
+/// dual-stack socket. On other systems a socket bound without `SO_REUSEADDR`·`SO_REUSEPORT`
+/// already keeps its port, and this does nothing.
+pub fn set_exclusive_address_use(socket: &socket2::Socket) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        exclusive::set(socket)
+    }
+    #[cfg(not(windows))]
+    {
+        let _unused = socket;
+        Ok(())
+    }
+}
+
+/// The Winsock call of [`set_exclusive_address_use`].
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod exclusive {
+    use std::io;
+    use std::os::windows::io::AsRawSocket;
+
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOCKET, SOCKET_ERROR, SOL_SOCKET, setsockopt,
+    };
+
+    pub(super) fn set(socket: &socket2::Socket) -> io::Result<()> {
+        let handle = SOCKET::try_from(socket.as_raw_socket()).map_err(io::Error::other)?;
+        let on = i32::from(true);
+        let len = i32::try_from(std::mem::size_of::<i32>()).map_err(io::Error::other)?;
+        // SAFETY: `handle` is the open socket `socket` borrows for this call, and the option
+        // value points to `on`, an i32 that lives past the call, with `len` its size.
+        let r = unsafe {
+            setsockopt(
+                handle,
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                (&raw const on).cast(),
+                len,
+            )
+        };
+        if r == SOCKET_ERROR {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Counts of a [`DemuxSocket`].
 #[derive(Debug, Default)]
 pub struct DemuxCounters {
