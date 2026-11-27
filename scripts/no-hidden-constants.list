@@ -1,8 +1,8 @@
 # no-hidden-constants의 목록 하나(docs/design/testing.md "설정값 시험"). 칸은 탭으로 나눈다.
 # 종류와 칸은 scripts/check-no-hidden-constants.sh 머리 주석에 있다.
-# 뒤 크레이트(tasty-net-p2p, transport의 연결 목록·Redialer)는 target·settings·table 줄과
-# 자기 파일의 allow 줄을 이 파일에 더한다. 와이어 형식 상수는 docs/design/p2p.md
-# "와이어 형식 상수 (설정 아님)" 표에 있는 값만 올린다.
+# 뒤 크레이트(tasty-net-p2p)는 target·settings·table 줄과 자기 파일의 allow 줄을 이 파일에
+# 더한다. transport의 연결 목록·Redialer·링크 ID 몫은 파일 끝 transport 묶음에 있다.
+# 와이어 형식 상수는 docs/design/p2p.md "와이어 형식 상수 (설정 아님)" 표에 있는 값만 올린다.
 target	crates/tasty-net-rendezvous/src/
 settings	crates/tasty-net-rendezvous/src/settings.rs
 table	crates/tasty-net-rendezvous/src/settings.rs	rendezvous.md	서버 설정값
