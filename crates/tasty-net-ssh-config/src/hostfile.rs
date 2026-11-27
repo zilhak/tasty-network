@@ -1072,28 +1072,49 @@ fn lines(text: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
         .map(|(l, n)| (n, l))
 }
 
-/// The lines of a file up to its end or the first read error: `None` when it cannot be
-/// opened.
-fn read_lines(path: &Path) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    Some(read_lines_from(std::io::BufReader::new(file)))
+/// A known_hosts file as read: the text, and whether its last line is a piece a read
+/// error cut ([`read_lines_from`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadFile {
+    path: PathBuf,
+    text: Vec<u8>,
+    cut: bool,
 }
 
-/// The lines of `reader` up to its end or the first read error. The bytes read before the
-/// error are a last line, as glibc `getline` returns them with the error flag set and fails
-/// only on the next call (`getdelim`: it stops at the failed refill and returns what it has).
-fn read_lines_from(mut reader: impl std::io::BufRead) -> Vec<u8> {
+/// The lines of a file up to its end or the first read error: `None` when it cannot be
+/// opened.
+fn read_lines(path: &Path) -> Option<ReadFile> {
+    let file = std::fs::File::open(path).ok()?;
+    let (text, cut) = read_lines_from(std::io::BufReader::new(file));
+    Some(ReadFile {
+        path: path.to_path_buf(),
+        text,
+        cut,
+    })
+}
+
+/// The bytes of `reader` up to its end or the first read error, and whether the error cut
+/// a line (the text then ends without a newline). Any error stops the reading, `Interrupted`
+/// too: glibc sets the error flag on a failed refill and reads no more (`_IO_new_file_underflow`),
+/// while `read_until` would retry. What becomes of the cut line differs between the C
+/// libraries: glibc `getline` returns it and `ssh` reads it as a line, Darwin `getdelim`
+/// returns -1 and `ssh` does not. [`KnownHosts::check`] uses it only to reject.
+fn read_lines_from(mut reader: impl std::io::BufRead) -> (Vec<u8>, bool) {
     let mut text = Vec::new();
     loop {
-        let mut line = Vec::new();
-        let read = reader.read_until(b'\n', &mut line);
-        text.extend_from_slice(&line);
-        match read {
-            Ok(_) if !line.is_empty() => {}
-            _ => break,
-        }
+        let n = match reader.fill_buf() {
+            Ok([]) => return (text, false),
+            Ok(buf) => {
+                text.extend_from_slice(buf);
+                buf.len()
+            }
+            Err(_) => {
+                let cut = text.last().is_some_and(|c| *c != b'\n');
+                return (text, cut);
+            }
+        };
+        reader.consume(n);
     }
-    text
 }
 
 /// The name a host key is looked up by in known_hosts files.
@@ -1182,7 +1203,7 @@ pub enum HostKeyVerdict {
 /// The known_hosts files of a connection, read once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnownHosts {
-    files: Vec<(PathBuf, Vec<u8>)>,
+    files: Vec<ReadFile>,
 }
 
 impl KnownHosts {
@@ -1190,24 +1211,25 @@ impl KnownHosts {
     /// [`crate::Resolution::known_hosts_files`]). A file that cannot be opened is skipped, as
     /// `load_hostkeys` skips a file it cannot open (`hostfile.c:291`-`:294`). A file is read
     /// line by line as `getline` reads it (`hostfile.c:806`): a read error ends the file and
-    /// keeps the lines read before it, with the bytes of a line it cut as a last line.
+    /// keeps the lines read before it. The bytes of a line it cut are kept as a last line
+    /// that [`KnownHosts::check`] uses only to reject: its `@revoked` and different keys
+    /// count, its matching key does not. Any read error ends the file, `Interrupted` too.
     pub fn load(files: &[PathBuf]) -> KnownHosts {
         KnownHosts {
-            files: files
-                .iter()
-                .filter_map(|p| read_lines(p).map(|text| (p.clone(), text)))
-                .collect(),
+            files: files.iter().filter_map(|p| read_lines(p)).collect(),
         }
     }
 
     /// The files that were opened.
     pub fn files(&self) -> impl Iterator<Item = &Path> {
-        self.files.iter().map(|(p, _)| p.as_path())
+        self.files.iter().map(|f| f.path.as_path())
     }
 
-    fn scanned(&self, query: &HostKeyQuery) -> Vec<(HostKeyEntry, Option<Key>)> {
+    /// The entries with their keys, and whether each is the cut last line of its file.
+    fn scanned(&self, query: &HostKeyQuery) -> Vec<(HostKeyEntry, Option<Key>, bool)> {
         let mut out = Vec::new();
-        for (path, text) in &self.files {
+        for ReadFile { path, text, cut } in &self.files {
+            let cut_line = cut.then(|| lines(text).count());
             for (line, l) in lines(text) {
                 if let Some(Scanned {
                     marker,
@@ -1235,6 +1257,7 @@ impl KnownHosts {
                             key,
                         },
                         parsed,
+                        cut_line == Some(line),
                     ));
                 }
             }
@@ -1246,7 +1269,7 @@ impl KnownHosts {
     /// (`match_hostname`) or a hashed name (`|1|`). Lines with a bad marker, no key part or a
     /// bad hash are not entries (`hostfile.c:833`-`:896`).
     pub fn entries(&self, query: &HostKeyQuery) -> Vec<HostKeyEntry> {
-        self.scanned(query).into_iter().map(|(e, _)| e).collect()
+        self.scanned(query).into_iter().map(|(e, _, _)| e).collect()
     }
 
     /// Judge the key blob a server sent for `query` (`check_hostkeys_by_key_or_type`,
@@ -1317,10 +1340,10 @@ impl KnownHosts {
             without_port: None,
         };
         let query = &query;
-        let lines: Vec<(HostKeyEntry, Key)> = self
+        let scanned: Vec<(HostKeyEntry, Key, bool)> = self
             .scanned(query)
             .into_iter()
-            .filter_map(|(e, k)| k.map(|k| (e, k)))
+            .filter_map(|(e, k, cut)| k.map(|k| (e, k, cut)))
             .collect();
         let key = parse_blob(key_blob);
         // `sshkey_drop_cert`: a certificate without its certificate part.
@@ -1329,9 +1352,15 @@ impl KnownHosts {
             ..k.clone()
         });
         let mut verdict = HostKeyVerdict::NotFound;
-        for (e, k) in lines.iter().filter(|(e, _)| e.marker == Marker::None) {
+        for (e, k, cut) in scanned.iter().filter(|(e, _, _)| e.marker == Marker::None) {
             let place = (e.file.clone(), e.line);
-            if plain.as_ref().is_some_and(|key| key.equal(k)) {
+            let equal = plain.as_ref().is_some_and(|key| key.equal(k));
+            // A cut last line is a reason to reject only: its key does not match (Darwin
+            // `ssh` does not read it), a different key is `HOST_CHANGED` (glibc `ssh` reads it).
+            if equal && *cut {
+                continue;
+            }
+            if equal {
                 verdict = HostKeyVerdict::Match {
                     file: place.0,
                     line: place.1,
@@ -1346,7 +1375,7 @@ impl KnownHosts {
         // `check_key_not_revoked` (`hostfile.c:315`-`:332`): an `@revoked` line with the key,
         // or for a certificate with its CA key (`:325`-`:328`); the first such line.
         if let Some(key) = &key
-            && let Some((e, _)) = lines.iter().find(|(e, k)| {
+            && let Some((e, _, _)) = scanned.iter().find(|(e, k, _)| {
                 e.marker == Marker::Revoked
                     && (key.equal_public(k) || key.ca.as_ref().is_some_and(|ca| ca.equal_public(k)))
             })
@@ -1357,9 +1386,9 @@ impl KnownHosts {
             };
         }
         if verdict == HostKeyVerdict::NotFound
-            && let Some((e, _)) = lines
+            && let Some((e, _, _)) = scanned
                 .iter()
-                .find(|(e, _)| e.marker == Marker::CertAuthority)
+                .find(|(e, _, _)| e.marker == Marker::CertAuthority)
         {
             return HostKeyVerdict::DistrustedCaLine {
                 file: e.file.clone(),
@@ -1973,46 +2002,149 @@ mod tests {
         assert!(!fits_buffer(SSHBUF_SIZE_MAX + 1));
     }
 
+    /// Gives the bytes, then fails every read with `kind`, then (after an `Interrupted`)
+    /// would give `after`.
+    struct Failing {
+        text: Vec<u8>,
+        kind: std::io::ErrorKind,
+        after: Vec<u8>,
+        failed: bool,
+    }
+
+    impl std::io::Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.text.is_empty() {
+                if !self.failed || self.kind != std::io::ErrorKind::Interrupted {
+                    self.failed = true;
+                    return Err(self.kind.into());
+                }
+                self.text = std::mem::take(&mut self.after);
+                if self.text.is_empty() {
+                    return Ok(0);
+                }
+            }
+            let n = buf.len().min(self.text.len());
+            buf[..n].copy_from_slice(&self.text[..n]);
+            self.text.drain(..n);
+            Ok(n)
+        }
+    }
+
+    fn read_failing(text: &[u8], kind: std::io::ErrorKind, after: &[u8]) -> (Vec<u8>, bool) {
+        read_lines_from(std::io::BufReader::new(Failing {
+            text: text.to_vec(),
+            kind,
+            after: after.to_vec(),
+            failed: false,
+        }))
+    }
+
+    /// One file read through [`read_failing`] with an `Other` error at its end.
+    fn cut_hosts(text: &str) -> (PathBuf, KnownHosts) {
+        let path = PathBuf::from("known_hosts");
+        let (text, cut) = read_failing(text.as_bytes(), std::io::ErrorKind::Other, b"");
+        let kh = KnownHosts {
+            files: vec![ReadFile {
+                path: path.clone(),
+                text,
+                cut,
+            }],
+        };
+        (path, kh)
+    }
+
     #[test]
     fn a_read_error_keeps_the_lines_before_it() {
-        /// Gives the bytes, then fails every read.
-        struct Failing(Vec<u8>);
-        impl std::io::Read for Failing {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self.0.is_empty() {
-                    return Err(std::io::Error::other("read error"));
-                }
-                let n = buf.len().min(self.0.len());
-                buf[..n].copy_from_slice(&self.0[..n]);
-                self.0.drain(..n);
-                Ok(n)
-            }
-        }
-        let read = |text: &[u8]| read_lines_from(std::io::BufReader::new(Failing(text.to_vec())));
+        let other = std::io::ErrorKind::Other;
         assert_eq!(
-            read(b"one\ntwo\nthr"),
-            b"one\ntwo\nthr",
-            "the piece before the error is a last line"
+            read_failing(b"one\ntwo\nthr", other, b""),
+            (b"one\ntwo\nthr".to_vec(), true),
+            "the piece before the error is kept as a cut line"
         );
-        assert_eq!(read(b"one\n"), b"one\n");
-        assert_eq!(read(b""), b"");
-        let got = read_lines_from(&b"one\nlast"[..]);
-        assert_eq!(got, b"one\nlast", "the last line without a newline is kept");
-        // A last `@revoked` piece before the error revokes, as in `ssh`.
-        let a = ed25519_blob(31);
-        let k = line("ssh-ed25519", &a);
-        let path = PathBuf::from("known_hosts");
-        let kh = KnownHosts {
-            files: vec![(
-                path.clone(),
-                read(format!("h.example {k}\n@revoked h.example {k}").as_bytes()),
-            )],
+        assert_eq!(
+            read_failing(b"one\n", other, b""),
+            (b"one\n".to_vec(), false)
+        );
+        assert_eq!(read_failing(b"", other, b""), (Vec::new(), false));
+        assert_eq!(
+            read_lines_from(&b"one\nlast"[..]),
+            (b"one\nlast".to_vec(), false),
+            "the last line without a newline at the end of the file is not cut"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_read_ends_the_file() {
+        // glibc reads no more after `EINTR`; `read_until` would retry and read `late`.
+        let interrupted = std::io::ErrorKind::Interrupted;
+        assert_eq!(
+            read_failing(b"one\n", interrupted, b"late\n"),
+            (b"one\n".to_vec(), false)
+        );
+        assert_eq!(
+            read_failing(b"one\ntw", interrupted, b"o\nlate\n"),
+            (b"one\ntw".to_vec(), true)
+        );
+        // The reader gives the line when it is read again: the test reader is right.
+        let mut r = Failing {
+            text: Vec::new(),
+            kind: interrupted,
+            after: b"late\n".to_vec(),
+            failed: false,
         };
+        let mut buf = [0u8; 8];
+        assert!(std::io::Read::read(&mut r, &mut buf).is_err());
+        assert_eq!(std::io::Read::read(&mut r, &mut buf).unwrap(), 5);
+    }
+
+    #[test]
+    fn a_cut_line_only_rejects() {
+        let a = ed25519_blob(31);
+        let b = ed25519_blob(32);
+        let (ka, kb) = (line("ssh-ed25519", &a), line("ssh-ed25519", &b));
+        // The key only on the cut line: no match (Darwin `ssh` does not read the line).
+        let (_, kh) = cut_hosts(&format!("other.example {ka}\nh.example {ka}"));
+        assert_eq!(kh.check(&q("h.example"), &a), HostKeyVerdict::NotFound);
+        // Nor through the look-up without the port.
+        assert_eq!(
+            kh.check(&HostKeyQuery::for_host("h.example", 2222, None), &a),
+            HostKeyVerdict::NotFound
+        );
+        // A cut `@revoked` line revokes (glibc `ssh` reads it).
+        let (path, kh) = cut_hosts(&format!("h.example {ka}\n@revoked h.example {ka}"));
         assert_eq!(
             kh.check(&q("h.example"), &a),
             HostKeyVerdict::Revoked {
-                file: path,
+                file: path.clone(),
                 line: 2
+            }
+        );
+        // A match before a cut line with another key: the match stays (the first match
+        // ends the search in both C libraries).
+        let (path, kh) = cut_hosts(&format!("h.example {ka}\nh.example {kb}"));
+        assert_eq!(
+            kh.check(&q("h.example"), &a),
+            HostKeyVerdict::Match {
+                file: path.clone(),
+                line: 1
+            }
+        );
+        // Another key on the cut line only: `HOST_CHANGED` (glibc), not new.
+        let (path, kh) = cut_hosts(&format!("other.example {ka}\nh.example {kb}"));
+        assert_eq!(
+            kh.check(&q("h.example"), &a),
+            HostKeyVerdict::Mismatch {
+                file: path.clone(),
+                line: 2
+            }
+        );
+        // A cut line with the key after a line with another key: the change stays.
+        let (path, kh) = cut_hosts(&format!("h.example {kb}\nh.example {ka}"));
+        assert_eq!(
+            kh.check(&q("h.example"), &a),
+            HostKeyVerdict::Mismatch {
+                file: path,
+                line: 1
             }
         );
     }
