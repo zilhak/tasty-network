@@ -142,8 +142,9 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 - 바꾸기: `SshSettings::set(키, 값)`. 모르는 키, 다른 종류의 값(초 단위 항목에 1초로 나누어떨어지지 않는 시간 포함), 범위 밖의 값은 `SettingsError`로 거절하고 아무것도 바꾸지 않는다. 설정은 `SshLauncher::with_settings(settings)`로 런처에 준다. 그 런처로 띄우는 ssh 옵션, 포트 발견, 터널, 판정 핸들이 모두 그 값을 쓴다. `Backoff::from_settings(&settings)`는 `backoff.*`를 쓴다. 설정 없는 `SshLauncher::new`·`Backoff::new()`는 기본값이다. 공개 상수 `SSH_CONNECT_TIMEOUT`·`PORT_DISCOVERY_STEP_TIMEOUT`·`PORT_DISCOVERY_TOTAL_TIMEOUT`은 해당 키의 기본값으로 남는다.
 - 조회: `SshLauncher::settings().entries()`(항목마다 `{key, value, source}`, 출처 `default`·`configured`)와 `get(키)`.
 - 대상마다의 적용값: 앞의 세 키는 ssh 옵션이 된다. 대상의 `extra_options`에 같은 옵션이 있으면 ssh는 먼저 나온 값을 쓴다. 그래서 `ServerAliveInterval`·`ServerAliveCountMax`는 대상 옵션보다 앞에 넘겨 설정값이 이기고, `ConnectTimeout`은 맨 뒤에 넘겨 대상의 값이 이긴다. `SshLauncher::applied_options(&target)`가 옵션마다 `{key, option, value, source}`를 돌려준다. `source`는 `default`·`configured`(설정값이 쓰인다)나 `target`(대상의 `ConnectTimeout`이 쓰인다)이다. 포트 발견이 느린 연결 실패를 시간 초과로 분류할 때도 이 적용값을 쓴다. 연결 목록의 `applied`에 싣는 일은 transport 쪽이 한다.
-- 대상의 `ConnectTimeout`은 OpenSSH의 시간 형식으로 읽는다. 숫자 뒤 단위 `s`·`m`·`h`·`d`·`w`(대소문자 무시)를 이어 붙일 수 있고(`1m30s`), 단위 없는 숫자는 초다. `none`은 OpenSSH가 정하지 않은 것으로 보므로(뒤에 오는 값이 정한다) 대상이 정하지 않은 것으로 다룬다. 다른 `ConnectTimeout`이 없으면 런처 값과 그 출처(`default`·`configured`)가 보인다. 읽지 못하는 값은 `applied_options`에 대상 문자열 그대로 `target`으로 보이고, 발견 분류는 런처 값을 쓴다. 0은 OpenSSH가 기한 없음으로 보므로 발견 분류도 시간으로 시간 초과를 정하지 않는다.
+- 대상의 `ConnectTimeout`은 OpenSSH의 시간 형식으로 읽는다. 숫자 뒤 단위 `s`·`m`·`h`·`d`·`w`(대소문자 무시)를 이어 붙일 수 있고(`1m30s`), 단위 없는 숫자는 초다. `none`은 OpenSSH가 정하지 않은 것으로 보므로(뒤에 오는 값이 정한다) 대상이 정하지 않은 것으로 다룬다. 다른 `ConnectTimeout`이 없으면 런처 값과 그 출처(`default`·`configured`)가 보인다. 읽지 못하는 값은 `applied_options`에 대상 문자열 그대로 `target`으로 보이고, 발견 분류는 런처 값을 쓴다. 0은 OpenSSH가 기한 없음으로 보므로 발견 분류도 걸린 시간으로 시간 초과를 정하지 않는다.
 - 나머지 키는 런처 하나에 하나다. 대상마다 다른 값이 필요하면 소비자가 대상마다 런처를 만든다.
+- 아래 표의 키 사이 관계(단계 상한이 `ConnectTimeout`보다 길다, 전체 예산이 단계 상한의 세 배보다 짧다)는 기본값을 고른 근거다. 다른 값을 설정하면 그 관계는 깨질 수 있다. 그래도 코드는 단계마다 `min(단계 상한, 남은 전체 예산)`으로 자르므로, 단계 상한이 `ConnectTimeout`보다 짧으면 ssh가 자기 기한에 닿기 전에 단계 상한이 자르고(`TimedOut`), 전체 예산이 길면 Auto의 세 단계가 각자 단계 상한까지 쓸 수 있다.
 - 간격 키가 기한·상한 키보다 커도 기한과 상한이 이긴다. 모든 대기는 남은 기한으로 자르고, 터널 준비 확인은 기한이 지난 뒤 새로 접속을 시도하지 않는다. `discovery.poll_min`이 `discovery.poll_max`보다 크면 `poll_max`에서 시작한다. `backoff.initial`이 `backoff.max_delay`보다 크면 처음 대기와 `reset` 뒤 대기도 `max_delay`다. 리스너 판정은 거절 줄이 온 시각을 기록해 `tunnel.verdict_grace`가 지난 뒤 온 줄은 세지 않는다. 키 사이의 관계로 설정을 거절하지는 않는다.
 
 | 키 | 기본 | 범위 | 근거 |
@@ -151,9 +152,9 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | `ssh.connect_timeout` | 10 s | 1 s ~ 1 h | ssh `ConnectTimeout`. 연결 맺기만 묶고 그 뒤 keepalive와는 관계없다. 대상의 `ConnectTimeout`이 이긴다(위) |
 | `ssh.server_alive_interval` | 15 s | 1 s ~ 1 h | ssh `ServerAliveInterval`. 아래 횟수와 곱한 약 45초 안에 망이 끊긴 ssh가 스스로 끝난다. 대상 옵션보다 앞이라 이긴다 |
 | `ssh.server_alive_count_max` | 3 | 1 ~ 100 | ssh `ServerAliveCountMax`. 위와 같다 |
-| `discovery.step_timeout` | 20 s | 1 s ~ 1 h | 포트 발견 한 단계(생성 훅, 자식 대기, 출력 수집)의 상한. 지나면 자식을 끝내고 회수한다. `ConnectTimeout`으로 끝나는 연결 실패가 이 상한 전에 스스로 끝나도록 그보다 길게 둔다 |
-| `discovery.total_timeout` | 45 s | 1 s ~ 1 h | 한 발견 호출의 단계들이 나눠 쓰는 예산. 단계마다 단계 상한과 남은 예산 중 짧은 쪽을 받고, 다 쓰면 새 ssh를 띄우지 않는다. 단계 상한의 세 배(Auto의 세 단계)보다 짧아서 전체 대기가 단계 수만큼 늘지 않는다 |
-| `discovery.output_limit` | 64 KiB | 1 KiB ~ 1 MiB | 발견 명령 stdout의 상한. 레코드는 작다. 넘으면 바로 `PortParseFailed`로 거절한다. identity `max_secret_bytes`의 위 끝이 이 기본값이다([기기 키·토큰](identity.md#설정값)) |
+| `discovery.step_timeout` | 20 s | 1 s ~ 1 h | 포트 발견 한 단계(생성 훅, 자식 대기, 출력 수집)의 상한. 지나면 자식을 끝내고 회수한다. 기본값은 `ConnectTimeout`(기본 10 s)으로 끝나는 연결 실패가 이 상한 전에 스스로 끝나도록 그보다 길게 골랐다 |
+| `discovery.total_timeout` | 45 s | 1 s ~ 1 h | 한 발견 호출의 단계들이 나눠 쓰는 예산. 단계마다 단계 상한과 남은 예산 중 짧은 쪽을 받고, 다 쓰면 새 ssh를 띄우지 않는다. 기본값은 기본 단계 상한의 세 배(Auto의 세 단계)보다 짧게 골라 전체 대기가 단계 수만큼 늘지 않는다 |
+| `discovery.output_limit` | 64 KiB | 1 KiB ~ 1 MiB | 발견 명령 stdout의 상한. 레코드는 작다. 넘으면 읽기를 멈추고, 자식이 `discovery.overflow_exit_grace` 안에 스스로 끝나지 않으면 끊는다. 자식이 0이 아닌 자기 종료 코드로 끝났으면 그 코드가 분류를 정하고(3이면 `RemoteInstanceExited`), 성공 종료·신호 종료·끊김이면 `PortParseFailed`다([레포 경계](repo-boundary.md) "포트 발견의 tasty 관례"). identity `max_secret_bytes`의 위 끝이 이 기본값이다([기기 키·토큰](identity.md#설정값)) |
 | `discovery.stderr_limit` | 16 KiB | 1 KiB ~ 1 MiB | 진단에 남기는 stderr 앞부분. 나머지는 읽어서 버린다(ssh가 닫힌 파이프에 막히지 않게) |
 | `discovery.stderr_detail_limit` | 512 | 64 ~ 65 536 | 실패 detail에 남기는 stderr 글자 수(자른 표시 `...` 포함) |
 | `discovery.overflow_exit_grace` | 100 ms | 0 ms ~ 10 s | stdout이 상한을 넘은 자식이 스스로 끝나기를 기다리는 시간. 대개 막 닫힌 파이프에 쓰다 실패해 끝나고, 그 종료 코드(3 등)가 분류를 정한다 |
