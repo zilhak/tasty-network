@@ -166,7 +166,7 @@ fn redial_failing(
     let table = transport.connections().expect("a table");
     let redialer = Redialer::new(table, config).expect("valid settings");
     let cancel = AttemptCancel::new();
-    redialer.redial(lost, &cancel, |options| {
+    redialer.redial(lost, None, &cancel, |options| {
         transport
             .connect_with(&SshTarget::parse("nowhere"), &cancel, options)
             .map(drop)
@@ -231,7 +231,7 @@ fn timed_redial(
     let redialer = Redialer::new(&table, config).expect("valid settings");
     let mut starts = Vec::new();
     let started = Instant::now();
-    let result = redialer.redial(lost, &AttemptCancel::new(), |_| {
+    let result = redialer.redial(lost, None, &AttemptCancel::new(), |_| {
         starts.push(Instant::now());
         Err::<(), _>(error())
     });
@@ -334,7 +334,7 @@ fn a_redial_keeps_the_chosen_role_reversal() {
     )
     .expect("valid");
     let cancel = AttemptCancel::new();
-    let result = redialer.redial(lost, &cancel, |options| {
+    let result = redialer.redial(lost, None, &cancel, |options| {
         let options = options.clone().with_holder(Holder::Acceptor);
         transport
             .connect_with(&SshTarget::parse("nowhere"), &cancel, &options)

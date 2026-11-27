@@ -169,7 +169,8 @@ pub enum Cause {
     HandshakeTimedOut,
     /// The peer closed the channel during the handshake.
     PeerClosed,
-    /// Another handshake failure (the error's text).
+    /// Another handshake failure, one that connecting again does not change (the error's
+    /// text).
     HandshakeFailed(String),
     /// The attempt was cancelled.
     Cancelled,
@@ -210,6 +211,33 @@ impl Cause {
         }
     }
 
+    /// Whether connecting again can give another result, as
+    /// [`HandshakeError::is_retryable`] says for the error the cause came from. Not retried:
+    /// this side closed it, the attempt was cancelled, the peer is too old, this side refused
+    /// the peer, the peer refused it for a reason other than [`RejectReason::Busy`], and the
+    /// other handshake failures ([`Cause::HandshakeFailed`]).
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Rejected(reason) => reason.is_retryable(),
+            Self::PeerTooOld
+            | Self::Refused(_)
+            | Self::HandshakeFailed(_)
+            | Self::Cancelled
+            | Self::ClosedHere => false,
+            Self::Discovery(_)
+            | Self::TunnelFailed(_)
+            | Self::TunnelExited
+            | Self::RemoteListenerAbsent
+            | Self::ConnectFailed(_)
+            | Self::HandshakeTimedOut
+            | Self::PeerClosed
+            | Self::Lost
+            | Self::Ended
+            | Self::SharedTunnel(_)
+            | Self::RedialExhausted => true,
+        }
+    }
+
     pub(crate) fn of_connect(error: &ConnectError) -> Self {
         match error {
             ConnectError::Cancelled => Self::Cancelled,
@@ -230,6 +258,9 @@ impl Cause {
             HandshakeError::PeerClosed => Self::PeerClosed,
             HandshakeError::RemoteListenerAbsent(_) => Self::RemoteListenerAbsent,
             HandshakeError::Connect(e) => Self::of_connect(e),
+            HandshakeError::Io(e) => Self::ConnectFailed(e.to_string()),
+            // A plain QUIC close during the handshake: the peer closed the channel.
+            HandshakeError::Closed(reason) if reason.is_retryable() => Self::PeerClosed,
             other => Self::HandshakeFailed(other.to_string()),
         }
     }

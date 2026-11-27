@@ -155,8 +155,8 @@ impl RedialerConfig {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RedialError {
-    /// The loss is not one to redial: this side closed the entry, or `redial.give_up_after`
-    /// is zero. No entry was made.
+    /// The loss is not one to redial: its cause is not retryable ([`Cause::is_retryable`],
+    /// this side closing it included), or `redial.give_up_after` is zero. No entry was made.
     NotRedialed,
     /// An attempt failed in a way connecting again does not change
     /// ([`HandshakeError::is_retryable`]).
@@ -270,19 +270,26 @@ impl Redialer {
     /// Redials the connection of the entry `lost` with `attempt` (which connects with the
     /// options it is given and runs the handshake) until an attempt succeeds, one fails with
     /// an error that is not retryable, the settings run out, or `cancel` stops it.
+    ///
+    /// `why` is the cause the consumer saw for the loss (the cause of the entry's last
+    /// transition event). A cause that is not retryable ([`Cause::is_retryable`]), given
+    /// here or still on the entry, ends the call with [`RedialError::NotRedialed`] before any
+    /// attempt, also when `connections.keep_closed` already dropped the entry.
     pub fn redial<T>(
         &self,
         lost: ConnectionId,
+        why: Option<&Cause>,
         cancel: &AttemptCancel,
         mut attempt: impl FnMut(&ConnectOptions) -> Result<T, HandshakeError>,
     ) -> Result<T, RedialError> {
         let config = &self.config;
         let clock = &*self.clock;
         let lost_entry = self.table.connection(lost);
-        let closed_here = lost_entry
-            .as_ref()
-            .is_some_and(|e| e.last_cause == Some(Cause::ClosedHere));
-        if closed_here || config.give_up_after().is_zero() {
+        let permanent = why
+            .into_iter()
+            .chain(lost_entry.as_ref().and_then(|e| e.last_cause.as_ref()))
+            .any(|cause| !cause.is_retryable());
+        if permanent || config.give_up_after().is_zero() {
             return Err(RedialError::NotRedialed);
         }
         let started = clock.now();
@@ -456,6 +463,9 @@ fn sleep(wait: Duration, cancel: &AttemptCancel) -> Result<(), Cancelled> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection_table::ConnectionTableConfig;
+    use crate::reject::{P2pCloseReason, RejectReason, TooOldEvidence};
+    use crate::transport::ConnectError;
 
     /// A clock that moves only when the redialer sleeps (by the wait plus `late`) or when an
     /// attempt says so.
@@ -507,7 +517,7 @@ mod tests {
         let redialer = Redialer::with_clock(&table, config, Arc::clone(&clock) as Arc<dyn Clock>)
             .expect("valid settings");
         let mut attempts = 0;
-        let result = redialer.redial(LOST, &AttemptCancel::new(), |_| {
+        let result = redialer.redial(LOST, None, &AttemptCancel::new(), |_| {
             attempts += 1;
             clock.advance(takes);
             Err::<(), _>(HandshakeError::TimedOut)
@@ -640,5 +650,123 @@ mod tests {
         // A long but countable limit is kept.
         let year = Duration::from_secs(365 * 24 * 60 * 60);
         assert!(Redialer::new(&table, RedialerConfig::new().with_give_up_after(year)).is_ok());
+    }
+
+    /// Opens an entry and ends it with `cause`, as a lost connection.
+    fn ended(table: &ConnectionTable, cause: Cause) -> ConnectionId {
+        let entry = table.open(NewEntry {
+            previous: None,
+            parent: None,
+            peer: ConnectionPeer::default(),
+            path: PathKind::SshForward,
+            local_side: Side::Dialer,
+            segments: Vec::new(),
+            via: Via::Loopback,
+            state: ConnectionState::Connected,
+            phase: None,
+            held: false,
+            path_fixed: true,
+        });
+        entry.transition(ConnectionState::Disconnected, None, Some(cause));
+        entry.id()
+    }
+
+    /// Redials `lost` with one attempt at most; gives the result and whether it attempted.
+    fn redial_once(
+        table: &ConnectionTable,
+        lost: ConnectionId,
+        why: Option<&Cause>,
+    ) -> (Result<(), RedialError>, bool) {
+        let config = RedialerConfig::new()
+            .with_initial(Duration::ZERO)
+            .with_max_attempts(1);
+        let redialer = Redialer::with_clock(table, config, FakeClock::new(Duration::ZERO))
+            .expect("valid settings");
+        let mut attempted = false;
+        let result = redialer.redial(lost, why, &AttemptCancel::new(), |_| {
+            attempted = true;
+            Err::<(), _>(HandshakeError::TimedOut)
+        });
+        (result, attempted)
+    }
+
+    #[test]
+    fn a_loss_that_is_not_retryable_makes_no_attempt() {
+        let token = Cause::Rejected(RejectReason::TokenInvalid);
+        // Still on the entry.
+        let table = ConnectionTable::default();
+        let lost = ended(&table, token.clone());
+        let before = table.connections().len();
+        let (result, attempted) = redial_once(&table, lost, None);
+        assert!(
+            matches!(result, Err(RedialError::NotRedialed)),
+            "{result:?}"
+        );
+        assert!(!attempted);
+        assert_eq!(table.connections().len(), before, "no entry was made");
+
+        // Dropped by connections.keep_closed = 0: the cause the consumer gives.
+        let table = ConnectionTable::new(ConnectionTableConfig::new().with_keep_closed(0));
+        for cause in [Cause::PeerTooOld, Cause::ClosedHere, token] {
+            let lost = ended(&table, cause.clone());
+            assert!(table.connection(lost).is_none(), "dropped");
+            let (result, attempted) = redial_once(&table, lost, Some(&cause));
+            assert!(
+                matches!(result, Err(RedialError::NotRedialed)),
+                "{cause}: {result:?}"
+            );
+            assert!(!attempted, "{cause}");
+        }
+
+        // Contrast: a busy peer is retried, from the entry or from the cause given.
+        let busy = Cause::Rejected(RejectReason::Busy);
+        let table = ConnectionTable::default();
+        let lost = ended(&table, busy.clone());
+        let (result, attempted) = redial_once(&table, lost, None);
+        assert!(
+            matches!(result, Err(RedialError::Exhausted(_))),
+            "{result:?}"
+        );
+        assert!(attempted);
+        let (_, attempted) = redial_once(&table, LOST, Some(&busy));
+        assert!(attempted);
+    }
+
+    #[test]
+    fn causes_classify_as_the_errors_they_come_from() {
+        let errors = [
+            HandshakeError::TimedOut,
+            HandshakeError::PeerClosed,
+            HandshakeError::Cancelled,
+            HandshakeError::SelfAttach,
+            HandshakeError::SignatureInvalid,
+            HandshakeError::Protocol("x"),
+            HandshakeError::Refused(RejectReason::Busy),
+            HandshakeError::Rejected {
+                reason: RejectReason::Busy,
+                error: String::new(),
+                ext: None,
+            },
+            HandshakeError::Rejected {
+                reason: RejectReason::TokenInvalid,
+                error: String::new(),
+                ext: None,
+            },
+            HandshakeError::PeerTooOld {
+                evidence: TooOldEvidence::V1Ack,
+            },
+            HandshakeError::Closed(P2pCloseReason::Closed),
+            HandshakeError::Closed(P2pCloseReason::NotPaired),
+            HandshakeError::Io(std::io::Error::other("reset")),
+            HandshakeError::Connect(ConnectError::Cancelled),
+            HandshakeError::Connect(ConnectError::Io(std::io::Error::other("refused"))),
+        ];
+        for error in &errors {
+            assert_eq!(
+                Cause::of_handshake(error).is_retryable(),
+                error.is_retryable(),
+                "{error}"
+            );
+        }
     }
 }

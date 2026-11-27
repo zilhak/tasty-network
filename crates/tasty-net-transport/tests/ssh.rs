@@ -702,7 +702,7 @@ fn ssh_connection_reports_applied_sources() {
     .expect("valid");
     // common::timeouts() keeps the default handshake timeout and changes the others.
     let link = redialer
-        .redial(lost, &cancel, |options| {
+        .redial(lost, None, &cancel, |options| {
             let conn = transport
                 .connect_with(&target(), &cancel, options)
                 .map_err(HandshakeError::Connect)?;
@@ -790,7 +790,7 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
     };
 
     // Both attempts join the shared tunnel and fail before a handshake.
-    let result = redialer.redial(lost, &cancel, |options| {
+    let result = redialer.redial(lost, None, &cancel, |options| {
         let conn = transport
             .connect_with(&target(), &cancel, options)
             .map_err(HandshakeError::Connect)?;
@@ -831,7 +831,7 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
     .expect("valid");
     let mut attempts = 0;
     let link = redialer
-        .redial(lost, &cancel, |options| {
+        .redial(lost, None, &cancel, |options| {
             attempts += 1;
             let conn = transport
                 .connect_with(&target(), &cancel, options)
