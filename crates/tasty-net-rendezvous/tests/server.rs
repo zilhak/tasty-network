@@ -1093,6 +1093,28 @@ async fn advertise_defaults_follow_the_bound_sockets() {
     .expect("server starts");
     let (_d, w) = Device::register(&server, &key(1), &[]).await;
     assert_eq!(w.stun, vec![server.addrs().alternate_port]);
+    // The default settings (listen.primary is the wildcard 0.0.0.0:3478) need no
+    // advertise.primary_ip when the injected sockets are bound to a specific loopback IP.
+    let defaults = ServerSettings::new();
+    assert!(
+        defaults.resolve().is_err(),
+        "a wildcard listen.primary alone"
+    );
+    let mut config = ServerConfig::new(key(100));
+    config.settings = defaults;
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: io("127.0.0.1:0").await,
+            alternate_port: io("127.0.0.1:0").await,
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts on the default settings");
+    assert!(server.addrs().primary.ip().is_loopback());
+    let (_d, w) = Device::register(&server, &key(1), &[]).await;
+    assert_eq!(w.stun, vec![server.addrs().alternate_port]);
     // A wildcard primary socket without advertise.primary_ip is refused.
     let mut config = ServerConfig::new(key(100));
     config.settings = s;

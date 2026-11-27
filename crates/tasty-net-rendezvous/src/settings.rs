@@ -691,7 +691,14 @@ impl ServerSettings {
 
     /// Check ranges and relations and give the values the server runs with.
     pub fn resolve(&self) -> Result<ServerParams, SettingsError> {
-        Resolver(self).params()
+        Resolver(self).params(Listen::Checked)
+    }
+
+    /// [`Self::resolve`] for a server on injected packet I/O: `listen.*` is not what the sockets
+    /// are bound to, so the relations of `advertise.*` to `listen.*` are left to the start
+    /// check against the real socket addresses.
+    pub(crate) fn resolve_for_injected_io(&self) -> Result<ServerParams, SettingsError> {
+        Resolver(self).params(Listen::Unused)
     }
 }
 
@@ -885,6 +892,13 @@ const MIN_BIDI_STREAMS: u64 = 2;
 
 struct Resolver<'a>(&'a ServerSettings);
 
+/// Whether the sockets are bound to `listen.*`, so that `advertise.*` is checked against it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listen {
+    Checked,
+    Unused,
+}
+
 impl Resolver<'_> {
     fn value(&self, key: &'static str) -> Value {
         self.0
@@ -1010,7 +1024,7 @@ impl Resolver<'_> {
         Ok(())
     }
 
-    fn params(&self) -> Result<ServerParams, SettingsError> {
+    fn params(&self, listen: Listen) -> Result<ServerParams, SettingsError> {
         let now = std::time::Instant::now();
         self.durations(now)?;
         let listen_primary = match self.value("listen.primary") {
@@ -1083,7 +1097,9 @@ impl Resolver<'_> {
         )?;
         let advertise_primary_ip = self.opt_ip("advertise.primary_ip");
         self.relation(
-            !listen_primary.ip().is_unspecified() || advertise_primary_ip.is_some(),
+            listen == Listen::Unused
+                || !listen_primary.ip().is_unspecified()
+                || advertise_primary_ip.is_some(),
             "a wildcard listen.primary needs advertise.primary_ip for the alternate STUN address",
             &["listen.primary", "advertise.primary_ip"],
         )?;
@@ -1111,7 +1127,7 @@ impl Resolver<'_> {
                     expected: "not a wildcard address",
                 });
             }
-            if let Some(bound) = bound {
+            if let Some(bound) = bound.filter(|_| listen == Listen::Checked) {
                 self.relation(
                     advertise_fits(bound, ip),
                     "an advertised IP has the address family of the IP it stands for",

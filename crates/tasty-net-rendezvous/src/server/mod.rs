@@ -416,10 +416,14 @@ impl Server {
         )
     }
 
-    /// Check the settings and start serving on the given packet I/O (`listen.*` is not used
-    /// for binding).
+    /// Check the settings and start serving on the given packet I/O. `listen.*` is not used
+    /// for binding, so the advertised defaults and the checks of `advertise.*` follow the
+    /// addresses the injected sockets are really bound to, not `listen.*`.
     pub async fn start_with_io(config: ServerConfig, io: ServerIo) -> Result<Server, StartError> {
-        let params = config.settings.resolve().map_err(StartError::Settings)?;
+        let params = config
+            .settings
+            .resolve_for_injected_io()
+            .map_err(StartError::Settings)?;
         Self::run(config, params, io)
     }
 
