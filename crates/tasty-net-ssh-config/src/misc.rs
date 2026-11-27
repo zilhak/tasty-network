@@ -893,7 +893,7 @@ fn inet_aton_darwin(s: &str) -> Option<Ipv4Addr> {
 /// `:`, one `::` for one or more zero groups, and a dotted IPv4 tail for the last two groups.
 /// glibc and bionic take at most four digits in a group, Apple any number whose value fits
 /// in 16 bits; the tail is read by the `inet_pton4` of that library (glibc refuses leading
-/// zeros there).
+/// zeros there), after its first part was counted as group digits.
 fn inet_pton6(s: &str, libc: Libc) -> Option<Ipv6Addr> {
     // The dotted tail is the last piece; the colon before it is not part of a group.
     let (body, v4) = match s.rsplit_once(':') {
@@ -903,6 +903,13 @@ fn inet_pton6(s: &str, libc: Libc) -> Option<Ipv6Addr> {
             } else {
                 LeadingZero::Decimal
             };
+            // The digits before the first `.` are read as a group first, so glibc and bionic
+            // stop at a fifth digit there; Apple only needs the value as hexadecimal to fit in
+            // 16 bits, which every part of at most 255 does.
+            let first = last.split('.').next().unwrap_or("");
+            if libc != Libc::Darwin && first.len() > GROUP_DIGITS_MAX {
+                return None;
+            }
             let a = inet_pton4(last, leading_zero)?;
             let body = s.get(..s.len() - last.len())?;
             let body = if body.ends_with("::") {

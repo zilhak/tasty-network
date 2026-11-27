@@ -1194,6 +1194,23 @@ mod tests {
             ["-", "::ffff:10.0.0.1", "::ffff:10.0.0.1", "refused"],
         ),
         ("00001::", Family::Any, ["-", "-", "1::", "refused"]),
+        // The first part of the tail is first read as group digits (at most four in glibc and
+        // bionic).
+        (
+            "::ffff:00001.0.0.1",
+            Family::Any,
+            ["-", "-", "::ffff:1.0.0.1", "refused"],
+        ),
+        (
+            "::ffff:0001.0.0.1",
+            Family::Any,
+            ["-", "::ffff:1.0.0.1", "::ffff:1.0.0.1", "refused"],
+        ),
+        (
+            "::ffff:0000000000255.0.0.1",
+            Family::Any,
+            ["-", "-", "::ffff:255.0.0.1", "refused"],
+        ),
         ("0001::", Family::Any, ["1::"; 4]),
     ];
 
