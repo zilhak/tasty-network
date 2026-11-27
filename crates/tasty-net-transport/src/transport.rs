@@ -8,6 +8,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use tasty_net_identity::{ConnectionToken, DeviceId};
+use tasty_net_p2p::P2pError;
 #[cfg(feature = "ssh")]
 use tasty_net_ssh::{PortDiscoveryError, TunnelError};
 
@@ -209,6 +210,29 @@ pub enum ConnectError {
         /// How it was found out.
         evidence: TooOldEvidence,
     },
+    /// The P2P target is this device's own ID: nothing was sent (docs/design/transport.md
+    /// "역할", self attach). Do not connect again.
+    SelfAttach,
+    /// The P2P endpoint could not make the connection (punching, the rendezvous server, the
+    /// endpoint being off); [`P2pError::connect_error`] tells why.
+    P2p(P2pError),
+}
+
+impl ConnectError {
+    /// Whether connecting again can give another result: not after a cancel, a peer too old,
+    /// a self attach, or a P2P error that is not retryable (an endpoint that is off or closed
+    /// included).
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Cancelled | Self::PeerTooOld { .. } | Self::SelfAttach => false,
+            Self::P2p(error) => match error {
+                P2pError::Connect(e) => e.is_retryable(),
+                P2pError::TimedOut | P2pError::Io(_) => true,
+                _ => false,
+            },
+            _ => true,
+        }
+    }
 }
 
 impl fmt::Display for ConnectError {
@@ -223,6 +247,8 @@ impl fmt::Display for ConnectError {
             Self::PeerTooOld { .. } => f.write_str(
                 "the peer publishes no connection token; it runs a version without handshake v2",
             ),
+            Self::SelfAttach => f.write_str("the P2P target is this device"),
+            Self::P2p(_) => f.write_str("the P2P connection could not be made"),
         }
     }
 }
@@ -235,7 +261,8 @@ impl Error for ConnectError {
             Self::Discovery(e) => Some(e),
             #[cfg(feature = "ssh")]
             Self::Tunnel(e) => Some(e),
-            Self::Cancelled | Self::PeerTooOld { .. } => None,
+            Self::P2p(e) => Some(e),
+            Self::Cancelled | Self::PeerTooOld { .. } | Self::SelfAttach => None,
         }
     }
 }

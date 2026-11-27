@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use tasty_net_identity::DeviceId;
+use tasty_net_p2p::P2pConnectError;
 #[cfg(feature = "ssh")]
 use tasty_net_ssh::PortDiscoveryFailureKind;
 
@@ -187,6 +188,9 @@ pub enum Cause {
     SharedTunnel(ConnectionId),
     /// The redialer gave up (`redial.give_up_after` or `redial.max_attempts`).
     RedialExhausted,
+    /// The P2P endpoint could not make the connection, a self attach included (the attempt
+    /// error of `tasty-net-p2p`).
+    P2pConnect(P2pConnectError),
 }
 
 impl Cause {
@@ -211,6 +215,7 @@ impl Cause {
             Self::Ended => "ended",
             Self::SharedTunnel(_) => "shared_tunnel",
             Self::RedialExhausted => "redial_exhausted",
+            Self::P2pConnect(_) => "p2p_connect_failed",
         }
     }
 
@@ -222,6 +227,7 @@ impl Cause {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Rejected(reason) => reason.is_retryable(),
+            Self::P2pConnect(error) => error.is_retryable(),
             Self::PeerTooOld
             | Self::Refused(_)
             | Self::HandshakeFailed(_)
@@ -251,6 +257,11 @@ impl Cause {
             #[cfg(feature = "ssh")]
             ConnectError::Tunnel(e) => Self::TunnelFailed(e.to_string()),
             ConnectError::PeerTooOld { .. } => Self::PeerTooOld,
+            ConnectError::SelfAttach => Self::P2pConnect(P2pConnectError::SelfAttach),
+            ConnectError::P2p(e) => match e.connect_error() {
+                Some(attempt) => Self::P2pConnect(*attempt),
+                None => Self::ConnectFailed(e.to_string()),
+            },
         }
     }
 
@@ -285,6 +296,7 @@ impl fmt::Display for Cause {
                 write!(f, "{}: {reason}", self.as_str())
             }
             Self::SharedTunnel(id) => write!(f, "{}: {id}", self.as_str()),
+            Self::P2pConnect(error) => write!(f, "{}: {error}", self.as_str()),
             other => f.write_str(other.as_str()),
         }
     }

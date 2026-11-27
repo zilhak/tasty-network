@@ -1,5 +1,5 @@
-//! Transport abstraction, logical channels, handshake v2, roles and the SSH transport of the
-//! Tasty network library.
+//! Transport abstraction, logical channels, handshake v2, roles, the SSH transport and the P2P
+//! adapter of the Tasty network library.
 //!
 //! The design is `docs/design/transport.md` and `docs/design/handshake.md`. Every consumer
 //! API is synchronous: blocking calls block the calling thread.
@@ -35,6 +35,7 @@
     feature = "ssh",
     doc = "| [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels); only with the `system-ssh` feature, which is on by default |"
 )]
+//! | [`P2pTransport`] · [`P2pListener`] · [`P2pInbound`] | consumers that reach a peer over a direct P2P connection (`tasty-net-p2p`: punched QUIC, one connection per device pair shared by its links and channels) |
 //! | [`memory_channel_pair`] · [`memory_transport`] · [`MemoryTransport`] · [`MemoryListener`] | tests that run channels without sockets |
 //!
 //! Without default features the crate has no SSH: the SSH transport, the SSH variants of
@@ -55,6 +56,7 @@ mod link;
 mod link_id;
 mod lock;
 mod memory;
+mod p2p;
 mod redial;
 mod reject;
 mod request;
@@ -90,6 +92,7 @@ pub use heartbeat::HeartbeatPolicy;
 pub use link::{BulkChannel, Link, LinkTimeouts, PeerInfo};
 pub use link_id::LinkId;
 pub use memory::{MemoryListener, MemoryTransport, memory_channel_pair, memory_transport};
+pub use p2p::{P2pInbound, P2pListener, P2pTransport};
 pub use redial::{RedialError, Redialer, RedialerConfig};
 pub use reject::{HandshakeError, P2pCloseReason, RejectReason, TooOldEvidence};
 pub use request::{

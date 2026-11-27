@@ -328,6 +328,11 @@ impl AcceptConfig {
         self.connections.as_ref()
     }
 
+    /// The link timeouts of this end.
+    pub(crate) fn timeouts(&self) -> &LinkTimeouts {
+        &self.timeouts
+    }
+
     /// The bulk credentials this end issued.
     pub fn bulk_registry(&self) -> &BulkRegistry {
         &self.bulk

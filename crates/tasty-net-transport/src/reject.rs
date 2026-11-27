@@ -206,9 +206,7 @@ impl HandshakeError {
             #[cfg(feature = "ssh")]
             Self::RemoteListenerAbsent(_) => true,
             Self::Closed(reason) => reason.is_retryable(),
-            Self::Connect(e) => {
-                !matches!(e, ConnectError::Cancelled | ConnectError::PeerTooOld { .. })
-            }
+            Self::Connect(e) => e.is_retryable(),
             _ => false,
         }
     }
