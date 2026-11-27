@@ -141,15 +141,22 @@ pub(crate) struct GlobFailed;
 /// Unix tests use it.
 #[cfg(all(test, unix))]
 pub(crate) fn glob(pattern: &str) -> Result<Vec<PathBuf>, GlobFailed> {
-    glob_tilde("", pattern)
+    glob_tilde("", pattern, pattern.len())
 }
 
 /// [`glob`] of `pattern` after `home`, the folder `GLOB_TILDE` put in place of a leading
-/// `~` part. As `globtilde` (`glob.c:364`-`:410`) adds it after `glob` has protected the
-/// quoted characters (`:206`-`:219`), a `\` in `home` is a plain character.
-pub(crate) fn glob_tilde(home: &str, pattern: &str) -> Result<Vec<PathBuf>, GlobFailed> {
+/// `~` part; `written` is the length of the pattern as written, with its `~` part. In the
+/// order of the original: `glob` returns `GLOB_NOMATCH` when the written pattern reaches
+/// `PATH_MAX` (`glob.c:200`) and protects the quoted characters (`:206`-`:219`), then
+/// `globtilde` (`:364`-`:410`) puts the home in front, so a `\` in `home` is a plain
+/// character, and cuts the result to `PATH_MAX - 1` characters without an error.
+pub(crate) fn glob_tilde(
+    home: &str,
+    pattern: &str,
+    written: usize,
+) -> Result<Vec<PathBuf>, GlobFailed> {
     let bytes = pattern.as_bytes();
-    if home.len() + bytes.len() >= PATH_MAX {
+    if written >= PATH_MAX {
         return Ok(Vec::new());
     }
     let mut patbuf: Vec<Char> = home.bytes().map(Char::from).collect();
@@ -170,6 +177,7 @@ pub(crate) fn glob_tilde(home: &str, pattern: &str) -> Result<Vec<PathBuf>, Glob
             patbuf.push(c);
         }
     }
+    patbuf.truncate(PATH_MAX - 1);
     let Some(compiled) = glob0(&patbuf) else {
         return Ok(Vec::new());
     };
@@ -608,6 +616,38 @@ mod tests {
         let literal = |len: usize| format!("{base}/{}", "d".repeat(len - base.len() - 1));
         assert_eq!(glob(&literal(PATH_MAX - 1)), Ok(Vec::new()));
         assert_eq!(glob(&literal(PATH_MAX)), Ok(Vec::new()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Unix only: the folders are named with `/`.
+    #[cfg(unix)]
+    #[test]
+    fn home_cut_at_path_max() {
+        const PART: usize = 100;
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tasty-ssh-config-gtil-{}", std::process::id()));
+        // A folder whose path is `PATH_MAX - 3` bytes, so `<folder>/f` is `PATH_MAX - 1`.
+        let want = PATH_MAX - 3;
+        let mut dir = root.as_os_str().to_str().unwrap().to_string();
+        while want - dir.len() > 2 * (PART + 1) {
+            dir.push('/');
+            dir.push_str(&"a".repeat(PART));
+        }
+        let last = want - dir.len() - 1;
+        dir.push('/');
+        dir.push_str(&"b".repeat(last));
+        assert_eq!(dir.len(), want);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/f"), "").unwrap();
+        let home = format!("{dir}/");
+        // The home and the rest are cut to `PATH_MAX - 1` characters and the search goes on.
+        assert_eq!(
+            glob_tilde(&home, "fgh", "~/fgh".len()),
+            Ok(vec![PathBuf::from(format!("{dir}/f"))])
+        );
+        // The written pattern, not the one with the home, decides `GLOB_NOMATCH`.
+        assert_eq!(glob_tilde(&home, "fgh", PATH_MAX), Ok(Vec::new()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

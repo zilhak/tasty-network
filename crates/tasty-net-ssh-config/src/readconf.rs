@@ -2102,6 +2102,7 @@ impl<'a> Reader<'a> {
             // GLOB_TILDE (`glob.c:364`-`:410`). Without the home the files are missing
             // (GLOB_NOMATCH, the line goes on), never a `~` folder of the working directory.
             // Another user's home is not looked up: OpenSSH would read files from it.
+            let written = pattern.len();
             let (home, pattern) = if pattern.starts_with('~') {
                 match misc::tilde_split(&pattern, &self.env.account) {
                     Ok((home, rest)) => (home, rest.to_string()),
@@ -2118,7 +2119,7 @@ impl<'a> Reader<'a> {
             } else {
                 (String::new(), pattern)
             };
-            let Ok(paths) = crate::glob::glob_tilde(&home, &pattern) else {
+            let Ok(paths) = crate::glob::glob_tilde(&home, &pattern, written) else {
                 return bad(format!("glob failed for {home}{pattern}."));
             };
             let oactive = *active;

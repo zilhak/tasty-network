@@ -43,7 +43,7 @@ those files (BSD-3-Clause; `charclass.h` is in the public domain).
 | | `digest-openssl.c` | `digests[]` names (`:58`), `ssh_digest_alg_by_name` (`:79`–`:89`) |
 | | `openbsd-compat/vis.c` | `vis` for `VIS_WHITE` (`:61`–`:144`, `isvisible` `:46`) |
 | `src/scaled.rs` | `openbsd-compat/fmt_scaled.c` | `scan_scaled` (`:75`–`:229`) |
-| `src/glob.rs` | `openbsd-compat/glob.c` | `glob` (`:179`–`:230`), `g_charclass` (`:438`–`:463`), `glob0` without `globtilde` (`:472`–`:594`), `glob1` (`:611`–`:622`), `glob2` (`:629`–`:695`), `glob3` (`:697`–`:780`), `match` (`:903`–`:969`) |
+| `src/glob.rs` | `openbsd-compat/glob.c` | `glob` (`:179`–`:230`), `g_charclass` (`:438`–`:463`), `glob0` (`:472`–`:594`), the joining and length cut of `globtilde` (`:364`–`:410`; the home itself comes from the caller), `glob1` (`:611`–`:622`), `glob2` (`:629`–`:695`), `glob3` (`:697`–`:780`), `match` (`:903`–`:969`) |
 | | `openbsd-compat/charclass.h` | `cclasses[]` |
 | `src/resolve.rs` | `ssh.c` | `tilde_expand_paths` (`:188`–`:199`), `default_client_percent_expand` and `default_client_percent_dollar_expand` (`:206`–`:232`), `is_addr_fast` and `is_addr` (`:284`–`:315`), `resolve_addr` for numeric addresses only (`:323`–`:367`), `process_config_files` (`:563`–`:594`), the configuration stage of `main` (`:1039`–`:1612`) |
 | | `sshconnect.h` | `DEFAULT_CLIENT_PERCENT_EXPAND_ARGS` (the `%` tokens) |
