@@ -208,7 +208,7 @@ A                         서버                          B
 
 ## 상태 기계
 
-endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전이마다 이벤트 `{from, to, cause, at}`를 하나 낸다. `cause`는 아래 표의 원인 값이고, 오류가 원인이면 그 오류 값(`P2pConnectError`, QUIC 종료 코드, io 분류)을 함께 싣는다. 호출자는 `status()`로 지금 상태를, `events()`로 전이 이력을 본다. 이벤트 큐 상한은 `events.queue_limit`(기본 256)이고, 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 이벤트 하나를 남긴다. 블로킹 대기 `next_event`는 endpoint의 끝도 받는다: 끝난 뒤에도 큐에 남은 이벤트(`Off` 포함)를 먼저 돌려주고, 큐가 비었으면 기다리지 않고 `P2pError::Closed`를 돌려준다. 기다리던 호출자는 끝에서 모두 깨어난다.
+endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전이마다 이벤트 `{from, to, cause, at, nat}`를 하나 낸다. `nat`(`Option<NatInfo>`)은 연결 시도가 `Closed`로 가는 전이에만 실리는 그 시도의 끝 기록이다: 그 시도 펀칭의 NAT 조합(두 기기의 `NatMapping`과 `mode`)이고, `punch_go`를 받기 전에 끝났으면 없다. 다른 전이에는 늘 없다. 시도는 `Closed`에서 연결 목록을 떠나므로, 실패한 시도의 조합은 이 기록으로 시도 번호(`subject`)에 묶어 얻는다(`punch_probe`가 이렇게 한다). `cause`는 아래 표의 원인 값이고, 오류가 원인이면 그 오류 값(`P2pConnectError`, QUIC 종료 코드, io 분류)을 함께 싣는다. 호출자는 `status()`로 지금 상태를, `events()`로 전이 이력을 본다. 이벤트 큐 상한은 `events.queue_limit`(기본 256)이고, 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 이벤트 하나를 남긴다. 블로킹 대기 `next_event`는 endpoint의 끝도 받는다: 끝난 뒤에도 큐에 남은 이벤트(`Off` 포함)를 먼저 돌려주고, 큐가 비었으면 기다리지 않고 `P2pError::Closed`를 돌려준다. 기다리던 호출자는 끝에서 모두 깨어난다.
 
 ### endpoint
 
@@ -522,7 +522,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | 서버 위치 | 공인 IPv4 주소가 있는 호스트 1대. 두 네트워크 어디에서도 닿아야 한다. 사설망 안의 머신은 안 된다. 주소 의존 판별까지 보려면 공인 IP 2개 |
 | 서버 포트 | UDP P1·P2 외부 개방([rendezvous](rendezvous.md#포트와-전송)) |
 
-측정 항목: 요청부터 성공 판정까지의 시간, 성공 판정부터 QUIC handshake 완료까지의 시간, 성공한 후보 종류(반사·호스트·peer reflexive), 두 기기의 `NatMapping`, 실패 사유. 반복 횟수는 실험 작업 지시로 정한다.
+측정 항목: 요청부터 성공 판정까지의 시간, 성공 판정부터 QUIC handshake 완료까지의 시간, 성공한 후보 종류(반사·호스트·peer reflexive), 두 기기의 `NatMapping`, 실패 사유. 실패한 시도의 `NatMapping`과 `mode`는 그 시도 `Closed` 전이의 `nat`에서 읽는다([상태 기계](#상태-기계)). 반복 횟수는 실험 작업 지시로 정한다.
 
 공개 문서에 실험 기록을 적을 때 기기 이름, 공인 IP, 사설 경로를 쓰지 않는다. 네트워크 종류만 적는다.
 

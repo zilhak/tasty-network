@@ -340,12 +340,20 @@ impl Tracked {
             cause: cause.clone(),
             at,
         });
+        // The end record of the attempt rides on its `Closed` transition: the record leaves
+        // the connection list with it.
+        let nat = if to == AttemptPhase::Closed {
+            r.info.nat
+        } else {
+            None
+        };
         self.tracker.events.push(P2pEvent::Transition {
             subject: Subject::Connection(self.id),
             from: from.map(Phase::Attempt),
             to: Phase::Attempt(to),
             cause,
             at,
+            nat,
         });
     }
 

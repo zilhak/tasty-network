@@ -15,6 +15,7 @@ use tasty_net_rendezvous::wire::message::CancelReason;
 
 use crate::close::P2pCloseReason;
 use crate::error::{P2pConnectError, StopCause};
+use crate::info::NatInfo;
 
 /// States of the endpoint (its server registration).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -188,6 +189,10 @@ pub enum P2pEvent {
         cause: Cause,
         /// When.
         at: SystemTime,
+        /// Only on the transition of a connection attempt to `Closed`, its end record: the NAT
+        /// combination of its punch (both mappings and the mode), `None` when it ended before
+        /// `punch_go`. `None` on every other transition. The attempt is the `subject`'s number.
+        nat: Option<NatInfo>,
     },
     /// Events were dropped because nobody read them.
     Lagged {
@@ -300,6 +305,7 @@ mod tests {
             to: Phase::Attempt(AttemptPhase::Requesting),
             cause: Cause::named("connect_called"),
             at: SystemTime::UNIX_EPOCH,
+            nat: None,
         }
     }
 

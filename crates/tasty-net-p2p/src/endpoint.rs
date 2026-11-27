@@ -293,6 +293,7 @@ fn move_endpoint(
         to: Phase::Endpoint(to),
         cause,
         at: SystemTime::now(),
+        nat: None,
     });
     true
 }
@@ -1559,6 +1560,85 @@ mod tests {
         );
         assert!(matches!(again.try_recv(), Ok(DeviceMessage::NatReport(_))));
         assert!(lock(&core.reg).nat.is_some());
+        ep.close();
+    }
+
+    /// The `Closed` transition of an attempt is its end record: one that ends at once on a
+    /// `punch_go` past `punch.window_max` carries the NAT combination of that `punch_go`, and
+    /// one that ends before `punch_go` carries none. The attempt has left the connection list
+    /// by then, so nothing else could tell it.
+    #[test]
+    fn the_end_of_an_attempt_records_its_nat_combination() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([31; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            30,
+            peer,
+            &[(
+                "punch.window_max",
+                Value::Duration(Duration::from_millis(100)),
+            )],
+        );
+        let ended = |ep: &P2pEndpoint| {
+            ep.events().into_iter().find_map(|e| match e {
+                P2pEvent::Transition {
+                    subject: crate::events::Subject::Connection(id),
+                    to: Phase::Attempt(AttemptPhase::Closed),
+                    nat,
+                    ..
+                } => Some((id, nat)),
+                _ => None,
+            })
+        };
+        let _before = ep.events();
+        let r = std::thread::scope(|s| {
+            let dial = s.spawn(|| ep.connect(peer));
+            let DeviceMessage::PunchRequest(asked) = next_sent(&mut rx) else {
+                panic!("punch_request first");
+            };
+            // The punch_go window (300 ms) is past punch.window_max (100 ms).
+            let _enter = core.handle.enter();
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchGo(punch_go(11, Some(asked.request_id), peer)),
+            );
+            drop(_enter);
+            dial.join().unwrap()
+        });
+        assert_eq!(
+            r.err().and_then(|e| e.connect_error().copied()),
+            Some(P2pConnectError::ServerLimitsInvalid {
+                key: "punch.window_max"
+            })
+        );
+        let (first, nat) = ended(&ep).expect("closed");
+        assert_eq!(
+            nat,
+            Some(crate::info::NatInfo {
+                local: NatMapping::default(),
+                peer: NatMapping::default(),
+                mode: PunchMode::All,
+            })
+        );
+        assert!(ep.connections().is_empty());
+        // Ended before punch_go: no combination.
+        let cancel = P2pCancel::new();
+        std::thread::scope(|s| {
+            let dial = s.spawn(|| ep.connect_with_cancel(peer, &cancel));
+            // The first attempt's punch_result may come before the new request.
+            while !matches!(next_sent(&mut rx), DeviceMessage::PunchRequest(_)) {}
+            cancel.cancel();
+            assert!(dial.join().unwrap().is_err());
+        });
+        let (second, nat) = ended(&ep).expect("closed");
+        assert_ne!(second, first);
+        assert_eq!(nat, None);
         ep.close();
     }
 
