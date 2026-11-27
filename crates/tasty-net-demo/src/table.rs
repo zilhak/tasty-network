@@ -344,7 +344,9 @@ pub struct TableView {
 
 impl TableView {
     /// Reads the lines of one snapshot of `who`, from its `table` line to its `table-end`
-    /// line. Lines of another kind among them are an error.
+    /// line. Lines of another kind among them are an error, and so are counts that do not
+    /// match what was read: the `entries=` of the first and the last line, and each entry's
+    /// `links=`.
     pub fn parse(who: &str, lines: &[String]) -> Result<Self, String> {
         let begin = format!("{who} table ");
         let conn = format!("{who} conn ");
@@ -376,9 +378,26 @@ impl TableView {
                     .filter(|e| e.get("id") == row.get("conn"))
                     .ok_or_else(|| format!("{line:?} follows no entry of its own"))?;
                 owner.links.push(row);
-            } else if line.starts_with(&end) {
-                if entries.len() != count {
-                    return Err(format!("{count} entries announced, {} read", entries.len()));
+            } else if let Some(words) = line.strip_prefix(&end) {
+                let tail = Row::parse(words)?;
+                for entry in &entries {
+                    let announced = entry
+                        .get("links")
+                        .ok_or_else(|| format!("entry {:?} has no link count", entry.get("id")))?;
+                    if announced != entry.links.len().to_string() {
+                        return Err(format!(
+                            "entry {:?} announces {announced} links, {} read",
+                            entry.get("id"),
+                            entry.links.len()
+                        ));
+                    }
+                }
+                let ended = tail.get("entries").ok_or("no entry count at the end")?;
+                if entries.len() != count || ended != count.to_string() {
+                    return Err(format!(
+                        "{count} entries announced at the start and {ended} at the end, {} read",
+                        entries.len()
+                    ));
                 }
                 return Ok(Self { device, entries });
             } else {
@@ -425,7 +444,7 @@ mod tests {
     fn a_snapshot_reads_back() {
         let lines: Vec<String> = [
             "dialer table device=ab entries=2",
-            "dialer conn id=1 previous=- cause_text=tunnel_failed:%20no history=connecting/tunnel/-,disconnected/-/tunnel_failed",
+            "dialer conn id=1 previous=- cause_text=tunnel_failed:%20no history=connecting/tunnel/-,disconnected/-/tunnel_failed links=0",
             "dialer conn id=2 previous=1 links=1",
             "dialer link conn=2 link_id=ff holder=dialer",
             "dialer table-end entries=2",
@@ -456,8 +475,33 @@ mod tests {
             TableView::parse("dialer", &short).is_err(),
             "a link without its entry"
         );
-        let mut unended = lines;
+        let mut unended = lines.clone();
         unended.pop();
         assert!(TableView::parse("dialer", &unended).is_err());
+
+        // Counts that do not match the lines read.
+        let changed = |at: usize, from: &str, to: &str| {
+            let mut changed = lines.clone();
+            changed[at] = changed[at].replace(from, to);
+            TableView::parse("dialer", &changed)
+        };
+        assert!(
+            changed(1, "links=0", "links=1").is_err(),
+            "a link line missing"
+        );
+        assert!(
+            changed(2, "links=1", "links=0").is_err(),
+            "a link line too many"
+        );
+        assert!(changed(1, " links=0", "").is_err(), "no link count");
+        assert!(
+            changed(4, "entries=2", "entries=3").is_err(),
+            "the end's count"
+        );
+        assert!(changed(4, "entries=2", "").is_err(), "no count at the end");
+        assert!(
+            changed(0, "entries=2", "entries=1").is_err(),
+            "the start's count"
+        );
     }
 }
