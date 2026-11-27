@@ -555,7 +555,9 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `sftp.max_write_packet` | 32 KiB | 4 KiB ~ 256 KiB | russh-sftp 기본(32768) |
 | `sftp.request_timeout` | 10 s | 1 s ~ 10 min | russh-sftp `request_timeout_secs` 기본. 1초 단위다 |
 
-고정값(바꿀 수 없다. 조회에는 출처 `fixed`로 나온다):
+### 고정값
+
+바꿀 수 없다. 조회에는 출처 `fixed`로 나온다.
 
 | 키 | 값 | 근거 |
 |---|---|---|
