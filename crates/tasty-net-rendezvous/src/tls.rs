@@ -49,6 +49,9 @@ pub enum TlsError {
     NotEd25519Spki,
     /// The 32 bytes are not a valid ed25519 point.
     InvalidKey,
+    /// The key is a point of small order: a signature with it does not show that the peer
+    /// holds a private key ([`is_weak_key`]).
+    WeakKey,
 }
 
 impl fmt::Display for TlsError {
@@ -57,6 +60,7 @@ impl fmt::Display for TlsError {
             TlsError::Rustls(e) => write!(f, "TLS configuration failed: {e}"),
             TlsError::NotEd25519Spki => write!(f, "public key is not an ed25519 SPKI"),
             TlsError::InvalidKey => write!(f, "public key is not a valid ed25519 key"),
+            TlsError::WeakKey => write!(f, "public key is a weak (small order) ed25519 key"),
         }
     }
 }
@@ -83,13 +87,28 @@ pub fn spki_der(id: &DeviceId) -> Vec<u8> {
     out
 }
 
-/// The device ID in an SPKI. Only the exact ed25519 form is accepted.
+/// The device ID in an SPKI. Only the exact ed25519 form of a key that is not weak is
+/// accepted.
 pub fn device_id_from_spki(spki: &[u8]) -> Result<DeviceId, TlsError> {
     let key = spki
         .strip_prefix(&ED25519_SPKI_PREFIX[..])
         .ok_or(TlsError::NotEd25519Spki)?;
     let key: &[u8; ED25519_KEY_LEN] = key.try_into().map_err(|_| TlsError::NotEd25519Spki)?;
-    DeviceId::from_bytes(key).map_err(|_| TlsError::InvalidKey)
+    let id = DeviceId::from_bytes(key).map_err(|_| TlsError::InvalidKey)?;
+    if is_weak_key(&id) {
+        return Err(TlsError::WeakKey);
+    }
+    Ok(id)
+}
+
+/// Whether `id` is a weak ed25519 public key: a point of small order (`ed25519-dalek`
+/// `VerifyingKey::is_weak`). For such a key a CertificateVerify signature can hold without
+/// a private key, so neither TLS nor an allowlist takes it. A key that does not decode counts
+/// as weak.
+pub fn is_weak_key(id: &DeviceId) -> bool {
+    ed25519_dalek::VerifyingKey::from_bytes(id.as_bytes())
+        .ok()
+        .is_none_or(|k| k.is_weak())
 }
 
 fn pkcs8_v1_der(key: &DeviceKey) -> PrivatePkcs8KeyDer<'static> {
@@ -343,6 +362,33 @@ pub fn peer_device_id(connection: &quinn::Connection) -> Option<DeviceId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The neutral point (y = 1), of order 1, and the point of order 2 (y = -1).
+    pub(crate) fn small_order_ids() -> Vec<DeviceId> {
+        let mut neutral = [0; 32];
+        neutral[0] = 1;
+        let mut order_two = [0xff; 32];
+        order_two[0] = 0xec;
+        order_two[31] = 0x7f;
+        [neutral, order_two]
+            .iter()
+            .map(|b| DeviceId::from_bytes(b).expect("a valid point"))
+            .collect()
+    }
+
+    #[test]
+    fn small_order_keys_are_refused() {
+        for id in small_order_ids() {
+            assert!(is_weak_key(&id), "{id}");
+            assert!(matches!(
+                device_id_from_spki(&spki_der(&id)),
+                Err(TlsError::WeakKey)
+            ));
+        }
+        let normal = DeviceKey::from_seed([3; 32]).id();
+        assert!(!is_weak_key(&normal));
+        assert_eq!(device_id_from_spki(&spki_der(&normal)).unwrap(), normal);
+    }
 
     #[test]
     fn spki_round_trip_and_strictness() {

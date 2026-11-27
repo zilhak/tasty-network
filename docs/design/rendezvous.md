@@ -70,7 +70,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 ## 기기 인증
 
 - 조정 연결은 QUIC(ALPN `tasty-rendezvous/1`) 위의 상호 인증 TLS 1.3이다. 양쪽 모두 RFC 7250 raw public key를 쓴다. 키를 고르는 쪽과 받은 키를 검증하는 쪽의 구성은 [P2P](p2p.md#인증)와 같다.
-- 서버가 기기를 확인하는 방법: 서버의 client 인증서 검증기는 raw public key를 요구하고(`client_auth_mandatory`), 받은 SPKI가 ed25519 형식인지 보고, TLS 1.3 CertificateVerify 서명을 그 키로 검증한다. 그 키가 곧 기기 ID다. 기기는 메시지에 자기 기기 ID를 싣지 않는다. 그래서 다른 기기 ID로 등록할 길이 없다.
+- 서버가 기기를 확인하는 방법: 서버의 client 인증서 검증기는 raw public key를 요구하고(`client_auth_mandatory`), 받은 SPKI가 ed25519 형식인지 보고, 작은 차수의 점(약한 키, `ed25519-dalek` `VerifyingKey::is_weak`)이면 거절하고, TLS 1.3 CertificateVerify 서명을 그 키로 검증한다. 약한 키에는 개인키 없이도 맞는 서명이 있을 수 있어 CertificateVerify만으로 키 소유를 보이지 못한다. 기기가 서버 키를 받을 때와 `allowlist` 파일을 읽을 때도 같은 함수로 거절한다. 그 키가 곧 기기 ID다. 기기는 메시지에 자기 기기 ID를 싣지 않는다. 그래서 다른 기기 ID로 등록할 길이 없다.
 - 기기가 서버를 확인하는 방법: 서버도 ed25519 서버 키를 가진다. 기기는 설정으로 받은 서버 공개키와 TLS의 raw public key를 비교한다(키 고정). 공용 인증 기관과 도메인 인증서는 쓰지 않는다. 서버 키는 `tasty-rendezvous keygen`으로 만들고, 시작할 때 공개키를 로그에 찍는다.
 - 세션 재개와 0-RTT는 양쪽 모두 끈다. 매 연결이 전체 handshake를 하고 CertificateVerify를 거치게 하기 위해서다.
 - 접속 허용: TLS가 끝난 직후 서버가 접근 정책으로 기기 ID를 본다. 라이브러리는 정책 trait `AccessPolicy`를 받는다. 실행 파일은 `everyone`(기본)과 `allowlist`(기기 ID 목록 파일) 둘을 준다. hub rendezvous가 누구를 받을지(로그인 사용자, 페어링된 기기 등)는 hub 쪽 결정이다([남은 결정](index.md#남은-결정)). 거절은 종료 코드 `access_denied`다.

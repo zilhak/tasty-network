@@ -28,6 +28,9 @@ serde_json = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # Punch tokens.
 getrandom = "0.4"
+# The weak key check of TLS and the allowlist (VerifyingKey::is_weak); the same pin as the
+# device key's implementation (docs/design/crates.md "외부 의존 원칙").
+ed25519-dalek = { version = "=3.0.0", default-features = false }
 tracing = "0.1"
 
 [dev-dependencies]

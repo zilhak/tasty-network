@@ -28,7 +28,7 @@
 | `quinn` | p2p, rendezvous | QUIC endpoint·연결·스트림. `default-features = false`로 두고 `runtime-tokio`·`rustls-ring`(과 로그용 `log`)만 켠다. 기본 feature의 `platform-verifier`·`bloom`은 빠진다(신뢰는 기기 키로 정하고, 0-RTT를 쓰지 않아 재전송 방지 필터가 필요 없다) |
 | `rustls` | p2p, rendezvous | TLS 1.3과 RFC 7250 raw public key. `default-features = false`, `features = ["ring", "std", "logging"]`. 기본 feature의 `aws_lc_rs`·`tls12`·`prefer-post-quantum`은 넣지 않는다. 설정을 만들 때 ring provider를 명시한다(`builder_with_provider`) |
 | `tokio` | p2p, rendezvous | 런타임, UDP 소켓, 타이머 |
-| `ed25519-dalek` | identity(간접으로 p2p, rendezvous) | 기기 키 서명·검증 |
+| `ed25519-dalek` | identity, rendezvous(간접으로 p2p) | 기기 키 서명·검증. rendezvous는 약한 키 검사(`VerifyingKey::is_weak`)만 직접 쓰고 identity와 같은 판(`=3.0.0`, `default-features = false`)을 고정한다 |
 | `serde`·`serde_json` | rendezvous | 조정 메시지 |
 | `toml` | rendezvous | 서버 설정 파일(`default-features = false`, `std`·`parse`·`serde`) |
 

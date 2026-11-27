@@ -39,6 +39,11 @@ pub enum AllowlistError {
         /// The 1-based line number.
         line: usize,
     },
+    /// A line is a weak (small order) key ([`crate::tls::is_weak_key`]).
+    WeakKey {
+        /// The 1-based line number.
+        line: usize,
+    },
 }
 
 impl fmt::Display for AllowlistError {
@@ -47,6 +52,9 @@ impl fmt::Display for AllowlistError {
             AllowlistError::Io(e) => write!(f, "allowlist file could not be read: {e}"),
             AllowlistError::BadLine { line } => {
                 write!(f, "allowlist line {line} is not a device ID")
+            }
+            AllowlistError::WeakKey { line } => {
+                write!(f, "allowlist line {line} is a weak (small order) key")
             }
         }
     }
@@ -61,7 +69,7 @@ impl Allowlist {
     }
 
     /// Parse a list: one device ID (64 lowercase hex digits) per line. Empty lines and lines
-    /// starting with `#` are skipped.
+    /// starting with `#` are skipped. A weak (small order) key is refused.
     pub fn parse(text: &str) -> Result<Self, AllowlistError> {
         let mut out = HashSet::new();
         for (index, line) in text.lines().enumerate() {
@@ -72,6 +80,9 @@ impl Allowlist {
             let id = line
                 .parse()
                 .map_err(|_| AllowlistError::BadLine { line: index + 1 })?;
+            if crate::tls::is_weak_key(&id) {
+                return Err(AllowlistError::WeakKey { line: index + 1 });
+            }
             out.insert(id);
         }
         Ok(Allowlist(out))
@@ -96,5 +107,24 @@ impl Allowlist {
 impl AccessPolicy for Allowlist {
     fn allows(&self, device: &DeviceId) -> bool {
         self.0.contains(device)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_refuses_weak_keys() {
+        let normal = tasty_net_identity::DeviceKey::from_seed([3; 32]).id();
+        let list = Allowlist::parse(&format!("# devices\n\n{normal}\n")).unwrap();
+        assert!(list.allows(&normal));
+        // The neutral point (order 1) is a valid point but a weak key.
+        let weak = format!("01{}", "00".repeat(31));
+        assert!(weak.parse::<DeviceId>().is_ok());
+        assert!(matches!(
+            Allowlist::parse(&format!("{normal}\n{weak}\n")),
+            Err(AllowlistError::WeakKey { line: 2 })
+        ));
     }
 }
