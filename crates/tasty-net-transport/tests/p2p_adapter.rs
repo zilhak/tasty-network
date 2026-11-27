@@ -537,6 +537,34 @@ fn rejected_first_stream_ack_is_read() {
     }
     assert_eq!(pair.transport.live_connections(), 0);
     wait_until("the connection's close", || pair.connections() == (0, 0));
+    // The entry was never `connected`: it ends with the refusal, not covered by the QUIC
+    // connection having been up.
+    let ended = pair
+        .table_a
+        .connections()
+        .last()
+        .cloned()
+        .expect("the entry");
+    wait_until("the entry's end", || {
+        entry(&pair.table_a, ended.id).state == ConnectionState::Disconnected
+    });
+    let ended = entry(&pair.table_a, ended.id);
+    assert!(
+        ended
+            .history
+            .iter()
+            .all(|h| h.state != ConnectionState::Connected),
+        "{:#?}",
+        ended.history
+    );
+    assert!(
+        matches!(
+            &ended.last_cause,
+            Some(Cause::Rejected(RejectReason::Domain))
+        ),
+        "{:?}",
+        ended.last_cause
+    );
 }
 
 /// Both sides send a last frame and end their side; each application reads the other's last
@@ -904,9 +932,28 @@ fn a_p2p_link_shows_one_p2p_udp_entry_with_its_link_id() {
         phases.contains(&Some(Phase::P2p(tasty_net_p2p::AttemptPhase::Requesting))),
         "{phases:?}"
     );
+    // The QUIC connection up is not yet `connected`: the handshake v2 on its first channel
+    // runs as `connecting`, and the link standing makes it `connected`.
+    let quic_up = a
+        .history
+        .iter()
+        .position(|h| {
+            h.phase == Some(Phase::Handshake)
+                && matches!(&h.cause, Some(Cause::P2p(c)) if c.name == "quic_established")
+        })
+        .unwrap_or_else(|| panic!("{:#?}", a.history));
+    assert_eq!(a.history[quic_up].state, ConnectionState::Connecting);
     assert!(
-        a.history.iter().any(|h| h.phase == Some(Phase::Handshake)
-            && matches!(&h.cause, Some(Cause::P2p(c)) if c.name == "quic_established")),
+        a.history[..quic_up]
+            .iter()
+            .all(|h| h.state == ConnectionState::Connecting),
+        "{:#?}",
+        a.history
+    );
+    assert!(
+        a.history[quic_up..]
+            .iter()
+            .any(|h| h.state == ConnectionState::Connected && h.phase.is_none()),
         "{:#?}",
         a.history
     );
