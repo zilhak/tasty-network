@@ -83,8 +83,12 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
    - 그런 속성이 붙은 파일 모듈 선언(`#[cfg(test)] mod tests;`)이 가리키는 파일(`<이름>.rs`, `<이름>/mod.rs`, 그 아래 폴더)은 보지 않는다. 지금 해당하는 것은 identity의 `src/device_key/tests.rs`(`device_key.rs:319`–`:321`이 선언)와 `src/record/tests.rs`(`record.rs:467`–`:469`)다.
    - `#[cfg(any(test, …))]`는 지우지 않는다. 시험 밖에서도 컴파일되기 때문이다.
    - 기존 `no-hidden-constants`의 `strip_cfg_test`(`scripts/check-no-hidden-constants.sh:245`)는 정확히 `#[cfg(test)]`만 지운다. 이 단계는 `all(test, …)`까지 지우므로 같은 함수를 넓혀 함께 쓴다.
-4. 남은 코드에서 금지 대상 경로(`process::Command`, `process::Child`, `process::Stdio`, `process::ExitStatus`, `process::CommandExt`, `tokio::process`, `use std::process::{…}`에 든 금지 이름)를 찾는다. 하나라도 있으면 파일:줄을 찍고 실패한다.
-5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식): 금지 경로를 둔 입력은 실패, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 입력과 `src/system/` 안에만 둔 입력은 통과, `mod system;`의 feature 속성을 뺀 입력은 실패.
+4. 남은 코드의 `use` 선언을 나무로 펼친다. 묶음(`use std::{io, process::{Command, id}};`), 중첩 중괄호, 별칭(`as`), `self`(`use std::process::{self};`), 여러 줄에 걸친 선언, 앞의 `::`를 모두 풀어 `가져온 경로 → 지역 이름` 목록을 만든다.
+   - 모듈 자체를 가져오는 것은 별칭과 관계없이 실패다: `std::process`(예: `use std::process;`, `use std::process as proc;`, `use std::{process as proc};`, `use std::process::{self as p};`)와 `tokio::process`(같은 모양들). 모듈을 지역 이름으로 들이면 그 뒤 `proc::Command`를 이름만으로는 가를 수 없기 때문이다. `std::process` 아래에서 가져와도 되는 것은 이름을 적은 `id`·`exit`·`abort`·`ExitCode`뿐이다. 글롭(`use std::process::*;`)도 실패다.
+   - 금지 이름을 직접 가져오는 것은 별칭과 관계없이 실패다(`use std::process::Command as Cmd;`, `use std::os::unix::process::CommandExt as _;`).
+   - `use` 없이 적은 경로도 찾는다: `std::process::`·`::std::process::`·`tokio::process::` 뒤의 금지 이름, `std::os::<os>::process::CommandExt`. `extern crate std as s;`·`extern crate tokio as t;`처럼 크레이트에 별칭을 주는 선언은 실패다(별칭 경로를 다시 찾지 않아도 되게).
+   - 하나라도 있으면 파일:줄과 펼친 경로를 찍고 실패한다. 펼치기는 `rustc`를 부르지 않는 스크립트 안의 작은 파서다. 문자열·주석 안의 글자는 먼저 지운다.
+5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식). 실패해야 하는 입력: `std::process::Command::new`, `use std::process::Command;`, `use std::process as p;`, `use std::{process as proc};`, `use std::{io, process::{self, id}};`, `use tokio::{process as p};`, `use tokio::process::Command as C;`, `use std::process::*;`, `extern crate std as s;`, 여러 줄로 나눈 묶음 선언, `mod system;`의 feature 속성을 뺀 입력. 통과해야 하는 입력: `use std::process::{id, exit};`, `std::process::abort()`, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 금지 경로, `src/system/` 안에만 둔 금지 경로, 주석·문자열 안의 `std::process::Command`.
 
 ### 의존 쪽 검사
 
@@ -128,7 +132,8 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 ### 이벤트 처리 규칙
 
 - 이벤트는 들어온 순서대로 두 값을 바꾼다: 앞·뒤(`Foreground`·`Background`), 망 있음·없음(`NetworkChanged`는 있음, `NetworkLost`는 없음). 처음 값은 앞·망 있음이다. 같은 값이 다시 오면 값은 그대로이고, `NetworkChanged`만은 값이 같아도 "망 바뀜" 처리를 한다.
-- endpoint는 이벤트마다 두 값으로 목표를 다시 계산한다. 목표가 "등록"이려면 망이 있어야 하고, 앞이거나 `lifecycle.background_registration = keep`이거나 `home` 대상이 있어야 한다(아래 "홈 서버 연결"). 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
+- endpoint는 이벤트마다 두 값과 붙들기 값 하나로 목표를 다시 계산한다. 목표가 "등록"인 조건은 `망 있음 && (앞 || lifecycle.background_registration = keep || 붙들기)`이고, 아니면 "멈춤"이다. 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
+- 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산한다.
 - `Background` 뒤 `lifecycle.background_grace` 안에 `Foreground`가 오면 예정된 닫기를 취소한다. endpoint는 `Registered` 그대로이고 이력에 `app_foreground`(취소)만 남는다.
 
 ### endpoint 상태 (p2p.md에 더할 것)
@@ -137,7 +142,8 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 |---|---|
 | `Registered` → `Paused` | `app_background`(grace가 끝나 서버 연결을 코드 0으로 닫음), `network_lost` |
 | `Connecting`·`Backoff` → `Paused` | `app_background`(바로), `network_lost`. 재연결 backoff도 멈춘다 |
-| `Paused` → `Connecting` | `app_foreground`, `network_changed`(목표가 "등록"이 될 때만). backoff 시도 번호를 1로 되돌린다 |
+| `Paused` → `Connecting` | `app_foreground`, `network_changed`, 붙들기 켜짐. 어느 원인이든 다시 계산한 목표가 "등록"일 때만이다(`network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다). backoff 시도 번호를 1로 되돌린다 |
+| `Registered` → `Paused` | 붙들기 꺼짐으로 목표가 "멈춤"이 됨(백그라운드에서). `app_background`와 같이 grace 뒤에 닫는다 |
 | `Backoff` → `Connecting` | `network_changed`(대기를 끝내고 바로, 시도 번호 1) |
 | `Registered` → `Registered` | `network_changed`(아래) |
 
@@ -149,7 +155,7 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 
 | 상태 | 하는 일 |
 |---|---|
-| `Registered` | 서버 연결은 그대로 두고 흐름 3(NAT 판별)과 4(`nat_report`)를 바로 다시 한다. 서버 연결이 `lifecycle.network_change_probe` 안에 흐름 3에 답하지 않으면 서버 연결을 닫고 backoff 없이 흐름 1~4(흐름 14와 같다)를 한다 |
+| `Registered` | 조정 연결(서버와의 QUIC 연결)은 그대로 두고 흐름 3(NAT 판별)과 4(`nat_report`)를 바로 다시 한다. 흐름 3은 조정 연결 밖의 STUN 요청이라 조정 연결이 살아 있는지를 알려 주지 않는다. 그래서 생존은 따로 본다: `nat_report`를 보낸 뒤 `lifecycle.network_change_probe` 안에 조정 연결로 UDP 데이터그램이 하나라도 들어와야 한다(quinn 0.11.12 `Connection::stats()`의 `udp_rx.datagrams`가 보낸 때의 값보다 커짐, `connection.rs:554`). `nat_report`는 ACK를 부르는 패킷이라 살아 있는 서버는 그 안에 ACK를 보낸다. quinn `Connection`에는 ping API가 없고 rendezvous 프로토콜에는 `nat_report`의 응답 메시지가 없어서 이 방법을 쓴다. 들어오지 않으면 조정 연결을 닫고 backoff 없이 흐름 1~4(흐름 14와 같다)를 한다. 흐름 3 자체가 실패하면(STUN 응답 없음) 기존 흐름 3의 실패 규칙을 따른다 |
 | `Connecting` | 하던 시도를 그대로 둔다(새 망에서 흐름 1부터 하고 있다) |
 | `Backoff`·`Paused` | 위 전이 표대로 흐름 1~4를 한다 |
 
@@ -163,12 +169,13 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 
 | 이벤트 | 동작 |
 |---|---|
-| `Background` | `lifecycle.background_redial = pause`(기본)면 대기 중인 재연결을 멈춘다. `home` 대상은 `lifecycle.home_background`를 따른다. 열린 터널은 그대로 둔다 |
+| `Background` | 아래 재연결 조건이 거짓이 된 대상의 대기 중인 재연결을 멈춘다. 열린 터널은 그대로 둔다 |
 | `Foreground` | 멈춘 재연결을 바로 한 번 시도하고 backoff를 처음 간격으로 되돌린다 |
-| `NetworkChanged` | `lifecycle.ssh_on_network_change = reconnect`(기본)면 SSH 터널(내장 세션 포함)을 원인 `network_changed`로 닫고 `Redialer`가 바로 다시 건다. `keep`이면 keepalive가 끊김을 본다 |
+| `NetworkChanged` | `lifecycle.ssh_on_network_change = reconnect`(기본)면 SSH 터널(내장 세션 포함)을 원인 `network_changed`로 닫는다. 재연결 조건이 참인 대상만 `Redialer`가 바로 다시 걸고, 거짓인 대상은 조건이 참이 될 때(`Foreground` 등)까지 기다린다. `keep`이면 keepalive가 끊김을 본다 |
 | `NetworkLost` | 재연결 대기를 멈추고 `give_up_after` 시계도 멈춘다. 다음 `NetworkChanged`에서 다시 시작한다 |
 
-- 홈 서버 연결: 앱이 늘 붙어 있으려는 대상(보통 사용자의 데스크톱 tasty)을 연결 옵션 `ConnectOptions::home(true)`로 표시한다. `lifecycle.home_background = keep`이면 백그라운드에서도 그 대상의 재연결을 이어 가고, 그 대상이 P2P면 P2P 등록도 유지한다. 실제로 이어지는지는 OS가 앱 실행을 허락하는지(Android 포그라운드 서비스 등)에 달렸고, 그 허가는 앱의 몫이다. 기본 `pause`는 다른 대상과 같다.
+- 재연결 조건: `Redialer`는 대상마다 `망 있음 && (앞 || lifecycle.background_redial = keep || (그 대상이 home && lifecycle.home_background = keep))`일 때만 시도한다. 두 값(앞·뒤, 망 있음·없음)은 위 "이벤트 처리 규칙"의 값과 같다. 그래서 P2P 등록과 SSH 재연결이 같은 이벤트에 같은 방향으로 움직이고, `home` 대상만 다르게 남길 수 있다.
+- 홈 서버 연결: 앱이 늘 붙어 있으려는 대상(보통 사용자의 데스크톱 tasty)을 연결 옵션 `ConnectOptions::home(true)`로 표시한다. `lifecycle.home_background = keep`이면 백그라운드에서도 그 대상의 재연결을 이어 가고(위 조건), 그 대상이 P2P면 transport가 붙들기(`hold_background_registration(true)`)로 P2P 등록도 유지한다. 실제로 이어지는지는 OS가 앱 실행을 허락하는지(Android 포그라운드 서비스 등)에 달렸고, 그 허가는 앱의 몫이다. 기본 `pause`는 다른 대상과 같다.
 
 ### 수명 설정값
 
@@ -289,7 +296,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | 모바일 cross check CI와 `no-process-spawn` | 후속 작업. 이 문서 "모바일 cross check", "다른 프로그램 실행 금지" |
 | OpenSSH 해석 이식 크레이트 | 후속 작업. [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트) |
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
-| 앱 수명 API(`AppEvent`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
+| 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
 | `tasty-net-ffi`와 생성 검사 | 후속 작업(내장 백엔드 뒤). 이 문서 "바인딩 층" |
 | 바인딩 API 목록 | tasty-android 요구를 받아 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
