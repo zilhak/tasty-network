@@ -4,7 +4,7 @@
 //! Every test uses its own device keys: one key has one P2P endpoint in a process, and the
 //! tests of this file run in parallel.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -25,11 +25,11 @@ use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
 use tasty_net_transport::settings::SettingSource;
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, Cause, ChannelReader,
-    ChannelWriter, ConnectError, ConnectOptions, ConnectionId, ConnectionInfo, ConnectionState,
-    ConnectionTable, DialConfig, DomainAccept, DomainPolicy, DomainReject, EdgeTransport,
-    EndReason, HandshakeError, Holder, Link, LinkTimeouts, P2pListener, P2pTransport, PathKind,
-    PeerInfo, Phase, RejectReason, RequestHandler, Transport, Via, dial_handshake, dial_request,
-    domain_code,
+    ChannelWriter, ConnectError, ConnectOptions, Connection, ConnectionId, ConnectionInfo,
+    ConnectionState, ConnectionTable, DialConfig, DomainAccept, DomainPolicy, DomainReject,
+    EdgeTransport, EndReason, HandshakeError, Holder, Link, LinkTimeouts, P2pListener,
+    P2pTransport, PathKind, PeerInfo, Phase, RejectReason, RequestHandler, Transport, Via,
+    dial_handshake, dial_request, domain_code,
 };
 
 /// How long a test waits for something that comes in well under a second on loopback.
@@ -337,16 +337,23 @@ impl Pair {
         ext: Option<&str>,
         options: &ConnectOptions,
     ) -> Result<Link, HandshakeError> {
+        let cancel = AttemptCancel::new();
+        let conn = self
+            .connect(&cancel, options)
+            .map_err(HandshakeError::Connect)?;
+        dial_handshake(conn, &self.dial, Holder::Dialer, ext, &cancel)
+    }
+
+    /// A channel to `b` without the handshake, once `b` is registered.
+    fn connect(
+        &self,
+        cancel: &AttemptCancel,
+        options: &ConnectOptions,
+    ) -> Result<Connection, ConnectError> {
         let started = Instant::now();
         loop {
-            let cancel = AttemptCancel::new();
-            let result = self
-                .transport
-                .connect_with(&self.b.id(), &cancel, options)
-                .map_err(HandshakeError::Connect)
-                .and_then(|conn| dial_handshake(conn, &self.dial, Holder::Dialer, ext, &cancel));
-            match result {
-                Err(HandshakeError::Connect(ConnectError::P2p(e)))
+            match self.transport.connect_with(&self.b.id(), cancel, options) {
+                Err(ConnectError::P2p(e))
                     if started.elapsed() < PATIENCE
                         && matches!(
                             e.connect_error(),
@@ -564,6 +571,37 @@ fn rejected_first_stream_ack_is_read() {
         ),
         "{:?}",
         ended.last_cause
+    );
+}
+
+/// The acceptor ends the refusing ACK's stream at once: a dialer that reads on after the ACK
+/// sees the EOF before the drain cap, without ending its own side first
+/// (docs/design/transport.md "P2P의 닫기 범위", "거절 ACK만 예외다").
+#[test]
+fn the_refusing_ack_is_followed_by_the_eof_at_once() {
+    let pair = Pair::start(50, Mode::Echo);
+    let cancel = AttemptCancel::new();
+    let Connection { mut channel, .. } = pair
+        .connect(&cancel, &ConnectOptions::new())
+        .expect("a channel");
+    channel
+        .control()
+        .set_read_timeout(Some(PATIENCE))
+        .expect("read timeout");
+    // Not a hello: the acceptor refuses it as malformed.
+    channel.write_all(b"{}\n").expect("a first line");
+    let ack = tasty_net_frame::read_frame(&mut channel).expect("the ACK");
+    assert_eq!(ack.tag, StreamTag::Control);
+    let ack: Value = serde_json::from_slice(&ack.payload).expect("the ACK is JSON");
+    assert_eq!(ack["ok"], json!(false), "{ack}");
+    let read_ack = Instant::now();
+    let mut rest = Vec::new();
+    channel.read_to_end(&mut rest).expect("the EOF");
+    let waited = read_ack.elapsed();
+    assert!(rest.is_empty(), "{rest:?}");
+    assert!(
+        waited < timeouts().drain_cap,
+        "the EOF came {waited:?} after the ACK, not before the drain cap"
     );
 }
 

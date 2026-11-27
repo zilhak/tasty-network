@@ -571,7 +571,7 @@ impl Io<'_> {
 /// `limit` long. Debug events mark the start and the end of the wait and why it ended.
 fn linger_close(ch: &mut RawChannel, limit: Duration) {
     let control = ch.control();
-    if let Err(error) = control.shutdown_write() {
+    if let Err(error) = ch.finish_at_once() {
         tracing::debug!(%error, "ending the sending direction failed");
         return;
     }

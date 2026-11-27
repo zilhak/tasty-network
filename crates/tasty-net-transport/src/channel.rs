@@ -70,7 +70,13 @@ pub struct RawChannel {
     addrs: Option<(SocketAddr, SocketAddr)>,
     /// The reconnection entry waiting for this channel's handshake on a shared tunnel.
     joined: Option<Joined>,
+    /// Ends the sending direction at once, where [`ChannelControl::shutdown_write`] first waits
+    /// for the peer's end (a P2P stream on the side that accepted the connection).
+    finish_now: Option<FinishNow>,
 }
+
+/// Ends a channel's sending direction at once.
+type FinishNow = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
 
 impl fmt::Debug for RawChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -99,6 +105,7 @@ impl RawChannel {
             entry: None,
             addrs: None,
             joined: None,
+            finish_now: None,
         }
     }
 
@@ -127,6 +134,22 @@ impl RawChannel {
         );
         channel.addrs = addrs.ok();
         Ok(channel)
+    }
+
+    /// Sets how the sending direction ends at once ([`RawChannel::finish_at_once`]).
+    pub(crate) fn with_finish_now(mut self, finish: FinishNow) -> Self {
+        self.finish_now = Some(finish);
+        self
+    }
+
+    /// Ends the sending direction at once, also on a channel whose normal end first waits for
+    /// the peer's end: the refusing ACK is the last thing either side sends
+    /// (docs/design/transport.md "P2P의 닫기 범위").
+    pub(crate) fn finish_at_once(&self) -> io::Result<()> {
+        match &self.finish_now {
+            Some(finish) => finish(),
+            None => self.control.shutdown_write(),
+        }
     }
 
     pub(crate) fn with_entry(mut self, entry: EntryRef) -> Self {

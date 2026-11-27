@@ -10,7 +10,8 @@
 //! On the side that accepted the QUIC connection, the finish waits until the reader read the
 //! peer's end, or until the drain cap passed (docs/design/transport.md "연결을 닫는 때"): when
 //! the dialer reads this end's EOF, this side's application already read everything the dialer
-//! sent, so the dialer may close the connection.
+//! sent, so the dialer may close the connection. The refusing ACK is the exception: the
+//! handshake finishes it at once ([`RawChannel::finish_at_once`]).
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
@@ -262,9 +263,12 @@ pub(crate) fn channel(
         Box::new(StreamWriter {
             stream: Arc::clone(&shared),
         }),
-        Arc::new(StreamControl { stream: shared }),
+        Arc::new(StreamControl {
+            stream: Arc::clone(&shared),
+        }),
         TransportKind::P2p,
     )
+    .with_finish_now(Arc::new(move || shared.finish_now()))
     .keep_alive(Arc::new(slot))
 }
 
