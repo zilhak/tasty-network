@@ -25,7 +25,7 @@ use crate::events::{Cause, CauseDetail, EndpointPhase};
 use crate::nat;
 
 /// How a registration ended or failed.
-enum End {
+pub(crate) enum End {
     /// Reconnect after the backoff.
     Retry(Cause),
     /// Do not reconnect.
@@ -184,7 +184,7 @@ pub(crate) async fn run(core: Arc<Core>) {
         let mut shutdown = core.shutdown.subscribe();
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
-            _ = shutdown.changed() => return,
+            _ = crate::endpoint::shut_down(&mut shutdown) => return,
         }
         from_backoff = true;
     }
@@ -215,7 +215,7 @@ pub(crate) fn drop_registration(core: &Core, r: &mut Registration) {
 }
 
 /// One coordination connection from connect to end.
-async fn session(core: &Arc<Core>) -> End {
+pub(crate) async fn session(core: &Arc<Core>) -> End {
     let config = match core.client_config(
         core.server.public_key,
         RENDEZVOUS_ALPN,
@@ -242,7 +242,7 @@ async fn session(core: &Arc<Core>) -> End {
             },
             Ok(Ok(c)) => c,
         },
-        _ = shutdown.changed() => return End::Shutdown,
+        _ = crate::endpoint::shut_down(&mut shutdown) => return End::Shutdown,
     };
     let end = registered(core, &conn, &mut shutdown).await;
     if matches!(end, End::Shutdown) {
@@ -282,7 +282,7 @@ async fn registered(
     let first_by = tokio::time::Instant::now() + p.hello_timeout;
     let welcome = tokio::select! {
         r = read_frame_by(&mut recv, p.max_message_bytes, p.frame_timeout, Some(first_by)) => r,
-        _ = shutdown.changed() => return End::Shutdown,
+        _ = crate::endpoint::shut_down(shutdown) => return End::Shutdown,
     };
     let welcome = match welcome {
         Ok(Some(body)) => match ServerMessage::parse(&body) {
@@ -381,7 +381,7 @@ async fn registered(
                 };
             }
             Some(_) = judging.join_next() => {}
-            _ = shutdown.changed() => break End::Shutdown,
+            _ = crate::endpoint::shut_down(shutdown) => break End::Shutdown,
         }
     };
     reader.abort();

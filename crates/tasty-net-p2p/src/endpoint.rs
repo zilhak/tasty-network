@@ -226,7 +226,8 @@ pub(crate) struct Core {
     pub(crate) accepting: Mutex<Vec<AcceptSession>>,
     pub(crate) accepted_tx: mpsc::UnboundedSender<Arc<ConnInner>>,
     pub(crate) accepted_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Arc<ConnInner>>>,
-    /// Set when the endpoint shuts down.
+    /// Set when the endpoint shuts down. A task waits for it with [`shut_down`], which also
+    /// sees a shutdown set before the task subscribed.
     pub(crate) shutdown: watch::Sender<bool>,
     /// The blocking calls in the runtime now, and whether new ones are refused.
     calls: Mutex<Calls>,
@@ -267,6 +268,14 @@ impl fmt::Debug for Core {
             .field("server", &self.server)
             .finish_non_exhaustive()
     }
+}
+
+/// Wait until the endpoint shuts down, whether the shutdown was signalled before this
+/// receiver subscribed or after (`changed` would wait for the next change and miss the
+/// first). It holds no borrow of the value when it returns, so a `select!` with it stays
+/// `Send`.
+pub(crate) async fn shut_down(shutdown: &mut watch::Receiver<bool>) {
+    let _down = shutdown.wait_for(|down| *down).await.is_ok();
 }
 
 /// Move the endpoint state in `reg` to `to` and queue its event; whether it moved. The event
@@ -941,7 +950,7 @@ async fn accept_loop(core: Arc<Core>) {
     loop {
         let incoming = tokio::select! {
             i = quic.accept() => i,
-            _ = shutdown.changed() => None,
+            _ = shut_down(&mut shutdown) => None,
         };
         let Some(incoming) = incoming else { break };
         let addr = canonical(incoming.remote_address());
@@ -1073,7 +1082,7 @@ pub(crate) async fn watch_connection(
     let cause = loop {
         tokio::select! {
             e = quic.closed() => break close_cause(&e, &conn),
-            _ = shutdown.changed() => {
+            _ = shut_down(&mut shutdown) => {
                 conn.close(P2pCloseReason::Closed);
                 break Cause::named("endpoint_off");
             }
@@ -2113,6 +2122,24 @@ mod tests {
         let _left = core.open_link(tx);
         ep.close();
         none_shows("the shutdown left the registration");
+    }
+
+    /// A session that begins after the shutdown was signalled still sees it and ends at once:
+    /// the signal is set before the session subscribes to it, the order a server loop that
+    /// was between its own check and its subscription meets.
+    #[test]
+    fn a_session_begun_after_the_shutdown_signal_ends_at_once() {
+        let peer = DeviceKey::from_seed([53; 32]).id();
+        let StandIn { ep, core, .. } = stand_in(52, peer, &[]);
+        core.shutdown.send_replace(true);
+        let end = core.handle.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), crate::server::session(&core)).await
+        });
+        assert!(
+            matches!(end, Ok(crate::server::End::Shutdown)),
+            "the session did not see the shutdown signalled before it subscribed"
+        );
+        ep.close();
     }
 
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
