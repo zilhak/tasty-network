@@ -416,7 +416,7 @@ OpenSSH와 같은 형식을 같은 뜻으로 읽는다(이식 크레이트). 위
 
 OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이 있고 이름은 128개다. 네 이름(`gssapiauthentication`·`gssapidelegatecredentials`·`pkcs11provider`·`smartcarddevice`)이 `#ifdef GSSAPI`·`#ifdef ENABLE_PKCS11`의 두 갈래로 두 번 나온다(한 번은 그 기능을 켠 빌드의 opcode, 한 번은 `oUnsupported`). 이 분류는 두 기능을 켠 갈래(실제 opcode)를 기준으로 한다. 배포판 OpenSSH가 보통 두 기능을 켜고 빌드되기 때문이다. 이식 크레이트는 128개 이름을 모두 알고 이름마다 아래 처리 하나를 갖는다. 별칭은 원래 지시어와 같은 처리다.
 
-지시어 이름은 대소문자를 가리지 않는다(`readconf.c`가 소문자로 바꿔 찾는다). 값의 대소문자는 OpenSSH가 그 지시어에서 하는 그대로다(예: `yes`·`no` 같은 다중 값은 대소문자 무시, 경로·명령은 구별, `Host` 패턴은 소문자로 바꿔 비교).
+지시어 이름은 대소문자를 가리지 않는다(`readconf.c`가 소문자로 바꿔 찾는다). 값의 대소문자는 OpenSSH가 그 지시어에서 하는 그대로다(예: `yes`·`no` 같은 다중 값은 대소문자 무시, 경로·명령은 구별, `Host` 패턴은 대소문자를 구별해 비교: `match_pattern(host, arg)`(`readconf.c:1854`)이 첫 읽기에서는 명령행에 적힌 그대로의 호스트를, `final` 두 번째 읽기에서는 소문자로 바꾼 호스트(`ssh.c:1206`–`:1207`)를 패턴과 그대로 맞춘다. `Match host`·`originalhost`는 `match_hostname`(`match.c:232`–`:242`)이 호스트와 패턴을 소문자로 바꿔 비교한다).
 
 | 처리 | 뜻 | `ConfigNote.action` |
 |---|---|---|

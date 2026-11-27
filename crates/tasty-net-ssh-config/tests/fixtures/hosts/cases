@@ -16,3 +16,4 @@ ssh://user@uri.example.com:2201
 pct
 ssh://pct
 -o HostKeyAlgorithms=!ssh-rsa web => refused config_error - hostkeyalgorithms
+Web
