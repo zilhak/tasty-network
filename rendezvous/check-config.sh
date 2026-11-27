@@ -496,8 +496,9 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
         ! wait_until 1 slow_false && [[ $(($(now_us) - start)) -lt 2000000 ]]
     }
     expect ok "wait_until: 기한을 경과 시각으로 잰다" wait_slow
-    late_true() { sleep 0.25; true; }
-    expect fail "wait_until: 기한 0.05 s에 0.25 s 뒤 성공하면 실패" wait_until 0.05 late_true
+    # 기한 1 s에 2.5 s 뒤 성공: 시계가 1초 해상도(%N 없는 date)여도 성공 시각이 끝 시각보다 1초 이상 뒤다.
+    late_true() { sleep 2.5; true; }
+    expect fail "wait_until: 기한 1 s에 2.5 s 뒤 성공하면 실패" wait_until 1 late_true
     expect ok "now_us: 늘어나는 마이크로초" test "$(now_us)" -gt 1000000000000000
     now_from_date() { local a b; a=$(now_us); b=$(unset EPOCHREALTIME; now_us); [[ "$b" -ge "$a" && $((b - a)) -lt 5000000 ]]; }
     expect ok "now_us: EPOCHREALTIME이 없으면 date로 같은 단위" now_from_date
