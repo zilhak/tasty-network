@@ -23,6 +23,7 @@
 
 mod algorithms;
 mod glob;
+mod hostfile;
 pub mod keywords;
 mod matching;
 mod misc;
@@ -33,6 +34,7 @@ mod result;
 mod scaled;
 pub mod settings;
 
+pub use hostfile::{HostKeyEntry, HostKeyQuery, HostKeyVerdict, KnownHosts, LineKey, Marker};
 pub use resolve::{
     CommandLine, CommandLineValue, ConfigError, ConfigFiles, ConfigInputs, ConfigSet, Resolution,
     ResolveContext,

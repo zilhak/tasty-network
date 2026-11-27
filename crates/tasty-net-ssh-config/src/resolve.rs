@@ -104,6 +104,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::hostfile::HostKeyQuery;
 use crate::keywords::{KEYWORDS, Op, Treatment, treatment};
 use crate::misc::{
     Account, ExpandError, Family, TildeError, Token, expand, numeric_host, numeric_text,
@@ -253,12 +254,28 @@ pub struct Resolution {
     /// [`Origin::Default`] for the default `ask`. [`Resolution::source_of`] gives the first
     /// written `StrictHostKeyChecking`, which can be a value this crate does not apply.
     pub host_key_checking_origin: Origin,
+    /// The known_hosts files `ssh` reads, in its order: `UserKnownHostsFile` (as
+    /// [`Options::user_hostfiles`]), then `GlobalKnownHostsFile` with `~` expanded
+    /// (`ssh.c:1791`-`:1793`). A file under a home that is not known is left out (a missing
+    /// file). Give it to [`crate::KnownHosts::load`].
+    pub known_hosts_files: Vec<PathBuf>,
 }
 
 impl Resolution {
     /// The `ssh -G` text of the resolution.
     pub fn dump_client_config(&self) -> Result<String, String> {
         self.options.dump_client_config(&self.host)
+    }
+
+    /// The name `ssh` looks the host key up by (`get_hostfile_hostname_ipaddr`,
+    /// `sshconnect.c:648`-`:700`): `HostKeyAlias`, or the host with the port when it is not 0
+    /// or 22.
+    pub fn host_key_query(&self) -> HostKeyQuery {
+        HostKeyQuery::for_host(
+            &self.host,
+            self.options.port.unwrap_or(DEFAULT_SSH_PORT),
+            self.options.host_key_alias.as_deref(),
+        )
     }
 
     /// Where the value of a keyword (as `ssh -G` names it) came from: its first source, or
@@ -396,6 +413,7 @@ impl ConfigSet {
             refusal: r.refusal,
             host_key_checking,
             host_key_checking_origin,
+            known_hosts_files: std::mem::take(&mut st.known_hosts_files),
         }
     }
 
@@ -847,6 +865,14 @@ impl ConfigSet {
                 r.o.user_hostfiles.push(v);
             }
         }
+        for f in &r.o.user_hostfiles {
+            st.known_hosts_files.push(PathBuf::from(f));
+        }
+        for f in &r.o.system_hostfiles {
+            if let Some(p) = tilde_path(&account, f, &Origin::Default)? {
+                st.known_hosts_files.push(PathBuf::from(p));
+            }
+        }
         let setenv = std::mem::take(&mut r.o.setenv);
         for e in setenv {
             let (name, value) = e.split_once('=').unwrap_or((&e, ""));
@@ -870,6 +896,7 @@ impl ConfigSet {
 #[derive(Default)]
 struct State {
     host: String,
+    known_hosts_files: Vec<PathBuf>,
 }
 
 fn config_error(origin: Option<&Origin>, message: String) -> Fatal {

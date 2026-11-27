@@ -307,6 +307,25 @@ allow	crates/tasty-net-ssh-config/src/glob.rs	const M_QUOTE: Char = 0x8000	glob.
 allow	crates/tasty-net-ssh-config/src/glob.rs	const M_PROTECT: Char = 0x4000	glob.c M_PROTECT 0x4000(이스케이프한 글자 표시 비트)
 allow	crates/tasty-net-ssh-config/src/glob.rs	const M_ASCII: Char = 0x00ff	glob.c M_ASCII 0x00ff(글자 바이트)
 allow	crates/tasty-net-ssh-config/src/glob.rs	const PATH_MAX: usize = if cfg!(any( target_os = "macos", target_os = "ios", target_os = "freebsd" )) { 1024 } else { 4096 }	C 라이브러리 PATH_MAX(BSD 1024·그 밖 4096): glob 패턴·경로 상한
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MARKER_BUFFER: usize = 32	hostfile.c check_markers의 char marker[32](표시는 31자까지)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const KEY_TYPE_BUFFER: usize = 128	hostfile.c hostkeys_foreach_file의 char ktype[128](키 종류 이름은 127자까지)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const SALT_BASE64_MAX: usize = 1024	hostfile.c extract_salt의 base64 salt 길이 상한 1024
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const SHA1_BYTES: usize = 20	해시 이름의 salt·HMAC-SHA1 길이 20 B(ssh_hmac_bytes(SSH_DIGEST_SHA1))
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const ED25519_PUBLIC_BYTES: usize = 32	crypto_api.h ED25519_PK_SZ 32
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MLDSA44_ED25519_PUBLIC_BYTES: usize = 1344	crypto_api.h MLDSA44_ED25519_PK_SZ 1344(ML-DSA-44 1312 + Ed25519 32)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MAX_BIGNUM_BYTES: usize = 2048	sshbuf.h SSHBUF_MAX_BIGNUM 2048 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MAX_EC_POINT_BYTES: usize = 133	sshbuf.h SSHBUF_MAX_ECPOINT 133 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const EC_POINT_UNCOMPRESSED: u8 = 0x04	와이어 형식: 압축하지 않은 EC 점의 첫 바이트 0x04(POINT_CONVERSION_UNCOMPRESSED)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MPINT_SIGN_BIT: u8 = 0x80	와이어 형식: SSH mpint 첫 바이트의 부호 비트 0x80
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const RSA_MINIMUM_MODULUS_BITS: usize = 1024	sshkey.h SSH_RSA_MINIMUM_MODULUS_SIZE 1024비트
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const BITS_PER_BYTE: usize = 8	바이트 하나의 비트 수
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const STRING_LENGTH_BYTES: usize = 4	와이어 형식: SSH string 앞의 uint32 길이 4 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P256: usize = 32	NIST P-256 좌표 하나 32 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P384: usize = 48	NIST P-384 좌표 하나 48 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P521: usize = 66	NIST P-521 좌표 하나 66 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	1	다음 바이트로 한 칸, 줄 번호는 1부터, 이름 길이 1 이하는 버린다(hostfile.c), EC 점 머리 1 B, 앞 0 바이트 하나 더(sshbuf_get_bignum2_bytes_direct)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	2	EC 점은 좌표 두 개(x, y)
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	u16::MIN	포트 0은 포트 없이 쓴다(misc.c put_host_port)
 allow	crates/tasty-net-ssh-config/src/matching.rs	const SUBPATTERN_BUFFER: usize = 1024	OpenSSH match.c match_pattern_list의 부분 패턴 버퍼 char sub[1024]
 allow	crates/tasty-net-ssh-config/src/matching.rs	const MAX_PROPOSALS: usize = 40	OpenSSH match.c match_list의 MAX_PROP 40
 allow	crates/tasty-net-ssh-config/src/matching.rs	0	빈 목록·첫 위치

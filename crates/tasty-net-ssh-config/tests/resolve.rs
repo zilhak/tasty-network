@@ -1110,3 +1110,26 @@ fn a_scoped_link_local_list_entry_is_judged_with_the_address_given() {
     let r = resolve("Match host nomatch localnetwork fe80:1::/32\n", "example");
     assert!(r.refusal.is_none(), "{:?}", r.refusal);
 }
+
+#[test]
+fn known_hosts_files_and_query() {
+    let r = resolve(
+        "Host web\n  Port 2222\n  UserKnownHostsFile ~/kh %d/kh2\n  \
+         GlobalKnownHostsFile ~/global /etc/g2\n",
+        "web",
+    );
+    assert_eq!(
+        r.known_hosts_files,
+        vec![
+            PathBuf::from("/home/tester/kh"),
+            PathBuf::from("/home/tester/kh2"),
+            PathBuf::from("/home/tester/global"),
+            PathBuf::from("/etc/g2"),
+        ]
+    );
+    assert_eq!(r.host_key_query().name, "[web]:2222");
+    let alias = resolve("Host web\n  Port 2222\n  HostKeyAlias other\n", "web");
+    assert_eq!(alias.host_key_query().name, "other");
+    let plain = resolve("", "web");
+    assert_eq!(plain.host_key_query().name, "web");
+}

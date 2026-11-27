@@ -14,6 +14,11 @@ publish = false
 [dependencies]
 # %C of ssh.c (the SHA-1 of the connection fields). No default features: only the hash.
 sha1 = { version = "=0.11.0", default-features = false }
+# Hashed known_hosts names (`|1|`, hostfile.c host_hash: HMAC-SHA1).
+hmac = { version = "=0.13.0", default-features = false }
+# The salt and hash of hashed names and the key blobs of known_hosts lines. No std: the
+# decoder and encoder only.
+base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
