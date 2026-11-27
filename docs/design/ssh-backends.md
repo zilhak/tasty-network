@@ -345,6 +345,9 @@ struct SshInspection {
 | `sshconnect.c`(1809)·`sshconnect2.c`(2508)의 판정 부분 | `check_host_key`(`:984`)의 known_hosts 판정 순서, `verify_host_key`(`:1499`)의 `RevokedHostKeys` 처리(`:1544`–`:1563`), `order_hostkeyalgs`(`sshconnect2.c:121`–`:216`, known_hosts에 있는 키 형식을 앞으로), RSA 크기 검사 자리(`sshconnect2.c:96`·`:1593`·`:1847`) |
 | `ssh.c`(2510)의 설정 단계 | `tilde_expand_paths`(`:189`–`:199`), `default_client_percent_expand`(`:207`–`:213`), `process_config_files`(`:564`–`:594`, 사용자·시스템 설정을 읽는 순서와 `final` 두 번째 읽기), `main`의 설정 단계(`:1186`–`:1612`: 첫 읽기 `:1187`, `HostName`의 `%h` 펼침 `:1195`–`:1203`, 호스트 소문자화 `:1206`–`:1207`, CNAME 따라가기 `:1229`–`:1240`, `final` 다시 읽기 `:1246`–`:1265`, `fill_default_options` `:1267`, 기본 사용자, `ProxyJump` → 홉 명령과 `jumphost loop` `:1278`–`:1324`, `ConnectionAttempts` 검사 `:1360`, `RemoteCommand` 충돌 `:1363`–`:1364`, `RemoteCommand`와 경로 지시어의 `~`·`%` 펼침 `:1457`–`:1611`), `load_public_identity_files`(`:2355`–`:2497`, `IdentityFile`·`CertificateFile`의 펼침과 순서) |
 | `version.h`(6) | `SSH_RELEASE`(`Match version`의 판정 값) |
+| `cipher.c`(473), `mac.c`(255), `sshkey.c`(3732)의 이름 표 | `ciphers[]`·`cipher_alg_list`·`ciphers_valid`, `macs[]`·`mac_alg_list`·`mac_valid`, `keyimpls[]` 이름·`sshkey_alg_list`·`sshkey_names_valid2`(알고리즘 지시어의 값 검사와 `+`·`-`·`^`의 전체 목록) |
+| `log.c`(656), `digest-openssl.c`(207)의 이름 표 | `log_levels[]`·`log_facilities[]`와 이름 변환(`LogLevel`·`SyslogFacility`), `digests[]` 이름(`FingerprintHash`) |
+| `pathnames.h`(194), `sshconnect.h`(108), `defines.h`(1026) | 기본 경로(`_PATH_SSH_USER_DIR`, 기본 키 파일, known_hosts), `%` 토큰 목록 `DEFAULT_CLIENT_PERCENT_EXPAND_ARGS`, `IPTOS_*` 값 |
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
@@ -375,7 +378,12 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   | Tatu Ylonen 조항만 | `readconf.c`, `readconf.h`, `sshconnect.c`, `hostfile.h` | `SSH-short` |
   | Tatu Ylonen 조항과 BSD | `ssh.c`, `hostfile.c`, `match.c` | `SSH-short`, `BSD-2-Clause` |
   | ISC | `misc.c` | `ISC` |
-  | BSD | `kex-names.c`, `myproposal.h`, `sshconnect2.c` | `BSD-2-Clause` |
+  | Tatu Ylonen 조항만 | `pathnames.h` | `SSH-short` |
+  | Tatu Ylonen 조항과 BSD | `cipher.c`, `log.c` | `SSH-short`, `BSD-2-Clause` |
+  | ISC | `digest-openssl.c` | `ISC` |
+  | BSD | `kex-names.c`, `myproposal.h`, `sshconnect2.c`, `mac.c`, `sshkey.c`, `sshconnect.h`, `defines.h` | `BSD-2-Clause` |
+
+- `glob(3)`(`Include`), `scan_scaled`(`RekeyLimit`), `vis(3)`(`EscapeChar` 출력)는 옮기지 않고 같은 결과를 내도록 따로 썼다. 원본 `openbsd-compat/glob.c`·`fmt_scaled.c`·`vis.c`는 3조항 BSD라 옮기면 크레이트 라이선스 식이 바뀐다.
 
 - Tatu Ylonen 조항은 파생물을 그렇게 표시하라고 요구한다("Any derived versions of this software must be clearly marked as such"). 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는 것으로 이 요구를 지킨다. 원본 파일과 함수를 모듈 문서에 적는다.
 - 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`는 이미 있고, `SSH-short`는 이식 크레이트 작업이 더한다. cargo-deny가 `SSH-short`를 받지 못하면(라이선스 식을 해석하지 못하거나 허용 목록에 넣지 못하면) 그 작업은 다른 표기나 예외 설정으로 돌아가지 않고 보고한다.
