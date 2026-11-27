@@ -165,16 +165,34 @@ impl ConnInner {
         })
     }
 
-    /// Why the connection closed ([`P2pConnection::close_reason`]).
+    /// Close with `reason` unless the connection is already closed: quinn sends the first
+    /// close only, so the first reason is the one kept (docs/design/handshake.md "QUIC 종료
+    /// 코드").
+    pub(crate) fn close(&self, reason: P2pCloseReason) {
+        let mut local = self
+            .local_close
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if local.is_some() || self.conn.close_reason().is_some() {
+            return;
+        }
+        *local = Some(reason);
+        self.conn.close(reason.var_int(), reason.reason());
+    }
+
+    /// Why the connection closed ([`P2pConnection::close_reason`]). Closed here by the
+    /// endpoint's shutdown, it is `closed`, the code the shutdown sends.
     pub(crate) fn close_reason(&self) -> Option<P2pCloseReason> {
         match self.conn.close_reason()? {
             ConnectionError::ApplicationClosed(c) => {
                 Some(P2pCloseReason::from_code(c.error_code.into_inner()))
             }
-            ConnectionError::LocallyClosed => *self
-                .local_close
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
+            ConnectionError::LocallyClosed => Some(
+                self.local_close
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .unwrap_or(P2pCloseReason::Closed),
+            ),
             _ => None,
         }
     }
@@ -278,14 +296,10 @@ impl P2pConnection {
     }
 
     /// Close the whole connection with `reason` (QUIC CONNECTION_CLOSE with the code of
-    /// docs/design/handshake.md "QUIC 종료 코드").
+    /// docs/design/handshake.md "QUIC 종료 코드"). Only the first close of a connection is
+    /// sent; a later call does not change the reason.
     pub fn close(&self, reason: P2pCloseReason) {
-        *self
-            .inner
-            .local_close
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(reason);
-        self.inner.conn.close(reason.var_int(), reason.reason());
+        self.inner.close(reason);
     }
 
     /// Why the connection closed: the reason this side sent, or the code the peer sent.

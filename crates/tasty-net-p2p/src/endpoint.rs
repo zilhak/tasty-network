@@ -923,7 +923,7 @@ pub(crate) async fn watch_connection(
         tokio::select! {
             e = quic.closed() => break close_cause(&e, &conn),
             _ = shutdown.changed() => {
-                quic.close(P2pCloseReason::Closed.var_int(), P2pCloseReason::Closed.reason());
+                conn.close(P2pCloseReason::Closed);
                 break Cause::named("endpoint_off");
             }
             _ = tick.tick(), if poll_address => {

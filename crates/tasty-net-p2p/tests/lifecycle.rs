@@ -1094,3 +1094,22 @@ fn a_second_bind_on_the_same_key_directory_is_in_use() {
     let _removed = std::fs::remove_file(dir.join("p2p.lock"));
     let _removed = std::fs::remove_dir(&dir);
 }
+
+/// The first close of a connection is the one sent and kept: a second close with another
+/// reason changes neither side's reason.
+#[test]
+fn a_second_close_keeps_the_first_reason() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    let a = device(&n1, 2, 1, &s, settings(&[]));
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    let (ca, cb) = connected(&a, &b);
+    ca.close(P2pCloseReason::SessionMismatch);
+    ca.close(P2pCloseReason::Closed);
+    assert_eq!(ca.close_reason(), Some(P2pCloseReason::SessionMismatch));
+    assert!(cb.wait_closed(LONG).expect("wait").is_some());
+    assert_eq!(cb.close_reason(), Some(P2pCloseReason::SessionMismatch));
+    a.ep.close();
+    b.ep.close();
+}
