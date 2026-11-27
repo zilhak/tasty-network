@@ -56,6 +56,8 @@ allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(0)	quinn AsyncUdpSocket::p
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(1)	quinn AsyncUdpSocket::poll_recv: 한 번에 데이터그램 하나를 채운다
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	+= 1	세기: 출처별 STUN 수
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_sub(1,	세기: 등록 전 연결 하나가 빠짐
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	n + 1	세기: 등록 전 연결 하나를 더함
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	[0u8;	버퍼를 0으로 채워 만든다(길이는 u16::MAX)
 allow	crates/tasty-net-rendezvous/src/server/state.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/state.rs	next_punch_id: 1	punch_id는 1부터 매긴다

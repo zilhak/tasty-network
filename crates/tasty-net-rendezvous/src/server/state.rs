@@ -45,6 +45,7 @@ pub(crate) struct Counters {
     pub registrations_total: AtomicU64,
     pub superseded: AtomicU64,
     pub access_denied: AtomicU64,
+    pub pending_refused: AtomicU64,
 }
 
 fn bump(c: &AtomicU64) {

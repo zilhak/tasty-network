@@ -181,6 +181,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `quic_handshake_timeout` | 5 s(임시) | 직접 경로 RTT 몇 번. 실험으로 확정 |
 | `punch_session_grace` | 5 s | 한쪽 통지 지연과 결과 보고 시간을 덮는 여유. 느린 망의 한쪽 지연(수백 ms)에 손실 재전송 몇 번을 더해도 남는다. 세션 TTL 식은 위 "서버 상태"(기본 21 s) |
 | `max_devices` | 10000 | 등록 하나는 연결 상태 수 KB다. 작은 서버 한 대가 감당할 수 있는 수 |
+| `max_pending_connections` | 1000 | 아직 등록되지 않은 연결(TLS handshake 중이거나 `hello`를 기다림)의 동시 수. 넘으면 새 연결 시도를 accept 단계에서 거절한다(QUIC `CONNECTION_REFUSED`, 태스크를 만들지 않는다). 하나하나는 `hello_timeout` 안에 끝나므로 정상 기기의 재연결이 몰려도 이 수면 남는다. quinn `max_incoming`은 accept하기 전의 연결만 센다 |
 | `max_punches` | 1000 | 동시 펀칭 전체 상한 |
 | `max_punches_per_device` | 4 | 한 기기가 다른 기기들에게 거는 동시 시도 |
 | `punch_requests_per_minute` | 20 | 기기마다. 남의 주소를 훑는 요청을 늦춘다 |

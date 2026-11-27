@@ -550,6 +550,38 @@ async fn stun_sources_per_window_are_capped() {
 }
 
 #[tokio::test]
+async fn pending_connections_are_capped() {
+    let mut s = local_settings();
+    s.set("max_pending_connections", Value::Count(1)).unwrap();
+    let server = start(s).await;
+    // A connection that has not sent hello holds the one pending place.
+    let mut first = Device::open(&server, &key(1)).await;
+    eventually("the first connection is pending", || {
+        server.status().pending == 1
+    })
+    .await;
+    match connect_with_alpn(&server, &key(2), ALPN_RENDEZVOUS).await {
+        Err(quinn::ConnectionError::ConnectionClosed(close)) => {
+            // CONNECTION_REFUSED (RFC 9000 §20.1).
+            assert_eq!(u64::from(close.error_code), 0x2, "{close:?}");
+        }
+        other => panic!("expected a refused connection, got {other:?}"),
+    }
+    assert_eq!(server.status().pending_refused, 1);
+    // Once the first one registers, the place is free.
+    first
+        .send(&DeviceMessage::Hello(Hello {
+            proto: PROTO,
+            host_candidates: Vec::new(),
+        }))
+        .await;
+    assert!(matches!(first.recv().await, ServerMessage::Welcome(_)));
+    eventually("the place is free", || server.status().pending == 0).await;
+    let (_d, _) = Device::register(&server, &key(2), &[]).await;
+    assert_eq!(server.status().registrations, 2);
+}
+
+#[tokio::test]
 async fn access_policy_rejects() {
     let allowed = key(1);
     let mut config = ServerConfig::new(key(100));

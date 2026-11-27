@@ -266,6 +266,7 @@ pub static DEFAULTS: &[Setting] = &[
     entry("quic_handshake_timeout", Kind::Duration, secs(5)),
     entry("punch_session_grace", Kind::Duration, secs(5)),
     entry("max_devices", Kind::Count, Value::Count(10_000)),
+    entry("max_pending_connections", Kind::Count, Value::Count(1000)),
     entry("max_punches", Kind::Count, Value::Count(1000)),
     entry("max_punches_per_device", Kind::Count, Value::Count(4)),
     entry("punch_requests_per_minute", Kind::Count, Value::Count(20)),
@@ -747,6 +748,8 @@ pub struct ServerParams {
     pub punch_session_grace: Duration,
     /// `max_devices`.
     pub max_devices: usize,
+    /// `max_pending_connections`.
+    pub max_pending_connections: usize,
     /// `max_punches`.
     pub max_punches: usize,
     /// `max_punches_per_device`.
@@ -1142,6 +1145,7 @@ impl Resolver<'_> {
             quic_handshake_timeout: self.duration("quic_handshake_timeout"),
             punch_session_grace,
             max_devices: self.fits("max_devices")?,
+            max_pending_connections: self.fits("max_pending_connections")?,
             max_punches: self.fits("max_punches")?,
             max_punches_per_device: self.fits("max_punches_per_device")?,
             punch_requests_per_minute: self.fits("punch_requests_per_minute")?,

@@ -12,7 +12,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use quinn::crypto::rustls::QuicServerConfig;
@@ -163,6 +163,10 @@ pub struct ServerStatus {
     pub access_denied: u64,
     /// Connections closed as `busy` because their send queue (`max_queued_messages`) was full.
     pub queue_full: u64,
+    /// Connections not registered yet (handshake or `hello` pending).
+    pub pending: usize,
+    /// Connection attempts refused because `max_pending_connections` were pending.
+    pub pending_refused: u64,
 }
 
 struct Inner {
@@ -175,7 +179,17 @@ struct Inner {
     stun_window: Mutex<StunWindow>,
     demux: Arc<DemuxCounters>,
     queue_full: Arc<std::sync::atomic::AtomicU64>,
+    pending: AtomicUsize,
     addrs: ServerAddrs,
+}
+
+/// One connection counted in `Inner::pending` until it is dropped.
+struct Pending(Arc<Inner>);
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct StunWindow {
@@ -214,6 +228,8 @@ impl Inner {
             superseded: get(&c.superseded),
             access_denied: get(&c.access_denied),
             queue_full: get(&self.queue_full),
+            pending: self.pending.load(Ordering::Relaxed),
+            pending_refused: get(&c.pending_refused),
         }
     }
 
@@ -428,6 +444,7 @@ impl Server {
             }),
             demux: demux_counters.clone(),
             queue_full: Arc::default(),
+            pending: AtomicUsize::default(),
             addrs,
         });
         let socket = DemuxSocket::with_counters(io.primary.clone(), inner.clone(), demux_counters);
@@ -593,6 +610,8 @@ async fn status_loop(inner: Arc<Inner>) {
             stun_dropped = s.stun_dropped,
             packets_dropped = s.packets_dropped,
             queue_full = s.queue_full,
+            pending = s.pending,
+            pending_refused = s.pending_refused,
             "status"
         );
     }
@@ -600,7 +619,24 @@ async fn status_loop(inner: Arc<Inner>) {
 
 async fn accept_loop(inner: Arc<Inner>, endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
-        tokio::spawn(connection(inner.clone(), incoming));
+        // Connections before registration are capped: a refused attempt costs no task.
+        let p = &inner.params;
+        let taken = inner
+            .pending
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < p.max_pending_connections).then_some(n + 1)
+            });
+        if taken.is_err() {
+            inner
+                .counters
+                .pending_refused
+                .fetch_add(1, Ordering::Relaxed);
+            debug!("connection refused: max_pending_connections reached");
+            incoming.refuse();
+            continue;
+        }
+        let pending = Pending(inner.clone());
+        tokio::spawn(connection(inner.clone(), incoming, pending));
     }
 }
 
@@ -624,7 +660,7 @@ enum HelloFailure {
     Connection,
 }
 
-async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
+async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pending) {
     let p = &inner.params;
     let deadline = Instant::now().checked_add(p.hello_timeout);
     let conn = match until(deadline, incoming).await {
@@ -737,6 +773,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
             return;
         }
     };
+    drop(pending);
     info!(device = %device, "registered");
     debug!(device = %device, reflexive = %reflexive, stun = ?advertised, "registered addresses");
     let welcome = ServerMessage::Welcome(Welcome {
