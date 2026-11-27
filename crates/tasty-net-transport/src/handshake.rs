@@ -852,7 +852,7 @@ fn settle_join(joined: Option<&Joined>, failed: Option<&HandshakeError>) {
     };
     match failed {
         None => joined.succeeded(),
-        Some(error) => joined.pending.end(Cause::of_handshake(error)),
+        Some(error) => joined.failed(Cause::of_handshake(error)),
     }
 }
 

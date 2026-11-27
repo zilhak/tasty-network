@@ -1153,3 +1153,68 @@ fn a_cancelled_first_handshake_ends_its_tunnel_entry_as_cancelled() {
     );
     assert!(!attempted);
 }
+
+#[test]
+fn a_join_shows_its_handshake_phase_and_keeps_its_failure() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("join-phase");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let first = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let broken = broken_transport(&fake, &table);
+    assert!(broken.connect(&target(), &cancel).is_err());
+    let lost = table.connections()[1].id;
+    // The far end goes; the tunnel stays shared while the first link holds it, so the
+    // redial joins it and its handshake fails for real.
+    drop(server);
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new()
+            .with_initial(Duration::from_millis(1))
+            .with_max_attempts(1),
+    )
+    .expect("valid");
+    let pending = |table: &ConnectionTable| {
+        table
+            .connections()
+            .into_iter()
+            .find(|e| e.previous == Some(lost))
+            .expect("the redial's entry")
+    };
+    let mut seen = Vec::new();
+    let result = redialer.redial(lost, None, &cancel, |options| {
+        let conn = transport
+            .connect_with(&target(), &cancel, options)
+            .map_err(HandshakeError::Connect)?;
+        let joining = pending(&table);
+        seen.push((joining.state, joining.phase));
+        let error = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel)
+            .expect_err("nothing answers on the shared tunnel");
+        assert!(error.is_retryable(), "{error}");
+        // The endpoint is gone by now; its guard did not replace the failure.
+        let failed = pending(&table);
+        assert_eq!(failed.state, ConnectionState::Reconnecting);
+        assert!(
+            matches!(
+                failed.last_cause,
+                Some(Cause::PeerClosed | Cause::RemoteListenerAbsent)
+            ),
+            "{:?}",
+            failed.last_cause
+        );
+        Err::<(), _>(error)
+    });
+    assert!(
+        matches!(result, Err(RedialError::Exhausted(Some(_)))),
+        "{result:?}"
+    );
+    assert_eq!(
+        seen,
+        [(ConnectionState::Reconnecting, Some(Phase::Handshake))]
+    );
+    assert_eq!(pending(&table).last_cause, Some(Cause::RedialExhausted));
+    drop(first);
+}

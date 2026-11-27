@@ -295,10 +295,7 @@ impl SshTransport {
                         // tunnel succeeds it ends naming the entry it joined; until then it
                         // stays `reconnecting`.
                         (Some(shared), true) => {
-                            joined = Some(Joined {
-                                pending: entry.clone(),
-                                into: shared.id(),
-                            });
+                            joined = Some(Joined::new(entry.clone(), shared.id()));
                         }
                         _ => entry.remove(),
                     }
@@ -352,7 +349,12 @@ impl SshTransport {
             }
         })?;
         let channel = match &joined {
-            Some(joined) => channel.with_joined(joined.clone()),
+            Some(joined) => {
+                // The channel on the shared tunnel is open: the reconnection is in its
+                // handshake now, as a new tunnel's is.
+                joined.pending.phase(Phase::Handshake);
+                channel.with_joined(joined.clone())
+            }
             None => channel,
         };
         Ok(Connection {
@@ -562,7 +564,7 @@ struct JoinGuard(Joined);
 
 impl Drop for JoinGuard {
     fn drop(&mut self) {
-        self.0.pending.end(Cause::Ended);
+        self.0.abandoned();
     }
 }
 

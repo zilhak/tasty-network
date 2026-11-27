@@ -8,6 +8,7 @@ mod info;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -365,16 +366,41 @@ pub(crate) struct NewEntry {
 pub(crate) struct Joined {
     pub pending: EntryRef,
     pub into: ConnectionId,
+    /// The handshake's result was recorded (shared by the clones).
+    settled: Arc<AtomicBool>,
 }
 
 impl Joined {
+    pub(crate) fn new(pending: EntryRef, into: ConnectionId) -> Self {
+        Self {
+            pending,
+            into,
+            settled: Arc::default(),
+        }
+    }
+
     /// The handshake on the shared tunnel succeeded.
     pub(crate) fn succeeded(&self) {
+        self.settled.store(true, Ordering::Release);
         self.pending.transition(
             ConnectionState::Disconnected,
             None,
             Some(Cause::SharedTunnel(self.into)),
         );
+    }
+
+    /// The handshake on the shared tunnel failed with `cause`.
+    pub(crate) fn failed(&self, cause: Cause) {
+        self.settled.store(true, Ordering::Release);
+        self.pending.end(cause);
+    }
+
+    /// The channel went without a handshake result: it ends as `ended` (a redialer's entry
+    /// only keeps the cause). After a result nothing changes.
+    pub(crate) fn abandoned(&self) {
+        if !self.settled.load(Ordering::Acquire) {
+            self.pending.end(Cause::Ended);
+        }
     }
 }
 
