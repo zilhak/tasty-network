@@ -777,91 +777,115 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
     let first = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
     let tunnel_entry = table.connections()[0].id;
     let broken = broken_transport(&fake, &table);
-    assert!(broken.connect(&target(), &cancel).is_err());
-    let lost = table.connections()[1].id;
-    let redialer = Redialer::new(
-        &table,
-        RedialerConfig::new()
-            .with_initial(Duration::from_millis(1))
-            .with_jitter(0.0)
-            .with_max_attempts(2),
-    )
-    .expect("valid");
-    let pending_of = |table: &ConnectionTable| {
+    let lose = || {
+        assert!(broken.connect(&target(), &cancel).is_err());
+        table.connections().last().expect("the lost entry").id
+    };
+    let entry_after = |lost| {
         table
             .connections()
             .into_iter()
-            .filter(|e| e.previous == Some(lost))
-            .collect::<Vec<_>>()
+            .find(|e| e.previous == Some(lost))
+            .expect("the redial's entry")
+    };
+    let redialer = |attempts| {
+        Redialer::new(
+            &table,
+            RedialerConfig::new()
+                .with_initial(Duration::from_millis(1))
+                .with_jitter(0.0)
+                .with_max_attempts(attempts),
+        )
+        .expect("valid")
     };
 
-    // Both attempts join the shared tunnel and fail before a handshake.
-    let result = redialer.redial(lost, None, &cancel, |options| {
+    // A handshake that succeeds on the shared tunnel, and only then, ends the redial's entry
+    // naming the tunnel's entry.
+    let lost = lose();
+    let joined = redialer(1)
+        .redial(lost, None, &cancel, |options| {
+            let conn = transport
+                .connect_with(&target(), &cancel, options)
+                .map_err(HandshakeError::Connect)?;
+            assert_eq!(entry_after(lost).state, ConnectionState::Reconnecting);
+            dial_handshake(conn, &client(), Holder::Dialer, None, &cancel)
+        })
+        .expect("joined");
+    assert_eq!(fake.tunnels_started(), 1);
+    let pending = entry_after(lost);
+    assert_eq!(pending.state, ConnectionState::Disconnected);
+    assert_eq!(pending.last_cause, Some(Cause::SharedTunnel(tunnel_entry)));
+    let shared = table.connection(tunnel_entry).expect("the tunnel's entry");
+    assert!(
+        shared.links.iter().any(|l| l.link_id == joined.link_id()),
+        "{:?}",
+        shared.links
+    );
+
+    // The far end goes while the tunnel stays shared: each attempt joins it, and its real
+    // handshake fails with a retryable error, which the entry keeps until the attempts run out.
+    drop(server);
+    let lost = lose();
+    let mut failures = 0;
+    let result = redialer(2).redial(lost, None, &cancel, |options| {
         let conn = transport
             .connect_with(&target(), &cancel, options)
             .map_err(HandshakeError::Connect)?;
-        drop(conn);
-        Err::<(), _>(HandshakeError::TimedOut)
+        let error = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel)
+            .expect_err("nothing answers behind the tunnel");
+        assert!(error.is_retryable(), "{error}");
+        let failed = entry_after(lost);
+        assert_eq!(failed.state, ConnectionState::Reconnecting);
+        assert!(
+            matches!(
+                failed.last_cause,
+                Some(Cause::PeerClosed | Cause::RemoteListenerAbsent)
+            ),
+            "{:?}",
+            failed.last_cause
+        );
+        failures += 1;
+        Err::<(), _>(error)
     });
     assert!(
-        matches!(result, Err(RedialError::Exhausted(_))),
+        matches!(result, Err(RedialError::Exhausted(Some(_)))),
         "{result:?}"
     );
-    let pending = pending_of(&table);
-    assert_eq!(pending.len(), 1, "{pending:#?}");
-    assert_eq!(pending[0].state, ConnectionState::Disconnected);
-    assert_eq!(pending[0].last_cause, Some(Cause::RedialExhausted));
-    let shared = table.connection(tunnel_entry).expect("the tunnel's entry");
-    assert_eq!(shared.state, ConnectionState::Connected);
-    assert_eq!(shared.links.len(), 1);
+    assert_eq!(failures, 2);
+    assert_eq!(fake.tunnels_started(), 1, "every attempt joined");
+    let pending = entry_after(lost);
+    assert_eq!(pending.state, ConnectionState::Disconnected);
+    assert_eq!(pending.last_cause, Some(Cause::RedialExhausted));
 
-    // The first attempt joins and fails; the shared tunnel then goes, and the second attempt
-    // starts a new tunnel whose link comes up on the redial's entry.
-    let table = ConnectionTable::default();
-    let transport = fake.transport().with_connections(table.clone());
-    let conn = transport.connect(&target(), &cancel).expect("connect");
-    drop(first);
-    let mut kept =
-        Some(dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake"));
-    let old_tunnel = table.connections()[0].id;
-    let broken = broken_transport(&fake, &table);
-    assert!(broken.connect(&target(), &cancel).is_err());
-    let lost = table.connections()[1].id;
-    let redialer = Redialer::new(
-        &table,
-        RedialerConfig::new()
-            .with_initial(Duration::from_millis(1))
-            .with_jitter(0.0)
-            .with_max_attempts(3),
-    )
-    .expect("valid");
+    // The first attempt joins and its handshake fails; the record then names another
+    // instance, and the second attempt starts a new tunnel whose link comes up on the same
+    // entry.
+    let other = echo_server(token('a'));
+    let lost = lose();
     let mut attempts = 0;
-    let link = redialer
+    let link = redialer(3)
         .redial(lost, None, &cancel, |options| {
             attempts += 1;
             let conn = transport
                 .connect_with(&target(), &cancel, options)
                 .map_err(HandshakeError::Connect)?;
+            let result = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel);
             if attempts == 1 {
-                drop(conn);
-                drop(kept.take());
-                wait_until("the shared tunnel to go", || transport.live_tunnels() == 0);
-                return Err(HandshakeError::TimedOut);
+                let error = result.expect_err("the shared tunnel's far end is gone");
+                assert_eq!(entry_after(lost).state, ConnectionState::Reconnecting);
+                fake.publish_record(other.addr.port(), token('a'), "instance-2");
+                return Err(error);
             }
-            dial_handshake(conn, &client(), Holder::Dialer, None, &cancel)
+            result
         })
         .expect("redialed");
     assert_eq!(attempts, 2);
-    let pending = table
-        .connections()
-        .into_iter()
-        .find(|e| e.previous == Some(lost))
-        .expect("the redial's entry");
+    assert_eq!(fake.tunnels_started(), 2);
+    let pending = entry_after(lost);
     assert_eq!(pending.state, ConnectionState::Connected, "{pending:#?}");
     assert_eq!(pending.links.len(), 1);
     assert_eq!(pending.links[0].link_id, link.link_id());
-    let old = table.connection(old_tunnel).expect("kept");
-    assert_eq!(old.state, ConnectionState::Disconnected);
+    drop((link, joined, first));
 }
 
 #[test]
