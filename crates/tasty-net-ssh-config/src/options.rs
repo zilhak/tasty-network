@@ -359,9 +359,10 @@ pub struct Options {
     pub pkcs11_provider: Option<String>,
     pub sk_provider: Option<String>,
     pub verify_host_key_dns: Option<YesNoAsk>,
-    /// Paths and whether a user configuration gave them (`identity_file_userprovided`).
-    pub identity_files: Vec<(String, bool)>,
-    pub certificate_files: Vec<(String, bool)>,
+    /// Paths and who gave them (`identity_file_userprovided`).
+    pub identity_files: Vec<(String, ProvidedBy)>,
+    /// Paths and who gave them (`certificate_file_userprovided`).
+    pub certificate_files: Vec<(String, ProvidedBy)>,
     /// The mode and the lifespan in seconds (`0` unlimited).
     pub add_keys_to_agent: Option<(AddKeys, i32)>,
     pub identity_agent: Option<String>,
@@ -421,6 +422,19 @@ pub struct Options {
 }
 
 /// `fill_default_options` values (`readconf.c:2860`–`:3034`).
+/// Who gave an `IdentityFile` or `CertificateFile`: the `userprovided` value of
+/// `add_identity_file` and `add_certificate_file`. A duplicate is dropped only when this is
+/// the same too (`readconf.c:494`-`:500`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProvidedBy {
+    /// `0`: the system configuration or the default files.
+    NotUser,
+    /// `1`: `ssh -i`.
+    IdentityOption,
+    /// `2` (`SSHCONF_USERCONF`): a user configuration file or `-o`.
+    UserConfig,
+}
+
 /// `SSH_MAX_IDENTITY_FILES` (`ssh.h`).
 pub(crate) const MAX_IDENTITY_FILES: usize = 100;
 /// `SSH_MAX_CERTIFICATE_FILES` (`ssh.h`).
@@ -434,9 +448,9 @@ pub(crate) struct TooManyFiles {
 }
 
 fn add_file(
-    list: &mut Vec<(String, bool)>,
+    list: &mut Vec<(String, ProvidedBy)>,
     path: String,
-    userprovided: bool,
+    userprovided: ProvidedBy,
     max: usize,
 ) -> Result<(), TooManyFiles> {
     if list.len() >= max {
@@ -548,7 +562,10 @@ impl Options {
         if self.identity_files.is_empty() {
             for f in DEFAULT_IDENTITY_FILES {
                 // The list is empty here, so the limit is not reached.
-                if self.add_identity_file(f.to_string(), false).is_err() {
+                if self
+                    .add_identity_file(f.to_string(), ProvidedBy::NotUser)
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -669,7 +686,7 @@ impl Options {
     pub(crate) fn add_identity_file(
         &mut self,
         path: String,
-        userprovided: bool,
+        userprovided: ProvidedBy,
     ) -> Result<(), TooManyFiles> {
         add_file(
             &mut self.identity_files,
@@ -683,7 +700,7 @@ impl Options {
     pub(crate) fn add_certificate_file(
         &mut self,
         path: String,
-        userprovided: bool,
+        userprovided: ProvidedBy,
     ) -> Result<(), TooManyFiles> {
         add_file(
             &mut self.certificate_files,

@@ -9,3 +9,4 @@ bad.example.com
 2001:db8::5
 deploy@WEB.Example.COM
 ssh://user@uri.example.com:2201
+-o IdentityFile=~/.ssh/id_%h web

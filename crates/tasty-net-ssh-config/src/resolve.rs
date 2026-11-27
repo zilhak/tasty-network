@@ -107,8 +107,8 @@ use std::path::{Path, PathBuf};
 use crate::keywords::{KEYWORDS, Op, Treatment, treatment};
 use crate::misc::{Account, ExpandError, TildeError, Token, expand, tilde_expand};
 use crate::options::{
-    Canonicalize, Compression, Flag, ForwardEnd, Jump, LogLevel, Options, PubkeyAuth, SessionType,
-    StrictHostKey, YesNoAsk, clear_or_none,
+    Canonicalize, Compression, Flag, ForwardEnd, Jump, LogLevel, Options, ProvidedBy, PubkeyAuth,
+    SessionType, StrictHostKey, YesNoAsk, clear_or_none,
 };
 use crate::readconf::{
     DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, Reader, connection_hash, owner_mode,
@@ -429,12 +429,13 @@ impl ConfigSet {
                 CommandLine::Identity(path) => {
                     let p = tilde_path(&r.env.account, path, &origin)?;
                     if Path::new(&p).exists() {
-                        r.o.add_identity_file(p.clone(), true).map_err(|e| {
-                            config_error(
-                                Some(&origin),
-                                format!("Too many identity files specified (max {})", e.max),
-                            )
-                        })?;
+                        r.o.add_identity_file(p.clone(), ProvidedBy::IdentityOption)
+                            .map_err(|e| {
+                                config_error(
+                                    Some(&origin),
+                                    format!("Too many identity files specified (max {})", e.max),
+                                )
+                            })?;
                         push_source(r, Op::IdentityFile, &p, &origin);
                     }
                 }

@@ -53,7 +53,7 @@ use crate::misc::{
 use crate::options::{
     AddKeys, AddressFamily, Canonicalize, Compression, ControlMaster, Digest, EscapeChar, Flag,
     Forward, ForwardEnd, Jump, KEYSTROKE_DEFAULT_INTERVAL_MS, KeepAlives, LogFacility, LogLevel,
-    Multistate, Options, PubkeyAuth, RequestTty, SessionType, StrictHostKey, Tunnel,
+    Multistate, Options, ProvidedBy, PubkeyAuth, RequestTty, SessionType, StrictHostKey, Tunnel,
     WarnWeakCrypto, YesNoAsk, clear_or_none,
 };
 use crate::result::{ConfigNote, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource};
@@ -109,6 +109,17 @@ pub(crate) struct Flags {
     pub(crate) user_conf: bool,
     pub(crate) final_pass: bool,
     pub(crate) never_match: bool,
+}
+
+impl Flags {
+    /// `flags & SSHCONF_USERCONF` as the `userprovided` value of `add_identity_file`.
+    fn provided_by(self) -> ProvidedBy {
+        if self.user_conf {
+            ProvidedBy::UserConfig
+        } else {
+            ProvidedBy::NotUser
+        }
+    }
 }
 
 /// A fatal error: the resolution stops.
@@ -930,7 +941,12 @@ impl<'a> Reader<'a> {
             label: label.to_string(),
         };
         self.line_keyword = None;
-        match self.process_line(line, &origin, None, Flags::default(), Default::default()) {
+        // `ssh.c:1039`-`:1043` reads `-o` with `SSHCONF_USERCONF`.
+        let flags = Flags {
+            user_conf: true,
+            ..Flags::default()
+        };
+        match self.process_line(line, &origin, None, flags, Default::default()) {
             Ok(()) => Ok(()),
             Err(LineErr::Fatal(f)) => Err(f),
             Err(LineErr::Bad(msg)) => Err(fatal(
@@ -1258,9 +1274,10 @@ impl<'a> Reader<'a> {
                     // `readconf.c:1412`-`:1442` checks the count before `add_*_file`, which
                     // checks it again.
                     let added = if ident {
-                        self.o.add_identity_file(arg.clone(), flags.user_conf)
+                        self.o.add_identity_file(arg.clone(), flags.provided_by())
                     } else {
-                        self.o.add_certificate_file(arg.clone(), flags.user_conf)
+                        self.o
+                            .add_certificate_file(arg.clone(), flags.provided_by())
                     };
                     if let Err(e) = added {
                         return bad(format!(

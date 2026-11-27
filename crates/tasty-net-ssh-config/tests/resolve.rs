@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tasty_net_ssh_config::options::{Flag, StrictHostKey};
+use tasty_net_ssh_config::options::{Flag, ProvidedBy, StrictHostKey};
 use tasty_net_ssh_config::{
     CommandLine, CommandLineValue, ConfigFiles, ConfigInputs, ConfigSet, NoteAction, NoteClass,
     Origin, RefusalKind, Resolution, ResolveContext,
@@ -481,6 +481,38 @@ fn identity_file_limit() {
         f.message.contains("Too many identity files"),
         "{}",
         f.message
+    );
+}
+
+#[test]
+fn identity_file_duplicates_by_origin() {
+    // `-o` is a user configuration (2), as the user file: one entry.
+    let o = resolve_with(
+        "IdentityFile /k\n",
+        "web",
+        vec![option("IdentityFile=/k", "override")],
+    );
+    assert_eq!(
+        o.options.identity_files,
+        vec![("/k".to_string(), ProvidedBy::UserConfig)]
+    );
+    // `-i` (1) is not a duplicate of the same file in the user file (2).
+    let dir = folder();
+    let key = write(&dir, "key", "").display().to_string();
+    let i = resolve_with(
+        &format!("IdentityFile {key}\n"),
+        "web",
+        vec![CommandLineValue {
+            value: CommandLine::Identity(key.clone()),
+            label: "target".to_string(),
+        }],
+    );
+    assert_eq!(
+        i.options.identity_files,
+        vec![
+            (key.clone(), ProvidedBy::IdentityOption),
+            (key, ProvidedBy::UserConfig)
+        ]
     );
 }
 
