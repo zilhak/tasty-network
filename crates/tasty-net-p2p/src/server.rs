@@ -62,20 +62,43 @@ fn lost(e: &ConnectionError) -> End {
     }
 }
 
-/// The TLS-stage failures of a handshake: a peer key this side refused (a local TLS error) and
-/// the peer's `no_application_protocol` alert.
+/// The TLS-stage failures of a handshake: a peer key this side refused and the peer's
+/// `no_application_protocol` alert.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TlsStage {
     KeyRefused,
     NoAlpn,
 }
 
+/// Whether a local error code is a certificate error of this side's verifier.
+fn key_refused(code: quinn::TransportErrorCode) -> bool {
+    [
+        rustls::AlertDescription::AccessDenied,
+        rustls::AlertDescription::BadCertificate,
+        rustls::AlertDescription::DecryptError,
+    ]
+    .map(alert_code)
+    .contains(&code)
+}
+
+/// The QUIC code of a TLS alert (RFC 9001 §4.8).
+fn alert_code(alert: rustls::AlertDescription) -> quinn::TransportErrorCode {
+    quinn::TransportErrorCode::crypto(u8::from(alert))
+}
+
+/// The TLS stage of a failed handshake, if it failed there. A key is refused only by this
+/// side's own verifier, which fails with a certificate error: a key other than the expected
+/// one (`access_denied`), a key that is not a valid ed25519 raw public key (`bad_certificate`)
+/// or a signature it does not verify (`decrypt_error`). Other local errors (QUIC transport
+/// parameters, a protocol violation) are not the key's.
 pub(crate) fn tls_stage(e: &ConnectionError) -> Option<TlsStage> {
-    let no_alpn = quinn::TransportErrorCode::crypto(u8::from(
-        rustls::AlertDescription::NoApplicationProtocol,
-    ));
     match e {
-        ConnectionError::TransportError(_) => Some(TlsStage::KeyRefused),
-        ConnectionError::ConnectionClosed(c) if c.error_code == no_alpn => Some(TlsStage::NoAlpn),
+        ConnectionError::TransportError(t) if key_refused(t.code) => Some(TlsStage::KeyRefused),
+        ConnectionError::ConnectionClosed(c)
+            if c.error_code == alert_code(rustls::AlertDescription::NoApplicationProtocol) =>
+        {
+            Some(TlsStage::NoAlpn)
+        }
         _ => None,
     }
 }
@@ -512,4 +535,29 @@ pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
         core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
     }
     j
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_certificate_alerts_of_this_side_are_a_refused_key() {
+        for alert in [
+            rustls::AlertDescription::AccessDenied,
+            rustls::AlertDescription::BadCertificate,
+            rustls::AlertDescription::DecryptError,
+        ] {
+            assert!(key_refused(alert_code(alert)), "{alert:?}");
+        }
+        for code in [
+            quinn::TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
+            quinn::TransportErrorCode::PROTOCOL_VIOLATION,
+            alert_code(rustls::AlertDescription::InternalError),
+            alert_code(rustls::AlertDescription::HandshakeFailure),
+        ] {
+            assert!(!key_refused(code), "{code:?}");
+        }
+        assert_eq!(tls_stage(&ConnectionError::TimedOut), None);
+    }
 }
