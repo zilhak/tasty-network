@@ -501,15 +501,25 @@ impl EndpointHandle for P2pEndpointHandle {
         })
     }
 
+    /// The share takes the attempt's cancel off the connection and lists it as shared, both
+    /// under the lock [`P2pEndpointHandle::connect_more`] reads `owned` under: no more channel
+    /// takes the connection before both are done, nor after a cancel that came first.
     fn publish(&self) -> Result<(), Cancelled> {
-        let Some((owned, _hold)) = lock(&self.owned).take() else {
+        let mut owned = lock(&self.owned);
+        let Some((registration, _hold)) = owned.take() else {
             return Ok(());
         };
-        owned.release()?;
+        if let Err(cancelled) = registration.release() {
+            // The cancel came first and closes the connection; closed here as well before the
+            // lock goes, as the cancel may not have reached it yet.
+            self.state.close(tasty_net_p2p::P2pCloseReason::Closed);
+            return Err(cancelled);
+        }
         lock(&self.shared).insert(
             self.state.conn.remote_device_id(),
             Arc::downgrade(&self.state),
         );
+        drop(owned);
         Ok(())
     }
 }
