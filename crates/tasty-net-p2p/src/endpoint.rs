@@ -875,11 +875,13 @@ async fn accept_loop(core: Arc<Core>) {
             incoming.refuse();
             continue;
         }
+        // The sessions learn of the Initial before the loop takes the next one, so an Initial
+        // taken before a session's deadline is counted before that deadline is judged.
+        for s in &matching {
+            let _sent = s.to.send(Incoming::Started(addr)).is_ok();
+        }
         let core = core.clone();
         tokio::spawn(async move {
-            for s in &matching {
-                let _sent = s.to.send(Incoming::Started(addr)).is_ok();
-            }
             let limit = matching
                 .iter()
                 .map(|s| s.probe.handshake)

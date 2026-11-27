@@ -739,6 +739,8 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
     let mut pending = usize::MIN;
     loop {
         tokio::select! {
+            // A handshake that came in is seen before the deadline that would end the session.
+            biased;
             inc = incoming.recv() => match inc {
                 Some(Incoming::Started(addr)) => {
                     pending += 1;
