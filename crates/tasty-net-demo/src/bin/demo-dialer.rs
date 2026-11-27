@@ -21,12 +21,16 @@
 //! `--instance-id` replaces the instance ID (default `demo-dialer-<pid>`); a test gives the
 //! server's to check that a self attach is refused.
 //!
-//! `--channels` opens, on every link that comes up, a bulk channel under it and a request
-//! channel through the same tunnel, and calls `system.info` once on the request channel. Both
-//! stay open until the link ends. `--also-holder dialer|acceptor` opens a second attach link
-//! with that holder through the same tunnel once the first one is up, so one tunnel carries
-//! links of both directions; it is not opened again after a loss, and its events carry the
-//! `extra-` prefix.
+//! `--channels` opens, every time the first link comes up (the first connection and each one
+//! after a loss), a bulk channel under it and a request channel through the same tunnel, and
+//! calls `system.info` once on the request channel. Both stay open until that link ends. The
+//! bulk channel is opened only under the first link, never under the second one.
+//! `--also-holder dialer|acceptor` opens a second attach link with that holder through the
+//! same tunnel every time the first link comes up, so one tunnel carries links of both
+//! directions. The second link is not redialed on its own: when it ends, it comes back only
+//! with the next connection of the first link. Its events carry the `extra-` prefix. After
+//! `quit` or the end of stdin no channel and no second link is opened, and one being opened
+//! is cancelled.
 //!
 //! The link's channels hold the `-L` tunnel, and the tunnel's `ssh` child is ended when the
 //! last of them goes. On `quit` the stdin thread holds the writer while it detaches, so the
@@ -61,6 +65,8 @@
 //! | `dialer extra-connected holder=<holder> link_id=<hex>` | `--also-holder`: the second link is up |
 //! | `dialer extra-failed error=<text>` | `--also-holder`: the second link did not come up |
 //! | `dialer extra-ended end=<name>` | `--also-holder`: the second link's reader ended |
+//! | `dialer extra-send-failed error=<text>` | `--also-holder`: writing on the second link failed (its descriptor, or a frame it served back) |
+//! | `dialer extra-panicked` | `--also-holder`: the second link's reader thread had panicked |
 //! | `dialer control <json>` | a Control frame arrived (the server's snapshot); `dialer extra-control` on the second link |
 //! | `dialer echo <text>` | a Data frame arrived on a link this end holds; `dialer extra-echo` on the second link |
 //! | `dialer served <text>` | a Data frame arrived on a link this end provides, and went back; `dialer extra-served` on the second link |

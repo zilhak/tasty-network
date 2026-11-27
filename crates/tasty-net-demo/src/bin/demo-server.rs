@@ -41,6 +41,7 @@
 //! | `server bulk-accepted peer=<instance>` | a bulk channel under an attach link is up (the value encoded as in `tasty_net_demo::table`) |
 //! | `server bulk-ended end=<failure name or detach>` | the bulk channel's reader ended |
 //! | `server request method=<method>` | a request channel answered a request (the value encoded as in `tasty_net_demo::table`) |
+//! | `server request-failed error=<text>` | serving a request channel failed; `server request-ended` follows |
 //! | `server request-ended` | a request channel ended |
 //! | `server table ...` · `server conn ...` · `server link ...` · `server table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `server refused reason=<wire reason>` | this end refused a handshake |
