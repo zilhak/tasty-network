@@ -759,8 +759,8 @@ impl ConfigSet {
                 None => Ok(None),
             }
         };
-        // A socket path the connection uses: without the home it cannot be known.
-        let path = |s: &str, what: &str| -> Result<String, Fatal> {
+        // A file `ssh` must read: without the home it cannot be known.
+        let needed = |s: &str, what: &str| -> Result<String, Fatal> {
             file(s, what)?.ok_or_else(|| {
                 Fatal(Refusal {
                     kind: RefusalKind::Undeterminable,
@@ -773,21 +773,23 @@ impl ConfigSet {
         if let Some(c) = r.o.remote_command.clone() {
             r.o.remote_command = Some(percent(&c, "remotecommand")?);
         }
+        // A socket under an unknown home is a missing socket: no control socket, no agent.
         if let Some(c) = r.o.control_path.clone() {
-            r.o.control_path = Some(path(&c, "controlpath")?);
+            r.o.control_path = file(&c, "controlpath")?;
         }
         if let Some(c) = r.o.identity_agent.clone() {
-            r.o.identity_agent = Some(path(&c, "identityagent")?);
+            r.o.identity_agent =
+                Some(file(&c, "identityagent")?.unwrap_or_else(|| "none".to_string()));
         }
         let revoked = std::mem::take(&mut r.o.revoked_host_keys);
         for k in revoked {
             // `ssh` stops when it cannot read a revoked keys file (`sshconnect.c:1544`-`:1563`),
             // so a file under an unknown home is not skipped.
-            let v = path(&k, "revokedhostkeys")?;
+            let v = needed(&k, "revokedhostkeys")?;
             r.o.revoked_host_keys.push(v);
         }
         if let Some(c) = r.o.forward_agent_sock_path.clone() {
-            r.o.forward_agent_sock_path = Some(path(&c, "forwardagent")?);
+            r.o.forward_agent_sock_path = file(&c, "forwardagent")?;
         }
         if let Some(c) = r.o.version_addendum.clone() {
             r.o.version_addendum = Some(percent_dollar(&c, "versionaddendum")?);

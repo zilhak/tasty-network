@@ -647,9 +647,19 @@ fn paths_under_an_unknown_home() {
         hosts.options.user_hostfiles,
         vec!["/etc/ssh/extra_known_hosts".to_string()]
     );
-    // A socket path cannot be known.
-    let control = run("ControlPath ~/.ssh/cm-%C\n");
-    assert_eq!(refusal_kind(&control), Some(RefusalKind::Undeterminable));
+    // A socket under the home is missing: no control socket, no agent.
+    let sockets = run(
+        "ControlPath ~/.ssh/cm-%C\nIdentityAgent ~/.ssh/agent.sock\nForwardAgent ~/.ssh/fwd.sock\n",
+    );
+    assert_eq!(refusal_kind(&sockets), None);
+    assert_eq!(sockets.options.control_path, None);
+    assert_eq!(sockets.options.identity_agent.as_deref(), Some("none"));
+    assert_eq!(sockets.options.forward_agent_sock_path, None);
+    // A revoked keys file `ssh` cannot read stops it, so it cannot be skipped.
+    let revoked = run("RevokedHostKeys ~/.ssh/revoked\n");
+    let f = revoked.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::Undeterminable);
+    assert_eq!(f.keyword.as_deref(), Some("revokedhostkeys"));
 }
 
 #[test]
