@@ -19,7 +19,7 @@ use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
 use tasty_net_rendezvous::tls::{self, SERVER_NAME, TlsOptions};
 use tasty_net_rendezvous::wire::ALPN_P2P;
 use tasty_net_rendezvous::wire::message::{
-    CancelReason, NatMapping, PunchCancel, PunchMode, ServerMessage,
+    CancelReason, NatMapping, PunchCancel, PunchMode, Role, ServerMessage,
 };
 
 use support::fake::{Fake, Script};
@@ -1147,4 +1147,40 @@ fn invalid_punch_go_is_reported_by_both() {
         let _ended = h.join();
     });
     drop(r.w);
+}
+
+/// A `punch_go` for another peer or with the other role is the server breaking its rules: the
+/// side that gets it sends no probe and reports `limits_invalid` (docs/design/p2p.md flow 3).
+#[test]
+fn punch_go_of_another_peer_or_role_is_refused() {
+    let r = scripted(Script {
+        start_after_ms: 1000,
+        go_a: Box::new(|g| g.role = Role::Controlled),
+        ..Script::default()
+    });
+    assert_eq!(
+        error(r.a.ep.connect(r.b.id())),
+        P2pConnectError::ServerLimitsInvalid {
+            key: "punch_go.role"
+        }
+    );
+    assert_eq!(sent_to_ip(&r.a, r.n2.public_ip()), 0);
+
+    let other = tasty_net_identity::DeviceKey::from_seed([77; 32]).id();
+    let r = scripted(Script {
+        start_after_ms: 1000,
+        go_b: Box::new(move |g| g.peer = other),
+        ..Script::default()
+    });
+    assert_eq!(
+        error(r.a.ep.connect(r.b.id())),
+        P2pConnectError::PeerLimitsInvalid
+    );
+    let mut lb = Log::default();
+    assert!(
+        lb.wait(&r.b.ep, LONG, attempt_to(AttemptPhase::Closed))
+            .is_some()
+    );
+    assert!(closed_with(&lb.0, "server_limits_invalid"));
+    assert_eq!(sent_to_ip(&r.b, r.n1.public_ip()), 0);
 }

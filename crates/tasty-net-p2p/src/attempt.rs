@@ -9,7 +9,7 @@ use tasty_net_rendezvous::tls::SERVER_NAME;
 use tasty_net_rendezvous::wire::ALPN_P2P;
 use tasty_net_rendezvous::wire::message::{
     AnswerReason, CancelReason, DeviceMessage, Limits, PunchAnswer, PunchGo, PunchMode,
-    PunchRequest, PunchResult, RefuseReason, ResultReason,
+    PunchRequest, PunchResult, RefuseReason, ResultReason, Role,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -42,9 +42,23 @@ pub(crate) fn attempt_bound(p: &P2pParams, l: &Limits) -> Duration {
 }
 
 /// The setting of `punch_go` that does not fit (docs/design/rendezvous.md "한계값 검사" 2).
-fn go_limits_invalid(p: &P2pParams, l: &Limits, go: &PunchGo) -> Option<&'static str> {
+///
+/// A `punch_go` for another peer or with the other role breaks the server's rules the same way
+/// (docs/design/p2p.md flow 3): the dialer is `controlling` towards the peer it asked for, the
+/// acceptor `controlled` towards the peer of its offer.
+fn go_limits_invalid(
+    p: &P2pParams,
+    l: &Limits,
+    go: &PunchGo,
+    peer: DeviceId,
+    role: Role,
+) -> Option<&'static str> {
     let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-    if go.window_ms > ms(p.window_max) {
+    if go.peer != peer {
+        Some("punch_go.peer")
+    } else if go.role != role {
+        Some("punch_go.role")
+    } else if go.window_ms > ms(p.window_max) {
         Some("punch.window_max")
     } else if go.handshake_ms > ms(p.handshake_timeout_max) {
         Some("quic.handshake_timeout_max")
@@ -401,7 +415,7 @@ async fn punch_once(
         r.info.applied = applied(core, &go, limits);
     });
     t.to(AttemptPhase::Scheduled, Cause::named("punch_go"));
-    if let Some(key) = go_limits_invalid(p, limits, &go) {
+    if let Some(key) = go_limits_invalid(p, limits, &go, peer, Role::Controlling) {
         result(
             core,
             (generation, go.punch_id),
@@ -613,7 +627,7 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
         r.info.applied = applied(&core, &go, &limits);
     });
     t.to(AttemptPhase::Scheduled, Cause::named("punch_go"));
-    if go_limits_invalid(p, &limits, &go).is_some() {
+    if go_limits_invalid(p, &limits, &go, from, Role::Controlled).is_some() {
         result(&core, key, Some(ResultReason::LimitsInvalid));
         t.to(AttemptPhase::Closed, Cause::named("server_limits_invalid"));
         return;
