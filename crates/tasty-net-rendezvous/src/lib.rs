@@ -9,8 +9,10 @@
 //!   probe, first-byte packet classes, candidate rule).
 //! - [`tls`]: RFC 7250 raw public key TLS 1.3 with device keys.
 //! - [`settings`]: every server time, count and limit, with defaults and sources.
+//! - [`packet_io`]: the packet I/O trait and the first-byte split socket under quinn.
 #![deny(unsafe_code)]
 
+pub mod packet_io;
 pub mod settings;
 pub mod tls;
 pub mod wire;
