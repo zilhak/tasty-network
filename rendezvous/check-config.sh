@@ -449,17 +449,26 @@ while True: time.sleep(0.1)'
 echo "INFO s: setting key=a value=1 source=configured" >&2; sleep 0.5
 echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
     start_late() { # wait_start_log <예상 rc> <기한> <글자...>
-        local want=$1 limit=$2 rc=0 pid
+        local want=$1 limit=$2 rc=0 pid reader left=0
         shift 2
         : >"$t/start.log"
-        bash -c "$late" 2>"$t/start.log" >/dev/null &
+        rm -f "${t:?}/out.fifo"
+        mkfifo "$t/out.fifo"
+        # 가짜의 표준 출력을 FIFO로 받는다. 출력을 쥔 프로세스가 모두 끝나야 읽는 쪽이 끝난다.
+        cat "$t/out.fifo" >/dev/null &
+        reader=$!
+        bash -c "$late" 2>"$t/start.log" >"$t/out.fifo" &
         pid=$!
         wait_start_log "$t/start.log" "$pid" "$limit" "$@" || rc=$?
-        # 마지막 sleep은 exec라 강제 종료하는 pid가 곧 sleep이다. 고아 자식이 남지 않는다.
+        # 마지막 sleep은 exec라 기록한 pid가 곧 sleep이다. 강제 종료 뒤 그 pid가 기한 안에 없어지고,
+        # 출력을 쥔 고아 자식이 없어 읽는 쪽도 끝나는지 PID로 본다(다른 실행의 프로세스와 겹치지 않는다).
         sleep 0.3
         kill -s KILL "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
-        [[ "$rc" == "$want" ]] && ! pgrep -fx 'sleep 30.25' >/dev/null
+        wait_until 2 gone "$pid" && wait_until 2 gone "$reader" || left=1
+        kill -s KILL "$reader" 2>/dev/null
+        wait "$reader" 2>/dev/null
+        [[ "$rc" == "$want" && "$left" == 0 ]]
     }
     start_ends() { # 시작 줄만 찍고 끝나는 가짜: 2
         local rc=0 pid
