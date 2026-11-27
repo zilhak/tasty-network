@@ -15,6 +15,7 @@
 | 2026-11-27 | director 2881: 이식 크레이트 라이선스는 `BSD-2-Clause AND ISC AND SSH-short`. 거부는 무시하면 보안이 약해지는 지시어에만, 제공하지 않는 인증 방법을 켜는 지시어는 표시하고 다음 인증으로 진행 | [라이선스](#라이선스), [지시어 분류](#지시어-분류) |
 | 2026-11-27 | director 2931: 2881 분류 기준의 둘째 종류(다른 호스트·경로로 연결되는 값) 확장, `ChannelTimeout` 지원, 확인 끄기 값의 표시를 승인. 내장 SSH attach 시험은 동작 수준 기준과 따로 둔다 | [지시어 분류](#지시어-분류), [선택 규칙](#선택-규칙), [동작 수준 기준](done-criteria.md#모바일-공개-전-기준) |
 | 2026-11-27 | director 3000: 원본(`openbsd-compat`)의 구조·변수 이름·경계 처리를 단계별로 따르는 코드는 파생으로 보고 원본 고지와 SPDX 식을 맞춘다. 이식 크레이트 라이선스에 `BSD-3-Clause`를 더한다 | [라이선스](#라이선스) |
+| 2026-11-28 | director 3106: OS libc 차이로 내장 백엔드가 같은 OS의 시스템 ssh와 다른 주소로 붙으면 접속 대상이 바뀐다(대상·경로가 바뀌는 것은 안전하게). 숫자 주소를 실행 OS의 libc 규칙에 맞추고, 맞출 수 없는 표기는 거부하고 사유를 보인다. 시험은 OS별 기대값 표로 한다 | [옮기는 원본](#옮기는-원본)의 숫자 주소, [후속 작업과 미정](#후속-작업과-미정) |
 
 ## 백엔드
 
@@ -354,7 +355,15 @@ struct SshInspection {
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
 - 서비스 데이터베이스는 읽지 않는다. `a2port`(`misc.c:592`–`:604`)는 숫자 포트만 받는다. 원본은 `getservbyname`으로 서비스 이름(`Port ssh`)도 받지만, 이 크레이트는 그 줄을 설정 오류(`ConfigError`, 키워드 `port`)로 거부한다.
-- 숫자 주소는 Linux glibc의 `getaddrinfo`·`getnameinfo`가 내는 결과를 따른다(`inet_aton` 형식, `AddressFamily inet`에서 IPv4 매핑 IPv6를 IPv4로, IPv4 호환 IPv6 `::a.b.c.d`의 표기). scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다. 대조 fixture는 OS와 무관한 사례만 둔다. BSD 계열 libc(macOS Libinfo, Android bionic)의 기준판은 `AddressFamily inet`에서 IPv4 매핑 IPv6를 바꾸지 않으므로(`getaddrinfo`가 `EAI_NONAME`을 내고 `hostname`은 적힌 그대로다), 그 규칙은 glibc 기준의 단위 시험이 고정한다. 실행 OS의 규칙을 따를지는 [후속 작업과 미정](#후속-작업과-미정)의 "숫자 주소의 OS별 규칙"이다.
+- 숫자 주소는 실행 OS의 C 라이브러리가 `getaddrinfo(AI_NUMERICHOST)`로 숫자로 읽는 형식을 그 라이브러리처럼 읽는다(director 3106). 기준판은 실행 OS의 libc를 쓰므로, 다른 규칙으로 읽으면 내장 백엔드가 같은 OS의 시스템 ssh와 다른 주소로 붙는다(`010.0.0.1`이 glibc에서는 `8.0.0.1`, macOS에서는 `10.0.0.1`). 라이브러리마다 다른 점은 다음과 같다.
+  - glibc(Linux): `inet_aton` 형식(`a.b.c.d`·`a.b.c`·`a.b`·`a`, 조각마다 10진·`0x` 16진·`0` 8진, `__inet_aton_exact`)을 받는다. `AddressFamily inet`에서 IPv4 매핑 IPv6(`::ffff:a.b.c.d`)를 IPv4로 바꾼다. IPv6 그룹은 16진 네 자리까지, 점 표기 꼬리는 앞자리 0을 받지 않는다.
+  - bionic(Android): `inet_pton`만 받는다(`explore_numeric`의 `inet_aton` 갈래는 `#if 0`). 네 조각 10진만 숫자이고 앞자리 0은 10진으로 읽는다(`010.0.0.1`→`10.0.0.1`). `127.1`·`0x7F000001`은 숫자가 아니라 적힌 그대로다. 요청한 패밀리만 읽으므로 `AddressFamily inet`의 IPv4 매핑 IPv6는 숫자가 아니다.
+  - Darwin(macOS·iOS, Libinfo `_gai_numerichost`): 먼저 `inet_pton(AF_INET)`(앞자리 0은 10진), 안 되면 `_inet_aton_check(strict)`로 짧은 형식·16진·8진을 받는다(`0300.0.0.1`은 10진으로 255를 넘어 8진 `192.0.0.1`). `inet_aton` 쪽은 조각을 64비트로 읽어 넘치면 감기고, 한 조각 주소는 아래 32비트를 쓰고, `.` 앞의 숫자 없는 `0x`를 0으로 본다. 한 패밀리를 요청하면 다른 패밀리 주소는 숫자가 아니다(`AddressFamily inet`의 IPv4 매핑 IPv6 포함). IPv6 그룹은 값이 16비트 안이면 자리 수를 보지 않고(`00001::`), 점 표기 꼬리의 앞자리 0은 10진이다.
+  - 그 밖의 OS(Windows, musl, BSD 계열): 이 크레이트에 규칙이 없다. 세 라이브러리가 같게 읽는 이름은 그 결과를 쓰고, 다르게 읽는 이름은 `Undeterminable`(키워드 `hostname`, 세 라이브러리의 결과를 적은 사유)로 거부한다. OpenSSH portable은 Windows에서 빌드되지 않는다(Windows의 ssh는 Microsoft의 Win32-OpenSSH 갈래다). 그 갈래와 ws2_32의 규칙은 확인하지 않았으므로 갈리는 형식은 거부하고, 셋이 같게 읽는 형식은 Windows도 같게 읽는다고 본다.
+  - 표기(`getnameinfo(NI_NUMERICHOST)`, `inet_ntop`)는 세 라이브러리가 같다. Apple `inet_ntop6`의 "앞 일곱 워드가 0" 갈래는 그 워드가 0 묶음 안이라 닿지 않는다.
+  - `Match localnetwork`의 주소 목록(`addr_pton`)도 같은 규칙으로 판정한다. 규칙이 없는 OS에서 갈리는 항목은 목록 오류로 보지 않고 판정 불가로 둔다.
+  - scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다.
+  - 시험: 사례마다 glibc·bionic·Darwin·규칙 없는 OS의 결과를 적은 OS별 기대값 표(`src/resolve.rs`의 `NUMERIC_FORMS`)를 두고, 세 라이브러리 열은 모든 OS에서, 실행 OS의 열은 그 OS에서 단언한다. 기준 클라이언트 대조 fixture에는 네 열이 모두 같은 사례만 둔다.
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
@@ -393,7 +402,7 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   | 공개 도메인 | `openbsd-compat/charclass.h`(Todd C. Miller) | 없음(고지만 둔다) |
 
 - `scan_scaled`(`RekeyLimit`, `src/scaled.rs`)와 `vis`(`EscapeChar` 출력, `options.rs`의 `vis_white`)는 원본(`openbsd-compat/fmt_scaled.c:75`–`:229`, `vis.c:61`–`:144`)의 구조·변수·경계 처리를 단계별로 따르므로 파생으로 표시하고 원본 고지를 둔다(director 3000). `glob(3)`(`Include`, `src/glob.rs`)는 Gate 4에서 `openbsd-compat/glob.c`(`glob`·`glob0`~`glob3`·`match`·`g_charclass`)와 `charclass.h`를 그대로 옮겨 다시 썼으므로 같은 기준으로 파생이고 두 파일의 고지를 둔다(glob.c 3조항 BSD, charclass.h 공개 도메인).
-- 숫자 주소의 판정과 표기(`misc.rs`의 `numeric_host`·`numeric_text`, `getaddrinfo(AI_NUMERICHOST)`·`getnameinfo(NI_NUMERICHOST)` 대신)는 옮긴 원본이 없다. `getaddrinfo(3)`·`inet_aton(3)`·`inet_ntop(3)` 매뉴얼 페이지를 보고 이 크레이트가 새로 쓴 코드다.
+- 숫자 주소의 판정과 표기(`misc.rs`의 `numeric_host`·`numeric_text`, `getaddrinfo(AI_NUMERICHOST)`·`getnameinfo(NI_NUMERICHOST)` 대신)는 옮긴 원본이 없다. glibc·bionic·Apple Libinfo·Libc 소스에서 읽은 규칙(위 [옮기는 원본](#옮기는-원본)의 숫자 주소)을 이 크레이트가 새로 쓴 코드다. 원본의 구조와 변수를 따르지 않으므로(조각으로 나눠 읽는다) director 3000 기준의 파생이 아니다.
 
 - Tatu Ylonen 조항은 파생물을 그렇게 표시하라고 요구한다("Any derived versions of this software must be clearly marked as such"). 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는 것으로 이 요구를 지킨다. 원본 파일과 함수를 모듈 문서에 적는다.
 - 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`는 이미 있고, `SSH-short`는 이식 크레이트 작업이 더한다. cargo-deny가 `SSH-short`를 받지 못하면(라이선스 식을 해석하지 못하거나 허용 목록에 넣지 못하면) 그 작업은 다른 표기나 예외 설정으로 돌아가지 않고 보고한다.
@@ -682,7 +691,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
 | IPv6 scope의 정규화 | 175500 질문. 기준판은 `getaddrinfo`·`getnameinfo`가 scope를 OS 인터페이스 표로 풀어 `hostname`을 바꾼다(`fe80::1%0001`→`fe80::1%lo`, 16진 소문자화). 이식 크레이트는 인터페이스 표를 읽지 않아 scope가 붙은 주소를 적힌 그대로 둔다. 인터페이스 표를 읽을지, 그 값이 `%h`·호스트 키 조회 이름에 쓰이는 차이를 둘지 |
-| 숫자 주소의 OS별 규칙 | 175500 질문. 이식 크레이트는 모든 OS에서 Linux glibc의 숫자 주소 규칙을 따른다. 기준판은 실행 OS의 libc를 쓰므로 macOS·Android에서는 `AddressFamily inet`의 IPv4 매핑 IPv6(`::ffff:192.0.2.1`)를 IPv4로 바꾸지 않는다. 실행 OS의 규칙을 따를지(따르면 `numeric_host`를 OS별로 가르고 대조 사례를 OS별로 둔다) |
+| 숫자 주소의 OS별 규칙 | 결정됨(director 3106). 실행 OS의 libc 규칙(glibc·bionic·Darwin)을 따르고, 규칙이 없는 OS에서 라이브러리마다 갈리는 표기(앞자리 0·`0x` 16진·짧은 형식·`AddressFamily inet`의 IPv4 매핑 IPv6·IPv6 그룹 자리 수·점 표기 꼬리의 앞자리 0)는 거부한다([옮기는 원본](#옮기는-원본)의 숫자 주소). bionic 규칙의 실제 기기 확인은 android 쪽이 한다 |
 | 설정 파일 소유자의 판정 시점 | 175500 질문. `load`는 로컬 uid를 입력으로 받지 않아 사용자 기본 파일의 모드만 보고 읽으며, 소유자는 `resolve`가 판정한다([결과 API](#결과-api)의 "파일 읽기"). `ConfigInputs`에 로컬 uid를 받아 `load`에서 소유자까지 판정할지(기준판처럼 다른 사용자 소유 파일을 읽지 않는다) |
 | 비교 시험의 기준 클라이언트 빌드 | 원격 빌드 머신에서 확인했다. `scripts/install-openssh-ref.sh`가 기준 커밋을 빌드하고 `ssh -G` 대조가 돈다([비교 시험의 기준 클라이언트](#비교-시험의-기준-클라이언트)의 빌드 도구) |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
