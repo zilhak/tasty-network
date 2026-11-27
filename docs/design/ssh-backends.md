@@ -38,6 +38,7 @@
 - 이 단계의 transport 조합은 기본(`system-ssh`)과 `--no-default-features`(SSH 없음) 둘이다.
 - 이 단계에는 내장 백엔드가 없다. 그래서 `ssh.backend` 설정값과 선택 규칙도 아직 없고, 지금처럼 시스템 ssh만 쓴다.
 - 모바일 cross check는 transport `--no-default-features`만 본다. ssh 크레이트는 아직 목록에 없다([모바일 cross check](mobile.md#모바일-cross-check)).
+- SSH 없는 조합은 검사 단계 `scripts/check.sh transport-no-ssh`가 본다: `--no-default-features`의 clippy·시험과, 그 `cargo tree`에 `tasty-net-ssh`가 없는지(기본 feature의 그래프에는 있는지 대조). CI는 세 OS의 clippy·test 잡에서 부른다([CI](../dev-guide/ci.md#ssh-없는-transport)).
 
 ### 2단계: 내장 백엔드 (이식 크레이트 뒤)
 
@@ -62,15 +63,15 @@
 | 항목 | 지금 자리 | 비고 |
 |---|---|---|
 | `SshTransport`, `FORWARDED_SEPARATOR`, `LOCAL_CONNECT_TIMEOUT` | `src/ssh.rs`, `src/lib.rs` 다시 내보내기 | |
-| `AttemptCancel::ssh_cancel` | `src/cancel.rs:93` | |
-| `ConnectError::Discovery(PortDiscoveryError)`, `ConnectError::Tunnel(TunnelError)` | `src/transport.rs:200`·`:202` | `ConnectError`는 `#[non_exhaustive]`(`:193`) |
+| `AttemptCancel::ssh_cancel` | `src/cancel.rs:97` | |
+| `ConnectError::Discovery(PortDiscoveryError)`, `ConnectError::Tunnel(TunnelError)` | `src/transport.rs:202`·`:205` | `ConnectError`는 `#[non_exhaustive]`(`:194`) |
 | `ConnectError::Backend(SshBackendError)` | 2단계에서 새로 생긴다 | 같다 |
-| `HandshakeError::RemoteListenerAbsent(RemoteListenerAbsent)` | `src/reject.rs:226` | `HandshakeError`는 `#[non_exhaustive]`(`:185`) |
-| 연결 목록 `Cause::Discovery(PortDiscoveryFailureKind)` | `src/connection_table/info.rs:153` | `Cause`는 `#[non_exhaustive]`(`:151`) |
+| `HandshakeError::RemoteListenerAbsent(RemoteListenerAbsent)` | `src/reject.rs:228` | `HandshakeError`는 `#[non_exhaustive]`(`:186`) |
+| 연결 목록 `Cause::Discovery(PortDiscoveryFailureKind)` | `src/connection_table/info.rs:155` | `Cause`는 `#[non_exhaustive]`(`:151`) |
 | `ConnectionInfo.ssh` 필드의 타입 `SshEntryInfo` | 2단계에서 새로 생긴다 | 아래 [연결 정보](#연결-정보) |
 
 - 세 enum이 모두 `#[non_exhaustive]`라서 소비자의 `match`는 어느 조합에서도 `_` 갈래를 이미 갖는다. 변형이 사라져도 소비자 코드는 그대로 컴파일된다.
-- 원인 코드 문자열 `discovery_failed`(`info.rs:194`)는 `ssh`가 꺼진 빌드에서 나오지 않을 뿐 다른 뜻으로 다시 쓰지 않는다. 연결 목록 타입에는 serde 직렬화가 없다(transport의 `connection_table`에 `Serialize` 0건). 외부 표현은 `Cause::as_str()`의 코드뿐이다.
+- 원인 코드 문자열 `discovery_failed`(`info.rs:197`)는 `ssh`가 꺼진 빌드에서 나오지 않을 뿐 다른 뜻으로 다시 쓰지 않는다. 연결 목록 타입에는 serde 직렬화가 없다(transport의 `connection_table`에 `Serialize` 0건). 외부 표현은 `Cause::as_str()`의 코드뿐이다.
 - FFI 모양: `tasty-net-ffi`는 늘 `embedded-ssh`로 빌드하므로([모바일 바인딩 층](mobile.md#바인딩-층)) FFI에 보이는 변형은 조합에 따라 달라지지 않는다. SSH 없는 transport는 Rust 소비자만 쓰는 조합이다.
 - 남는 공개 항목: `Transport`·`Listener`·`RawChannel`·`Link`, handshake v2, 메모리 전송, P2P 어댑터, `ConnectionTable`과 그 설정값, `Redialer`, `Phase`의 `PortDiscovery`·`Tunnel`, `PathKind`의 `ssh_forward`·`ssh_role_reversed`·`ssh_inbound`, `Cause::TunnelFailed`·`TunnelExited`·`RemoteListenerAbsent`(SSH 타입을 싣지 않는 unit·문자열 변형), `Via::Ssh{target, remote_port}`. 받는 쪽 `ssh_inbound`는 꺼진 빌드에서도 생긴다(상대가 SSH로 연 연결을 루프백 listener로 받는다).
 - 2단계에서 더하는 unit 원인 `Cause::SshBackendUnavailable`(`ssh_backend_unavailable`)과 `Cause::SshConfigRefused`(`ssh_config_refused`)도 SSH 타입을 싣지 않으므로 조합과 관계없이 남는다.
@@ -79,10 +80,11 @@
 
 | 항목 | `ssh`가 꺼진 빌드 |
 |---|---|
-| `RawChannel.verdict: Option<ListenerVerdict>`(`src/channel.rs:63`), `with_verdict`(`:179`), `listener_absent`(`:186`–`:192`) | `#[cfg(feature = "ssh")]`로 뺀다. 판정을 쓰는 곳은 SSH 채널뿐이다 |
-| `handshake.rs` `explain()`(`:612`–`:625`)의 `tasty_net_ssh::connection_closed_error` 호출 | 그 함수는 `io::Error::new(UnexpectedEof, …)` 하나다(`tasty-net-ssh/src/listener.rs:118`). `explain`의 SSH 판정 갈래만 cfg로 빼고, 꺼진 빌드에서는 받은 오류를 그대로 돌려준다. 닫힘 오류 자체는 handshake가 직접 만든다 |
+| `RawChannel.verdict: Option<ListenerVerdict>`(`src/channel.rs:65`), `with_verdict`(`:186`), `listener_absent`(`:194`–`:199`) | `#[cfg(feature = "ssh")]`로 뺀다. 판정을 쓰는 곳은 SSH 채널뿐이다 |
+| `handshake.rs` `explain()`(`:611`–`:629`, 꺼진 빌드의 것은 `:631`–`:635`)의 `tasty_net_ssh::connection_closed_error` 호출 | 그 함수는 `io::Error::new(UnexpectedEof, …)` 하나다(`tasty-net-ssh/src/listener.rs:118`). `explain`의 SSH 판정 갈래만 cfg로 빼고, 꺼진 빌드에서는 받은 오류를 그대로 돌려준다. 닫힘 오류 자체는 handshake가 직접 만든다 |
 | 통합 시험 `tests/ssh.rs`(`:18`에서 `SpawnHook`·`SshLauncher` 사용) | 파일 첫 줄 `#![cfg(feature = "system-ssh")]` |
-| 통합 시험 `tests/connection_table.rs`(`:7`에서 `tasty_net_ssh` 사용) | SSH 항목을 만드는 도우미와 시험에 `#[cfg(feature = "system-ssh")]`. 메모리 전송 시험은 남긴다. `cargo test -p tasty-net-transport --no-default-features`가 SSH 없이 돈다 |
+| 통합 시험 `tests/connection_table.rs`(`:10`에서 `tasty_net_ssh` 사용) | SSH 항목을 만드는 도우미와 시험에 `#[cfg(feature = "system-ssh")]`. 이 파일의 시험 여섯은 모두 SSH 항목을 쓰고 메모리 전송 시험은 없으므로, 파일 첫머리의 `#![cfg(feature = "system-ssh")]` 하나로 둔다. 메모리 전송·루프백 시험(`tests/handshake.rs`·`loopback.rs`·`settings.rs`)은 남는다. `cargo test -p tasty-net-transport --no-default-features`가 SSH 없이 돈다 |
+| SSH 전송만 부르는 내부 도우미: `RawChannel::with_entry`·`with_joined`·`wrap_control`(`src/channel.rs`), `Joined::new`·`abandoned`, `EntryRef::choose_path`·`phase`(`src/connection_table/mod.rs`) | `#[cfg(feature = "ssh")]`로 뺀다. 꺼진 빌드에서 부르는 곳이 없다(workspace의 `dead_code = "deny"`). 다른 전송이 쓰게 되면 그 작업이 cfg를 거둔다 |
 
 ### 공통 항목과 백엔드 전용 항목
 
@@ -122,7 +124,7 @@
 
 - OS·플랫폼으로 나누지 않는다. 모바일은 `system-ssh` 없이 빌드하므로 `system_not_built`로 내장을 고른다.
 - 발견은 다른 프로그램을 실행하지 않고 파일만 본다(`ssh -V`를 돌리지 않는다).
-  1. 런처의 프로그램(`SshLauncher::program()`, 기본은 `resolve_ssh_path()`)이 경로 구분자를 가지면 그 경로 하나를 본다. Windows의 `%WINDIR%\System32\OpenSSH\ssh.exe` 우선(`tasty-net-ssh/src/lib.rs:63`–`:72`)은 기본 프로그램을 정하는 기존 규칙이다.
+  1. 런처의 프로그램(`SshLauncher::program()`, 기본은 `resolve_ssh_path()`)이 경로 구분자를 가지면 그 경로 하나를 본다. Windows의 `%WINDIR%\System32\OpenSSH\ssh.exe` 우선(`tasty-net-ssh/src/system/mod.rs:20`–`:29`)은 기본 프로그램을 정하는 기존 규칙이다.
   2. 구분자가 없는 이름이면 `PATH`의 디렉터리를 앞에서부터 본다. Unix는 그 이름의 일반 파일에 실행 권한 비트가 있어야 한다. Windows는 디렉터리마다 `<이름>`, 이름에 확장자가 없으면 이어서 `<이름>.exe`를 본다.
   3. 시스템 백엔드는 발견한 절대 경로로 실행한다. 그래서 선택이 본 파일과 실행한 파일이 같다(Windows `Command`가 실행 파일 폴더·System32를 먼저 보는 규칙을 타지 않는다).
   4. 찾은 파일이 OpenSSH인지는 가리지 않는다. 같은 이름의 다른 클라이언트가 먼저 있으면 그것이 시스템 백엔드가 되고, 그 클라이언트가 옵션을 거절하면 시스템 백엔드의 오류로 끝난다. 알려진 한계다.
@@ -179,7 +181,7 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 | 10 | 시스템 설정 파일 | `/etc/ssh/ssh_config` 등 | `file:<경로>:<줄>` |
 | 11 | OpenSSH 기본값 | `fill_default_options`(`readconf.c:2860`)의 값 | `default` |
 
-- 1~3·6·8과 4의 `-o` 옵션은 지금의 `push_common_opts` 순서(`tasty-net-ssh/src/lib.rs:126`–`:170`)와 같다. 바뀌는 것은 7(`ssh.overrides`)이 더해지는 것과 세션 종류 플래그의 자리다. 지금 터널은 `-N`을 대상 옵션 뒤에 둔다(`spawn.rs:146`–`:157`이 `push_common_opts` 다음에 플래그를 붙인다). OpenSSH는 `-N`·`-s`를 읽을 때 이미 다른 세션 종류가 정해져 있으면 실패하고(`ssh.c:1030`–`:1033`·`:1048`–`:1051`), `-o`는 첫 값이 이긴다. 그래서 대상 옵션에 `SessionType=subsystem`이 있으면 지금 터널은 `Cannot specify -N with -s/SessionType`로 끝난다. 2단계는 세 용도의 세션 종류 플래그·옵션을 4의 자리(대상 옵션과 `ssh.overrides` 앞)로 옮긴다. 그러면 뒤의 `SessionType`은 첫 값에 져서 쓰이지 않는다(OpenSSH 9.6p1의 `ssh -G`로 확인: `-s -o SessionType=none`은 `sessiontype subsystem`, `-o SessionType=none -s`는 그 오류). 대상 옵션이 전역 덮어쓰기를 이기고, 덮어쓰기가 `ssh.connect_timeout`을 이긴다.
+- 1~3·6·8과 4의 `-o` 옵션은 지금의 `push_common_opts` 순서(`tasty-net-ssh/src/lib.rs:106`–`:150`)와 같다. 바뀌는 것은 7(`ssh.overrides`)이 더해지는 것과 세션 종류 플래그의 자리다. 지금 터널은 `-N`을 대상 옵션 뒤에 둔다(`spawn.rs:146`–`:157`이 `push_common_opts` 다음에 플래그를 붙인다). OpenSSH는 `-N`·`-s`를 읽을 때 이미 다른 세션 종류가 정해져 있으면 실패하고(`ssh.c:1030`–`:1033`·`:1048`–`:1051`), `-o`는 첫 값이 이긴다. 그래서 대상 옵션에 `SessionType=subsystem`이 있으면 지금 터널은 `Cannot specify -N with -s/SessionType`로 끝난다. 2단계는 세 용도의 세션 종류 플래그·옵션을 4의 자리(대상 옵션과 `ssh.overrides` 앞)로 옮긴다. 그러면 뒤의 `SessionType`은 첫 값에 져서 쓰이지 않는다(OpenSSH 9.6p1의 `ssh -G`로 확인: `-s -o SessionType=none`은 `sessiontype subsystem`, `-o SessionType=none -s`는 그 오류). 대상 옵션이 전역 덮어쓰기를 이기고, 덮어쓰기가 `ssh.connect_timeout`을 이긴다.
 - 대상 옵션·`ssh.overrides`·설정 파일의 `SessionType`은 OpenSSH도 값을 먼저 검사한다. 맞는 값(`none`·`subsystem`·`default`)이면 첫 값에 져서 쓰이지 않고, 두 백엔드 모두 용도의 값과 다르면 `ConfigNote`(`shown`)로 남긴다. 거절하지 않는 이유: 무시해도 보안이 약해지지 않고, OpenSSH도 같은 인자 순서에서 같은 값을 쓴다. 틀린 값이면 OpenSSH는 첫 값이 이미 있어도 그 줄에서 끝낸다(`readconf.c:2198`–`:2201`, gx10 9.6p1 `ssh -G -o SessionType=default -o SessionType=INVALID`가 `unsupported option "INVALID"`로 끝남). 내장 백엔드도 같은 자리에서 설정 오류로 끝낸다(이식 크레이트의 값 검사가 같다).
 - OpenSSH 8.7 미만: `SessionType`은 8.7p1에서 생겼다(8.6p1 `readconf.c`에 `sessiontype` 0건, 8.7p1 `:301`). 그 판은 `-o SessionType=default`를 `command-line: line 0: Bad configuration option: sessiontype`으로 거절하고 끝난다. 지원 여부는 원격 출력과 무관한 증거로 정한다. exec·포트 발견 자식의 stderr에는 원격 명령의 stderr도 섞이므로 그 문구를 보고 다시 실행하지 않는다. 런처가 그 실행 파일로 처음 한 번 `ssh -G -F none -o SessionType=default tasty-probe`(접속하지 않고 해석만 한다)를 실행해, 옵션 해석 오류(위 줄과 종료 코드 255)로 끝나면 "모름", 성공하면 "앎"으로 정한다. `-F none`은 시스템·사용자 설정 파일을 모두 읽지 않으므로(기준판 `ssh.c:572`–`:592` `process_config_files`, 8.6p1 `:570`도 같다) 사용자 설정의 `Match exec`가 실행되지 않고, 대상 이름은 고정값이다. 이 확인은 실행 파일이 옵션 이름을 아는지만 보고, 그 판단은 설정 파일보다 먼저 명령행 `-o`를 처리할 때 끝나므로(`ssh.c:1039`–`:1046`, 8.6p1 `:1031`–`:1036`이 거기서 255로 끝낸다) 대상과 사용자 설정이 필요 없다. 그래서 설정 오류로 판정이 미뤄지는 일은 없다. 그 밖의 이유로 끝나면 정하지 않고 "앎"으로 보고, 같은 오류는 실제 명령이 낸다. 결과는 찾은 실행 파일의 경로마다 기억하고, `PATH`에서 고른 파일이 바뀌면 다시 정한다. exec·포트 발견은 그 판정대로 처음부터 옵션을 넣거나 빼고 다시 실행하지 않는다. 그래서 앱 명령은 한 번만 실행된다. 그 판에는 `SessionType`도 `Match sessiontype`도 없으므로 옵션 없이 실행해도 세션 종류가 바뀌지 않는다. 실제 호출에 넘기는 사용자 설정(대상 옵션·`ssh.overrides`·설정 파일)의 `SessionType`은 OpenSSH가 해석하게 둔다. 그 판은 그 이름을 모르므로 오류로 끝내고, 앞에서 적용된 `IgnoreUnknown`이 그 이름을 덮으면 건너뛴다(8.6p1 `readconf.c:785`–`:787`). 터널의 `ForkAfterAuthentication` 재시도(`tunnel.rs:172`–`:184`, `listener.rs:53` `is_fork_option_refusal`)는 지금 코드 그대로 둔다.
 - `with_verify`일 때만 3이 먼저 들어가므로 대상 옵션·`ssh.overrides`·설정 파일이 `StrictHostKeyChecking`을 약하게 만들 수 없다. `with_verify`가 없으면 시스템 백엔드는 호스트 키 옵션을 하나도 넣지 않는다(`lib.rs:117`·`:146`, 시험 `:860` `without_verify_no_host_key_option_is_added`). 그때는 대상 옵션·설정 파일·OpenSSH 기본(`ask`)이 정하고, 대상 옵션의 `StrictHostKeyChecking=no`는 `ssh`에 그대로 간다. 이것은 지금의 데스크톱 동작이고 대상 옵션은 소비자(tasty) 사용자의 값이라 바꾸지 않는다.
@@ -651,7 +653,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 
 | 항목 | 상태 |
 |---|---|
-| 1단계 feature 분리 | 후속 작업(transport ssh feature 분리) |
+| 1단계 feature 분리 | 들어갔다(transport ssh feature 분리). 검사 단계 `scripts/check.sh transport-no-ssh` |
 | 이식 크레이트 `tasty-net-ssh-config` | 후속 작업(OpenSSH 해석 이식) |
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
