@@ -396,9 +396,23 @@ impl Transport for P2pTransport {
                                 .acquire()
                                 .ok_or_else(closed)
                                 .and_then(|hold| Ok((open_channel(&state, cancel)?, hold)));
-                            match opened {
-                                Ok((channel, hold)) => Ok((channel, state, owned, hold)),
-                                Err(error) => {
+                            let error = match opened {
+                                Ok((channel, hold)) => {
+                                    return Ok((channel, state, owned, Some(hold)));
+                                }
+                                Err(error) => error,
+                            };
+                            // The peer closed the new connection with a code before its first
+                            // stream (a refused pairing): the first channel is a closed one, so
+                            // its handshake ends with that code (docs/design/handshake.md "흐름
+                            // (P2P 경로)").
+                            match state.conn.close_reason() {
+                                Some(reason) if !cancel.is_cancelled() => {
+                                    let channel =
+                                        state.entered(stream::closed(&state.conn, reason));
+                                    Ok((channel, state, owned, None))
+                                }
+                                _ => {
                                     // No channel holds the new connection: close it here.
                                     state.close(tasty_net_p2p::P2pCloseReason::Closed);
                                     Err(error)
@@ -432,7 +446,7 @@ struct P2pEndpointHandle {
     /// connection that keeps it open until the first handshake's result is noted: a failed
     /// first handshake drops its channel before the caller notes why, and the connection's end
     /// must not end the entry before that (the endpoint is dropped after the note).
-    owned: Mutex<Option<(Registration, ChannelSlot)>>,
+    owned: Mutex<Option<(Registration, Option<ChannelSlot>)>>,
     shared: Shared,
     /// A reconnection waiting on a shared connection, ended if the attempt is dropped
     /// unfinished.

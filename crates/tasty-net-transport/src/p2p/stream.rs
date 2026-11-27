@@ -452,6 +452,72 @@ impl Cancellable for Opening {
     }
 }
 
+/// A channel on `conn`, which was closed with `reason` before its first stream: every read
+/// and write fails, and the control shows the code.
+pub(crate) fn closed(conn: &P2pConnection, reason: P2pCloseReason) -> RawChannel {
+    RawChannel::new(
+        Box::new(Closed(reason)),
+        Box::new(Closed(reason)),
+        Arc::new(ClosedControl { conn: conn.clone() }),
+        TransportKind::P2p,
+    )
+}
+
+/// A half of a channel on a closed connection.
+struct Closed(P2pCloseReason);
+
+impl Closed {
+    fn error(&self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            format!("the P2P connection was closed ({})", self.0),
+        )
+    }
+}
+
+impl Read for Closed {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(self.error())
+    }
+}
+
+impl Write for Closed {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(self.error())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The control of a channel on a closed connection.
+struct ClosedControl {
+    conn: P2pConnection,
+}
+
+impl ChannelControl for ClosedControl {
+    fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown_and_wake(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn close_reason(&self) -> Option<P2pCloseReason> {
+        self.conn.close_reason()
+    }
+}
+
 /// Refuses a stream this end does not take: resets its sending side and stops its receiving
 /// side.
 pub(crate) fn refuse(stream: P2pStream) {

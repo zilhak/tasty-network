@@ -1101,6 +1101,67 @@ fn a_not_paired_close_ends_the_handshake_with_its_code() {
     b.close();
 }
 
+/// The accepting side closes the connection with `not_paired` as soon as it takes it, before
+/// any stream (as `tasty-net-p2p` does for a peer off its pairing list): the code still ends
+/// the handshake, not retried, whether it came before or after the dialer's first stream.
+#[test]
+fn a_not_paired_close_before_the_first_stream_keeps_its_code() {
+    let server = Rendezvous::start();
+    let (ka, kb) = (key(66), key(67));
+    let a = endpoint(&server, 66, kb.id());
+    let b = endpoint(&server, 67, ka.id());
+    let table = ConnectionTable::default();
+    let transport = P2pTransport::new(a.clone()).with_connections(table.clone());
+    let dial = DialConfig::new(ka, "dialer-66").with_timeouts(timeouts());
+    for _ in 0..3 {
+        let closer = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                let conn = b
+                    .accept_timeout(Some(PATIENCE))
+                    .expect("the dialer's connection");
+                conn.close(P2pCloseReason::NotPaired);
+            })
+        };
+        let started = Instant::now();
+        let error = loop {
+            let cancel = AttemptCancel::new();
+            let result = transport
+                .connect(&b.id(), &cancel)
+                .map_err(HandshakeError::Connect)
+                .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &cancel));
+            match result {
+                Err(HandshakeError::Connect(ConnectError::P2p(e)))
+                    if started.elapsed() < PATIENCE && e.connect_error().is_some() =>
+                {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => break error,
+                Ok(_) => panic!("a link on a closed connection"),
+            }
+        };
+        assert!(
+            matches!(error, HandshakeError::Closed(P2pCloseReason::NotPaired)),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        closer.join().expect("closer");
+        let ended = table.connections().last().cloned().expect("the entry");
+        wait_until("the entry's end", || {
+            entry(&table, ended.id).state == ConnectionState::Disconnected
+        });
+        let ended = entry(&table, ended.id);
+        assert_eq!(
+            ended.last_cause,
+            Some(Cause::P2pClosed(P2pCloseReason::NotPaired)),
+            "{:#?}",
+            ended.history
+        );
+    }
+    a.close();
+    b.close();
+}
+
 /// Close scope, sixth row: when the last link and channel on the connection end, the dialer
 /// closes the QUIC connection (`P2pConnection::close`, code 0) while both endpoints stay up;
 /// it does not wait for the idle timeout.
