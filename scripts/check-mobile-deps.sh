@@ -13,21 +13,22 @@
 #                     cargo는 그 Cargo.toml의 폴더에서 돈다(그 폴더의 .cargo/config.toml·툴체인 고정을 따른다)
 #   --app             앱 그래프 기준. tokio의 process는 그 feature를 켠 경로에 tasty-net-* 크레이트가
 #                     있을 때만 실패다(앱 자신은 켜도 된다). 없으면 이 레포 기준: tokio의 process는 실패
-#   --target          모바일 target. 여러 번 줄 수 있다
+#   --target          모바일 target(aarch64-linux-android, x86_64-linux-android, aarch64-apple-ios,
+#                     aarch64-apple-ios-sim). 여러 번 줄 수 있다
 #   -p                그래프의 뿌리 패키지(앱이면 앱 cdylib 크레이트)
-#   -- 뒤             cargo tree에 그대로 넘기는 feature 인자(--no-default-features, --features a,b 등).
-#                     배포 빌드와 같은 인자를 준다
+#   -- 뒤             cargo tree에 넘기는 feature 인자. --no-default-features, --all-features,
+#                     --features <목록>(--features=<목록>), -F <목록>만 받는다. 배포 빌드와 같은 인자를 준다
 #
 # 실패(1): russh-config 패키지 줄이 있다, tasty-net-ssh의 feature에 system-ssh가 있다, tokio의 feature에
-# process가 있다(--app이면 위 조건). 판정 불가(2): 인자 오류, cargo tree 실패(종료 코드가 0이 아님),
-# 출력에 뿌리 패키지 줄이 없음. 통과는 0이다. cargo 명령은 --locked로 돌므로 Cargo.lock이 있어야 한다.
+# process가 있다(--app이면 위 조건). 판정 불가(2): 인자 오류(모바일이 아닌 target, -- 뒤의 feature
+# 인자가 아닌 것 포함), cargo tree 실패(종료 코드가 0이 아님), 출력에 뿌리 패키지 줄이 없음, 판정 실패. 통과는 0이다. cargo 명령은 --locked로 돌므로 Cargo.lock이 있어야 한다.
 set -euo pipefail
 
 TAG="[mobile-deps]"
 SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 
 usage() {
-    sed -n '7,19p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '7,20p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -37,6 +38,31 @@ APP=0
 PKG=""
 TARGETS=()
 FEATS=()
+MOBILE_TARGETS=(aarch64-linux-android x86_64-linux-android aarch64-apple-ios aarch64-apple-ios-sim)
+
+# -- 뒤의 인자는 feature 선택만 받는다. --prune·-e·--depth·-i·--invert처럼 cargo tree의 출력 범위를
+# 바꾸는 인자는 금지 의존을 그래프에서 지울 수 있으므로 판정 불가다.
+check_feature_args() {
+    local a
+    while [[ $# -gt 0 ]]; do
+        a=$1
+        case "$a" in
+            --no-default-features | --all-features) shift ;;
+            --features=?*) shift ;;
+            --features | -F)
+                if [[ $# -lt 2 || "$2" == -* || -z "$2" ]]; then
+                    echo "$TAG 판정 불가: $a 뒤에 feature 목록이 없다" >&2
+                    return 2
+                fi
+                shift 2
+                ;;
+            *)
+                echo "$TAG 판정 불가: -- 뒤에는 feature 인자(--no-default-features, --all-features, --features <목록>, -F <목록>)만 준다: $a" >&2
+                return 2
+                ;;
+        esac
+    done
+}
 
 # cargo tree 호출. 자체 시험이 이 함수를 가짜로 바꿔 끼운다. --manifest-path가 있으면 그 폴더에서
 # 돌린다. cargo는 지금 폴더에서 .cargo/config.toml을 찾고 rustup도 지금 폴더로 툴체인을 고르므로,
@@ -270,6 +296,17 @@ FAKE
         "다른 폴더에서 부른 --manifest-path는 그 폴더에서 cargo를 돌린다#0#app#--manifest-path @APP@ --app --target aarch64-linux-android -p app"
         "상대 경로 --manifest-path도 그 폴더에서 돈다#0#app#--manifest-path ../app/Cargo.toml --target aarch64-linux-android -p app"
         "없는 --manifest-path#2##--manifest-path ../none/Cargo.toml --target aarch64-linux-android -p app"
+        "모바일 target 네 개#0##--target aarch64-linux-android --target x86_64-linux-android --target aarch64-apple-ios --target aarch64-apple-ios-sim -p app"
+        "호스트 target#2##--target x86_64-unknown-linux-gnu -p app"
+        "모바일 target 뒤의 호스트 target#2##--target aarch64-linux-android --target x86_64-apple-darwin -p app"
+        "feature 인자들#0##--target aarch64-linux-android -p app -- --no-default-features --features a,b -F c --features=d --all-features"
+        "-- 뒤의 --prune#2##--target aarch64-linux-android -p app -- --prune tokio"
+        "-- 뒤의 -e#2##--target aarch64-linux-android -p app -- -e no-build"
+        "-- 뒤의 --depth#2##--target aarch64-linux-android -p app -- --depth 1"
+        "-- 뒤의 -i#2##--target aarch64-linux-android -p app -- -i tokio"
+        "-- 뒤의 모르는 인자#2##--target aarch64-linux-android -p app -- --frobnicate"
+        "feature 목록 없는 --features#2##--target aarch64-linux-android -p app -- --features"
+        "feature 목록 대신 인자가 온 -F#2##--target aarch64-linux-android -p app -- -F --prune"
     )
     for c in "${cases[@]}"; do
         IFS='#' read -r name want pwd_mode args <<<"$c"
@@ -327,6 +364,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$PKG" && ${#TARGETS[@]} -gt 0 ]] || usage
+for t in "${TARGETS[@]}"; do
+    known=0
+    for k in "${MOBILE_TARGETS[@]}"; do [[ "$k" == "$t" ]] && known=1; done
+    if [[ $known -eq 0 ]]; then
+        echo "$TAG 판정 불가: 모바일 target이 아니다: $t (target: ${MOBILE_TARGETS[*]})" >&2
+        exit 2
+    fi
+done
+check_feature_args ${FEATS[@]+"${FEATS[@]}"} || exit 2
 if [[ -n "$MANIFEST" ]]; then
     if [[ ! -f "$MANIFEST" ]]; then
         echo "$TAG 판정 불가: Cargo.toml이 없다: $MANIFEST" >&2
