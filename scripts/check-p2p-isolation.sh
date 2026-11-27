@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # P2P 크레이트 격리 검사(docs/design/crates.md "P2P 크레이트 격리", 동작 수준 기준 D8).
 # tasty-net-p2p·tasty-net-rendezvous가 이 workspace 안에서 의존하는 크레이트가 허용 범위 안인지
-# cargo metadata로 본다. 일반·build·dev 의존을 모두 보고, 허용된 workspace 크레이트를 거쳐
-# 닿는 workspace 크레이트(그 크레이트의 일반·build 의존)도 본다.
+# cargo metadata의 resolve 그래프(package ID)로 본다. 대상의 일반·build·dev 의존을 보고, 그
+# 뒤로 일반·build 의존을 따라가 닿는 workspace 크레이트도 본다(workspace 밖 크레이트를 거쳐도).
 #   허용: tasty-net-rendezvous → tasty-net-identity
 #         tasty-net-p2p        → tasty-net-identity, tasty-net-rendezvous
 #
@@ -58,86 +58,107 @@ ALLOWED = {
 }
 
 
-def kind_name(kind):
-    return kind or "normal"
-
-
 def judge(meta):
-    """(위반 목록, 대상 수, 요약). 대상 크레이트가 0개면 대상 수 0."""
-    members = set(meta.get("workspace_members", []))
-    by_id = {p["id"]: p for p in meta.get("packages", [])}
-    member_names = {by_id[m]["name"] for m in members if m in by_id}
-    by_name = {by_id[m]["name"]: by_id[m] for m in members if m in by_id}
+    """(위반 목록, 대상 수, 요약). 대상 크레이트가 0개면 대상 수 0.
 
-    def workspace_deps(pkg, kinds):
+    workspace 소속은 이름이 아니라 package ID(workspace_members)로 정하고, 의존은 resolve
+    그래프의 package ID로 따라간다. 그래서 workspace 크레이트와 이름이 같은 다른 출처의
+    크레이트는 workspace 의존이 아니고, 이름을 바꿔 쓴 workspace 의존이나 workspace 밖
+    크레이트를 거쳐 닿는 workspace 크레이트도 잡는다."""
+    members = set(meta.get("workspace_members", []))
+    name_of = {p["id"]: p["name"] for p in meta.get("packages", [])}
+    resolve = meta.get("resolve") or {}
+    nodes = {n["id"]: n for n in resolve.get("nodes", [])}
+
+    def edges(pid):
         out = []
-        for d in pkg.get("dependencies", []):
-            name = d["name"]
-            if name in member_names and kind_name(d.get("kind")) in kinds:
-                out.append((name, kind_name(d.get("kind"))))
+        for d in nodes.get(pid, {}).get("deps", []):
+            kinds = {k.get("kind") or "normal" for k in d.get("dep_kinds", [])} or {"normal"}
+            out.append((d["pkg"], kinds))
         return out
 
     violations = []
+    by_name = {name_of[m]: m for m in members if m in name_of}
     targets = sorted(n for n in ALLOWED if n in by_name)
     for t in targets:
+        tid = by_name[t]
         allowed = ALLOWED[t]
-        # 대상의 직접 의존: 일반·build·dev.
-        stack = []
-        for name, kind in workspace_deps(by_name[t], {"normal", "build", "dev"}):
-            if name not in allowed:
-                violations.append(f"{t} → {name} ({kind} 의존)")
-            else:
-                stack.append((name, [t, name]))
-        # 허용된 크레이트를 거쳐 닿는 크레이트: 그 크레이트의 일반·build 의존.
+        # 대상의 직접 의존은 일반·build·dev, 그 뒤는 일반·build 의존만 따라간다.
+        stack = [(dep, [name_of.get(dep, dep)], sorted(kinds))
+                 for dep, kinds in edges(tid) if kinds & {"normal", "build", "dev"}]
         seen = set()
         while stack:
-            name, path = stack.pop()
-            if name in seen:
+            pid, path, kinds = stack.pop()
+            if pid in seen:
                 continue
-            seen.add(name)
-            for dep, kind in workspace_deps(by_name[name], {"normal", "build"}):
-                if dep not in allowed and dep != t:
-                    violations.append(f"{t} → {' → '.join(path[1:])} → {dep} ({kind} 의존을 거침)")
-                elif dep == t:
-                    violations.append(f"{t} → {' → '.join(path[1:])} → {t} (순환)")
-                else:
-                    stack.append((dep, path + [dep]))
-    summary = f"대상 크레이트 {len(targets)}개({', '.join(targets) or '없음'}) · workspace 크레이트 {len(member_names)}개 · 위반 {len(violations)}개"
+            seen.add(pid)
+            how = "/".join(kinds) + (" 의존" if len(path) == 1 else " 의존을 거침")
+            if pid == tid:
+                violations.append(f"{t} → {' → '.join(path)} (순환)")
+                continue
+            if pid in members and name_of.get(pid) not in allowed:
+                violations.append(f"{t} → {' → '.join(path)} ({how})")
+                continue
+            for dep, k in edges(pid):
+                if k & {"normal", "build"}:
+                    stack.append((dep, path + [name_of.get(dep, dep)], sorted(k & {"normal", "build"})))
+    summary = (f"대상 크레이트 {len(targets)}개({', '.join(targets) or '없음'}) · workspace 크레이트 "
+               f"{len(members)}개 · 위반 {len(violations)}개")
     return violations, len(targets), summary
 
 
 def self_test():
-    def pkg(name, deps):
+    names = {}
+
+    def pid(name, source="path+file:///ws/crates/"):
+        i = f"{source}{name}#0.1.0" if source.startswith("path") else f"{source}#{name}@9.0.0"
+        names[i] = name
+        return i
+
+    def meta(members, nodes):
+        """members: workspace 크레이트 이름. nodes: {id: [(의존 id, 이름, 종류 또는 None)]}."""
+        ids = set(nodes)
+        for deps in nodes.values():
+            ids |= {d for d, _, _ in deps}
+        ids |= {pid(m) for m in members}
         return {
-            "id": f"{name} 0.1.0 (path+file:///ws/crates/{name})",
-            "name": name,
-            "dependencies": [{"name": n, "kind": k} for n, k in deps],
+            "workspace_members": [pid(m) for m in members],
+            "packages": [{"id": i, "name": names[i]} for i in sorted(ids)],
+            "resolve": {"nodes": [
+                {"id": i, "deps": [{"name": n, "pkg": d, "dep_kinds": [{"kind": k, "target": None}]}
+                                   for d, n, k in nodes.get(i, [])]}
+                for i in sorted(ids)
+            ]},
         }
 
-    def meta(*pkgs):
-        extra = [pkg("serde", [])]
-        return {
-            "workspace_members": [p["id"] for p in pkgs],
-            "packages": list(pkgs) + extra,
-        }
-
-    ident = pkg("tasty-net-identity", [("serde", None)])
-    frame = pkg("tasty-net-frame", [])
-    ssh = pkg("tasty-net-ssh", [])
-    transport = pkg("tasty-net-transport", [("tasty-net-frame", None)])
+    rv, p2p, ident, frame, ssh, transport = (pid(n) for n in (
+        "tasty-net-rendezvous", "tasty-net-p2p", "tasty-net-identity", "tasty-net-frame",
+        "tasty-net-ssh", "tasty-net-transport"))
+    serde = pid("serde", "registry+https://github.com/rust-lang/crates.io-index")
+    other_frame = pid("tasty-net-frame", "registry+https://github.com/rust-lang/crates.io-index")
+    helper = pid("helper", "registry+https://github.com/rust-lang/crates.io-index")
+    ws = ["tasty-net-rendezvous", "tasty-net-identity", "tasty-net-frame", "tasty-net-ssh", "tasty-net-transport"]
     cases = [
-        ("rendezvous → identity만", meta(pkg("tasty-net-rendezvous", [("tasty-net-identity", None), ("serde", None)]), ident), 0),
-        ("p2p → rendezvous·identity", meta(pkg("tasty-net-p2p", [("tasty-net-rendezvous", None), ("tasty-net-identity", "dev")]),
-                                         pkg("tasty-net-rendezvous", [("tasty-net-identity", None)]), ident), 0),
-        ("rendezvous → ssh 일반 의존", meta(pkg("tasty-net-rendezvous", [("tasty-net-ssh", None)]), ssh), 1),
-        ("rendezvous → frame dev 의존", meta(pkg("tasty-net-rendezvous", [("tasty-net-frame", "dev")]), frame), 1),
-        ("rendezvous → transport build 의존", meta(pkg("tasty-net-rendezvous", [("tasty-net-transport", "build")]), transport, frame), 1),
-        ("rendezvous → p2p(방향이 거꾸로)", meta(pkg("tasty-net-rendezvous", [("tasty-net-p2p", "dev")]),
-                                              pkg("tasty-net-p2p", [("tasty-net-rendezvous", None)])), 1),
-        ("identity를 거쳐 frame", meta(pkg("tasty-net-rendezvous", [("tasty-net-identity", None)]),
-                                     pkg("tasty-net-identity", [("tasty-net-frame", None)]), frame), 1),
-        ("identity의 dev 의존은 전파하지 않는다", meta(pkg("tasty-net-rendezvous", [("tasty-net-identity", None)]),
-                                                   pkg("tasty-net-identity", [("tasty-net-frame", "dev")]), frame), 0),
+        ("rendezvous → identity만", meta(ws, {rv: [(ident, "tasty-net-identity", None), (serde, "serde", None)],
+                                           ident: [(serde, "serde", None)]}), 0),
+        ("p2p → rendezvous·identity", meta(ws + ["tasty-net-p2p"], {p2p: [(rv, "tasty-net-rendezvous", None),
+                                                                        (ident, "tasty-net-identity", "dev")],
+                                                                  rv: [(ident, "tasty-net-identity", None)]}), 0),
+        ("rendezvous → ssh 일반 의존", meta(ws, {rv: [(ssh, "tasty-net-ssh", None)]}), 1),
+        ("rendezvous → frame dev 의존", meta(ws, {rv: [(frame, "tasty-net-frame", "dev")]}), 1),
+        ("rendezvous → transport build 의존", meta(ws, {rv: [(transport, "tasty-net-transport", "build")],
+                                                        transport: [(frame, "tasty-net-frame", None)]}), 1),
+        ("rendezvous → p2p(방향이 거꾸로)", meta(ws + ["tasty-net-p2p"], {rv: [(p2p, "tasty-net-p2p", "dev")],
+                                                                        p2p: [(rv, "tasty-net-rendezvous", None)]}), 1),
+        ("identity를 거쳐 frame", meta(ws, {rv: [(ident, "tasty-net-identity", None)],
+                                          ident: [(frame, "tasty-net-frame", None)]}), 1),
+        ("identity의 dev 의존은 전파하지 않는다", meta(ws, {rv: [(ident, "tasty-net-identity", None)],
+                                                       ident: [(frame, "tasty-net-frame", "dev")]}), 0),
+        ("이름이 같은 다른 출처 크레이트는 workspace 의존이 아니다",
+         meta(ws, {rv: [(other_frame, "tasty-net-frame", None)]}), 0),
+        ("이름을 바꿔 쓴 workspace 의존", meta(ws, {rv: [(frame, "frame", None)]}), 1),
+        ("workspace 밖 크레이트를 거쳐 닿는 workspace 크레이트",
+         meta(ws, {rv: [(helper, "helper", None)], helper: [(ssh, "tasty-net-ssh", None)]}), 1),
     ]
     failed = 0
     for title, m, want in cases:
@@ -145,7 +166,7 @@ def self_test():
         if len(violations) != want:
             print(f"  ✘ {title}: 위반 {len(violations)}개 {violations}, 기대 {want}개", file=sys.stderr)
             failed += 1
-    _, targets, _ = judge(meta(ident, frame))
+    _, targets, _ = judge(meta(["tasty-net-identity", "tasty-net-frame"], {ident: []}))
     if targets != 0:
         print("  ✘ 대상 크레이트가 없으면 대상 0개여야 한다", file=sys.stderr)
         failed += 1
