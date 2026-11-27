@@ -14,6 +14,7 @@ use tasty_net_rendezvous::wire::message::{
     DeviceMessage, Hello, Limits, NatReport, ServerMessage, StunResult, Welcome,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::debug;
 
 use crate::endpoint::{Core, PunchHold, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
@@ -321,7 +322,11 @@ async fn registered(
             ),
         );
     }
-    tokio::spawn(rejudge(core.clone(), generation));
+    // The judgements this registration starts belong to it: when the registration ends (the
+    // session or the endpoint ends), dropping the set aborts the ones still running, so no STUN
+    // request of theirs goes out after that and no transaction ID of theirs waits.
+    let mut judging = JoinSet::new();
+    judging.spawn(rejudge(core.clone(), generation));
     // The reader owns the receiving side: a frame is never cut by a select.
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let limit = p.max_message_bytes;
@@ -352,7 +357,7 @@ async fn registered(
             }
             r = msg_rx.recv() => match r {
                 Some(Ok(Some(body))) => match ServerMessage::parse(&body) {
-                    Ok(m) => dispatch(core, generation, m),
+                    Ok(m) => dispatch(core, generation, m, &mut judging),
                     Err(e) => break close_malformed(conn, e),
                 },
                 Some(Ok(None)) | Some(Err(FrameError::Io(_))) | None => {
@@ -371,6 +376,7 @@ async fn registered(
                     _ => lost(&e),
                 };
             }
+            Some(_) = judging.join_next() => {}
             _ = shutdown.changed() => break End::Shutdown,
         }
     };
@@ -476,13 +482,19 @@ fn limits_detail(core: &Core, key: &'static str, l: &Limits) -> CauseDetail {
     }
 }
 
-/// Act on a message of the server of registration `generation`.
-pub(crate) fn dispatch(core: &Arc<Core>, generation: u64, m: ServerMessage) {
+/// Act on a message of the server of registration `generation`. A judgement it starts goes
+/// into `judging`, the set the registration owns.
+pub(crate) fn dispatch(
+    core: &Arc<Core>,
+    generation: u64,
+    m: ServerMessage,
+    judging: &mut JoinSet<()>,
+) {
     match m {
         ServerMessage::Welcome(_) => debug!("a second welcome ignored"),
         ServerMessage::ReflexiveChanged(c) => {
             lock(&core.reg).reflexive = Some(crate::socket::canonical(c.reflexive));
-            tokio::spawn(rejudge(core.clone(), generation));
+            judging.spawn(rejudge(core.clone(), generation));
         }
         ServerMessage::PunchRefused(r) => {
             if let Some(tx) = lock(&core.requests).remove(&r.request_id) {

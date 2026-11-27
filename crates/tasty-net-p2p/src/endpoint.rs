@@ -1480,6 +1480,7 @@ mod tests {
             &core,
             generation,
             ServerMessage::PunchGo(punch_go(7, Some(request_id), peer)),
+            &mut tokio::task::JoinSet::new(),
         );
         assert!(lock(&core.punches).is_empty());
         drop(_enter);
@@ -1506,6 +1507,7 @@ mod tests {
                 &core,
                 generation,
                 ServerMessage::PunchGo(punch_go(request_id, Some(request_id), peer)),
+                &mut tokio::task::JoinSet::new(),
             );
             assert!(lock(&core.requests).is_empty());
             assert_eq!(lock(&core.punches).len(), 1, "the answer is queued");
@@ -1613,6 +1615,7 @@ mod tests {
                 &core,
                 generation,
                 ServerMessage::PunchGo(punch_go(11, Some(asked.request_id), peer)),
+                &mut tokio::task::JoinSet::new(),
             );
             drop(_enter);
             dial.join().unwrap()
@@ -1681,6 +1684,7 @@ mod tests {
                     &core,
                     generation,
                     ServerMessage::PunchGo(punch_go(13, Some(asked.request_id), peer)),
+                    &mut tokio::task::JoinSet::new(),
                 );
             }
             let until = Instant::now() + Duration::from_secs(10);
@@ -1721,6 +1725,80 @@ mod tests {
         );
     }
 
+    /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
+    /// judgement that wait started ends with it: no STUN request goes out after that and no
+    /// transaction ID waits. Only the shutdown signal is sent, so the runtime still runs and a
+    /// detached judgement would go on asking until its attempts run out.
+    #[test]
+    fn the_end_of_the_endpoint_stops_the_judgement_of_a_retry_wait() {
+        use crate::settings::Value;
+        let io = Arc::new(crate::probe::tests_support::CountingSink::default());
+        let peer = DeviceKey::from_seed([37; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in_with(
+            36,
+            peer,
+            &[
+                (
+                    "punch.retry_delay",
+                    Value::Duration(Duration::from_secs(60)),
+                ),
+                // Two hundred requests 50 ms apart: the judgement asks for the whole test.
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(50))),
+                ("nat.stun_attempts", Value::Count(200)),
+            ],
+            io.clone(),
+        );
+        let stun_sent = || io.stun_sent.load(std::sync::atomic::Ordering::SeqCst);
+        let r = std::thread::scope(|s| {
+            let dial = s.spawn(|| ep.connect(peer));
+            let DeviceMessage::PunchRequest(asked) = next_sent(&mut rx) else {
+                panic!("punch_request first");
+            };
+            {
+                // Nobody answers the probes: the 300 ms window passes and a retry waits.
+                let _enter = core.handle.enter();
+                crate::server::dispatch(
+                    &core,
+                    generation,
+                    ServerMessage::PunchGo(punch_go(14, Some(asked.request_id), peer)),
+                    &mut tokio::task::JoinSet::new(),
+                );
+            }
+            let until = Instant::now() + Duration::from_secs(10);
+            while ep
+                .connections()
+                .iter()
+                .all(|c| c.state != AttemptPhase::RetryWait)
+            {
+                assert!(Instant::now() < until, "RetryWait: {:?}", ep.connections());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // The probes have ended; what goes out now is the judgement's.
+            let waiting = stun_sent();
+            while !(stun_sent() > waiting && core.router.waiting() > 0) {
+                assert!(Instant::now() < until, "judging: {:?}", ep.connections());
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            core.shutdown.send_replace(true);
+            let r = dial.join().unwrap();
+            // The attempt sees the signal at once; a request in flight may still go out.
+            std::thread::sleep(Duration::from_millis(100));
+            let after = stun_sent();
+            // Six request intervals.
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(stun_sent(), after, "STUN requests sent after the end");
+            assert_eq!(core.router.waiting(), 0, "transaction IDs left");
+            r
+        });
+        assert!(matches!(r, Err(P2pError::Closed)), "{:?}", r.map(|_| ()));
+        ep.close();
+    }
+
     /// The endpoint's end drops the acceptor's attempt while it punches, and its probes end
     /// with it: no STUN probe goes out after that and no transaction ID waits. The shutdown
     /// signal alone ends the attempt here, so the runtime still runs and a detached probe task
@@ -1747,6 +1825,7 @@ mod tests {
                     punch_id: 15,
                     from: peer,
                 }),
+                &mut tokio::task::JoinSet::new(),
             );
         }
         let DeviceMessage::PunchAnswer(answer) = next_sent(&mut rx) else {
@@ -1762,7 +1841,12 @@ mod tests {
         }];
         {
             let _enter = core.handle.enter();
-            crate::server::dispatch(&core, generation, ServerMessage::PunchGo(go));
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchGo(go),
+                &mut tokio::task::JoinSet::new(),
+            );
         }
         let until = Instant::now() + Duration::from_secs(10);
         while !(ep
@@ -1808,6 +1892,7 @@ mod tests {
                     punch_id: 5,
                     from: peer,
                 }),
+                &mut tokio::task::JoinSet::new(),
             );
         }
         let DeviceMessage::PunchAnswer(answer) = next_sent(&mut rx) else {
@@ -1820,6 +1905,7 @@ mod tests {
                 &core,
                 generation,
                 ServerMessage::PunchGo(punch_go(5, None, peer)),
+                &mut tokio::task::JoinSet::new(),
             );
         }
         // Registered again: the server numbers its punches anew.
@@ -1833,6 +1919,7 @@ mod tests {
                 punch_id: 5,
                 reason: CancelReason::Expired,
             }),
+            &mut tokio::task::JoinSet::new(),
         );
         let until = Instant::now() + Duration::from_secs(10);
         let closed = loop {
@@ -1854,5 +1941,140 @@ mod tests {
         assert_eq!(closed, "accept_deadline_elapsed");
         assert!(again.try_recv().is_err(), "nothing sent to the new server");
         ep.close();
+    }
+
+    /// Packet I/O over a loopback UDP socket that counts the STUN requests it sends and drops
+    /// every STUN message it receives: a NAT judgement never gets its answers and asks on.
+    #[derive(Debug)]
+    struct UnansweredStun {
+        udp: tasty_net_rendezvous::packet_io::UdpPacketIo,
+        stun_sent: std::sync::atomic::AtomicU64,
+    }
+
+    fn is_stun(packet: &[u8]) -> bool {
+        let cookie = tasty_net_rendezvous::wire::stun::MAGIC_COOKIE.to_be_bytes();
+        packet.get(4..8) == Some(&cookie[..])
+    }
+
+    impl tasty_net_rendezvous::packet_io::PacketIo for UnansweredStun {
+        fn poll_recv_from(
+            &self,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<(usize, std::net::SocketAddr)>> {
+            self.poll_recv_with_dst(cx, buf)
+                .map_ok(|(len, from, _)| (len, from))
+        }
+        fn poll_recv_with_dst(
+            &self,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<(usize, std::net::SocketAddr, Option<std::net::IpAddr>)>>
+        {
+            loop {
+                match self.udp.poll_recv_with_dst(cx, buf) {
+                    std::task::Poll::Ready(Ok((len, _, _))) if is_stun(&buf[..len]) => {}
+                    other => return other,
+                }
+            }
+        }
+        fn poll_send_ready(
+            &self,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.udp.poll_send_ready(cx)
+        }
+        fn try_send_to(&self, buf: &[u8], to: std::net::SocketAddr) -> std::io::Result<()> {
+            if is_stun(buf) {
+                self.stun_sent
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.udp.try_send_to(buf, to)
+        }
+        fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+            self.udp.local_addr()
+        }
+        fn may_fragment(&self) -> bool {
+            self.udp.may_fragment()
+        }
+        fn dual_stack(&self) -> bool {
+            self.udp.dual_stack()
+        }
+    }
+
+    /// The endpoint's end stops the NAT judgement its registration started: no STUN request
+    /// goes out after that and no transaction ID waits. The endpoint registers with a real
+    /// server on loopback, whose STUN answers never reach it, so the judgement asks on. Only
+    /// the shutdown signal is sent, so the runtime still runs and a detached judgement would go
+    /// on asking until its attempts run out.
+    #[test]
+    fn the_end_of_the_endpoint_stops_the_judgement_its_registration_started() {
+        use crate::settings::Value;
+        use tasty_net_identity::DeviceKey;
+        use tasty_net_rendezvous::server::{Server, ServerConfig};
+        use tasty_net_rendezvous::settings::{ServerSettings, Value as ServerValue};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut settings = ServerSettings::new();
+        settings
+            .set(
+                "listen.primary",
+                ServerValue::Address("127.0.0.1:0".parse().unwrap()),
+            )
+            .unwrap();
+        settings
+            .set("listen.alternate_port", ServerValue::Port(0))
+            .unwrap();
+        let mut config = ServerConfig::new(DeviceKey::from_seed([40; 32]));
+        config.settings = settings;
+        let server = rt.block_on(Server::start(config)).expect("server starts");
+        let udp = rt
+            .block_on(tasty_net_rendezvous::packet_io::UdpPacketIo::bind(
+                "127.0.0.1:0".parse().unwrap(),
+            ))
+            .unwrap();
+        let io = Arc::new(UnansweredStun {
+            udp,
+            stun_sent: std::sync::atomic::AtomicU64::new(0),
+        });
+        let stun_sent = || io.stun_sent.load(std::sync::atomic::Ordering::SeqCst);
+        let mut config = crate::P2pConfig::new(
+            DeviceKey::from_seed([41; 32]),
+            Arc::new(crate::PairingList::new()),
+        );
+        config.enabled = true;
+        config.server = Some(crate::RendezvousServer {
+            addr: server.addrs().primary,
+            public_key: server.public_key(),
+        });
+        config.packet_io = Some(io.clone());
+        // Two hundred requests 50 ms apart: the judgement asks for the whole test.
+        config
+            .settings
+            .set("nat.stun_rto", Value::Duration(Duration::from_millis(50)));
+        config.settings.set("nat.stun_attempts", Value::Count(200));
+        let ep = crate::P2pEndpoint::bind(config).expect("bind");
+        let core = ep.core().unwrap().clone();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !(lock(&core.reg).phase == Some(EndpointPhase::Registered)
+            && stun_sent() > 0
+            && core.router.waiting() > 0)
+        {
+            assert!(Instant::now() < until, "judging: {:?}", ep.status());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        core.shutdown.send_replace(true);
+        // The registration sees the signal at once; a request in flight may still go out.
+        std::thread::sleep(Duration::from_millis(100));
+        let after = stun_sent();
+        // Six request intervals.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(stun_sent(), after, "STUN requests sent after the end");
+        assert_eq!(core.router.waiting(), 0, "transaction IDs left");
+        ep.close();
+        rt.block_on(server.shutdown());
     }
 }
