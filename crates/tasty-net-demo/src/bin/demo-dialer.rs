@@ -382,8 +382,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         if shared.quit.load(Ordering::SeqCst) {
             detach(&shared.link, Duration::ZERO);
         }
-        let channels = open_channels.then(|| channels(&link, &dial)).flatten();
-        let extra = also.and_then(|holder| open_extra(&shared, &dial, holder));
+        // After quit no more connections start, and `quit` cancels one in progress.
+        let channels = open_channels
+            .then(|| aux_cancel(&shared).and_then(|cancel| channels(&link, &dial, &cancel)))
+            .flatten();
+        let extra = also.and_then(|holder| {
+            aux_cancel(&shared).and_then(|cancel| open_extra(&shared, &dial, holder, &cancel))
+        });
+        lock(&shared.attempt).take();
         let end = read_link(reader, provides.then_some(&shared.link), "");
         lock(&shared.link).take();
         // Everything on the tunnel goes with the link, so a lost tunnel ends with it.
@@ -473,7 +479,7 @@ struct Channels {
 
 /// Opens a bulk channel under `link` and a request channel through the same tunnel, and calls
 /// `system.info` once. Says why on stdout when one of them fails.
-fn channels(link: &Link, dial: &Dial) -> Option<Channels> {
+fn channels(link: &Link, dial: &Dial, cancel: &AttemptCancel) -> Option<Channels> {
     let failed = |error: &dyn std::error::Error| {
         emit(&format!(
             "dialer channels-failed error={}",
@@ -481,12 +487,11 @@ fn channels(link: &Link, dial: &Dial) -> Option<Channels> {
         ));
     };
     let bulk = link.open_bulk(None).map_err(|e| failed(&e)).ok()?;
-    let cancel = AttemptCancel::new();
     let requests = dial
         .transport
-        .connect(&dial.target, &cancel)
+        .connect(&dial.target, cancel)
         .map_err(HandshakeError::Connect)
-        .and_then(|conn| dial_request(conn, &dial.config, &cancel))
+        .and_then(|conn| dial_request(conn, &dial.config, cancel))
         .map_err(|e| failed(&e))
         .ok()?;
     let answer = requests
@@ -512,13 +517,17 @@ fn channels(link: &Link, dial: &Dial) -> Option<Channels> {
 
 /// Opens the second link of `--also-holder` through the same tunnel and reads it on its own
 /// thread until it ends. Says why on stdout when it does not come up.
-fn open_extra(shared: &Arc<Shared>, dial: &Dial, holder: Holder) -> Option<JoinHandle<()>> {
-    let cancel = AttemptCancel::new();
+fn open_extra(
+    shared: &Arc<Shared>,
+    dial: &Dial,
+    holder: Holder,
+    cancel: &AttemptCancel,
+) -> Option<JoinHandle<()>> {
     let result = dial
         .transport
-        .connect(&dial.target, &cancel)
+        .connect(&dial.target, cancel)
         .map_err(HandshakeError::Connect)
-        .and_then(|conn| dial_handshake(conn, &dial.config, holder, None, &cancel));
+        .and_then(|conn| dial_handshake(conn, &dial.config, holder, None, cancel));
     let mut link = match result {
         Ok(link) => link,
         Err(error) => {
@@ -558,6 +567,29 @@ fn open_extra(shared: &Arc<Shared>, dial: &Dial, holder: Holder) -> Option<JoinH
             emit(&format!("dialer extra-failed error={error}"));
             None
         }
+    }
+}
+
+/// The cancel of an auxiliary connection (the request channel, the second link), registered
+/// where `quit` cancels it; none once `quit` came, so no connection starts after it.
+fn aux_cancel(shared: &Shared) -> Option<AttemptCancel> {
+    let cancel = AttemptCancel::new();
+    *lock(&shared.attempt) = Some(cancel.clone());
+    // `quit` is set before the registered cancel is cancelled ([`request_quit`]), so either
+    // this sees it or `quit` cancels the one just registered.
+    if shared.quit.load(Ordering::SeqCst) {
+        lock(&shared.attempt).take();
+        return None;
+    }
+    Some(cancel)
+}
+
+/// Marks that `quit` came and cancels the connection in progress (an attempt, the
+/// redialer's wait or an auxiliary connection).
+fn request_quit(shared: &Shared) {
+    shared.quit.store(true, Ordering::SeqCst);
+    if let Some(cancel) = lock(&shared.attempt).as_ref() {
+        cancel.cancel();
     }
 }
 
@@ -685,11 +717,7 @@ fn read_stdin(shared: &Shared) {
             None => emit(&format!("dialer unknown-command {line}")),
         }
     }
-    shared.quit.store(true, Ordering::SeqCst);
-    // Cancels the attempt in progress, or wakes the redialer's wait.
-    if let Some(cancel) = lock(&shared.attempt).as_ref() {
-        cancel.cancel();
-    }
+    request_quit(shared);
     detach(&shared.link, shared.hold_writer);
     detach(&shared.extra, Duration::ZERO);
 }
@@ -757,6 +785,17 @@ mod tests {
             next_after(&NoLink::Attempt(connect()), false),
             Next::Rejected
         );
+    }
+
+    /// An auxiliary connection gets a cancel that `quit` reaches, and none starts after it.
+    #[test]
+    fn quit_cancels_an_auxiliary_connection_and_stops_new_ones() {
+        let shared = Shared::default();
+        let cancel = aux_cancel(&shared).expect("before quit");
+        assert!(!cancel.is_cancelled());
+        request_quit(&shared);
+        assert!(cancel.is_cancelled(), "quit cancels the one in progress");
+        assert!(aux_cancel(&shared).is_none(), "none starts after quit");
     }
 
     fn describe(no_link: &NoLink) -> String {
