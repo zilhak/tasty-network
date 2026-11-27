@@ -223,6 +223,9 @@ def judge_source(text):
     items, spans = use_items(toks)
     out = []
     for path, glob, line in items:
+        # include!를 use로 들이면(별칭이 있든 없든) 다른 이름으로 부를 수 있어 include_lines가 찾지 못한다.
+        if not glob and len(path) >= 2 and path[0] in ("std", "core") and path[-1] == "include":
+            raise ScanError(f"{line}행: {'::'.join(path)}를 use로 들인 include!는 판정하지 않는다")
         why = judge_import(path, glob)
         if why:
             out.append((line, "::".join(path) + ("::*" if glob else ""), why))
@@ -578,6 +581,14 @@ def self_test():
     included = dict(tree)
     included["crates/tasty-net-ssh/src/lib.rs"] = guarded + "include!(\"system/spawn.rs\");\n"
     crate_case("include!로 src/system/ 파일을 들이는 입력", included, "읽기 오류")
+    for title, use in (("use std::include as inc;로 들인 include!", "use std::include as inc;\n"),
+                       ("use std::include as import_source;로 들인 include!", "use std::include as import_source;\n"),
+                       ("use core::{include as inc};로 들인 include!", "use core::{include as inc};\n"),
+                       ("use ::std::include;(별칭 없음)", "use ::std::include;\n")):
+        aliased = dict(tree)
+        name = use.split(" as ")[1].rstrip(";}\n") if " as " in use else "include"
+        aliased["crates/tasty-net-ssh/src/lib.rs"] = guarded + use + f"{name}!(\"system/spawn.rs\");\n"
+        crate_case(title, aliased, "읽기 오류")
     included_path = dict(tree)
     included_path["crates/tasty-net-rendezvous/src/lib.rs"] = "std::include!(concat!(\"x\", \".rs\"));\n"
     crate_case("경로로 부른 std::include!(다른 금지 크레이트)", included_path, "읽기 오류")
