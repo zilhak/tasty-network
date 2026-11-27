@@ -9,11 +9,11 @@ table	crates/tasty-net-rendezvous/src/settings.rs	rendezvous.md	서버 설정값
 table	crates/tasty-net-rendezvous/src/settings.rs	p2p.md	의존성이 노출하는 값
 table	crates/tasty-net-rendezvous/src/settings.rs	p2p.md	고정값 (설정 불가, 조회에는 보임)
 allow	crates/tasty-net-rendezvous/src/wire/mod.rs	const PROTO = 1	와이어 형식: 조정 프로토콜 판 1 (p2p.md 와이어 형식 상수)
-allow	crates/tasty-net-rendezvous/src/wire/mod.rs	enum CloseCode = 0 1 2 3 4 5 6	와이어 형식: 조정 연결 QUIC 종료 코드 0~6 (rendezvous.md 메시지 표)
-allow	crates/tasty-net-rendezvous/src/wire/mod.rs	const ALL = 7	종료 코드 목록의 길이 7 (CloseCode 변형 수)
-allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const STUN_FIRST_BYTES = 0 3	와이어 형식: 첫 바이트 STUN 0–3
-allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_SHORT_FIRST_BYTES = 64 127	와이어 형식: 첫 바이트 QUIC 64–127
-allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_LONG_FIRST_BYTES = 192 255	와이어 형식: 첫 바이트 QUIC 192–255
+allow	crates/tasty-net-rendezvous/src/wire/mod.rs	enum CloseCode = 0, 1, 2, 3, 4, 5, 6	와이어 형식: 조정 연결 QUIC 종료 코드 0~6 (rendezvous.md 메시지 표)
+allow	crates/tasty-net-rendezvous/src/wire/mod.rs	const ALL = [CloseCode::Closed, CloseCode::AccessDenied, CloseCode::Superseded, CloseCode::UnsupportedProto, CloseCode::Malformed, CloseCode::Busy, CloseCode::HelloTimeout,]	종료 코드 전부(타입의 길이 7은 변형 수)
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const STUN_FIRST_BYTES = 0..=3	와이어 형식: 첫 바이트 STUN 0–3
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_SHORT_FIRST_BYTES = 64..=127	와이어 형식: 첫 바이트 QUIC 64–127
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_LONG_FIRST_BYTES = 192..=255	와이어 형식: 첫 바이트 QUIC 192–255
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	const FRAME_HEADER_LEN = 4	와이어 형식: 조정 프레임 길이 접두 4 B
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	declared == 0	와이어 형식: 길이 0 프레임은 형식 오류 (rendezvous.md 프레임)
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	first == 0	읽은 바이트 0은 스트림 끝
@@ -45,8 +45,8 @@ allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	port() == 0	후보 규�
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut taken = 0	세기: 고른 후보 수의 시작
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut dropped = 0	세기: 버린 후보 수의 시작
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	+= 1	세기: 하나씩 센다
-allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_SPKI_PREFIX = 12 0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00	와이어 형식: ed25519 SPKI 앞머리 12 B (RFC 8410)
-allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_PKCS8_V1_PREFIX = 16 0x30 0x2e 0x02 0x01 0x00 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x04 0x22 0x04 0x20	와이어 형식: ed25519 PKCS#8 v1 앞머리 16 B (RFC 8410 §7)
+allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_SPKI_PREFIX = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,]	와이어 형식: ed25519 SPKI 앞머리 12 B (RFC 8410)
+allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_PKCS8_V1_PREFIX = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,]	와이어 형식: ed25519 PKCS#8 v1 앞머리 16 B (RFC 8410 §7)
 allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_KEY_LEN = 32	와이어 형식: ed25519 키 32 B (RFC 8032)
 allow	crates/tasty-net-rendezvous/src/tls.rs	send_tls13_tickets = 0	고정값 tls.tickets 0 (p2p.md 고정값)
 allow	crates/tasty-net-rendezvous/src/tls.rs	max_early_data_size = 0	고정값 tls.early_data 끔 (p2p.md 고정값)
@@ -54,7 +54,7 @@ allow	crates/tasty-net-rendezvous/src/quic.rs	const QUIC_VERSION_1 = 0x0000_0001
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	fetch_add(1,	세기: 패킷 하나
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(0)	quinn AsyncUdpSocket::poll_recv: 받을 자리가 없으면 채운 버퍼 0개
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(1)	quinn AsyncUdpSocket::poll_recv: 한 번에 데이터그램 하나를 채운다
-allow	crates/tasty-net-rendezvous/src/packet_io.rs	const COALESCED_MAX = 1 16	OS가 받기 한 번에 합치는 최대 64 KiB(Linux GRO·Windows URO 상한, 설정 아님)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	const COALESCED_MAX = 1 << 16	OS가 받기 한 번에 합치는 최대 64 KiB(Linux GRO·Windows URO 상한, 설정 아님)
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	vec![0;	버퍼를 0으로 채워 만든다
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	meta[0]	받기 한 번의 결과 하나(첨자)
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
