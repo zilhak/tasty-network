@@ -13,7 +13,8 @@
 //!   comes back.
 //!
 //! A Detach frame ends a link. The server ends when its stdin closes or reads `quit`, and then
-//! retires its record.
+//! retires its record. The stdin line `table` prints the connection table (one `ssh_inbound`
+//! entry per accepted channel) in the lines of `tasty_net_demo::table`.
 //!
 //! ```text
 //! demo-server --record <path> [--proposals accept|refuse] [--read-timeout-ms <ms>]
@@ -33,6 +34,7 @@
 //! | `server send-failed error=<text>` | a `send` line found no held link, or writing failed |
 //! | `server link-ended client=<n> end=<detach\|failure name>` | the link's reader ended |
 //! | `server released client=<n> live=<links>` | the link's registration was dropped |
+//! | `server table ...` · `server conn ...` · `server link ...` · `server table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `server refused reason=<wire reason>` | this end refused a handshake |
 //! | `server handshake-failed error=<text>` | a handshake failed without a refusal |
 //! | `server bye` | the server ends |
@@ -46,12 +48,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::{Args, Snapshot, emit, error_chain, failure_name, link_timeouts};
+use tasty_net_demo::table::table_lines;
+use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken, DeviceKey, RecordPublication};
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelReader,
-    ChannelWriter, DomainAccept, DomainPolicy, DomainReject, HandshakeError, Link,
+    ChannelWriter, ConnectionTable, DomainAccept, DomainPolicy, DomainReject, HandshakeError, Link,
     MAX_HANDSHAKE_LINE, RawChannel, RoleProposal, Side, accept_handshake, read_first_line,
 };
 
@@ -157,6 +160,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let timeouts = link_timeouts(args.millis("read-timeout-ms", Duration::from_secs(30))?);
 
     let key = DeviceKey::generate()?;
+    let device = key.id().to_string();
     let token = ConnectionToken::issue()?;
     // A fresh ID per start, so a dialer can tell a restarted server from the old one.
     let nonce = ConnectionToken::issue()?;
@@ -169,8 +173,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let policy = Arc::new(LivePolicy::default());
+    let connections = ConnectionTable::default();
     let config = AcceptConfig::new(key, instance_id.clone(), Some(token.clone()), policy)
         .with_timeouts(timeouts)
+        .with_connections(connections.clone())
         .with_role_proposals(move |proposal| answer(proposal, accept_proposals));
     let record = ConnectionRecord {
         port,
@@ -189,7 +195,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let held = Arc::clone(&held);
         std::thread::Builder::new()
             .name("stdin".into())
-            .spawn(move || watch_stdin(&publication, &held))?;
+            .spawn(move || watch_stdin(&publication, &held, &connections, &device))?;
     }
 
     for stream in listener.incoming() {
@@ -224,15 +230,24 @@ fn answer(proposal: RoleProposal, accept: bool) {
     }
 }
 
-/// Sends `send <text>` lines on the newest held link. Ends the process when stdin closes or
-/// reads `quit`, after retiring the record.
-fn watch_stdin(publication: &Mutex<Option<RecordPublication>>, held: &Held) {
+/// Sends `send <text>` lines on the newest held link and prints the connection table on
+/// `table`. Ends the process when stdin closes or reads `quit`, after retiring the record.
+fn watch_stdin(
+    publication: &Mutex<Option<RecordPublication>>,
+    held: &Held,
+    connections: &ConnectionTable,
+    device: &str,
+) {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let line = line.trim_end();
         if line == "quit" {
             break;
+        }
+        if line == "table" {
+            emit_lines(&table_lines("server", device, &connections.connections()));
+            continue;
         }
         if let Some(text) = line.strip_prefix("send ") {
             let sent = lock(held)

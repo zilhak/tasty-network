@@ -4,13 +4,16 @@
 //!
 //! The binaries print one event per line on stdout, `<who> <event> key=value ...`, so a person
 //! can follow them and the integration tests can wait for them. How to run them by hand is in
-//! `docs/examples.md`.
+//! `docs/examples.md`. On the stdin command `table` each binary prints its connection table
+//! ([`table`]).
 //!
 //! | Binary | Does |
 //! |--------|------|
 //! | `demo-server` | the accepting end: publishes a connection record and accepts handshake v2 on a loopback port. On a forward link it provides the workspace (one Control snapshot, Data echoed); on an accepted role reversal it holds (waits for the dialer's descriptor, sends its stdin lines, prints the echo) |
 //! | `demo-dialer` | reaches the server over SSH (record discovery, `-L` tunnel) as the holder (forward) or, with `--holder acceptor`, as the provider of the role reversal; connects again with backoff after a loss |
 #![forbid(unsafe_code)]
+
+pub mod table;
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -71,6 +74,20 @@ pub fn emit(line: &str) {
     // A closed stdout (the reader went away) is not a reason to stop the demo.
     if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
         eprintln!("{line}");
+    }
+}
+
+/// Prints `lines` on stdout at once, so no other event line falls between them.
+pub fn emit_lines(lines: &[String]) {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    let mut out = std::io::stdout().lock();
+    if out
+        .write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        eprint!("{text}");
     }
 }
 

@@ -6,7 +6,8 @@
 //! goes out as a Data frame and the echo is printed. When the link is lost the dialer waits
 //! with backoff and connects again from discovery. A refusal that connecting again cannot
 //! change (a wrong token, for example) ends the dialer with exit code 3. `quit` or the end of
-//! stdin detaches and ends with exit code 0.
+//! stdin detaches and ends with exit code 0. The stdin line `table` prints the connection
+//! table (one entry per tunnel) in the lines of `tasty_net_demo::table`.
 //!
 //! `--holder acceptor` proposes the role reversal (docs/design/transport.md "역할" (b)): the
 //! server holds and this end provides the workspace over the same `-L` tunnel, and this end
@@ -50,6 +51,7 @@
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
 //! | `dialer rejected reason=<reason or -> error=<text>` | it did not; the dialer ends. The reason is the peer's wire reason, or `self_attach` when the peer turned out to be this instance |
+//! | `dialer table ...` · `dialer conn ...` · `dialer link ...` · `dialer table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `dialer stdin-thread-late limit_ms=<ms>` | after `quit`, the stdin thread's Detach did not end in time |
 //! | `dialer stdin-thread-panicked` | after `quit`, the stdin thread had panicked |
 //! | `dialer bye` | the dialer ends after `quit` |
@@ -62,13 +64,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::{Args, Snapshot, emit, error_chain, failure_name, link_timeouts};
+use tasty_net_demo::table::table_lines;
+use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
 use tasty_net_ssh::{Backoff, PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, ChannelReader, ChannelWriter, DialConfig, EndReason, HandshakeError, Holder,
-    LinkCloser, Side, SshTransport, Transport, dial_handshake,
+    AttemptCancel, ChannelReader, ChannelWriter, ConnectionTable, DialConfig, EndReason,
+    HandshakeError, Holder, LinkCloser, Side, SshTransport, Transport, dial_handshake,
 };
 
 const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remote path> \
@@ -106,6 +109,10 @@ struct Shared {
     link: Mutex<Option<(ChannelWriter, LinkCloser)>>,
     /// The attempt in progress, so `quit` can cancel it.
     attempt: Mutex<Option<AttemptCancel>>,
+    /// The connection table the transport reports in, for the `table` line.
+    connections: ConnectionTable,
+    /// This device's ID, for the `table` line.
+    device: String,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -162,13 +169,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     .with_verify(args.flag("verify-host-keys"))
     .with_spawn_hook(spawn_hook(Arc::clone(&tunnel_pid)));
-    let transport = SshTransport::new(launcher, discovery, PortMode::FileUnix);
+    let connections = ConnectionTable::default();
+    let transport = SshTransport::new(launcher, discovery, PortMode::FileUnix)
+        .with_connections(connections.clone());
     let instance_id = match args.value("instance-id") {
         Some(id) => id.to_string(),
         None => format!("demo-dialer-{}", std::process::id()),
     };
-    let config =
-        DialConfig::new(DeviceKey::generate()?, instance_id.clone()).with_timeouts(timeouts);
+    let key = DeviceKey::generate()?;
+    let device = key.id().to_string();
+    let config = DialConfig::new(key, instance_id.clone()).with_timeouts(timeouts);
 
     emit(&format!("dialer pid={}", std::process::id()));
     let hold_writer = match std::env::var(HOLD_WRITER_ENV) {
@@ -184,6 +194,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .saturating_add(DETACH_END_MARGIN);
     let shared = Arc::new(Shared {
         hold_writer,
+        connections,
+        device,
         ..Shared::default()
     });
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -329,10 +341,7 @@ fn spawn_hook(tunnel_pid: Arc<AtomicU32>) -> SpawnHook {
 
 /// The name of a side in event lines.
 fn side_name(side: Side) -> &'static str {
-    match side {
-        Side::Dialer => "dialer",
-        Side::Acceptor => "acceptor",
-    }
+    tasty_net_demo::table::side_name(side)
 }
 
 /// Prints every frame of the link until it ends. Returns the end's name. With `provider`
@@ -377,7 +386,7 @@ fn read_link(mut reader: ChannelReader, provider: Option<&Shared>) -> &'static s
     }
 }
 
-/// Reads stdin commands: `send <text>` and `quit`. The end of stdin is `quit`.
+/// Reads stdin commands: `send <text>`, `table` and `quit`. The end of stdin is `quit`.
 fn read_stdin(shared: &Shared, wake: &mpsc::Sender<()>) {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -385,6 +394,14 @@ fn read_stdin(shared: &Shared, wake: &mpsc::Sender<()>) {
         let line = line.trim_end();
         if line == "quit" {
             break;
+        }
+        if line == "table" {
+            emit_lines(&table_lines(
+                "dialer",
+                &shared.device,
+                &shared.connections.connections(),
+            ));
+            continue;
         }
         match line.strip_prefix("send ") {
             Some(text) => {
