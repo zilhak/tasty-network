@@ -6,10 +6,12 @@
 
 | 바이너리 | 하는 일 |
 |---|---|
-| `demo-server` | workspace 제공 쪽 흉내. 루프백 포트에서 handshake v2를 받고, `--record` 자리에 연결 레코드(포트·토큰·인스턴스 ID)를 발행한다. 정방향 링크마다 Control snapshot을 한 번 보내고 Data를 그대로 돌려준다. 역할 반전 제안은 `--proposals accept|refuse`(기본 `refuse`)로 답하고, 수락한 링크에서는 holder가 되어 dialer의 descriptor를 받고 stdin의 `send <글>` 줄을 가장 최근 링크에 Data로 보내 돌아온 echo를 찍는다. stdin이 닫히거나 `quit`을 읽으면 레코드를 거두고 끝난다 |
-| `demo-dialer` | SSH로 서버 기기의 레코드를 읽고(`cat`, 그다음 `type`) `-L` 터널을 열어 handshake한다. stdin의 `send <글>` 줄을 Data로 보내고 echo를 찍는다. 링크가 끊기면 backoff 뒤 레코드 발견부터 다시 한다. 다시 연결해도 결과가 같은 거절(틀린 토큰 등)이면 종료 코드 3으로 끝난다. `quit`이나 stdin 끝이면 Detach를 보내고 0으로 끝난다. `--holder acceptor`면 같은 `-L` 터널 위에서 역할 반전을 제안하고, 수락되면 workspace 제공 쪽이 되어 descriptor를 보낸 뒤 받은 Data를 돌려준다. 끊기면 다시 연결하는 쪽은 그대로 dialer다 |
+| `demo-server` | workspace 제공 쪽 흉내. 루프백 포트에서 handshake v2를 받고, `--record` 자리에 연결 레코드(포트·토큰·인스턴스 ID)를 발행한다. 정방향 링크마다 Control snapshot을 한 번 보내고 Data를 그대로 돌려준다. 역할 반전 제안은 `--proposals accept|refuse`(기본 `refuse`)로 답하고, 수락한 링크에서는 holder가 되어 dialer의 descriptor를 받고 stdin의 `send <글>` 줄을 가장 최근 링크에 Data로 보내 돌아온 echo를 찍는다. attach 링크 아래의 bulk 채널은 받아 프레임을 그대로 돌려주고, 요청 채널에는 `system.info`에만 자기 인스턴스 ID로 답한다. stdin이 닫히거나 `quit`을 읽으면 레코드를 거두고 끝난다 |
+| `demo-dialer` | SSH로 서버 기기의 레코드를 읽고(`cat`, 그다음 `type`) `-L` 터널을 열어 handshake한다. stdin의 `send <글>` 줄을 Data로 보내고 echo를 찍는다. 링크가 끊기면 transport의 `Redialer`(기본 설정값)로 backoff 뒤 레코드 발견부터 다시 한다. 다시 연결해도 결과가 같은 거절(틀린 토큰 등)이면 종료 코드 3으로, `Redialer`가 포기하면(`redial.give_up_after`) 종료 코드 4로 끝난다. `quit`이나 stdin 끝이면 Detach를 보내고 0으로 끝난다. `--holder acceptor`면 같은 `-L` 터널 위에서 역할 반전을 제안하고, 수락되면 workspace 제공 쪽이 되어 descriptor를 보낸 뒤 받은 Data를 돌려준다. 끊기면 다시 연결하는 쪽은 그대로 dialer다. `--channels`면 링크마다 bulk 채널과 같은 터널 위 요청 채널을 열고, `--also-holder dialer|acceptor`면 같은 터널로 그 holder의 두 번째 attach 링크를 연다 |
 
 옵션과 stdout에 찍는 사건 줄의 정본은 각 바이너리 소스의 머리 주석이다(`src/bin/demo-server.rs`, `src/bin/demo-dialer.rs`). 사건 줄은 `<누구> <사건> 키=값 ...` 형식이다.
+
+두 바이너리 모두 stdin에 `table`을 주면 자기 연결 목록([전송 추상화](design/transport.md) "연결 목록")을 한 묶음으로 찍는다. `<누구> table device=<자기 기기 ID> entries=<n>`, 항목마다 `<누구> conn id=... path=... direction=... local_side=... state=... ...`, attach 링크마다 `<누구> link conn=<항목> link_id=... holder=... transport=...`, 끝에 `<누구> table-end`다. 값은 공백 없는 한 낱말로 퍼센트 인코딩하고 없는 값은 `-`다. 키 목록과 인코딩의 정본은 `src/table.rs`다.
 
 ## 손으로 돌리기
 
@@ -74,6 +76,7 @@ send hello
 | `reconnect_after_tunnel_kill` | 터널 ssh를 끝내면 dialer가 끊김을 분류하고 새 터널(다른 PID)로 다시 붙어 echo가 된다. 서버에 남은 링크는 하나다 |
 | `reconnect_after_server_restart` | 서버를 죽이고 다시 띄우면 dialer가 새로 발견한 레코드(다른 인스턴스 ID)로 다시 붙는다 |
 | `wrong_token_is_rejected_without_retry` | 틀린 토큰은 `token_invalid`로 거절되고 dialer는 시도 한 번으로 끝난다 |
+| `connection_table_reports_ssh_forward` | attach·bulk·요청 채널을 나르는 터널 하나가 dialer에서는 항목 하나(구간 셋, `ssh` 경유, rendezvous 없음), 서버에서는 채널마다 `ssh_inbound` 항목(bulk는 `parent`)이다. 터널을 끊으면 옛 항목은 원인과 함께 `disconnected`, 새 항목은 새 ID로 옛 ID를 가리키고 `reconnecting`에서 `connected`가 된다 |
 
 `crates/tasty-net-demo/tests/ssh_reverse_attach.rs`는 역할 반전을 같은 방식으로 확인한다(D3). 두 파일은 같은 시험 도우미(`tests/support/`)를 쓴다.
 
@@ -84,6 +87,9 @@ send hello
 | `reconnect_after_tunnel_kill` | 터널 ssh를 끝내면 서버 쪽 링크가 끝나고 dialer가 새 터널(다른 PID)로 다시 붙어 다시 제안한다. 역할 표와 echo가 그대로다 |
 | `refused_proposal_stops_without_retry` | 거절하는 서버에서 dialer는 `role_refused`로 시도 한 번 만에 종료 코드 3으로 끝난다 |
 | `self_attach_is_rejected` | 서버의 인스턴스 ID를 쓰는 dialer는 `self_attach`로 끝나고 제안·attach가 일어나지 않는다 |
+| `connection_table_reports_ssh_role_reversed` | `connection_table_reports_ssh_forward`와 같은 모양을 `ssh_role_reversed`·`role_reversed`로 본다 |
+| `both_ends_produce_matching_local_links` | 두 끝의 연결 목록에서 만든 토폴로지 입력(링크 ID, dialer, acceptor, holder, 엣지 값)이 같다 |
+| `mixed_holders_on_one_tunnel` | 한 터널 위 정방향 링크와 역할 반전 링크: SSH를 띄운 쪽 항목은 `mixed`, 링크마다 두 끝의 값이 같다(`ssh_forward` 하나, `ssh_role_reversed` 하나) |
 
 정확한 조건은 시험 파일이 정본이다. 모든 시험은 끝에 sshd·ssh·예제 프로세스가 남지 않았는지 확인한다.
 
