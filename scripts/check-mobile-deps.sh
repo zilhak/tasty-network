@@ -98,8 +98,10 @@ judge_features() {
     awk -v app="$APP" '
         {
             line = $0
-            sub(/ \(\*\)$/, "", line)
             if (line == "") next
+            sub(/ \(\*\)$/, "", line)
+            # 접힘 표시만 있는 줄(" (*)")은 빈 줄이 아니라 모르는 줄이다.
+            if (line == "") { print "unknown " NR ": " $0; next }
             # "<이름> v<판>[ <출처…>]|<feature,…>"가 아니면 모르는 줄이다(앞 공백, | 없음·둘 이상 등).
             # 출처는 로컬 경로에 괄호가 들 수 있어 | 밖의 아무 글자로, feature 이름은 Cargo가 Unicode XID
             # 글자를 받으므로 | 와 공백 밖의 아무 글자로 본다.
@@ -136,9 +138,10 @@ judge_features() {
 # 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지나 그 feature 노드가 있으면 그 경로를
 # "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍고, 모양을 모르는 줄(깊이 숫자로 시작하지
 # 않음, 노드가 "<이름> v<판>…"이나 "<이름> feature \"<f>\"[ (<표시>)]"가 아님, 깊이가 한 번에 둘 이상 늘어남)은
-# "unknown <줄 번호>: <줄>"로 찍고, 끝에 "end"를 찍는다. 빈 줄만 건너뛴다.
+# "unknown <줄 번호>: <줄>"로 찍고, 끝에 "end"를 찍는다. 빈 줄만 건너뛴다. 뿌리(깊이 0)는 꼭 하나이고
+# 요청한 판의 tokio(인자 $1)여야 한다. 아니면 그 줄이나 "unknown roots <수>"를 찍는다.
 judge_inverted() {
-    awk '
+    awk -v want="$1" '
         BEGIN { prev = -1 }
         {
             if ($0 == "") next
@@ -152,6 +155,11 @@ judge_inverted() {
             }
             prev = d
             path[d] = text
+            if (d == 0) {
+                roots++
+                split(text, r, " ")
+                if (r[1] != "tokio" || r[2] != "v" want) print "unknown " NR ": 뿌리가 tokio v" want "가 아니다: " $0
+            }
             if (d == 1) { inside = (text == "tokio feature \"process\""); if (inside) found = 1; next }
             if (inside && d > 1) {
                 split(text, w, " ")
@@ -164,7 +172,11 @@ judge_inverted() {
                 }
             }
         }
-        END { if (!found) print "no-process-node"; print "end" }
+        END {
+            if (roots != 1) print "unknown roots " roots + 0
+            if (!found) print "no-process-node"
+            print "end"
+        }
     '
 }
 
@@ -217,7 +229,7 @@ check_target() {
             echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 cargo tree가 실패했다(target $t, 종료 코드 $inv_rc)" >&2
             return 2
         fi
-        if ! inv=$(judge_inverted <<<"$inv") || ! grep -qx 'end' <<<"$inv"; then
+        if ! inv=$(judge_inverted "$v" <<<"$inv") || ! grep -qx 'end' <<<"$inv"; then
             echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무의 판정이 실패했다(target $t)" >&2
             return 2
         fi
@@ -258,6 +270,9 @@ self_test() {
     local inv_none='0tokio v1.54.1;1tokio feature "rt";2app v0.1.0 (/w/app)'
     local inv_space='0tokio v1.54.1;1tokio feature "process";2tokio feature "full"; 3tasty-net-transport v0.1.0 (/w/t);4app v0.1.0 (/w/app)'
     local root_nobar='app v0.1.0 (/w/app)'
+    local inv_badroot='0not-tokio v2.0.0;1tokio feature "process";2app v0.1.0 (/w/app)'
+    local inv_badver='0tokio v1.0.0;1tokio feature "process";2app v0.1.0 (/w/app)'
+    local inv_tworoots='0tokio v1.54.1;1tokio feature "process";2app v0.1.0 (/w/app);0tokio v1.54.1;1tokio feature "rt"'
     local root_uni='app v0.1.0 (/project)|모바일'
     local root_paren='app v0.1.0 (/project (iOS)/app)|default'
     local inv_paren='0tokio v1.54.1;1tokio feature "process";2app feature "모바일";3app v0.1.0 (/project (iOS)/app)'
@@ -290,6 +305,11 @@ self_test() {
         "Unicode XID feature 이름(모바일)#0#0#$root_uni;$tk#0##0"
         "괄호가 든 로컬 경로 (/project (iOS)/app)#0#0#$root_paren;$tk#0##0"
         "거꾸로 본 나무의 괄호 경로와 Unicode feature 노드(앱 기준)#1#0#$root_paren;$tkp#0#$inv_paren#0"
+        "feature 나무에 단독 (*) 줄#0#2#$root; (*)#0##0"
+        "거꾸로 본 나무에 단독 (*) 줄(앱 기준)#1#2#$root;$tkp#0#$inv_app; (*)#0"
+        "거꾸로 본 나무의 뿌리가 tokio가 아니다(앱 기준)#1#2#$root;$tkp#0#$inv_badroot#0"
+        "거꾸로 본 나무의 뿌리가 다른 판의 tokio다(앱 기준)#1#2#$root;$tkp#0#$inv_badver#0"
+        "거꾸로 본 나무의 뿌리가 둘이다(앱 기준)#1#2#$root;$tkp#0#$inv_tworoots#0"
         "tokio 판을 뽑는 sed가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-sed"
         "위반 줄을 찾는 grep이 실패한다#0#2#$root;$tkp#0##0#fail-grep"
     )
