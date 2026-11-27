@@ -259,7 +259,9 @@ fn redialer_follows_settings() {
     );
     assert_eq!(config.wait_before(4, -1.0), ms(75));
 
-    // Four attempts with the waits within the random width, then the attempts run out.
+    // Four attempts, each after at least the shortest wait the settings allow, then the
+    // attempts run out. Real waits only bound from below; the give-up time is the redial
+    // unit tests' (on a fake clock).
     let (result, started, starts, table) =
         timed_redial(config.clone(), || HandshakeError::TimedOut);
     assert!(
@@ -270,42 +272,16 @@ fn redialer_follows_settings() {
         "{result:?}"
     );
     assert_eq!(starts.len(), 4);
-    let slack = ms(250);
     let mut previous = started;
     for (n, at) in (1u64..).zip(&starts) {
         let gap = at.duration_since(previous);
-        let (low, high) = (config.wait_before(n, -1.0), config.wait_before(n, 1.0));
-        assert!(
-            gap >= low && gap <= high + slack,
-            "wait {n}: {gap:?} not in [{low:?}, {high:?}]"
-        );
+        let low = config.wait_before(n, -1.0);
+        assert!(gap >= low, "wait {n}: {gap:?} shorter than {low:?}");
         previous = *at;
     }
     let entry = table.connections().pop().expect("the redial entry");
     assert_eq!(entry.last_cause, Some(Cause::RedialExhausted));
     assert_eq!(entry.redial.as_ref().map(|r| r.attempt), Some(4));
-
-    // give_up_after: waits of 100 ms end at 100, 200 and 300 ms; a fourth would end past
-    // 350 (and a late second attempt still has 50 ms before the third would not fit).
-    let config = RedialerConfig::new()
-        .with_initial(ms(100))
-        .with_multiplier(1.0)
-        .with_jitter(0.0)
-        .with_give_up_after(ms(350));
-    let (result, started, starts, table) = timed_redial(config, || HandshakeError::TimedOut);
-    assert!(
-        matches!(result, Err(RedialError::Exhausted(_))),
-        "{result:?}"
-    );
-    assert_eq!(starts.len(), 3);
-    assert!(
-        started.elapsed() < ms(350) + slack,
-        "{:?}",
-        started.elapsed()
-    );
-    let entry = table.connections().pop().expect("the redial entry");
-    assert_eq!(entry.state, ConnectionState::Disconnected);
-    assert_eq!(entry.last_cause, Some(Cause::RedialExhausted));
 
     // An error connecting again does not change stops at once.
     let config = RedialerConfig::new().with_initial(ms(1));

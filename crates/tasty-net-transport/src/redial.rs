@@ -184,20 +184,57 @@ impl std::error::Error for RedialError {
 /// Between attempts the entry stays `reconnecting` in the `retry_wait` phase with the attempt
 /// number and the time left. Each call starts again from the first wait, so a connection
 /// that came up resets the backoff. When to call it stays the consumer's decision.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Redialer {
     table: ConnectionTable,
     config: RedialerConfig,
+    clock: Arc<dyn Clock>,
+}
+
+impl fmt::Debug for Redialer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Redialer")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where the redialer reads the time and waits; the system clock outside the unit tests.
+trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+    /// Waits `wait`, or until `cancel` stops the attempt.
+    fn sleep(&self, wait: Duration, cancel: &AttemptCancel) -> Result<(), Cancelled>;
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, wait: Duration, cancel: &AttemptCancel) -> Result<(), Cancelled> {
+        sleep(wait, cancel)
+    }
 }
 
 impl Redialer {
     /// A redialer over `table` with `config`. A multiplier below 1 or not finite, or a
     /// jitter outside [0, 1], is refused.
     pub fn new(table: &ConnectionTable, config: RedialerConfig) -> Result<Self, InvalidSetting> {
+        Self::with_clock(table, config, Arc::new(SystemClock))
+    }
+
+    fn with_clock(
+        table: &ConnectionTable,
+        config: RedialerConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, InvalidSetting> {
         check_redial(config.multiplier(), config.jitter())?;
         Ok(Self {
             table: table.clone(),
             config,
+            clock,
         })
     }
 
@@ -221,6 +258,7 @@ impl Redialer {
         mut attempt: impl FnMut(&ConnectOptions) -> Result<T, HandshakeError>,
     ) -> Result<T, RedialError> {
         let config = &self.config;
+        let clock = &*self.clock;
         let lost_entry = self.table.connection(lost);
         let closed_here = lost_entry
             .as_ref()
@@ -228,7 +266,7 @@ impl Redialer {
         if closed_here || config.give_up_after().is_zero() {
             return Err(RedialError::NotRedialed);
         }
-        let started = Instant::now();
+        let started = clock.now();
         let pending = self.table.open(NewEntry {
             previous: Some(lost),
             parent: None,
@@ -261,16 +299,16 @@ impl Redialer {
         let mut wait = config.wait_before(number, jitter_unit());
         let mut last = None;
         loop {
-            if !fits(config, started, wait) {
+            if !fits(config, clock.since(started), wait) {
                 return Err(exhausted(&pending, last));
             }
-            progress(&pending, number, Some(wait));
-            if sleep(wait, cancel).is_err() {
+            progress(&pending, clock, number, Some(wait));
+            if clock.sleep(wait, cancel).is_err() {
                 pending.hold(false, None);
                 pending.transition(ConnectionState::Disconnected, None, Some(Cause::Cancelled));
                 return Err(RedialError::Cancelled);
             }
-            progress(&pending, number, None);
+            progress(&pending, clock, number, None);
             match attempt(&options) {
                 Ok(connected) => {
                     pending.hold(false, None);
@@ -295,7 +333,9 @@ impl Redialer {
                     number += 1;
                     wait = config.wait_before(number, jitter_unit());
                     let bounded = config.max_attempts();
-                    if (bounded != 0 && number > bounded) || !fits(config, started, wait) {
+                    if (bounded != 0 && number > bounded)
+                        || !fits(config, clock.since(started), wait)
+                    {
                         return Err(exhausted(&pending, last));
                     }
                     pending.transition(
@@ -309,10 +349,16 @@ impl Redialer {
     }
 }
 
-/// Whether a wait of `wait` from now still ends within `redial.give_up_after` of `started`.
-fn fits(config: &RedialerConfig, started: Instant, wait: Duration) -> bool {
-    started
-        .elapsed()
+impl dyn Clock + '_ {
+    /// The time since `started`.
+    fn since(&self, started: Instant) -> Duration {
+        self.now().saturating_duration_since(started)
+    }
+}
+
+/// Whether a wait of `wait` after `elapsed` still ends within `redial.give_up_after`.
+fn fits(config: &RedialerConfig, elapsed: Duration, wait: Duration) -> bool {
+    elapsed
         .checked_add(wait)
         .is_some_and(|at| at <= config.give_up_after())
 }
@@ -328,8 +374,8 @@ fn exhausted(pending: &EntryRef, last: Option<HandshakeError>) -> RedialError {
 }
 
 /// Shows attempt `number` on the entry, and the wait before it if it is waiting.
-fn progress(pending: &EntryRef, number: u64, wait: Option<Duration>) {
-    pending.hold(true, wait.and_then(|w| Instant::now().checked_add(w)));
+fn progress(pending: &EntryRef, clock: &dyn Clock, number: u64, wait: Option<Duration>) {
+    pending.hold(true, wait.and_then(|w| clock.now().checked_add(w)));
     pending.update(|info| {
         info.redial = Some(RedialProgress {
             attempt: number,
@@ -382,4 +428,118 @@ fn sleep(wait: Duration, cancel: &AttemptCancel) -> Result<(), Cancelled> {
         };
     }
     Err(Cancelled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A clock that moves only when the redialer sleeps (by the wait plus `late`) or when an
+    /// attempt says so.
+    struct FakeClock {
+        now: Mutex<Instant>,
+        late: Duration,
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl FakeClock {
+        fn new(late: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                now: Mutex::new(Instant::now()),
+                late,
+                waits: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn advance(&self, by: Duration) {
+            let mut now = lock(&self.now);
+            *now += by;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            *lock(&self.now)
+        }
+
+        fn sleep(&self, wait: Duration, cancel: &AttemptCancel) -> Result<(), Cancelled> {
+            let _registration = cancel.register(Arc::new(Wake::default()))?;
+            lock(&self.waits).push(wait);
+            self.advance(wait + self.late);
+            Ok(())
+        }
+    }
+
+    const LOST: ConnectionId = ConnectionId(1000);
+
+    /// Redials `LOST` on a fake clock with attempts that take `takes` and time out; gives the
+    /// result, the attempt count, the waits and the table.
+    fn fake_redial(
+        config: RedialerConfig,
+        late: Duration,
+        takes: Duration,
+    ) -> (Result<(), RedialError>, u64, Vec<Duration>, ConnectionTable) {
+        let table = ConnectionTable::default();
+        let clock = FakeClock::new(late);
+        let redialer = Redialer::with_clock(&table, config, Arc::clone(&clock) as Arc<dyn Clock>)
+            .expect("valid settings");
+        let mut attempts = 0;
+        let result = redialer.redial(LOST, &AttemptCancel::new(), |_| {
+            attempts += 1;
+            clock.advance(takes);
+            Err::<(), _>(HandshakeError::TimedOut)
+        });
+        let waits = lock(&clock.waits).clone();
+        (result, attempts, waits, table)
+    }
+
+    fn last_cause(table: &ConnectionTable) -> Option<Cause> {
+        table.connections().pop().and_then(|e| e.last_cause)
+    }
+
+    #[test]
+    fn attempts_run_out_after_max_attempts_with_the_set_waits() {
+        let ms = Duration::from_millis;
+        let config = RedialerConfig::new()
+            .with_initial(ms(40))
+            .with_multiplier(2.0)
+            .with_max_delay(ms(100))
+            .with_jitter(0.0)
+            .with_max_attempts(4);
+        let (result, attempts, waits, table) = fake_redial(config, Duration::ZERO, ms(5));
+        assert!(
+            matches!(
+                result,
+                Err(RedialError::Exhausted(Some(HandshakeError::TimedOut)))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(attempts, 4);
+        assert_eq!(waits, [ms(40), ms(80), ms(100), ms(100)]);
+        assert_eq!(last_cause(&table), Some(Cause::RedialExhausted));
+    }
+
+    #[test]
+    fn attempts_stop_when_the_next_wait_ends_past_give_up_after() {
+        let ms = Duration::from_millis;
+        // Waits of 100 ms end at 100, 200 and 300 ms; a fourth would end at 400, past 350.
+        let config = RedialerConfig::new()
+            .with_initial(ms(100))
+            .with_multiplier(1.0)
+            .with_jitter(0.0)
+            .with_give_up_after(ms(350));
+        let (result, attempts, waits, table) = fake_redial(config.clone(), Duration::ZERO, ms(0));
+        assert!(
+            matches!(result, Err(RedialError::Exhausted(_))),
+            "{result:?}"
+        );
+        assert_eq!(attempts, 3);
+        assert_eq!(waits.len(), 3);
+        assert_eq!(last_cause(&table), Some(Cause::RedialExhausted));
+
+        // Attempts that take 60 ms each: the third wait would end at 100 + 60 + 100 + 60 +
+        // 100 = 420, past 350, so two attempts.
+        let (_, attempts, _, _) = fake_redial(config, Duration::ZERO, ms(60));
+        assert_eq!(attempts, 2);
+    }
 }
