@@ -755,6 +755,13 @@ def self_test():
     files["src/outer/t.rs"] = "fn f() -> u8 { 4 }\n"
     case("인라인 시험 모듈 아래 같은 이름은 그 인라인 모듈의 경로로 푼다", "target\tsrc\n",
          {"src/lib.rs", "src/real.rs", "src/suite/real.rs", "src/outer/t.rs"}, 1)
+    files["src/key.rs"] = ("fn seed() -> [u8; 32] { [0u8; 32] }\n"
+                           "fn id(s: &[u8]) -> Option<[u8; 32]> { decode::<32>(s) }\n")
+    key_allow = ("target\tsrc\nallow\tsrc/key.rs\t[u8; 32]\t형식\n"
+                 "allow\tsrc/key.rs\t[0u8; 32]\t형식\nallow\tsrc/key.rs\tdecode::<32>\t형식\n")
+    case("형식 자리의 토큰 묶음만 허용한 파일", key_allow, {"src/key.rs"}, 0)
+    files["src/key.rs"] += "const RETRIES: u32 = 32;\nfn wait() -> u64 { 32 }\n"
+    case("같은 파일에 새로 넣은 같은 숫자는 위반", key_allow, {"src/key.rs"}, 2)
     files["src/suffix.rs"] = "fn f() -> (u8, u32) { (0xFFu8, 0x1f32) }\n"
     case("접미 붙은 16진 리터럴", "target\tsrc\nallow\tsrc/suffix.rs\t0xFF\t바이트 끝\n"
          "allow\tsrc/suffix.rs\t0x1f32\t16진의 f32는 숫자\n", {"src/suffix.rs"}, 0)
