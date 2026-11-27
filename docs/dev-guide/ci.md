@@ -39,8 +39,8 @@
 `scripts/install-ndk.sh`가 NDK r30(`Pkg.Revision` 30.0.16248370, Linux x86_64 아카이브)을 받아 잡의 임시 폴더에 푼다. 러너 이미지에 들어 있는 NDK는 이미지가 바뀔 때 함께 바뀌므로 쓰지 않는다.
 
 - 판의 근거: 2026-11-28 Google SDK 저장소 목록(`https://dl.google.com/android/repository/repository2-3.xml`)의 NDK 가운데 가장 새 안정판(beta 아님)이다. 모바일 설계의 판정 기록(director 확인)이 같은 판으로 했고, 설계가 근거로 든 `android_getnetworkblockedreason`(API 37) 헤더도 r30의 것이다. 빌드 대상 API 수준(29)은 NDK 판과 따로 설계가 정한다.
-- 대조: 저장소 목록에 실린 그 아카이브의 SHA-1과, 같은 아카이브를 받아 잰 SHA-256을 함께 스크립트에 고정한다. 둘 중 하나라도 다르면 설치가 실패한다. 푼 뒤 `source.properties`의 `Pkg.Revision`과 `toolchains/llvm/prebuilt/linux-x86_64/bin/clang`도 본다.
-- 목적지: `PREFIX/android-ndk-r30`이 이미 있으면 그 폴더의 `Pkg.Revision`이 고정 판이고 clang이 있을 때만 그대로 쓴다. 그 밖의 모양(`source.properties`가 없는 폴더, 빈 폴더, 파일, 다른 판)은 건드리지 않고 2로 끝난다. 받은 아카이브는 PREFIX 안의 임시 폴더에 풀고 `mv -T`로 정확히 그 이름에 옮긴다. 옮기는 사이 같은 자리에 무언가 생기면(같은 PREFIX의 동시 설치) 그 아래로 넣지 않고 실패한다. 옮긴 뒤 다시 판과 clang을 보고 나서야 폴더를 찍는다.
+- 대조: 저장소 목록에 실린 그 아카이브의 SHA-1과, 같은 아카이브를 받아 잰 SHA-256을 함께 스크립트에 고정한다. 둘 중 하나라도 다르면 설치가 실패한다. 푼 뒤 `source.properties`의 `Pkg.Revision`과 `toolchains/llvm/prebuilt/linux-x86_64/bin/clang`이 실행 파일인지(폴더가 아닌지)도 본다.
+- 목적지: `PREFIX/android-ndk-r30`이 이미 있으면 그 폴더의 `Pkg.Revision`이 고정 판이고 clang이 있을 때만 그대로 쓴다. 그 밖의 모양(`source.properties`가 없는 폴더, 빈 폴더, 파일, 다른 판)은 건드리지 않고 2로 끝난다. 받은 아카이브는 PREFIX 안의 임시 폴더에 풀고, 목적지는 `mkdir`로 이 실행이 새로 만들 수 있을 때만 쓴다. 받는 사이 같은 자리에 무언가 생기면(빈 폴더 포함, 같은 PREFIX의 동시 설치) 그 자리를 교체하지도 그 아래로 넣지도 않고 실패한다. 만든 목적지로 푼 NDK의 항목을 옮기고, 다시 판과 clang을 보고 나서야 폴더를 찍는다. 도중에 끝나면 이 실행이 만든 목적지와 임시 폴더를 지운다. 지울 경로는 trap 글자에 넣지 않으므로 PREFIX에 따옴표 같은 글자가 들어도 된다.
 - 자체 시험: `bash scripts/install-ndk.sh --self-test`가 가짜 아카이브(python3로 만든다)로 위 경우를 보고, `mobile-android` 잡이 설치 전에 돌린다.
 - 설치 action을 쓰지 않는 근거: 원격 빌드 환경과 로컬에서도 같은 판을 같은 명령으로 받는다. cargo-deny·shellcheck를 고정 판과 고정 합으로 받는 것과 같은 방식이다. 압축은 `unzip`(없으면 `bsdtar`)으로 풀어 실행 권한과 심볼릭 링크를 지킨다.
 - 판을 올릴 때: 저장소 목록에서 새 판의 `ndk;<판>` linux 아카이브 이름과 checksum을 옮기고, 받아서 SHA-256을 다시 잰다. 이 절의 근거도 고친다.

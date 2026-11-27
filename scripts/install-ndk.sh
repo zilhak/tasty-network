@@ -52,14 +52,23 @@ ndk_ok() {
         say "$dir의 판이 '${got:-source.properties 없음}'이다(기대 $NDK_REVISION)."
         return 1
     fi
-    if [ ! -x "$dir/$CLANG_REL" ]; then
-        say "$dir에 $CLANG_REL이 없다."
+    if [ ! -f "$dir/$CLANG_REL" ] || [ ! -x "$dir/$CLANG_REL" ]; then
+        say "$dir에 실행 파일 $CLANG_REL이 없다."
         return 1
     fi
 }
 
+# 끝날 때 지울 것: 이 실행의 임시 폴더와, 이 실행이 만들었지만 다 채우지 못한 목적지. 경로를 trap 글자에
+# 넣지 않고 변수로 들고 있으므로 PREFIX에 따옴표가 들어도 된다.
+INSTALL_TMP=""
+CLAIMED_DEST=""
+cleanup() {
+    if [ -n "$CLAIMED_DEST" ]; then rm -rf -- "${CLAIMED_DEST:?}"; fi
+    if [ -n "$INSTALL_TMP" ]; then rm -rf -- "${INSTALL_TMP:?}"; fi
+}
+
 install_main() {
-    local prefix="${PREFIX:-$HOME/.local/share/android-ndk}" dest tmp got
+    local prefix="${PREFIX:-$HOME/.local/share/android-ndk}" dest tmp got e
     dest="$prefix/$NAME"
 
     if [ -e "$dest" ] || [ -L "$dest" ]; then
@@ -81,8 +90,8 @@ install_main() {
     # 자체 시험은 이 함수를 errexit가 꺼지는 자리에서 부르므로 명령마다 종료 코드를 본다.
     mkdir -p "$prefix" || return 2
     tmp=$(mktemp -d "$prefix/.install-ndk.XXXXXX") || return 2
-    # shellcheck disable=SC2064  # tmp는 지금 값으로 묶는다
-    trap "rm -rf '${tmp:?}'" EXIT
+    INSTALL_TMP=$tmp
+    trap cleanup EXIT
 
     say "받는다: $URL"
     fetch "$tmp/$ZIP" || { say "내려받기 실패."; return 2; }
@@ -105,15 +114,23 @@ install_main() {
     [ -d "$tmp/x/$NAME" ] || { say "아카이브 안에 $NAME 폴더가 없다."; return 2; }
     ndk_ok "$tmp/x/$NAME" || { say "푼 NDK가 고정 판의 NDK가 아니다."; return 2; }
 
-    # -T: dest가 그 사이 생겼으면 그 아래로 넣지 않고 실패한다(같은 PREFIX의 동시 설치).
-    if ! mv -T "$tmp/x/$NAME" "$dest"; then
-        say "$dest로 옮기지 못했다(그 사이 같은 자리에 무언가 생겼을 수 있다). 그 자리는 그대로 두고 멈춘다."
+    # 목적지는 mkdir로 이 실행이 만들 때만 쓴다. 그 사이 무언가 생겼으면(빈 폴더 포함, 같은 PREFIX의
+    # 동시 설치) 실패하고 그 자리는 건드리지 않는다. 만든 뒤에는 푼 NDK의 항목을 그 안으로 옮긴다(같은
+    # 파일 시스템 안의 이름 바꾸기). 다 옮기기 전에 끝나면 cleanup이 만든 목적지를 지운다.
+    if ! mkdir -- "$dest" 2>/dev/null; then
+        say "$dest를 만들지 못했다(그 사이 같은 자리에 무언가 생겼거나 만들 수 없다). 그 자리는 그대로 두고 멈춘다."
         return 2
     fi
+    CLAIMED_DEST=$dest
+    for e in "$tmp/x/$NAME"/* "$tmp/x/$NAME"/.[!.]* "$tmp/x/$NAME"/..?*; do
+        [ -e "$e" ] || [ -L "$e" ] || continue
+        mv -- "$e" "$dest/" || { say "$dest로 옮기지 못했다."; return 2; }
+    done
     if [ -e "$dest/$NAME" ] || ! ndk_ok "$dest"; then
         say "옮긴 뒤 $dest가 고정 판의 NDK가 아니다."
         return 2
     fi
+    CLAIMED_DEST=""
     say "설치했다: $dest (Pkg.Revision $NDK_REVISION)"
     echo "$dest"
 }
@@ -121,12 +138,13 @@ install_main() {
 # 자체 시험: 가짜 NDK 아카이브(source.properties와 clang 자리의 실행 파일)를 만들어 받기를 그 복사로
 # 바꾸고, PREFIX의 상태마다 종료 코드와 찍은 폴더를 본다.
 self_test() {
-    local work failed=0 c name want setup archive out got
+    local work failed=0 c name want setup archive out got pfx left
     command -v python3 >/dev/null 2>&1 || { say "자체 시험에는 python3가 필요하다."; return 2; }
     command -v unzip >/dev/null 2>&1 || command -v bsdtar >/dev/null 2>&1 \
         || { say "자체 시험에는 unzip이나 bsdtar가 필요하다."; return 2; }
     work=$(mktemp -d "${TMPDIR:-/tmp}/install-ndk-test.XXXXXX")
-    # 아카이브 종류: good(고정 판, clang 있음), noclang(clang 없음), oldrev(다른 판), noname(폴더 이름이 다름)
+    # 아카이브 종류: good(고정 판, clang 있음), noclang(clang 없음), oldrev(다른 판), noname(폴더 이름이 다름),
+    # clangdir(clang 자리가 폴더)
     python3 -I - "$work" "$NAME" "$NDK_REVISION" "$CLANG_REL" <<'PY'
 import sys, zipfile
 work, name, rev, clang = sys.argv[1:5]
@@ -135,15 +153,21 @@ def make(kind):
     r = "29.0.1" if kind == "oldrev" else rev
     with zipfile.ZipFile(f"{work}/{kind}.zip", "w") as z:
         z.writestr(f"{top}/source.properties", f"Pkg.Desc = Android NDK\nPkg.Revision = {r}\n")
-        if kind != "noclang":
+        if kind == "clangdir":
+            info = zipfile.ZipInfo(f"{top}/{clang}/")
+            info.external_attr = (0o40755 << 16)
+            z.writestr(info, "")
+        elif kind != "noclang":
             info = zipfile.ZipInfo(f"{top}/{clang}")
             info.external_attr = (0o100755 << 16)
             z.writestr(info, "#!/bin/sh\n")
-for k in ("good", "noclang", "oldrev", "noname"):
+for k in ("good", "noclang", "oldrev", "noname", "clangdir"):
     make(k)
 PY
-    # 이름#기대 종료 코드#PREFIX 준비(fresh·again·emptydir·otherfiles·file·badrev·noclangdest·bad-sum·race)#아카이브
-    # (race는 받는 동안 목적지에 파일이 든 폴더가 생긴다)
+    # 이름#기대 종료 코드#PREFIX 준비(fresh·again·emptydir·otherfiles·file·badrev·noclangdest·clangdirdest·
+    # bad-sum·race·race-empty·quote)#아카이브
+    # (race는 받는 동안 목적지에 파일이 든 폴더가, race-empty는 빈 폴더가 생긴다. quote는 PREFIX에 작은따옴표가
+    # 든다. 어느 경우든 끝난 뒤 PREFIX에 임시 폴더 .install-ndk.*가 남으면 실패다)
     local cases=(
         "빈 PREFIX에 설치한다#0#fresh#good"
         "같은 판이 이미 있다#0#again#good"
@@ -157,12 +181,18 @@ PY
         "아카이브에 그 이름의 폴더가 없다#2#fresh#noname"
         "아카이브의 해시가 다르다#2#bad-sum#good"
         "받는 사이 다른 설치가 목적지를 만든다#2#race#good"
+        "받는 사이 목적지에 빈 폴더가 생긴다#2#race-empty#good"
+        "목적지의 clang 자리가 폴더다#2#clangdirdest#good"
+        "아카이브의 clang 자리가 폴더다#2#fresh#clangdir"
+        "PREFIX에 작은따옴표가 든다#0#quote#good"
     )
     for c in "${cases[@]}"; do
         IFS='#' read -r name want setup archive <<<"$c"
-        rm -rf "${work:?}/p"
-        mkdir -p "$work/p"
-        local dest="$work/p/$NAME"
+        rm -rf "${work:?}/p" "${work:?}/p'q"
+        pfx="$work/p"
+        [ "$setup" = quote ] && pfx="$work/p'q"
+        mkdir -p "$pfx"
+        local dest="$pfx/$NAME"
         case "$setup" in
             again)
                 mkdir -p "$dest/$(dirname "$CLANG_REL")"
@@ -175,6 +205,10 @@ PY
             file) : >"$dest" ;;
             badrev) mkdir "$dest" && printf 'Pkg.Revision = 29.0.1\n' >"$dest/source.properties" ;;
             noclangdest) mkdir "$dest" && printf 'Pkg.Revision = %s\n' "$NDK_REVISION" >"$dest/source.properties" ;;
+            clangdirdest)
+                mkdir -p "$dest/$CLANG_REL"
+                printf 'Pkg.Revision = %s\n' "$NDK_REVISION" >"$dest/source.properties"
+                ;;
         esac
         got=0
         out=$(
@@ -184,16 +218,19 @@ PY
             fetch() {
                 cp "$work/$archive.zip" "$1"
                 if [ "$setup" = race ]; then mkdir "$dest" && : >"$dest/partial"; fi
+                if [ "$setup" = race-empty ]; then mkdir "$dest"; fi
             }
             NDK_SHA256=$(sum256 "$work/$archive.zip")
             NDK_SHA1=$(sum1 "$work/$archive.zip")
             [ "$setup" = bad-sum ] && NDK_SHA1=0000000000000000000000000000000000000000
-            PREFIX="$work/p" install_main 2>/dev/null
+            PREFIX="$pfx" install_main 2>/dev/null
         ) || got=$?
         if [ "$got" = 0 ] && { [ "$out" != "$dest" ] || [ "$(revision_of "$dest")" != "$NDK_REVISION" ] \
-            || [ ! -x "$dest/$CLANG_REL" ] || [ -e "$dest/$NAME" ]; }; then
+            || [ ! -f "$dest/$CLANG_REL" ] || [ ! -x "$dest/$CLANG_REL" ] || [ -e "$dest/$NAME" ]; }; then
             got="0(찍은 폴더 '$out'이 고정 판의 NDK가 아님)"
         fi
+        left=$(find "$pfx" -maxdepth 1 -name '.install-ndk.*' | wc -l)
+        [ "$left" -eq 0 ] || got="$got(임시 폴더 ${left}개가 남음)"
         if [ "$got" = "$want" ]; then
             say "자체 시험 통과: $name"
         else
