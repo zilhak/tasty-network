@@ -634,10 +634,25 @@ impl State {
         }
     }
 
-    pub fn set_timer(&mut self, punch_id: u64, handle: AbortHandle) {
+    /// Store the timer of `punch_id` for `stage`. A punch that is gone or in another stage
+    /// does not take it: the timer is aborted. A timer the punch held is aborted too.
+    pub fn set_timer(&mut self, punch_id: u64, stage: Stage, handle: AbortHandle) {
         match self.punches.get_mut(&punch_id) {
-            Some(s) => s.timer = Some(handle),
-            None => handle.abort(),
+            Some(s) if s.stage == stage => {
+                if let Some(old) = s.timer.replace(handle) {
+                    old.abort();
+                }
+            }
+            _ => handle.abort(),
+        }
+    }
+
+    /// Abort every punch timer (server shutdown).
+    pub fn abort_timers(&mut self) {
+        for s in self.punches.values_mut() {
+            if let Some(t) = s.timer.take() {
+                t.abort();
+            }
         }
     }
 }

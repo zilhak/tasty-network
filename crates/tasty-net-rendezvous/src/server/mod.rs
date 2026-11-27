@@ -287,7 +287,10 @@ impl Inner {
         out
     }
 
-    fn after(self: &Arc<Self>, after: After) {
+    /// Arrange what a state change asks for. It runs under the same lock as the change: a
+    /// timer is spawned and its handle stored with the stage it is for before any other
+    /// message can move the punch on, so no handle is overwritten or lost.
+    fn after(self: &Arc<Self>, state: &mut State, after: After) {
         if let After::Timer {
             punch_id,
             stage,
@@ -299,7 +302,7 @@ impl Inner {
                 tokio::time::sleep_until(at).await;
                 inner.state().expire(punch_id, stage);
             });
-            self.state().set_timer(punch_id, handle.abort_handle());
+            state.set_timer(punch_id, stage, handle.abort_handle());
         }
     }
 }
@@ -529,22 +532,25 @@ impl Server {
 
     /// Close every connection with `closed` and stop.
     pub async fn shutdown(mut self) {
-        self.endpoint
-            .close(CloseCode::Closed.var_int(), CloseCode::Closed.reason());
-        for t in self.tasks.drain(..) {
-            t.abort();
-        }
+        self.stop();
+        self.tasks.clear();
         self.endpoint.wait_idle().await;
     }
-}
 
-impl Drop for Server {
-    fn drop(&mut self) {
+    /// Close every connection and abort the server's tasks and the punch timers.
+    fn stop(&self) {
         self.endpoint
             .close(CloseCode::Closed.var_int(), CloseCode::Closed.reason());
         for t in &self.tasks {
             t.abort();
         }
+        self.inner.state().abort_timers();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -902,7 +908,7 @@ async fn reader(
             Ok(m) => m,
         };
         let now = Instant::now();
-        let after = {
+        {
             let mut state = inner.state();
             // A connection that a new registration of the same device replaced is being
             // closed: what it still sends does not touch the new registration.
@@ -913,7 +919,7 @@ async fn reader(
                     continue;
                 }
             }
-            match msg {
+            let after = match msg {
                 DeviceMessage::Hello(_) => After::Nothing,
                 DeviceMessage::NatReport(r) => {
                     state.nat_report(p, &inner.counters, device, r);
@@ -929,9 +935,9 @@ async fn reader(
                     state.punch_result(device, r);
                     After::Nothing
                 }
-            }
-        };
-        inner.after(after);
+            };
+            inner.after(&mut state, after);
+        }
     }
 }
 
