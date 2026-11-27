@@ -490,7 +490,21 @@ fn poll_until_ready(
 mod tests {
     use super::*;
     use crate::SpawnHook;
+    use std::sync::PoisonError;
     use std::sync::atomic::AtomicUsize;
+
+    /// `establish` lets go of its reserved local port before ssh starts, and a test may free a
+    /// port it reserved and bind it again later. Meanwhile a listener that another test of this
+    /// binary opens on a port the kernel picks can land on that port: it answers the ready probe
+    /// of a fake ssh that never forwards, or the later bind fails. Every test that opens a
+    /// listener on a kernel-picked port (an `establish` or `reserve_local_port` call, an echo
+    /// server, a forwarding fake ssh) holds this lock for its whole run.
+    static PORTS: Mutex<()> = Mutex::new(());
+
+    /// Held while a test reserves, frees or listens on ports the kernel picks.
+    fn ports_to_myself() -> MutexGuard<'static, ()> {
+        PORTS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// A first wait above the cap starts, and resets, at the cap.
     #[test]
@@ -584,6 +598,7 @@ mod tests {
 
     #[test]
     fn reserve_local_port_holds_a_usable_port() {
+        let _ports = ports_to_myself();
         let (listener, p) = reserve_local_port().unwrap();
         assert!(p > 0);
         assert!(
@@ -674,6 +689,7 @@ mod tests {
     /// `establish` creates its child through the hook, once.
     #[test]
     fn establish_spawns_through_the_hook_once() {
+        let _ports = ports_to_myself();
         let (hook, calls, _) = counting_hook();
         let launcher = SshLauncher::new("/tasty-net-ssh-test/no-such-ssh").with_spawn_hook(hook);
         let result = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), 45123);
@@ -838,6 +854,7 @@ mod tests {
         /// without it, and the launcher (and its clones) leave it out from then on.
         #[test]
         fn an_ssh_without_the_fork_option_gets_a_tunnel_without_it() {
+            let _ports = ports_to_myself();
             let old_ssh = forwarder_after(
                 "old-ssh",
                 "case \" $* \" in *\" ForkAfterAuthentication=no \"*)\n\
@@ -880,6 +897,7 @@ mod tests {
         /// Runs `establish` once on `ssh` and returns the argvs it started and whether the
         /// launcher still uses the option.
         fn establish_recording(ssh: &Script) -> (Vec<Vec<String>>, bool) {
+            let _ports = ports_to_myself();
             let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
             let seen = Arc::clone(&argvs);
             let hook = SpawnHook::new(move |mut cmd| {
@@ -1022,6 +1040,7 @@ mod tests {
         /// the child.
         #[test]
         fn a_tunnel_forwards_to_the_remote_port_and_drop_reaps_it() {
+            let _ports = ports_to_myself();
             let fake = forwarder();
             let (hook, calls, pids) = counting_hook();
             let launcher = SshLauncher::new(fake.path()).with_spawn_hook(hook);
@@ -1081,6 +1100,7 @@ mod tests {
         /// channel that closes without an answer is not blamed on the earlier refusals.
         #[test]
         fn an_empty_remote_port_is_judged_absent_for_that_channel_only() {
+            let _ports = ports_to_myself();
             let fake = forwarder();
             let launcher = SshLauncher::new(fake.path());
             let (held, remote) = reserve_local_port().expect("port");
@@ -1148,6 +1168,7 @@ mod tests {
         #[test]
         fn the_line_limit_comes_from_the_settings() {
             use crate::settings::Value;
+            let _ports = ports_to_myself();
             let refusal = format!(
                 "{}command-line: line 0: Bad configuration option: forkafterauthentication",
                 "x".repeat(300)
@@ -1186,6 +1207,7 @@ mod tests {
         #[test]
         fn the_ready_wait_is_not_stretched_by_the_poll() {
             use crate::settings::Value;
+            let _ports = ports_to_myself();
             let ssh = Script::new("never-ready-poll", "#!/bin/sh\nexec sleep 10\n");
             let mut settings = crate::SshSettings::new();
             settings
@@ -1215,6 +1237,7 @@ mod tests {
         /// `tunnel.ready_timeout` of the launcher bounds the wait for the local end.
         #[test]
         fn the_ready_timeout_comes_from_the_settings() {
+            let _ports = ports_to_myself();
             let ssh = Script::new("never-ready", "#!/bin/sh\nexec sleep 10\n");
             let mut settings = crate::SshSettings::new();
             settings
@@ -1241,6 +1264,7 @@ mod tests {
         /// the error, and its child is reaped.
         #[test]
         fn an_early_exit_is_an_error_after_its_stderr_and_the_child_is_reaped() {
+            let _ports = ports_to_myself();
             let ssh = Script::new(
                 "early-exit",
                 "#!/bin/sh\necho 'first line' >&2\nsleep 0.05\necho 'Permission denied (publickey).' >&2\nexit 255\n",
