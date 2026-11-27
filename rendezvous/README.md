@@ -81,16 +81,49 @@ docker compose logs -f rendezvous
 
 - 호스트 방화벽과 클라우드 보안 그룹에서 위 표의 UDP 포트를 모든 출발지에 연다. 기기는 아무 망에서나 붙는다.
 - 같은 출발 주소의 STUN 요청은 초당 `stun_per_source_per_second`(기본 50)를 넘으면 답하지 않는다. 출발 주소를 속인 반사 공격을 막는 상한이다.
-- 접속할 기기를 정해 두려면 `rendezvous.toml`의 `allowlist` 예를 쓴다. 목록 밖 기기는 TLS 직후 `access_denied`로 닫힌다.
+- 접속할 기기를 정해 두려면 아래 "접속할 기기 정하기"의 `allowlist`를 쓴다. 목록 밖 기기는 TLS 직후 `access_denied`로 닫힌다.
+
+## 접속할 기기 정하기
+
+`rendezvous.toml` 끝의 `allowlist` 예에서 주석을 풀면 목록 파일의 기기만 받는다. 목록 파일은 기기 ID(소문자 hex 64자)를 한 줄에 하나씩 적고, `#`으로 시작하는 줄과 빈 줄은 건너뛴다. `file`의 상대 경로는 설정 파일이 있는 폴더 기준이다.
+
+컨테이너로 돌리면 설정 파일 하나만 `/etc/tasty-rendezvous/`에 붙어 있으므로 목록 파일도 같은 폴더에 읽기 전용으로 붙인다. 붙이지 않으면 `settings --config`와 서버 시작이 `allowlist file could not be read: No such file or directory`로 멈춘다. `compose.yaml`의 `volumes`에 주석으로 둔 줄을 푼다.
+
+```yaml
+    volumes:
+      - ./rendezvous.toml:/etc/tasty-rendezvous/rendezvous.toml:ro
+      - ./allowlist.txt:/etc/tasty-rendezvous/allowlist.txt:ro
+```
+
+- 컨테이너 안의 서버는 UID 10001(`rendezvous`)로 돈다. 붙인 파일의 권한은 호스트 파일 그대로이므로 UID 10001이 읽을 수 있어야 한다. 호스트 사용자 전용(0600) 파일이면 `Permission denied`로 멈춘다. 목록과 설정 파일은 비밀이 아니므로 `chmod 644`로 둔다.
+- 목록을 고친 뒤에는 서버를 다시 띄운다. 서버는 시작할 때 한 번만 읽는다.
 
 ## 두 번째 IP
 
-NAT 판별은 같은 IP의 두 포트로 포트 의존까지 본다. 주소 의존(주소마다 다른 매핑)까지 보려면 두 번째 공인 IP가 필요하다. 없어도 서버는 돈다.
+NAT 판별은 같은 IP의 두 포트로 포트 의존까지 본다. 주소 의존(주소마다 다른 매핑)까지 보려면 두 번째 공인 IP가 필요하다. 없어도 서버는 돈다. 띄우는 곳에 따라 설정이 다르다.
+
+### 호스트에서 직접 띄울 때
 
 1. 호스트에 두 번째 공인 IP를 붙인다.
-2. `listen.primary`를 첫 IP로, `listen.alternate_ip`를 두 번째 IP로 둔다. 두 번째 IP의 주 포트·보조 포트는 STUN만 받는다.
-3. 그 IP를 기기에게 알리는 주소가 다르면(NAT 뒤 호스트, 컨테이너) `advertise.alternate_ip`에 공인 주소를 적는다.
-4. 두 번째 IP의 UDP 3478·3479도 연다. 컨테이너로 돌리면 `compose.yaml`의 `ports`에 IP를 붙여 게시한다(예: `"198.51.100.20:3478:3478/udp"`).
+2. `listen.primary`를 첫 IP(`"203.0.113.10:3478"`)로, `listen.alternate_ip`를 두 번째 IP(`"198.51.100.20"`)로 둔다. 서버가 두 번째 IP의 주 포트·보조 포트에도 소켓을 열고, 그 둘은 STUN만 받는다. 듣는 주소가 공인 IP 자체이므로 `advertise.*`는 필요 없다(호스트가 NAT 뒤면 `advertise.primary_ip`·`advertise.alternate_ip`에 바깥 주소를 적는다).
+3. 두 IP의 UDP 3478·3479를 모두 연다.
+
+### 컨테이너로 띄울 때
+
+기본 브리지 네트워크의 컨테이너에는 호스트의 공인 IP가 없다. `ports`에 IP를 붙여 게시해도 그 IP가 컨테이너 안에 생기지 않는다. 그래서 `listen.primary`나 `listen.alternate_ip`에 호스트 IP를 적으면 서버가 `server socket could not be bound: Cannot assign requested address`로 시작하지 않는다. 방법은 둘이다.
+
+- 호스트 네트워크: `compose.yaml`에서 `ports`를 지우고 `network_mode: host`를 둔다. 컨테이너가 호스트의 주소를 그대로 쓰므로 위 "호스트에서 직접 띄울 때"의 `listen.*` 설정이 그대로 된다. 서버가 응답의 출발 IP를 질의 대상 IP와 같게 낸다. 두 IP를 쓸 때 추천하는 방법이다.
+- 브리지 그대로: 컨테이너는 wildcard(기본 `listen.primary`)로 듣고, `listen.alternate_ip`는 두지 않는다. `advertise.primary_ip`에 첫 IP를, `advertise.alternate_ip`에 두 번째 IP를 적고, `ports`는 IP 없는 게시 대신 두 IP의 두 포트를 하나씩 게시한다. IP 없는 게시(`"3478:3478/udp"`)는 모든 호스트 주소의 그 포트를 잡으므로 IP를 붙인 게시와 함께 둘 수 없다. 두 IP로 온 질의는 컨테이너의 같은 소켓으로 들어가고, 응답은 Docker의 주소 변환을 거쳐 질의받은 IP에서 나간다.
+
+  ```yaml
+      ports:
+        - "203.0.113.10:3478:3478/udp"
+        - "203.0.113.10:3479:3479/udp"
+        - "198.51.100.20:3478:3478/udp"
+        - "198.51.100.20:3479:3479/udp"
+  ```
+
+확인한 것과 하지 않은 것: 사설 IP 두 개가 있는 Linux 호스트(Docker 29.6)에서 세 경우를 띄우고, 같은 호스트에서 네 주소(두 IP × 두 포트)로 STUN Binding을 보냈다. 브리지에서 `listen.primary`에 호스트 IP를 적으면 위 오류로 시작하지 않았다. 호스트 네트워크와 `listen.alternate_ip`는 네 주소 모두 답했고 반사 주소가 보낸 소켓 주소와 같았다. 브리지에서 IP별 게시와 `advertise.alternate_ip`도 네 주소 모두 답했다. 공인 IP 두 개와 다른 망의 기기에서 본 반사 주소(브리지의 주소 변환 뒤에도 기기의 바깥 주소가 보이는지)는 확인하지 않았다. 같은 호스트에서 보낸 질의는 Docker가 출발 주소를 바꿔 이 확인에 쓸 수 없었다.
 
 ## 설정 검사
 
