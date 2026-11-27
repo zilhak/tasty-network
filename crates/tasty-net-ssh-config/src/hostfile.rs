@@ -955,6 +955,7 @@ fn check_markers(mut cp: &[u8]) -> Option<(Marker, &[u8])> {
 
 /// The key of a known_hosts line as `ssh` reads it (`sshkey_read`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LineKey {
     /// The key blob.
     pub blob: Vec<u8>,
@@ -966,6 +967,7 @@ pub struct LineKey {
 
 /// A known_hosts line whose host field names the host of a query.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HostKeyEntry {
     /// The file.
     pub file: PathBuf,
@@ -1130,6 +1132,7 @@ impl HostKeyQuery {
 
 /// The verdict of [`KnownHosts::check`] (`HostStatus` of `check_key_in_hostkeys`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HostKeyVerdict {
     /// `HOST_OK`: a line without a marker has the key.
     Match {

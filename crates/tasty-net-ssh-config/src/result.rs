@@ -50,6 +50,7 @@ pub struct ValueSource {
 /// An `IdentityFile` or `CertificateFile` entry as `ssh` loads it before authenticating
 /// (`load_public_identity_files`, `ssh.c:2354`-`:2497`). The crate does not open the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct KeyFile {
     /// The value as written, the way `ssh -G` shows it.
     pub written: String,
