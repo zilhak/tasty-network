@@ -1295,6 +1295,84 @@ async fn mtu_discovery_follows_the_socket() {
 }
 
 #[tokio::test]
+async fn dual_stack_addresses_are_ipv4() {
+    // Windows opens [::] as IPv6 only, so an IPv4 device cannot reach it there.
+    if cfg!(windows) {
+        return;
+    }
+    let mut s = local_settings();
+    s.set("listen.primary", Value::Address("[::]:0".parse().unwrap()))
+        .unwrap();
+    s.set(
+        "advertise.primary_ip",
+        Value::Ip("127.0.0.1".parse().unwrap()),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(key(100));
+    config.settings = s;
+    let Ok(server) = Server::start(config).await else {
+        // No IPv6 on this host.
+        return;
+    };
+    let port = server.addrs().primary.port();
+    let alt = server.addrs().alternate_port.port();
+    // An IPv4 device on the IPv4 loopback reaches the dual-stack socket.
+    let endpoint = client_endpoint();
+    let crypto = tls::client_config(
+        &key(1),
+        server.public_key(),
+        ALPN_RENDEZVOUS,
+        TlsOptions::default(),
+    )
+    .unwrap();
+    let config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+    let conn = tokio::time::timeout(
+        DEADLINE,
+        endpoint
+            .connect_with(
+                config,
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                tls::SERVER_NAME,
+            )
+            .unwrap(),
+    )
+    .await
+    .expect("handshake ends in time")
+    .expect("handshake");
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let hello = DeviceMessage::Hello(Hello {
+        proto: PROTO,
+        host_candidates: Vec::new(),
+    });
+    write_frame(&mut send, &hello.to_json().unwrap(), LIMIT)
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(DEADLINE, read_frame(&mut recv, LIMIT, DEADLINE))
+        .await
+        .expect("a welcome in time")
+        .unwrap()
+        .unwrap();
+    let ServerMessage::Welcome(w) = ServerMessage::parse(&body).unwrap() else {
+        panic!("expected welcome");
+    };
+    // The device is told its IPv4 address, not ::ffff:127.0.0.1, and gets the IPv4 STUN
+    // address.
+    assert_eq!(w.reflexive, endpoint.local_addr().unwrap());
+    assert!(w.reflexive.is_ipv4());
+    assert_eq!(w.stun, vec![SocketAddr::from((Ipv4Addr::LOCALHOST, alt))]);
+    // The STUN answer on the dual-stack port maps to the IPv4 address too.
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let got = stun_request(
+        &udp,
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        &stun::binding_request(&[4; 12], None),
+    )
+    .await
+    .expect("an answer");
+    assert_eq!(got.mapped, Some(udp.local_addr().unwrap()));
+}
+
+#[tokio::test]
 async fn wrong_alpn_fails_in_tls() {
     let server = start(local_settings()).await;
     match connect_with_alpn(&server, &key(1), b"tasty-rendezvous/2").await {

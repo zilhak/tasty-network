@@ -306,7 +306,10 @@ impl Inner {
 
 impl StunSink for Inner {
     fn on_stun(&self, packet: &[u8], from: SocketAddr, io: &dyn PacketIo) {
-        let reply = match server_answer(packet, from) {
+        // On a dual-stack socket an IPv4 device shows up as ::ffff:a.b.c.d; it is told its
+        // IPv4 address. The answer still goes to the address the request came from.
+        let seen = canonical(from);
+        let reply = match server_answer(packet, seen) {
             ServerStunAction::Answer(reply) => reply,
             ServerStunAction::Drop => {
                 self.counters.stun_dropped.fetch_add(1, Ordering::Relaxed);
@@ -322,7 +325,7 @@ impl StunSink for Inner {
                 w.counts = HashMap::new();
             }
             let sources = w.counts.len();
-            let n = match w.counts.get_mut(&from) {
+            let n = match w.counts.get_mut(&seen) {
                 Some(n) => n,
                 None if sources >= self.params.max_stun_sources => {
                     self.counters
@@ -330,7 +333,7 @@ impl StunSink for Inner {
                         .fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-                None => w.counts.entry(from).or_default(),
+                None => w.counts.entry(seen).or_default(),
             };
             *n += 1;
             if *n > self.params.stun_per_source_per_second {
@@ -669,6 +672,12 @@ async fn accept_loop(inner: Arc<Inner>, endpoint: quinn::Endpoint) {
     }
 }
 
+/// `addr` with an IPv4-mapped IPv6 address (a dual-stack socket's view of an IPv4 peer) as
+/// the IPv4 address: what the server stores and sends.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
 /// `fut` until `deadline`: `None` when the deadline passed first. A deadline of `None` (past
 /// the clock's range) never passes.
 async fn until<F: std::future::IntoFuture>(deadline: Option<Instant>, fut: F) -> Option<F::Output> {
@@ -761,7 +770,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
         return;
     }
 
-    let reflexive = conn.remote_address();
+    let reflexive = canonical(conn.remote_address());
     let advertised = inner.advertised(reflexive);
     let host = filter_host(&hello.host_candidates, stored_host(p));
     let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
@@ -951,7 +960,7 @@ async fn monitor(
                 break;
             }
             _ = poll.tick() => {
-                let now = conn.remote_address();
+                let now = canonical(conn.remote_address());
                 if now != reflexive {
                     reflexive = now;
                     let mut state = inner.state();
