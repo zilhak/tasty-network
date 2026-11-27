@@ -9,7 +9,8 @@
 # 사용: bash scripts/check-p2p-isolation.sh
 #       bash scripts/check-p2p-isolation.sh --metadata <파일>   cargo metadata 출력 JSON 파일로 판정한다
 #       bash scripts/check-p2p-isolation.sh --self-test         판정 함수를 고정 사례로 시험한다
-# 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·metadata 실패·대상 크레이트 0개) 2.
+# 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·metadata 실패·대상 크레이트 0개·
+# resolve 그래프가 없거나 대상 크레이트의 노드가 그래프에 없음) 2.
 
 set -euo pipefail
 
@@ -58,8 +59,13 @@ ALLOWED = {
 }
 
 
+class Undecidable(Exception):
+    pass
+
+
 def judge(meta):
-    """(위반 목록, 대상 수, 요약). 대상 크레이트가 0개면 대상 수 0.
+    """(위반 목록, 대상 수, 요약). 대상 크레이트가 0개면 대상 수 0. resolve 그래프가 없거나
+    (cargo metadata --no-deps 출력 등) 대상 크레이트의 노드가 그래프에 없으면 Undecidable.
 
     workspace 소속은 이름이 아니라 package ID(workspace_members)로 정하고, 의존은 resolve
     그래프의 package ID로 따라간다. 그래서 workspace 크레이트와 이름이 같은 다른 출처의
@@ -67,8 +73,10 @@ def judge(meta):
     크레이트를 거쳐 닿는 workspace 크레이트도 잡는다."""
     members = set(meta.get("workspace_members", []))
     name_of = {p["id"]: p["name"] for p in meta.get("packages", [])}
-    resolve = meta.get("resolve") or {}
-    nodes = {n["id"]: n for n in resolve.get("nodes", [])}
+    resolve = meta.get("resolve")
+    if not isinstance(resolve, dict) or not isinstance(resolve.get("nodes"), list):
+        raise Undecidable("metadata에 resolve 그래프가 없다(--no-deps 출력은 판정할 수 없다)")
+    nodes = {n["id"]: n for n in resolve["nodes"]}
 
     def edges(pid):
         out = []
@@ -80,6 +88,9 @@ def judge(meta):
     violations = []
     by_name = {name_of[m]: m for m in members if m in name_of}
     targets = sorted(n for n in ALLOWED if n in by_name)
+    missing = [t for t in targets if by_name[t] not in nodes]
+    if missing:
+        raise Undecidable(f"대상 크레이트의 노드가 resolve 그래프에 없다: {', '.join(missing)}")
     for t in targets:
         tid = by_name[t]
         allowed = ALLOWED[t]
@@ -160,11 +171,23 @@ def self_test():
         ("workspace 밖 크레이트를 거쳐 닿는 workspace 크레이트",
          meta(ws, {rv: [(helper, "helper", None)], helper: [(ssh, "tasty-net-ssh", None)]}), 1),
     ]
+    no_resolve = meta(ws, {rv: [(frame, "tasty-net-frame", "dev")]})
+    no_resolve["resolve"] = None
+    no_node = meta(ws, {rv: [(frame, "tasty-net-frame", "dev")]})
+    no_node["resolve"]["nodes"] = [n for n in no_node["resolve"]["nodes"] if n["id"] != rv]
+    cases += [
+        ("resolve가 null이면(--no-deps 출력) 판정 불가", no_resolve, "판정 불가"),
+        ("대상 크레이트의 노드가 그래프에 없으면 판정 불가", no_node, "판정 불가"),
+    ]
     failed = 0
     for title, m, want in cases:
-        violations, _, _ = judge(m)
-        if len(violations) != want:
-            print(f"  ✘ {title}: 위반 {len(violations)}개 {violations}, 기대 {want}개", file=sys.stderr)
+        try:
+            violations, _, _ = judge(m)
+            got = len(violations)
+        except Undecidable as e:
+            violations, got = [str(e)], "판정 불가"
+        if got != want:
+            print(f"  ✘ {title}: 결과 {got} {violations}, 기대 {want}", file=sys.stderr)
             failed += 1
     _, targets, _ = judge(meta(["tasty-net-identity", "tasty-net-frame"], {ident: []}))
     if targets != 0:
@@ -183,7 +206,12 @@ if mode == "self-test":
     sys.exit(0)
 
 with open(os.path.join(tmp, "metadata.json"), encoding="utf-8") as f:
-    violations, targets, summary = judge(json.load(f))
+    meta = json.load(f)
+try:
+    violations, targets, summary = judge(meta)
+except Undecidable as e:
+    print(f"[p2p-isolation] 판정 불가: {e}", file=sys.stderr)
+    sys.exit(2)
 if targets == 0:
     print(f"[p2p-isolation] 판정 불가: 대상 크레이트가 0개다({', '.join(sorted(ALLOWED))}).", file=sys.stderr)
     sys.exit(2)
