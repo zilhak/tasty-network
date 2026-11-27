@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tasty_net_identity::DeviceId;
 
-use crate::model::{Edge, EdgeKey, LinkId, Node, NodeStatus, Side, TransportKind, WorkspaceRef};
+use crate::model::{
+    Edge, EdgeKey, FromHolder, LinkId, Node, NodeStatus, Side, TransportKind, WorkspaceRef,
+};
 
 /// What kind of authenticated link a [`LocalLink`] is. Only [`LinkKind::Attach`] becomes
 /// an edge.
@@ -134,6 +136,7 @@ pub struct View {
 /// earlier `connected_at`). The order is the order of first appearance.
 pub fn aggregate_edges(me: &DeviceId, links: &[LocalLink]) -> Vec<Edge> {
     dedup_edges(
+        me,
         links
             .iter()
             .filter(|link| link.kind == LinkKind::Attach)
@@ -160,19 +163,24 @@ fn edge_of(me: &DeviceId, link: &LocalLink) -> Edge {
     }
 }
 
-fn dedup_edges(edges: impl IntoIterator<Item = Edge>) -> Vec<Edge> {
-    let mut out: Vec<Edge> = Vec::new();
+/// Every edge here is reported by this device, `me`.
+fn dedup_edges(me: &DeviceId, edges: impl IntoIterator<Item = Edge>) -> Vec<Edge> {
+    let mut out: Vec<(Edge, FromHolder)> = Vec::new();
     let mut index: HashMap<EdgeKey, usize> = HashMap::new();
     for edge in edges {
+        let from = FromHolder::of(&edge, me);
         match index.get(&edge.key()) {
-            Some(&at) => out[at].merge_report(edge),
+            Some(&at) => {
+                let (kept, kept_from) = &mut out[at];
+                kept.merge_report(kept_from, edge, from);
+            }
             None => {
                 index.insert(edge.key(), out.len());
-                out.push(edge);
+                out.push((edge, from));
             }
         }
     }
-    out
+    out.into_iter().map(|(edge, _)| edge).collect()
 }
 
 /// The view of this device for its own screen: every edge and failure, whatever the

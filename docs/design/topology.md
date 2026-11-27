@@ -13,7 +13,7 @@
 
 - 엣지는 연결 방향(dialer → acceptor)과 holder를 따로 담는다. 역할 반전과 P2P에서 둘이 다르기 때문이다([전송 추상화](transport.md) "역할").
 - 엣지는 attach 링크 하나에 하나다. 합치기 키는 `link_id` 하나다. 같은 두 기기 사이 attach가 여럿이면(같은 workspace의 다른 surface에 병렬로 붙은 경우 포함) `link_id`가 달라 엣지도 여럿이다. 같은 링크를 양 끝이 보고하면 `link_id`가 같아 하나로 합친다.
-- 합칠 때 두 보고의 `dialer`·`acceptor`·`holder`·`transport`는 handshake가 양 끝에 같은 값을 정해 주므로 같다. 같은 `link_id`인데 이 네 필드가 다른 보고는 그 링크의 보고가 아니므로 합치지 않고 버린다. 그래서 먼저 온 보고가 남는다(요청자 자기 링크의 `link_id`는 아래 "공개 범위"의 로컬 사본 규칙이 먼저다). 그 밖의 필드: `workspace`는 두 보고 중 하나라도 실었으면 그 값을 쓴다. 각 보고는 이미 보고한 기기의 공개 범위를 거쳤으므로 합쳐서 새로 드러나는 것은 없다. `rtt_ms`는 있는 값 중 작은 쪽, `connected_at`은 이른 쪽이다.
+- 합칠 때 두 보고의 `dialer`·`acceptor`·`holder`·`transport`는 handshake가 양 끝에 같은 값을 정해 주므로 같다. 같은 `link_id`인데 이 네 필드가 다른 보고는 그 링크의 보고가 아니므로 합치지 않고 버린다. 그래서 먼저 온 보고가 남는다(요청자 자기 링크의 `link_id`는 아래 "공개 범위"의 로컬 사본 규칙이 먼저다). 그 밖의 필드: `workspace`는 두 보고 중 하나라도 실었으면 그 값을 쓴다. 두 보고가 같은 필드(`id`·`name`)에 다른 값을 실었으면 필드마다 workspace를 가진 쪽(holder) 기기가 보낸 보고의 값을 쓰고, 그것으로 가를 수 없으면(둘 다 holder의 보고이거나 둘 다 아님) 문자열로 작은 값을 쓴다. 그래서 도착 순서와 상관없이 같은 값이 남는다. 각 보고는 이미 보고한 기기의 공개 범위를 거쳤으므로 합쳐서 새로 드러나는 것은 없다. `rtt_ms`는 있는 값 중 작은 쪽, `connected_at`은 이른 쪽이다.
 - `TransportKind`는 링크의 경로와 attach 방향을 함께 나타낸다. 값은 링크마다 그 링크의 holder와 경로 종류에서 나온다([전송 추상화](transport.md#토폴로지와의-관계)). 연결 목록 항목의 `direction` 요약은 쓰지 않는다. `p2p_udp`는 펀칭된 직접 UDP 경로의 QUIC 연결이다. 중계 경로가 없으므로 iroh 설계의 `p2p_direct`·`p2p_relay` 구분은 없앤다.
 - SSH 포워딩으로 들어온 루프백 연결을 받은 쪽은 연결 목록에 `path = ssh_inbound` 항목을 둔다. 그래도 엣지 값으로는 handshake가 확인한 holder로 `ssh_forward`(holder = dialer)나 `ssh_role_reversed`(holder = acceptor)를 낸다. 그래서 SSH를 띄운 쪽과 받은 쪽의 보고가 같은 엣지 하나로 합쳐진다. `ssh_inbound`는 엣지 값이 아니다.
 - P2P 엣지의 `rtt_ms`는 P2P 연결의 RTT(`P2pConnection::rtt`)에서 온다. SSH 엣지는 `rtt_ms`가 없다.

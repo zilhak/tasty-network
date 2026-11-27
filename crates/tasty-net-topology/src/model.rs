@@ -227,6 +227,49 @@ pub struct Edge {
     pub workspace: Option<WorkspaceRef>,
 }
 
+/// Which workspace fields of a (merged) edge report came from the device that holds the
+/// workspace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FromHolder {
+    id: bool,
+    name: bool,
+}
+
+impl FromHolder {
+    /// The fields of `edge` as `reporter` reported it.
+    pub(crate) fn of(edge: &Edge, reporter: &DeviceId) -> Self {
+        let from_holder = edge.holder_device() == *reporter;
+        Self {
+            id: from_holder,
+            name: from_holder,
+        }
+    }
+}
+
+/// Keeps one workspace field value: a value from the holder's report wins, then the smaller
+/// value (an order of all candidates, so the order of the reports does not matter).
+fn pick(
+    kept: &mut Option<String>,
+    kept_from_holder: &mut bool,
+    new: Option<String>,
+    new_from_holder: bool,
+) {
+    let Some(new) = new else {
+        return;
+    };
+    let take = match kept {
+        None => true,
+        Some(kept) => {
+            (new_from_holder, std::cmp::Reverse(&new))
+                > (*kept_from_holder, std::cmp::Reverse(&*kept))
+        }
+    };
+    if take {
+        *kept = Some(new);
+        *kept_from_holder = new_from_holder;
+    }
+}
+
 /// What makes two edges the same edge (docs/design/topology.md "모델": the merge key is the
 /// `link_id` alone).
 pub(crate) type EdgeKey = LinkId;
@@ -238,26 +281,40 @@ impl Edge {
 
     /// Merge another report of the same link into this one (docs/design/topology.md "모델"):
     /// a workspace field carried by either report is kept, the smaller `rtt_ms` and the
-    /// earlier `connected_at` win. Both ends of an honest link report the same ends, holder
+    /// earlier `connected_at` win. When both carry a field with different values, the value
+    /// from the report of the device that holds the workspace wins, and otherwise the
+    /// smaller value; `mine` and `theirs` tell which fields came from that device, so the
+    /// result does not depend on the order of the reports. Both ends of an honest link report the same ends, holder
     /// and transport, which the handshake fixes; a report of the same `link_id` that differs
     /// in them is not that link and is dropped, so the report that came first stays.
-    pub(crate) fn merge_report(&mut self, other: Edge) {
+    pub(crate) fn merge_report(&mut self, mine: &mut FromHolder, other: Edge, theirs: FromHolder) {
         debug_assert_eq!(self.link_id, other.link_id);
         if !self.same_link_as(&other) {
             return;
         }
-        self.workspace = match (self.workspace.take(), other.workspace) {
-            (Some(a), Some(b)) => Some(WorkspaceRef {
-                id: a.id.or(b.id),
-                name: a.name.or(b.name),
-            }),
-            (a, b) => a.or(b),
-        };
+        let ours = self.workspace.take().unwrap_or(WorkspaceRef {
+            id: None,
+            name: None,
+        });
+        let (mut id, mut name) = (ours.id, ours.name);
+        if let Some(w) = other.workspace {
+            pick(&mut id, &mut mine.id, w.id, theirs.id);
+            pick(&mut name, &mut mine.name, w.name, theirs.name);
+        }
+        self.workspace = (id.is_some() || name.is_some()).then_some(WorkspaceRef { id, name });
         self.rtt_ms = match (self.rtt_ms, other.rtt_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
         self.connected_at = self.connected_at.min(other.connected_at);
+    }
+
+    /// The device that holds the workspace of this link.
+    pub(crate) fn holder_device(&self) -> DeviceId {
+        match self.holder {
+            Side::Dialer => self.dialer,
+            Side::Acceptor => self.acceptor,
+        }
     }
 
     /// Whether `other` describes the same ends, holder and transport.
@@ -441,15 +498,21 @@ mod tests {
             id: None,
             name: Some("main".into()),
         };
+        let any = FromHolder::default();
         let mut a = report(Some(30), 20, None);
+        let mut a_from = any;
         // A report of the same link ID that names other ends is not this link: dropped.
         let mut other_ends = report(Some(1), 1, Some(id_only.clone()));
         other_ends.dialer = id(3);
-        a.merge_report(other_ends);
+        a.merge_report(&mut a_from, other_ends, any);
         assert_eq!(a, report(Some(30), 20, None));
-        a.merge_report(report(Some(10), 25, Some(id_only.clone())));
+        a.merge_report(
+            &mut a_from,
+            report(Some(10), 25, Some(id_only.clone())),
+            any,
+        );
         assert_eq!(a, report(Some(10), 20, Some(id_only.clone())));
-        a.merge_report(report(None, 5, Some(name_only)));
+        a.merge_report(&mut a_from, report(None, 5, Some(name_only)), any);
         assert_eq!(
             a,
             report(
@@ -461,5 +524,43 @@ mod tests {
                 })
             )
         );
+    }
+
+    /// Two reports of one link whose workspace names differ give the same name in either
+    /// order: the holder's (here the dialer, id(1)) when one of them is the holder's, the
+    /// smaller one when neither or both are.
+    #[test]
+    fn differing_workspace_values_merge_the_same_in_either_order() {
+        let report = |name: &str| Edge {
+            link_id: link_id(),
+            dialer: id(1),
+            acceptor: id(2),
+            holder: Side::Dialer,
+            transport: TransportKind::SshForward,
+            rtt_ms: None,
+            connected_at: 0,
+            workspace: Some(WorkspaceRef {
+                id: None,
+                name: Some(name.into()),
+            }),
+        };
+        let merged = |first: (&str, &DeviceId), second: (&str, &DeviceId)| {
+            let mut edge = report(first.0);
+            let mut from = FromHolder::of(&edge, first.1);
+            let other = report(second.0);
+            let other_from = FromHolder::of(&other, second.1);
+            edge.merge_report(&mut from, other, other_from);
+            edge.workspace.unwrap().name.unwrap()
+        };
+        let (holder, other, third) = (id(1), id(2), id(3));
+        // The holder's report says "zeta": it wins over the smaller "alpha".
+        assert_eq!(merged(("zeta", &holder), ("alpha", &other)), "zeta");
+        assert_eq!(merged(("alpha", &other), ("zeta", &holder)), "zeta");
+        // Neither report is the holder's: the smaller value.
+        assert_eq!(merged(("zeta", &other), ("alpha", &third)), "alpha");
+        assert_eq!(merged(("alpha", &third), ("zeta", &other)), "alpha");
+        // Both are the holder's: the smaller value too.
+        assert_eq!(merged(("zeta", &holder), ("alpha", &holder)), "alpha");
+        assert_eq!(merged(("alpha", &holder), ("zeta", &holder)), "alpha");
     }
 }

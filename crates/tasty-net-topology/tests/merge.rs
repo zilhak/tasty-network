@@ -336,3 +336,43 @@ fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
         assert_eq!(own.rtt_ms, Some(5));
     }
 }
+
+/// R explores from itself over R → `near`, so `near`'s report of the A → B link comes first.
+/// A and B share every workspace field.
+fn explore_near(near: u8, at_a: End, at_b: End) -> Exploration {
+    let mut net = Net::new();
+    net.link(1, R, near, End::plain(), End::plain());
+    net.link(2, A, B, at_a, at_b);
+    for device in [A, B] {
+        net.sharing.insert(
+            id(device),
+            Sharing {
+                enabled: true,
+                workspace: WorkspaceExposure::ALL,
+            },
+        );
+    }
+    net.explore_from_r()
+}
+
+#[test]
+fn differing_workspace_values_keep_the_holders_in_either_order() {
+    // A dials B and holds the workspace (holder = dialer); the two ends name it differently.
+    let named = |name: &str| End {
+        workspace: Some(WorkspaceRef {
+            id: Some("ws-1".into()),
+            name: Some(name.into()),
+        }),
+        ..End::plain()
+    };
+    for near in [A, B] {
+        let x = explore_near(near, named("zeta"), named("alpha"));
+        let ab = a_b_edges(&x);
+        assert_eq!(ab.len(), 1, "{ab:?}");
+        assert_eq!(
+            ab[0].workspace.as_ref().and_then(|w| w.name.as_deref()),
+            Some("zeta"),
+            "R next to {near}"
+        );
+    }
+}

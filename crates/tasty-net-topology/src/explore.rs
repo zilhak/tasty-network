@@ -24,7 +24,7 @@ use crate::message::{
     Done, MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
     Suppressed, split_done, split_result, validate_route,
 };
-use crate::model::{Edge, EdgeKey, Node, NodeReason, NodeStatus};
+use crate::model::{Edge, EdgeKey, FromHolder, Node, NodeReason, NodeStatus};
 
 /// Sends one message to one neighbor over its authenticated attach link.
 pub trait Outbox {
@@ -137,6 +137,8 @@ pub struct Exploration {
     edges: Vec<Edge>,
     /// Where each link's edge is in `edges`.
     edge_index: HashMap<EdgeKey, usize>,
+    /// Which workspace fields of each link's edge came from the holder's report.
+    edge_from: HashMap<EdgeKey, FromHolder>,
     /// The parts received per `(branch, from)`, to notice a missing one.
     parts: HashMap<(String, DeviceId), PartTrack>,
     /// The dones received per `(branch, from)`, counted like the parts.
@@ -243,6 +245,7 @@ impl Exploration {
 
     /// Puts this device's own copy of a link in place of any edge with its `link_id`.
     fn put_own(&mut self, edge: Edge) {
+        self.edge_from.insert(edge.key(), FromHolder::default());
         match self.edge_index.get(&edge.key()) {
             Some(&at) => self.edges[at] = edge,
             None => {
@@ -252,12 +255,17 @@ impl Exploration {
         }
     }
 
-    /// Adds one edge, or merges it into the edge of the same link (docs/design/topology.md
-    /// "모델").
-    fn merge_edge(&mut self, edge: Edge) {
+    /// Adds one edge `reporter` reported, or merges it into the edge of the same link
+    /// (docs/design/topology.md "모델").
+    fn merge_edge(&mut self, edge: Edge, reporter: &DeviceId) {
+        let from = FromHolder::of(&edge, reporter);
         match self.edge_index.get(&edge.key()) {
-            Some(&at) => self.edges[at].merge_report(edge),
+            Some(&at) => {
+                let kept_from = self.edge_from.entry(edge.key()).or_default();
+                self.edges[at].merge_report(kept_from, edge, from);
+            }
             None => {
+                self.edge_from.insert(edge.key(), from);
                 self.edge_index.insert(edge.key(), self.edges.len());
                 self.edges.push(edge);
             }
@@ -291,7 +299,7 @@ impl Exploration {
                 {
                     continue;
                 }
-                self.merge_edge(edge);
+                self.merge_edge(edge, &part.from);
             } else if let Some(own) = own {
                 // A report of a link this device had when the exploration started, whatever
                 // ends it names, is that link's local copy.
@@ -299,7 +307,7 @@ impl Exploration {
                 self.put_own(own);
             } else {
                 // A link this device did not have at the start stays the remote copy.
-                self.merge_edge(edge);
+                self.merge_edge(edge, &part.from);
             }
         }
     }
@@ -617,6 +625,7 @@ impl Agent {
             node_index: HashMap::new(),
             edges: Vec::new(),
             edge_index: HashMap::new(),
+            edge_from: HashMap::new(),
             parts: HashMap::new(),
             done_parts: HashMap::new(),
             local_merged: false,
