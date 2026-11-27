@@ -89,7 +89,7 @@ impl DeviceKey {
 
     /// The device ID (the public key).
     pub fn id(&self) -> DeviceId {
-        DeviceId(self.secret.verifying_key())
+        DeviceId(self.secret.verifying_key().to_bytes())
     }
 
     /// Sign `message` with this key.
@@ -175,42 +175,35 @@ pub(crate) mod random_fault {
 
 /// The device ID: the ed25519 public key of a [`DeviceKey`]. Its text form is 64 lowercase hex
 /// digits. IDs are ordered by their 32 bytes, which is also the order of their text.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceId(VerifyingKey);
-
-impl PartialOrd for DeviceId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DeviceId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.as_bytes().cmp(other.as_bytes())
-    }
-}
+///
+/// It holds the 32 compressed bytes, checked to be a valid point when the ID is made, and not an
+/// `ed25519_dalek::VerifyingKey`, which also carries the decompressed point (192 bytes).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceId([u8; 32]);
 
 impl DeviceId {
     /// The ID from the 32 raw public key bytes. Bytes that are not a valid ed25519 point are
     /// refused.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, DeviceIdParseError> {
         VerifyingKey::from_bytes(bytes)
-            .map(Self)
+            .map(|key| Self(key.to_bytes()))
             .map_err(|_| DeviceIdParseError::InvalidKey)
     }
 
     /// The 32 raw public key bytes (the form signed into the handshake and taken by
     /// [`DeviceId::from_bytes`]).
     pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
+        &self.0
     }
 
     /// Whether `signature` is a valid signature of `message` by this device. Verification is
     /// strict (`verify_strict`).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
-        self.0
-            .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
-            .is_ok()
+        // The bytes were checked when the ID was made, so decompressing them again succeeds.
+        VerifyingKey::from_bytes(&self.0).is_ok_and(|key| {
+            key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
+                .is_ok()
+        })
     }
 }
 

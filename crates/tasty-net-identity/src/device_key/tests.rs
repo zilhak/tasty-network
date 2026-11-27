@@ -330,6 +330,11 @@ fn device_ids_are_ordered_by_their_bytes() {
 }
 
 #[test]
+fn a_device_id_is_its_32_bytes() {
+    assert_eq!(std::mem::size_of::<DeviceId>(), 32);
+}
+
+#[test]
 fn signature_text_round_trip() {
     let signature = DeviceKey::generate().unwrap().sign(b"x");
     let text = signature.to_string();
