@@ -1,6 +1,9 @@
 //! The connection table's bounds and IDs (docs/design/transport.md "연결 목록"). The entries
 //! come from SSH connection attempts whose `ssh` cannot be started: each attempt is one
 //! entry that ends in port discovery, on every platform and without a network.
+//!
+//! Every test here makes SSH entries, so the file needs the system ssh backend.
+#![cfg(feature = "system-ssh")]
 
 use std::time::{Duration, Instant};
 

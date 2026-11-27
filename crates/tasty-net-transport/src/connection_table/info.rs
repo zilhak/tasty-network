@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use tasty_net_identity::DeviceId;
+#[cfg(feature = "ssh")]
 use tasty_net_ssh::PortDiscoveryFailureKind;
 
 use crate::link_id::LinkId;
@@ -150,6 +151,7 @@ impl Phase {
 #[non_exhaustive]
 pub enum Cause {
     /// Port discovery over SSH failed.
+    #[cfg(feature = "ssh")]
     Discovery(PortDiscoveryFailureKind),
     /// The peer's record has no token: it is too old for handshake v2.
     PeerTooOld,
@@ -191,6 +193,7 @@ impl Cause {
     /// The cause's code.
     pub fn as_str(&self) -> &'static str {
         match self {
+            #[cfg(feature = "ssh")]
             Self::Discovery(_) => "discovery_failed",
             Self::PeerTooOld => "peer_too_old",
             Self::TunnelFailed(_) => "tunnel_failed",
@@ -224,8 +227,9 @@ impl Cause {
             | Self::HandshakeFailed(_)
             | Self::Cancelled
             | Self::ClosedHere => false,
-            Self::Discovery(_)
-            | Self::TunnelFailed(_)
+            #[cfg(feature = "ssh")]
+            Self::Discovery(_) => true,
+            Self::TunnelFailed(_)
             | Self::TunnelExited
             | Self::RemoteListenerAbsent
             | Self::ConnectFailed(_)
@@ -242,7 +246,9 @@ impl Cause {
         match error {
             ConnectError::Cancelled => Self::Cancelled,
             ConnectError::Io(e) => Self::ConnectFailed(e.to_string()),
+            #[cfg(feature = "ssh")]
             ConnectError::Discovery(e) => Self::Discovery(e.kind()),
+            #[cfg(feature = "ssh")]
             ConnectError::Tunnel(e) => Self::TunnelFailed(e.to_string()),
             ConnectError::PeerTooOld { .. } => Self::PeerTooOld,
         }
@@ -256,6 +262,7 @@ impl Cause {
             HandshakeError::TimedOut => Self::HandshakeTimedOut,
             HandshakeError::Cancelled => Self::Cancelled,
             HandshakeError::PeerClosed => Self::PeerClosed,
+            #[cfg(feature = "ssh")]
             HandshakeError::RemoteListenerAbsent(_) => Self::RemoteListenerAbsent,
             HandshakeError::Connect(e) => Self::of_connect(e),
             HandshakeError::Io(e) => Self::ConnectFailed(e.to_string()),
@@ -269,6 +276,7 @@ impl Cause {
 impl fmt::Display for Cause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "ssh")]
             Self::Discovery(kind) => write!(f, "{}: {kind}", self.as_str()),
             Self::TunnelFailed(text) | Self::ConnectFailed(text) | Self::HandshakeFailed(text) => {
                 write!(f, "{}: {text}", self.as_str())

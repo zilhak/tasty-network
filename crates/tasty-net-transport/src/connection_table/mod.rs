@@ -371,6 +371,7 @@ pub(crate) struct Joined {
 }
 
 impl Joined {
+    #[cfg(feature = "ssh")]
     pub(crate) fn new(pending: EntryRef, into: ConnectionId) -> Self {
         Self {
             pending,
@@ -397,6 +398,7 @@ impl Joined {
 
     /// The channel went without a handshake result: it ends as `ended` (a redialer's entry
     /// only keeps the cause). After a result nothing changes.
+    #[cfg(feature = "ssh")]
     pub(crate) fn abandoned(&self) {
         if !self.settled.load(Ordering::Acquire) {
             self.pending.end(Cause::Ended);
@@ -442,6 +444,7 @@ impl EntryRef {
 
     /// The path the consumer's profile chose (`with_holder`); the first link no longer
     /// changes it.
+    #[cfg(feature = "ssh")]
     pub(crate) fn choose_path(&self, holder: Holder) {
         self.table.with_state(|state, _| {
             if let Some(stored) = state.entries.get_mut(&self.id) {
@@ -455,6 +458,7 @@ impl EntryRef {
     }
 
     /// Moves a connection being set up to `phase`, keeping its state.
+    #[cfg(feature = "ssh")]
     pub(crate) fn phase(&self, phase: Phase) {
         self.table.with_state(|state, config| {
             let Some(current) = state.entries.get(&self.id).map(|s| s.info.state) else {

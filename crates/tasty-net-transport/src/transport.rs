@@ -8,6 +8,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use tasty_net_identity::{ConnectionToken, DeviceId};
+#[cfg(feature = "ssh")]
 use tasty_net_ssh::{PortDiscoveryError, TunnelError};
 
 use crate::cancel::{AttemptCancel, Cancelled};
@@ -197,8 +198,10 @@ pub enum ConnectError {
     /// The socket or stream could not be opened.
     Io(io::Error),
     /// Port discovery over SSH failed; its kind tells why.
+    #[cfg(feature = "ssh")]
     Discovery(PortDiscoveryError),
     /// The SSH tunnel did not come up.
+    #[cfg(feature = "ssh")]
     Tunnel(TunnelError),
     /// The peer is too old for handshake v2 (its record has no token). Do not connect again.
     PeerTooOld {
@@ -212,7 +215,9 @@ impl fmt::Display for ConnectError {
         match self {
             Self::Cancelled => f.write_str("the connection attempt was cancelled"),
             Self::Io(_) => f.write_str("the channel could not be opened"),
+            #[cfg(feature = "ssh")]
             Self::Discovery(_) => f.write_str("the peer's connection record could not be read"),
+            #[cfg(feature = "ssh")]
             Self::Tunnel(_) => f.write_str("the SSH tunnel did not come up"),
             Self::PeerTooOld { .. } => f.write_str(
                 "the peer publishes no connection token; it runs a version without handshake v2",
@@ -225,7 +230,9 @@ impl Error for ConnectError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            #[cfg(feature = "ssh")]
             Self::Discovery(e) => Some(e),
+            #[cfg(feature = "ssh")]
             Self::Tunnel(e) => Some(e),
             Self::Cancelled | Self::PeerTooOld { .. } => None,
         }

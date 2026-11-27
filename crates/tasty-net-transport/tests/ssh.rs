@@ -1,7 +1,7 @@
 //! The SSH forward transport with a fake `ssh`: a shell script that prints the connection
 //! record for a discovery and, for `-L`, runs this test binary as a forwarder over real
 //! loopback ports (the same fake the tasty-net-ssh tests use).
-#![cfg(unix)]
+#![cfg(all(unix, feature = "system-ssh"))]
 
 mod common;
 

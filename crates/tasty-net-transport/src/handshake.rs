@@ -609,6 +609,7 @@ fn linger_close(ch: &mut RawChannel, limit: Duration) {
 }
 
 /// A channel that closed during the handshake is explained by its SSH listener verdict.
+#[cfg(feature = "ssh")]
 fn explain(ch: &RawChannel, error: HandshakeError) -> HandshakeError {
     match error {
         HandshakeError::PeerClosed => {
@@ -625,6 +626,12 @@ fn explain(ch: &RawChannel, error: HandshakeError) -> HandshakeError {
         },
         other => other,
     }
+}
+
+/// Without SSH no channel has a listener verdict: the error stays as it is.
+#[cfg(not(feature = "ssh"))]
+fn explain(_ch: &RawChannel, error: HandshakeError) -> HandshakeError {
+    error
 }
 
 /// Message 1 as bytes, refused here when it is longer than [`MAX_HANDSHAKE_LINE`] with its

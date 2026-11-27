@@ -15,6 +15,7 @@ use tasty_net_frame::{
     write_frame,
 };
 
+#[cfg(feature = "ssh")]
 use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
 
 use crate::connection_table::{EntryRef, Joined};
@@ -60,6 +61,7 @@ pub struct RawChannel {
     kind: TransportKind,
     keep: Vec<Arc<dyn Any + Send + Sync>>,
     /// The absent-listener verdict of a channel through an SSH tunnel.
+    #[cfg(feature = "ssh")]
     verdict: Option<ListenerVerdict>,
     /// The connection table entry of the physical connection the channel is on (the dialing
     /// side's transports set it).
@@ -92,6 +94,7 @@ impl RawChannel {
             control,
             kind,
             keep: Vec::new(),
+            #[cfg(feature = "ssh")]
             verdict: None,
             entry: None,
             addrs: None,
@@ -126,6 +129,7 @@ impl RawChannel {
         Ok(channel)
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) fn with_entry(mut self, entry: EntryRef) -> Self {
         self.entry = Some(entry);
         self
@@ -136,6 +140,7 @@ impl RawChannel {
         self.entry.as_ref()
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) fn with_joined(mut self, joined: Joined) -> Self {
         self.joined = Some(joined);
         self
@@ -168,6 +173,7 @@ impl RawChannel {
     }
 
     /// Puts `wrap`'s control in place of the channel's (it delegates to the one it is given).
+    #[cfg(feature = "ssh")]
     pub(crate) fn wrap_control(
         mut self,
         wrap: impl FnOnce(Arc<dyn ChannelControl>) -> Arc<dyn ChannelControl>,
@@ -176,6 +182,7 @@ impl RawChannel {
         self
     }
 
+    #[cfg(feature = "ssh")]
     pub(crate) fn with_verdict(mut self, verdict: ListenerVerdict) -> Self {
         self.verdict = Some(verdict);
         self
@@ -183,6 +190,7 @@ impl RawChannel {
 
     /// Whether this channel failed with `failure` because nothing listens behind its SSH
     /// tunnel. Waits up to half a second for ssh's report when the channel has a verdict.
+    #[cfg(feature = "ssh")]
     pub(crate) fn listener_absent(
         &self,
         failure: &(dyn std::error::Error + 'static),

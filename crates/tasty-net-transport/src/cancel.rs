@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+#[cfg(feature = "ssh")]
 use tasty_net_ssh::SshCancel;
 
 use crate::channel::ChannelControl;
@@ -31,6 +32,7 @@ struct Inner {
     resources: Mutex<Vec<(u64, Arc<dyn Cancellable>)>>,
     next_id: AtomicU64,
     /// Stops the port discovery children of the attempt.
+    #[cfg(feature = "ssh")]
     ssh: SshCancel,
 }
 
@@ -82,6 +84,7 @@ impl AttemptCancel {
             self.inner.cancelled.store(true, Ordering::SeqCst);
             std::mem::take(&mut *list)
         };
+        #[cfg(feature = "ssh")]
         self.inner.ssh.cancel();
         for (_, resource) in resources {
             resource.cancel();
@@ -90,6 +93,7 @@ impl AttemptCancel {
 
     /// The SSH cancel handle of the attempt: install it with [`SshCancel::scope`] on the
     /// thread that runs a port discovery, and [`AttemptCancel::cancel`] stops that discovery.
+    #[cfg(feature = "ssh")]
     pub fn ssh_cancel(&self) -> &SshCancel {
         &self.inner.ssh
     }

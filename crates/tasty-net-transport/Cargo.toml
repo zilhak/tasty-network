@@ -8,10 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# The SSH backend feature contract (docs/design/ssh-backends.md "feature 계약"). ssh is internal:
+# it brings tasty-net-ssh without a backend, so consumers turn on a backend feature instead.
+# Without default features the crate has no SSH transport.
+default = ["system-ssh"]
+ssh = ["dep:tasty-net-ssh"]
+system-ssh = ["ssh", "tasty-net-ssh/system-ssh"]
+
 [dependencies]
 tasty-net-frame = { path = "../tasty-net-frame" }
 tasty-net-identity = { path = "../tasty-net-identity" }
-tasty-net-ssh = { path = "../tasty-net-ssh" }
+tasty-net-ssh = { path = "../tasty-net-ssh", default-features = false, optional = true }
 # Nonces and bulk credentials (docs/design/crates.md "외부 의존 원칙").
 getrandom = "0.4"
 serde_json = "1"

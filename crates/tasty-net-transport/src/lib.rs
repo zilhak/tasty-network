@@ -31,8 +31,12 @@
 //! | [`Holder`] · [`Side`] · [`Roles`] · [`roles`] | consumers that act on the roles of a link |
 //! | [`Purpose`] · [`PROTO`] · [`STREAM_OPEN_METHOD`] · [`MAX_HANDSHAKE_LINE`] · [`LEGACY_PROTOCOL_ERROR`] · [`is_valid_capability`] · [`InvalidCapabilities`] | the wire constants |
 //! | [`ConnectionTable`] · [`ConnectionTableConfig`] · [`ConnectionInfo`] · [`ConnectionId`] · [`ConnectionEvent`] · [`ConnectionState`] · [`ConnectionPeer`] · [`PathKind`] · [`Direction`] · [`Phase`] · [`Cause`] · [`Segment`] · [`Via`] · [`HistoryEntry`] · [`LinkInfo`] · [`EdgeTransport`] · [`RedialProgress`] · [`settings`] · [`Redialer`] · [`RedialerConfig`] · [`RedialError`] | consumers that show which devices this one is connected with, over which path and addresses (docs/design/transport.md "연결 목록") |
-//! | [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels) |
+//! | [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels); only with the `system-ssh` feature, which is on by default |
 //! | [`memory_channel_pair`] · [`memory_transport`] · [`MemoryTransport`] · [`MemoryListener`] | tests that run channels without sockets |
+//!
+//! Without default features the crate has no SSH: the SSH transport, the SSH variants of
+//! [`ConnectError`], [`HandshakeError`] and [`Cause`], and [`AttemptCancel`]'s SSH cancel handle
+//! are left out (docs/design/ssh-backends.md "`ssh`가 꺼진 transport에서 사라지는 것").
 #![deny(unsafe_code)]
 
 mod bulk;
@@ -53,6 +57,7 @@ mod reject;
 mod request;
 mod role;
 pub mod settings;
+#[cfg(feature = "ssh")]
 mod ssh;
 mod transport;
 mod wake;
@@ -88,6 +93,7 @@ pub use request::{
     RESPONSE_TOO_LARGE, RequestClient, RequestError, RequestHandler, RequestServer, ServeError,
 };
 pub use role::{Holder, Roles, Side, roles};
+#[cfg(feature = "ssh")]
 pub use ssh::{FORWARDED_SEPARATOR, LOCAL_CONNECT_TIMEOUT, SshTransport};
 pub use transport::{
     AcceptError, ConnectError, ConnectOptions, Connection, DialAuth, Endpoint, EndpointHandle,
