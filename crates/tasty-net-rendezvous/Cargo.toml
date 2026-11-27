@@ -31,6 +31,9 @@ getrandom = "0.4"
 # The weak key check of TLS and the allowlist (VerifyingKey::is_weak); the same pin as the
 # device key's implementation (docs/design/crates.md "외부 의존 원칙").
 ed25519-dalek = { version = "=3.0.0", default-features = false }
+# IPV6_V6ONLY off before binding an IPv6 socket, on every OS (docs/design/rendezvous.md
+# "광고 주소와 바인딩 주소"); the same version as quinn's UDP layer.
+socket2 = "0.6"
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]

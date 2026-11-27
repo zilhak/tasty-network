@@ -1128,8 +1128,10 @@ impl Resolver<'_> {
                 });
             }
             if let Some(bound) = bound.filter(|_| listen == Listen::Checked) {
+                // Before binding: the server asks for a dual-stack IPv6 socket. Whether the OS
+                // gave one is the start check's (server::check_advertise).
                 self.relation(
-                    advertise_fits(bound, ip),
+                    advertise_fits(bound, true, ip),
                     "an advertised IP has the address family of the IP it stands for",
                     &[key, bound_key],
                 )?;
@@ -1335,12 +1337,12 @@ impl Resolver<'_> {
 }
 
 /// Whether `advertised` may stand for the bound IP `bound`: the same address family, where an
-/// IPv6 wildcard binding (dual stack) takes both families.
-pub(crate) fn advertise_fits(bound: IpAddr, advertised: IpAddr) -> bool {
+/// IPv6 wildcard binding takes both families when the socket is `dual_stack`.
+pub(crate) fn advertise_fits(bound: IpAddr, dual_stack: bool, advertised: IpAddr) -> bool {
     let advertised = advertised.to_canonical();
     match bound.to_canonical() {
         IpAddr::V4(_) => advertised.is_ipv4(),
-        IpAddr::V6(b) if b.is_unspecified() => true,
+        IpAddr::V6(b) if b.is_unspecified() && dual_stack => true,
         IpAddr::V6(_) => advertised.is_ipv6(),
     }
 }

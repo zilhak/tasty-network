@@ -31,6 +31,7 @@
 | `ed25519-dalek` | identity, rendezvous(간접으로 p2p) | 기기 키 서명·검증. rendezvous는 약한 키 검사(`VerifyingKey::is_weak`)만 직접 쓰고 identity와 같은 판(`=3.0.0`, `default-features = false`)을 고정한다 |
 | `serde`·`serde_json` | rendezvous | 조정 메시지 |
 | `toml` | rendezvous | 서버 설정 파일(`default-features = false`, `std`·`parse`·`serde`) |
+| `socket2` | rendezvous | IPv6 소켓을 묶기 전에 `IPV6_V6ONLY`를 끄고([rendezvous](rendezvous.md#광고-주소와-바인딩-주소) 이중 스택) 묶인 소켓의 값을 읽는다. quinn의 UDP 계층과 같은 판(0.6) |
 | `libc`(Unix)·`windows-sys`(Windows) | rendezvous | 경로보다 큰 보내기의 오류 번호 `EMSGSIZE`·`WSAEMSGSIZE`(아래 "소켓 하나와 패킷 나누기"). `windows-sys`는 `Win32_Networking_WinSock`만 켠다 |
 
 - 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다, `rust-version = "1.85"`), rustls 0.23.46(`rust-version = "1.71"`)이다. raw public key resolver가 0.23.16부터 있으므로 rustls는 그 이상이어야 한다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).

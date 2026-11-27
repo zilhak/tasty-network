@@ -1413,11 +1413,60 @@ async fn mtu_probes_too_large_for_the_path_are_lost_not_fatal() {
 }
 
 #[tokio::test]
-async fn dual_stack_addresses_are_ipv4() {
-    // Windows opens [::] as IPv6 only, so an IPv4 device cannot reach it there.
-    if cfg!(windows) {
+async fn ipv6_only_socket_takes_no_ipv4_advertising() {
+    // An IPv6 wildcard socket the OS keeps IPv6 only cannot serve IPv4 devices: advertising an
+    // IPv4 address for it is refused at start, an IPv6 one is not.
+    let v6_only = || {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .ok()?;
+        socket.set_only_v6(true).ok()?;
+        socket.set_nonblocking(true).ok()?;
+        socket
+            .bind(&"[::]:0".parse::<SocketAddr>().unwrap().into())
+            .ok()?;
+        let io = UdpPacketIo::new(UdpSocket::from_std(socket.into()).ok()?).ok()?;
+        Some(Arc::new(io) as Arc<dyn PacketIo>)
+    };
+    let Some(probe) = v6_only() else {
+        // No IPv6 on this host.
         return;
+    };
+    assert!(!probe.dual_stack());
+    let start = |ip: &str| {
+        let mut s = local_settings();
+        s.set("advertise.primary_ip", Value::Ip(ip.parse().unwrap()))
+            .unwrap();
+        let mut config = ServerConfig::new(key(100));
+        config.settings = s;
+        let primary = v6_only().unwrap();
+        let alternate_port = v6_only().unwrap();
+        Server::start_with_io(
+            config,
+            ServerIo {
+                primary,
+                alternate_port,
+                alternate_ip: None,
+            },
+        )
+    };
+    match start("127.0.0.1").await {
+        Err(StartError::Settings(e)) => assert!(e.to_string().contains("advertise.primary_ip")),
+        other => panic!("expected a settings error, got {other:?}"),
     }
+    start("::1").await.expect("an IPv6 advertised IP starts");
+    // A socket the server binds itself to [::] takes IPv4 too.
+    let own = UdpPacketIo::bind("[::]:0".parse().unwrap()).await.unwrap();
+    assert!(own.dual_stack());
+}
+
+#[tokio::test]
+async fn dual_stack_addresses_are_ipv4() {
+    // The server turns IPV6_V6ONLY off itself, so this holds on every OS and whatever the
+    // host default (Windows, Linux net.ipv6.bindv6only) is.
     let mut s = local_settings();
     s.set("listen.primary", Value::Address("[::]:0".parse().unwrap()))
         .unwrap();

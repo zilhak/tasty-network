@@ -48,6 +48,13 @@ pub trait PacketIo: Send + Sync + fmt::Debug + 'static {
     fn may_fragment(&self) -> bool {
         true
     }
+
+    /// Whether this IPv6 socket also takes IPv4 (`IPV6_V6ONLY` off), so that an IPv6 wildcard
+    /// binding serves both families. The default is false: packet I/O that does not know is
+    /// taken as IPv6 only when bound to IPv6.
+    fn dual_stack(&self) -> bool {
+        false
+    }
 }
 
 /// [`PacketIo`] over a tokio UDP socket, received and set up through quinn's UDP layer
@@ -57,6 +64,7 @@ pub trait PacketIo: Send + Sync + fmt::Debug + 'static {
 pub struct UdpPacketIo {
     socket: tokio::net::UdpSocket,
     state: quinn::udp::UdpSocketState,
+    dual_stack: bool,
     held: Mutex<Held>,
 }
 
@@ -80,22 +88,44 @@ impl fmt::Debug for UdpPacketIo {
         f.debug_struct("UdpPacketIo")
             .field("socket", &self.socket)
             .field("may_fragment", &self.state.may_fragment())
+            .field("dual_stack", &self.dual_stack)
             .finish_non_exhaustive()
     }
 }
 
 impl UdpPacketIo {
-    /// Bind a UDP socket.
+    /// Bind a UDP socket. An IPv6 socket is asked to take IPv4 too (`IPV6_V6ONLY` off) on
+    /// every OS, since the default differs (Windows, and Linux with `net.ipv6.bindv6only=1`,
+    /// start IPv6 only). When the OS refuses, the socket stays IPv6 only and
+    /// [`PacketIo::dual_stack`] is false.
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        Self::new(tokio::net::UdpSocket::bind(addr).await?)
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(addr),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        if addr.is_ipv6()
+            && let Err(e) = socket.set_only_v6(false)
+        {
+            debug!(error = %e, %addr, "the socket stays IPv6 only");
+        }
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        Self::new(tokio::net::UdpSocket::from_std(socket.into())?)
     }
 
-    /// Wrap a bound socket. This sets the socket options of quinn's UDP layer on it.
+    /// Wrap a bound socket. This sets the socket options of quinn's UDP layer on it; whether an
+    /// IPv6 socket takes IPv4 is read from the socket.
     pub fn new(socket: tokio::net::UdpSocket) -> io::Result<Self> {
         let state = quinn::udp::UdpSocketState::new((&socket).into())?;
+        let dual_stack = socket.local_addr()?.is_ipv6()
+            && socket2::SockRef::from(&socket)
+                .only_v6()
+                .is_ok_and(|only| !only);
         Ok(UdpPacketIo {
             socket,
             state,
+            dual_stack,
             held: Mutex::new(Held {
                 buf: vec![0; COALESCED_MAX],
                 // Nothing held yet.
@@ -179,6 +209,10 @@ impl PacketIo for UdpPacketIo {
 
     fn may_fragment(&self) -> bool {
         self.state.may_fragment()
+    }
+
+    fn dual_stack(&self) -> bool {
+        self.dual_stack
     }
 }
 

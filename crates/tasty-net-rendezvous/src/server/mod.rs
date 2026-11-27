@@ -437,7 +437,14 @@ impl Server {
                 None => None,
             },
         };
-        check_advertise(&params, &addrs).map_err(StartError::Settings)?;
+        let dual_stack = Sockets {
+            primary: io.primary.dual_stack(),
+            alternate_ip: io
+                .alternate_ip
+                .as_ref()
+                .is_some_and(|(a, _)| a.dual_stack()),
+        };
+        check_advertise(&params, &addrs, dual_stack).map_err(StartError::Settings)?;
         let tls_config = tls::server_config(
             &config.key,
             ALPN_RENDEZVOUS,
@@ -573,9 +580,21 @@ impl Drop for Server {
     }
 }
 
+/// Whether the primary socket and the first socket of the second IP take both families.
+#[derive(Clone, Copy)]
+struct Sockets {
+    primary: bool,
+    alternate_ip: bool,
+}
+
 /// The checks of docs/design/rendezvous.md "광고 주소와 바인딩 주소" against the addresses the
-/// sockets are really bound to (they differ from `listen.*` with injected packet I/O).
-fn check_advertise(p: &ServerParams, a: &ServerAddrs) -> Result<(), SettingsError> {
+/// sockets are really bound to (they differ from `listen.*` with injected packet I/O) and the
+/// families they take: an IPv6 wildcard socket the OS keeps IPv6 only takes no IPv4 advertising.
+fn check_advertise(
+    p: &ServerParams,
+    a: &ServerAddrs,
+    dual_stack: Sockets,
+) -> Result<(), SettingsError> {
     let relation = |rule, values| Err(SettingsError::Relation { rule, values });
     match p.advertise_primary_ip {
         None if a.primary.ip().is_unspecified() => {
@@ -588,9 +607,10 @@ fn check_advertise(p: &ServerParams, a: &ServerAddrs) -> Result<(), SettingsErro
                 ],
             );
         }
-        Some(ip) if !advertise_fits(a.primary.ip(), ip) => {
+        Some(ip) if !advertise_fits(a.primary.ip(), dual_stack.primary, ip) => {
             return relation(
-                "an advertised IP has the address family of the IP it stands for",
+                "an advertised IP has an address family the socket it stands for takes (an IPv6 \
+                 socket the OS keeps IPv6 only takes no IPv4)",
                 vec![
                     ("advertise.primary_ip", Value::Ip(ip)),
                     ("listen.primary", Value::Address(a.primary)),
@@ -600,10 +620,11 @@ fn check_advertise(p: &ServerParams, a: &ServerAddrs) -> Result<(), SettingsErro
         _ => {}
     }
     if let (Some(ip), Some((second, _))) = (p.advertise_alternate_ip, a.alternate_ip)
-        && !advertise_fits(second.ip(), ip)
+        && !advertise_fits(second.ip(), dual_stack.alternate_ip, ip)
     {
         return relation(
-            "an advertised IP has the address family of the IP it stands for",
+            "an advertised IP has an address family the socket it stands for takes (an IPv6 \
+             socket the OS keeps IPv6 only takes no IPv4)",
             vec![
                 ("advertise.alternate_ip", Value::Ip(ip)),
                 ("listen.alternate_ip", Value::Ip(second.ip())),

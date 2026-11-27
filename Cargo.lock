@@ -1691,6 +1691,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "socket2",
  "tasty-net-identity",
  "tokio",
  "toml",
