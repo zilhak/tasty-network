@@ -56,7 +56,7 @@
 //! | `dialer attempt n=<n>` | an attempt starts |
 //! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded |
 //! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
-//! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered |
+//! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered (the value encoded as in `tasty_net_demo::table`) |
 //! | `dialer channels-failed error=<text>` | `--channels`: opening them failed; the link stays |
 //! | `dialer extra-connected holder=<holder> link_id=<hex>` | `--also-holder`: the second link is up |
 //! | `dialer extra-failed error=<text>` | `--also-holder`: the second link did not come up |
@@ -82,7 +82,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::table::table_lines;
+use tasty_net_demo::table::{encode_value, table_lines};
 use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
@@ -507,7 +507,7 @@ fn channels(link: &Link, dial: &Dial, cancel: &AttemptCancel) -> Option<Channels
         answer
             .get("instance_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("-")
+            .map_or_else(|| "-".to_string(), encode_value)
     ));
     Some(Channels {
         _bulk: bulk,

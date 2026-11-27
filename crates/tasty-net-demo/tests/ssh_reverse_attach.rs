@@ -21,6 +21,7 @@ use support::table::{
     ROLE_REVERSED, check_reconnected, check_tunnel_entries, dialer_instance, in_state, local_links,
     read_table, wait_table,
 };
+use tasty_net_demo::table::decode_value;
 use tasty_net_demo::{Snapshot, field};
 
 /// The role table of a reversed SSH link, as both ends print it after `local=`.
@@ -385,16 +386,52 @@ fn matching_links(server: &mut Proc, dialer: &mut Proc, links: usize) -> Vec<[St
     near_links
 }
 
+/// The first line of `proc` that starts with `prefix`, waiting for it up to [`SSH_STEP`].
+fn transcript_line(proc: &Proc, prefix: &str) -> String {
+    let deadline = std::time::Instant::now() + SSH_STEP;
+    loop {
+        if let Some(line) = proc
+            .transcript
+            .lines()
+            .into_iter()
+            .find(|l| l.starts_with(prefix))
+        {
+            return line;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no line {prefix:?} within {SSH_STEP:?}\n{}",
+            proc.transcript.render()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Both ends of one role reversed SSH link give the same `LocalLink` input: link ID, dialer,
 /// acceptor, holder and edge value. The server's bulk and request entries carry no link.
+/// The dialer's instance ID has characters that would break a raw event value; the server's
+/// bulk and request lines keep it, encoded as in the snapshot.
 #[test]
 fn both_ends_produce_matching_local_links() {
+    const ID: &str = "desk\"e=1%x";
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     let (mut server, ready) = start_accepting_server(&mut scene);
-    let mut dialer = start_reversing_dialer(&mut scene, &["--channels"]);
+    let mut dialer = start_reversing_dialer(&mut scene, &["--channels", "--instance-id", ID]);
     reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
-    dialer.expect_prefix("dialer channels-open ", LOCAL_STEP);
+    let open = dialer.expect_prefix("dialer channels-open ", SSH_STEP);
+    let value = |line: &str, key: &str| {
+        field(line, key)
+            .and_then(decode_value)
+            .unwrap_or_else(|| panic!("no {key}= value in {line:?}"))
+    };
+    assert_eq!(value(&open, "instance"), ready.instance, "{open}");
+    // The bulk channel's line comes from another server thread than the link's lines, so it
+    // is looked for in the transcript.
+    let bulk = transcript_line(&server, "server bulk-accepted ");
+    assert_eq!(value(&bulk, "peer"), ID, "{bulk}");
+    let request = transcript_line(&server, "server request ");
+    assert_eq!(value(&request, "method"), "system.info", "{request}");
     let links = matching_links(&mut server, &mut dialer, 1);
     let [_, dialer_device, acceptor_device, holder, transport] = &links[0];
     assert_ne!(dialer_device, acceptor_device);

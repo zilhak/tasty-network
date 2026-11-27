@@ -38,9 +38,9 @@
 //! | `server send-failed error=<text>` | a `send` line found no held link, or writing failed |
 //! | `server link-ended client=<n> end=<detach\|failure name>` | the link's reader ended |
 //! | `server released client=<n> live=<links>` | the link's registration was dropped |
-//! | `server bulk-accepted peer=<instance>` | a bulk channel under an attach link is up |
+//! | `server bulk-accepted peer=<instance>` | a bulk channel under an attach link is up (the value encoded as in `tasty_net_demo::table`) |
 //! | `server bulk-ended end=<failure name or detach>` | the bulk channel's reader ended |
-//! | `server request method=<method>` | a request channel answered a request |
+//! | `server request method=<method>` | a request channel answered a request (the value encoded as in `tasty_net_demo::table`) |
 //! | `server request-ended` | a request channel ended |
 //! | `server table ...` · `server conn ...` · `server link ...` · `server table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `server refused reason=<wire reason>` | this end refused a handshake |
@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::table::table_lines;
+use tasty_net_demo::table::{encode_value, table_lines};
 use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken, DeviceKey, RecordPublication};
@@ -151,7 +151,7 @@ impl DomainPolicy for LivePolicy {
     fn accept_bulk(&self, request: &BulkRequest<'_>) -> Result<DomainAccept, DomainReject> {
         emit(&format!(
             "server bulk-accepted peer={}",
-            request.parent().instance_id()
+            encode_value(request.parent().instance_id())
         ));
         Ok(DomainAccept::default())
     }
@@ -169,7 +169,7 @@ impl RequestHandler for Requests {
         method: &str,
         _params: serde_json::Value,
     ) -> Result<serde_json::Value, serde_json::Value> {
-        emit(&format!("server request method={method}"));
+        emit(&format!("server request method={}", encode_value(method)));
         match method {
             "system.info" => Ok(serde_json::json!({ "instance_id": self.instance_id })),
             _ => Err(serde_json::json!({ "code": "demo.unknown_method" })),
