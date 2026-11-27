@@ -256,12 +256,57 @@ mod tests {
 
     #[test]
     fn candidates_follow_kind_priority_and_limit() {
+        // The input of docs/design/testing.md: server reflexive 1, reported reflexive 5,
+        // host 7, some of them duplicates.
         let limits = CandidateLimits {
             max_reported_reflexive: 3,
             max_host_candidates: 4,
         };
         let server = a("203.0.113.5:40000");
-        // Five reported reflexive: one repeats the server reflexive address, one is IPv6
+        let reported = [
+            a("203.0.113.5:40000"),
+            a("203.0.113.5:40001"),
+            a("203.0.113.5:40002"),
+            a("203.0.113.5:40003"),
+            a("203.0.113.5:40004"),
+        ];
+        let host = [
+            a("192.168.1.2:5000"),
+            a("192.168.1.2:5000"),
+            a("10.0.0.2:5000"),
+            a("10.0.0.3:5000"),
+            a("172.16.0.2:5000"),
+            a("172.16.0.3:5000"),
+            a("192.168.1.3:5000"),
+        ];
+        let got = select_candidates(server, &reported, &host, PunchMode::All, limits);
+        use CandidateKind::*;
+        let want = vec![
+            (server, ServerReflexive),
+            (a("203.0.113.5:40001"), ReportedReflexive),
+            (a("203.0.113.5:40002"), ReportedReflexive),
+            (a("203.0.113.5:40003"), ReportedReflexive),
+            (a("192.168.1.2:5000"), Host),
+            (a("10.0.0.2:5000"), Host),
+            (a("10.0.0.3:5000"), Host),
+            (a("172.16.0.2:5000"), Host),
+        ];
+        let got_pairs: Vec<(SocketAddr, CandidateKind)> =
+            got.candidates.iter().map(|c| (c.addr, c.kind)).collect();
+        assert_eq!(got_pairs, want);
+        assert_eq!(got.duplicates, 2, "{got:?}");
+        assert_eq!(got.rejected, 0, "{got:?}");
+        assert_eq!(got.truncated, 3, "{got:?}");
+    }
+
+    #[test]
+    fn candidates_drop_other_family_and_link_local() {
+        let limits = CandidateLimits {
+            max_reported_reflexive: 3,
+            max_host_candidates: 4,
+        };
+        let server = a("203.0.113.5:40000");
+        // Seven reported reflexive: one repeats the server reflexive address, one is IPv6
         // (another family), one is link-local; the rest are valid and more than the cap.
         let reported = [
             a("203.0.113.5:40000"),
