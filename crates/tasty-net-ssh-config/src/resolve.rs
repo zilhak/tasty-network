@@ -1076,7 +1076,7 @@ fn judge(r: &mut Reader<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::misc::{Libc, numeric_host_of};
+    use crate::misc::{Libc, Reading, numeric_host_of, settled};
 
     #[test]
     fn addresses() {
@@ -1176,6 +1176,37 @@ mod tests {
         ("1:2:3:4:5:6:7:1.2.3.4", Family::Any, ["-"; 4]),
         ("1.2.3.4::", Family::Any, ["-"; 4]),
         ("fe80::1%lo", Family::Any, ["-"; 4]),
+        // Darwin takes a nonzero second word of a link-local (or node- or link-local
+        // multicast) address as the interface: the text depends on the interfaces.
+        ("fe80::1", Family::Any, ["fe80::1"; 4]),
+        (
+            "fe80:1::1",
+            Family::Any,
+            ["fe80:1::1", "fe80:1::1", "refused", "refused"],
+        ),
+        (
+            "FE80:1::1",
+            Family::Inet6,
+            ["fe80:1::1", "fe80:1::1", "refused", "refused"],
+        ),
+        (
+            "febf:1::1",
+            Family::Any,
+            ["febf:1::1", "febf:1::1", "refused", "refused"],
+        ),
+        ("fec0:1::1", Family::Any, ["fec0:1::1"; 4]),
+        (
+            "ff02:1::1",
+            Family::Any,
+            ["ff02:1::1", "ff02:1::1", "refused", "refused"],
+        ),
+        (
+            "ff11:1::1",
+            Family::Any,
+            ["ff11:1::1", "ff11:1::1", "refused", "refused"],
+        ),
+        ("ff05:1::1", Family::Any, ["ff05:1::1"; 4]),
+        ("fe80:1::1", Family::Inet, ["-"; 4]),
         // An IPv4-mapped address asked for IPv4: only glibc takes the IPv4 address.
         (
             "::ffff:192.0.2.1",
@@ -1218,24 +1249,27 @@ mod tests {
         a.map_or_else(|| "-".to_string(), numeric_text)
     }
 
+    fn reading_text(r: Reading) -> String {
+        match r {
+            Reading::Address(a) => numeric_text(a),
+            Reading::Name => "-".to_string(),
+            Reading::Scoped => "refused".to_string(),
+        }
+    }
+
     #[test]
     fn numeric_forms_of_each_c_library() {
         for (name, family, want) in NUMERIC_FORMS {
             for (libc, want) in Libc::ALL.iter().zip(want) {
-                let got = text(numeric_host_of(*libc, name, *family));
+                let got = reading_text(numeric_host_of(*libc, name, *family));
                 assert_eq!(&got, want, "{} {name} {family:?}", libc.name());
             }
             // Without a rule: the reading every library gives, else a refusal.
-            let readings: Vec<String> = Libc::ALL
+            let all: Vec<(Libc, Reading)> = Libc::ALL
                 .iter()
-                .map(|l| text(numeric_host_of(*l, name, *family)))
+                .map(|l| (*l, numeric_host_of(*l, name, *family)))
                 .collect();
-            let alike = readings.windows(2).all(|w| w[0] == w[1]);
-            let other = if alike {
-                readings[0].as_str()
-            } else {
-                "refused"
-            };
+            let other = settled(&all).map_or_else(|| "refused".to_string(), text);
             assert_eq!(other, want[3], "no rule: {name} {family:?}");
         }
     }

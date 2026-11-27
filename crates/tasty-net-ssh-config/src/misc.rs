@@ -687,39 +687,105 @@ impl Libc {
     }
 }
 
-/// `getaddrinfo(name, ..., AI_NUMERICHOST)` of the C library of this OS: the address `name`
-/// is in numeric form, or `None`. A scope (`%`) is not taken. On an OS without a rule
-/// ([`Libc::current`] is `None`) the answer is the one every library gives; where they
-/// differ it is `Err` with the reason, and the caller refuses.
-pub(crate) fn numeric_host(name: &str, family: Family) -> Result<Option<IpAddr>, String> {
-    if let Some(libc) = Libc::current() {
-        return Ok(numeric_host_of(libc, name, family));
-    }
-    let readings: Vec<(Libc, Option<IpAddr>)> = Libc::ALL
-        .iter()
-        .map(|&l| (l, numeric_host_of(l, name, family)))
-        .collect();
-    match readings.split_first() {
-        Some(((_, first), rest)) if rest.iter().all(|(_, a)| a == first) => Ok(*first),
-        _ => {
-            let each: Vec<String> = readings
-                .iter()
-                .map(|(l, a)| match a {
-                    Some(a) => format!("{} {}", l.name(), numeric_text(*a)),
-                    None => format!("{} not an address", l.name()),
-                })
-                .collect();
-            Err(format!(
-                "the C libraries read host \"{name}\" differently ({}), and this crate has no \
-                 numeric address rule for the C library of this OS",
-                each.join(", ")
-            ))
+/// How a C library reads a host name with `getaddrinfo(AI_NUMERICHOST)` and writes it back
+/// with `getnameinfo(NI_NUMERICHOST)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reading {
+    /// A numeric address.
+    Address(IpAddr),
+    /// Not a numeric address: `ssh` keeps the name as written.
+    Name,
+    /// Darwin: an IPv6 link-local address, or a node- or link-local multicast address, whose
+    /// second word is not zero. Libinfo takes that word as the interface index without a `%`
+    /// (`si_addrinfo_v6`), and `getnameinfo` writes the address with the name of that
+    /// interface or fails when there is none, so the result depends on the interfaces.
+    Scoped,
+}
+
+impl Reading {
+    fn text(self) -> String {
+        match self {
+            Reading::Address(a) => numeric_text(a),
+            Reading::Name => "not an address".to_string(),
+            Reading::Scoped => "an address scoped by its second word".to_string(),
         }
     }
 }
 
-/// [`numeric_host`] by the rule of `libc`.
-pub(crate) fn numeric_host_of(libc: Libc, name: &str, family: Family) -> Option<IpAddr> {
+/// The readings of `name` by the C library of this OS, or by every library with a rule on
+/// an OS without one ([`Libc::current`] is `None`).
+pub(crate) fn readings(name: &str, family: Family) -> Vec<(Libc, Reading)> {
+    let libcs = match Libc::current() {
+        Some(l) => vec![l],
+        None => Libc::ALL.to_vec(),
+    };
+    libcs
+        .into_iter()
+        .map(|l| (l, numeric_host_of(l, name, family)))
+        .collect()
+}
+
+/// The address the readings settle on (`None`: not an address), or `None` when they differ
+/// or one depends on the interfaces.
+pub(crate) fn settled(readings: &[(Libc, Reading)]) -> Option<Option<IpAddr>> {
+    let ((_, first), rest) = readings.split_first()?;
+    if *first == Reading::Scoped || rest.iter().any(|(_, r)| r != first) {
+        return None;
+    }
+    Some(match first {
+        Reading::Address(a) => Some(*a),
+        _ => None,
+    })
+}
+
+/// Why the readings of `name` do not settle.
+pub(crate) fn unsettled(name: &str, readings: &[(Libc, Reading)]) -> String {
+    let each: Vec<String> = readings
+        .iter()
+        .map(|(l, r)| format!("{} {}", l.name(), r.text()))
+        .collect();
+    let how = match readings {
+        [(l, r)] => format!("{} reads \"{name}\" as {}", l.name(), r.text()),
+        _ => format!(
+            "the C libraries read \"{name}\" differently ({})",
+            each.join(", ")
+        ),
+    };
+    format!("{how}, and this crate cannot tell the address ssh uses on this OS")
+}
+
+/// `getaddrinfo(name, ..., AI_NUMERICHOST)` of the C library of this OS: the address `name`
+/// is in numeric form, or `None`. A scope (`%`) is not taken. On an OS without a rule the
+/// answer is the one every library gives. Where the libraries differ, or the reading
+/// depends on the interfaces, it is `Err` with the reason, and the caller refuses.
+pub(crate) fn numeric_host(name: &str, family: Family) -> Result<Option<IpAddr>, String> {
+    let r = readings(name, family);
+    settled(&r).ok_or_else(|| unsettled(name, &r))
+}
+
+/// The scope field of a multicast address (the low four bits of the first word).
+const MC_SCOPE_MASK: u16 = 0x000f;
+/// Multicast scope node-local (`IN6_IS_ADDR_MC_NODELOCAL`).
+const MC_SCOPE_NODE_LOCAL: u16 = 0x1;
+/// Multicast scope link-local (`IN6_IS_ADDR_MC_LINKLOCAL`).
+const MC_SCOPE_LINK_LOCAL: u16 = 0x2;
+
+/// Whether Libinfo takes the second word of `a` as an interface index: `si_addrinfo_v6`
+/// moves it out of a link-local address, and `getnameinfo` reads it from link-local and
+/// node- or link-local multicast addresses. The multicast test does not look at the flags
+/// that newer Apple headers check, so it may refuse more than Darwin needs.
+fn embeds_scope(a: Ipv6Addr) -> bool {
+    let [w0, w1, ..] = a.segments();
+    let multicast = a.is_multicast()
+        && matches!(
+            w0 & MC_SCOPE_MASK,
+            MC_SCOPE_NODE_LOCAL | MC_SCOPE_LINK_LOCAL
+        );
+    w1 != 0 && (a.is_unicast_link_local() || multicast)
+}
+
+/// How `libc` reads `name` ([`numeric_host`]).
+pub(crate) fn numeric_host_of(libc: Libc, name: &str, family: Family) -> Reading {
     let v4 = match libc {
         Libc::Glibc => inet_aton_glibc(name),
         Libc::Bionic => inet_pton4(name, LeadingZero::Decimal),
@@ -728,15 +794,24 @@ pub(crate) fn numeric_host_of(libc: Libc, name: &str, family: Family) -> Option<
     if let Some(a) = v4 {
         // `ssh` does not pass `AI_V4MAPPED`: asked for IPv6, an IPv4 address is refused
         // (glibc `EAI_ADDRFAMILY`, Darwin `-1`); bionic does not read IPv4 for IPv6 at all.
-        return (family != Family::Inet6).then_some(IpAddr::V4(a));
+        return if family == Family::Inet6 {
+            Reading::Name
+        } else {
+            Reading::Address(IpAddr::V4(a))
+        };
     }
-    let a = inet_pton6(name, libc)?;
+    let Some(a) = inet_pton6(name, libc) else {
+        return Reading::Name;
+    };
     match family {
-        Family::Any | Family::Inet6 => Some(IpAddr::V6(a)),
+        Family::Any | Family::Inet6 if libc == Libc::Darwin && embeds_scope(a) => Reading::Scoped,
+        Family::Any | Family::Inet6 => Reading::Address(IpAddr::V6(a)),
         // Only glibc takes an IPv4-mapped IPv6 address for IPv4. Darwin returns `-1`
         // (`EAI_NONAME`), bionic reads only IPv4 for IPv4.
-        Family::Inet if libc == Libc::Glibc => a.to_ipv4_mapped().map(IpAddr::V4),
-        Family::Inet => None,
+        Family::Inet if libc == Libc::Glibc => a
+            .to_ipv4_mapped()
+            .map_or(Reading::Name, |v4| Reading::Address(IpAddr::V4(v4))),
+        Family::Inet => Reading::Name,
     }
 }
 

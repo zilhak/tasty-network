@@ -339,6 +339,7 @@ allow	crates/tasty-net-ssh-config/src/misc.rs	const V4_COMPAT_ZERO_WORDS: usize 
 allow	crates/tasty-net-ssh-config/src/misc.rs	const BITS_PER_HEX_DIGIT: u32 = 4	16진수 한 자리의 비트 수(inet_aton·inet_pton6)
 allow	crates/tasty-net-ssh-config/src/misc.rs	const GROUP_DIGITS_MAX: usize = 4	glibc·bionic inet_pton6: 그룹 하나의 16진수 최대 4자리
 allow	crates/tasty-net-ssh-config/src/misc.rs	const GROUP_MAX: u32 = 0xffff	inet_pton6: 16비트 그룹 하나의 상한 0xffff
+allow	crates/tasty-net-ssh-config/src/misc.rs	const MC_SCOPE_MASK: u16 = 0x000f	IPv6 멀티캐스트 scope 필드(첫 워드 아래 4비트)
 allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_IDENTITY_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_IDENTITY_FILES 100
 allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_CERTIFICATE_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_CERTIFICATE_FILES 100
 allow	crates/tasty-net-ssh-config/src/options.rs	const FORWARD_X11_TIMEOUT: i32 = 1200	readconf.c fill_default_options ForwardX11Timeout 기본 1200초
