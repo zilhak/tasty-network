@@ -601,13 +601,18 @@ async fn access_policy_rejects() {
 async fn superseded_registration_is_closed() {
     let server = start(local_settings()).await;
     let (mut peer, _) = Device::register(&server, &key(2), &["192.168.0.2:1"]).await;
-    let (first, _) = Device::register(&server, &key(1), &["192.168.0.1:1"]).await;
-    // The first registration has a punch offered by the peer.
+    let (mut first, _) = Device::register(&server, &key(1), &["192.168.0.1:1"]).await;
+    // The first registration has a punch offered by the peer. The new registration starts
+    // only once the offer arrived: messages of two connections have no order between them.
     peer.send(&DeviceMessage::PunchRequest(PunchRequest {
         request_id: 1,
         peer: first.id,
     }))
     .await;
+    match first.recv().await {
+        ServerMessage::PunchOffer(o) => assert_eq!(o.from, peer.id),
+        other => panic!("expected punch_offer, got {other:?}"),
+    }
     let (mut second, _) = Device::register(&server, &key(1), &[]).await;
     assert_eq!(first.closed_with().await, code(CloseCode::Superseded));
     // The peer's session with the old registration is ended.
@@ -882,13 +887,15 @@ async fn punch_session_expires() {
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert_eq!(server.status().punches, 0);
 
-    // After punch_go, no result: both get punch_cancel{expired} after the TTL.
+    // After punch_go, no result: both get punch_cancel{expired} after the TTL. The clock
+    // starts before the request, so before the server sends punch_go: the TTL is a strict
+    // lower bound of what it measures.
+    let gone = tokio::time::Instant::now();
     let (punch_id, go_a, _) = punch(&mut a, &mut b, 2).await;
     let ServerMessage::PunchGo(go_a) = go_a else {
         panic!("{go_a:?}");
     };
     assert!(go_a.start_after_ms <= 100);
-    let gone = tokio::time::Instant::now();
     for d in [&mut a, &mut b] {
         match d.recv().await {
             ServerMessage::PunchCancel(c) => {
@@ -899,7 +906,7 @@ async fn punch_session_expires() {
         }
     }
     assert!(
-        gone.elapsed() >= Duration::from_millis(1200),
+        gone.elapsed() >= Duration::from_millis(1400),
         "{:?}",
         gone.elapsed()
     );
