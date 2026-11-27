@@ -18,7 +18,7 @@ Host *
     CanonicalizeMaxDots 2
     UserKnownHostsFile ~/.ssh/known_hosts_%h ~/.ssh/known_hosts2
     GlobalKnownHostsFile none
-    VersionAddendum test-%h
+    VersionAddendum test-%h # not a comment
     PermitRemoteOpen any
     RequiredRSASize 2048
     SyslogFacility LOCAL1

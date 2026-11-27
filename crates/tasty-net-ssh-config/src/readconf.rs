@@ -974,8 +974,7 @@ impl<'a> Reader<'a> {
         {
             len -= 1;
         }
-        let mut line = raw.get(..len).unwrap_or(raw).to_string();
-        let mut rest = Some(line.clone());
+        let mut rest = Some(raw.get(..len).unwrap_or(raw).to_string());
         let Some(mut keyword) = strdelim(&mut rest) else {
             return Ok(());
         };
@@ -1885,16 +1884,9 @@ impl<'a> Reader<'a> {
                         format!("Invalid {keyword} argument"),
                     )));
                 }
-                let mut v = s.clone();
-                if let Some(hash) = line.find('#') {
-                    // The '#' cuts the whole line; the value is what is left of it.
-                    line.truncate(hash);
-                    let kept = line
-                        .trim_end_matches(|c: char| c.is_ascii() && misc::is_c_space(c as u8))
-                        .len();
-                    let start = len.saturating_sub(s.len());
-                    v = line.get(start..kept.max(start)).unwrap_or("").to_string();
-                }
+                // `strchr(line, '#')` (readconf.c:2553) only sees the keyword: `strdelim`
+                // ended the line after it. A `#` in the value stays.
+                let v = s.clone();
                 let v = if v.eq_ignore_ascii_case("none") {
                     String::new()
                 } else {
