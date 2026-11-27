@@ -571,6 +571,25 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | 시스템 백엔드 명령 | `tasty-net-ssh` 단위 시험 | 포트 발견·exec·SFTP 자식 명령에 `ControlMaster=no`·`ControlPath=none`이 대상 옵션 앞에 있다 |
 | 호스트 키 | `tasty-net-ssh-config`와 `tasty-net-ssh` 시험, demo 시험 하나 | 같은 형식의 바뀐 키 거절, known_hosts에 다른 형식(ed25519)의 키만 있는 호스트가 ecdsa 키를 내면 `HOST_CHANGED`로 거절(`accept-new`에서도 기록하지 않음), `@revoked` 거절, `@cert-authority` 줄만 있는 호스트는 모르는 호스트, `RevokedHostKeys` 파일이 없으면 거절, 1024비트보다 작은 RSA 호스트 키 거절, `accept-new` 기록. 판정 부분은 `ssh-keygen -F`가 아니라 OpenSSH `check_hostkeys_by_key_or_type`의 결과를 원본 표로 둔다 |
 | 리스너 판정 | `tasty-net-ssh` 시험 | 사유 코드 2만 `RemoteListenerAbsent`, 1·3·4는 `ChannelOpenRefused`(서버 설명 문구 포함) |
+| 메모리 키 | `tasty-net-ssh` 단위 시험 | [android 요구](#android-요구의-자리)의 메모리 키로 인증하고, `inspect`·`Debug` 출력에 키 바이트가 없다 |
+| Windows 셸 포트 발견 | demo 시험(Windows OpenSSH `sshd`) | 원격 기본 셸이 PowerShell·cmd인 서버에서 내장 백엔드의 포트 발견이 시스템 백엔드와 같은 레코드를 읽는다([android 요구](#android-요구의-자리) #11) |
+
+## android 요구의 자리
+
+tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호) 가운데 Rust API 쪽 자리다. FFI로 무엇을 내는지는 [모바일 바인딩 층](mobile.md#android-요구의-자리)이 맡는다. 여기에는 경계와 계약만 적고, 세부 API는 내장 SSH 백엔드 작업이 정한다.
+
+| # | 요구 | 이 레포의 계약 | 세부를 정할 곳 |
+|---|---|---|---|
+| 1 | 앱이 준 폴더의 OpenSSH 형식 config·키·known_hosts로 접속, 비밀번호·passphrase·keyboard-interactive·호스트 키 확인을 콜백으로 | `embedded.home`·`embedded.ssh_dir`([설정값](#설정값))과 `SshPrompt`. 모르는 지시어 거부와 `@cert-authority` 불신은 [지시어 분류](#지시어-분류)·[호스트 키 판정](#호스트-키-판정)대로 | 내장 SSH 백엔드 |
+| 2 | 키를 파일 대신 메모리 바이트로 주기 | 대상 옵션에 메모리 키 원천을 더한다. 메모리 키는 `IdentityFile`보다 앞에 내민다(OpenSSH의 `-i`와 같은 자리). 바이트는 넘겨받은 뒤 이 레포가 소유하고 세션이 끝나거나 대상이 지워지면 지운다(zeroize). `inspect`·`ConfigNote`·`Debug`·오류에는 키 바이트도 passphrase도 내지 않고 "메모리 키 n개"와 공개키 지문만 낸다. 시스템 백엔드는 메모리 키를 쓸 수 없으므로 그런 대상은 내장 백엔드가 필요하다(`auto`에서 시스템을 고르면 `BackendUnavailable{reason: memory_key}`로 거절, 백엔드를 바꾸지 않는다) | 내장 SSH 백엔드 |
+| 3 | exec: 스트림 또는 상한 있는 수집, 종료 상태, 시간 제한·취소, env | [공개 API](#공개-api-tasty-net-ssh)와 [출력 상한](#출력-상한과-세션-수신-루프) | 내장 SSH 백엔드 |
+| 4 | SFTP 연산과 실패 사유 구분 | 연산: `read_dir`(이름·종류·크기·mtime·권한·링크 대상), `metadata`·`symlink_metadata`, `canonicalize`, 범위 읽기(offset·len). `SftpError`는 적어도 `PermissionDenied`·`NotFound`·`SubsystemUnavailable`(서버가 `subsystem` 요청을 거절, 시스템 백엔드는 자식이 SFTP 판 협상 전에 끝남)·`SessionLost`·`Timeout`·`Other{code, message}`(SFTP 상태 코드 그대로)를 가른다. SFTP 상태 코드 `SSH_FX_PERMISSION_DENIED`(3)·`SSH_FX_NO_SUCH_FILE`(2)을 앞의 둘로 옮긴다 | 내장 SSH 백엔드 |
+| 5 | SFTP 쓰기 | 공개 API에 이미 있다. 앱이 쓸지는 앱 쪽 결정 뒤다 | 보류 |
+| 6 | 터널·exec·SFTP가 한 세션을 함께 쓰는 경계 | [용도마다 해석하고 같을 때만 세션을 나눈다](#용도마다-해석하고-같을-때만-세션을-나눈다) | 정해짐 |
+| 6b | attach 없는 일반 SSH 세션의 수명·끊김을 연결 목록과 같은 상태 API로 | 내장 세션(exec·SFTP만 있는 세션 포함)을 [연결 목록](transport.md#연결-목록)의 항목 종류 하나로 더한다(`kind: ssh_session`). 새 목록을 두지 않는 이유: 앱이 같은 `EventStream`·사유·`is_retryable()`로 한 번에 본다. 항목은 세션 키, `session_id`, 그 위 핸들 수(터널·exec·SFTP), 끊김 사유를 가진다. 시스템 백엔드의 exec·SFTP는 자식마다 세션이라 항목이 그 핸들 수명과 같다 | 내장 SSH 백엔드, transport |
+| 11 | 내장 백엔드에서 PowerShell·cmd 포트 발견 | 포트 발견은 두 백엔드가 같은 명령 문자열을 쓴다([포트 발견의 tasty 관례](repo-boundary.md#포트-발견의-tasty-관례)). 차이는 시스템 백엔드가 명령을 `ssh`의 인자로 넘기는 것과 내장 백엔드가 `exec` 요청에 그대로 싣는 것뿐이다. OpenSSH는 인자를 공백으로 이어 한 문자열로 보내므로 같은 문자열이 가야 한다. 시험(위 목록)이 원격 셸 PowerShell·cmd 서버에서 이를 확인한다 | 내장 SSH 백엔드 |
+
+#7·#7b·#8·#9·#10은 FFI 경계 항목이라 [모바일 바인딩 층](mobile.md#android-요구의-자리)에 있다.
 
 ## 후속 작업과 미정
 
@@ -581,5 +600,6 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | 비교 시험의 기준 클라이언트 빌드 | 후속 작업(OpenSSH 해석 이식). 원격 빌드 머신에서 `scripts/install-openssh-ref.sh`가 도는지 처음 확인한다 |
+| android 요구의 세부 API | 후속 작업(내장 SSH 백엔드, 바인딩 크레이트). [android 요구의 자리](#android-요구의-자리) |
 | 내장 세션을 붙들어 두는 시간 | 정하지 않음. 모바일에서 연속 exec마다 인증하는 비용이 문제가 되면 android 요구와 함께 설정값으로 정한다 |
 | tasty 설정 화면의 SSH 항목 | tasty 전환 때. 이 레포 범위 밖 |
