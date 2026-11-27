@@ -1948,9 +1948,10 @@ mod tests {
         ep.close();
     }
 
-    /// From `Off` on the status shows no judgement: the shutdown drops the one of a
-    /// registration the server loop did not clear, and a judgement that ends after `Off` (of
-    /// a link the server loop opened while the shutdown began) does not show.
+    /// From `Off` on the status shows no judgement, by two separate checks judged apart: a
+    /// judgement that ends after `Off` (of a link that is still current and has its limits) is
+    /// stopped by the `Off` check of `server::rejudge` alone, and the shutdown itself drops the
+    /// judgement of a registration the server loop did not clear.
     #[test]
     fn off_shows_no_judgement() {
         use crate::settings::Value;
@@ -1973,10 +1974,13 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
         let judged = lock(&core.reg).nat.clone().expect("judged");
         let limits = lock(&core.reg).limits;
-        // The shutdown begins; the server loop ends its registration.
+        // The shutdown begins; the server loop ends its registration. The test waits for the
+        // whole of that end (the limits too) before it puts its own registration in place, so
+        // the server loop cannot clear the limits the test installs and stop the judgement
+        // below by the limit check instead of the `Off` check.
         core.shutdown.send_replace(true);
         let until = Instant::now() + Duration::from_secs(10);
-        while core.generation().is_some() {
+        while core.generation().is_some() || lock(&core.reg).limits.is_some() {
             assert!(
                 Instant::now() < until,
                 "the server loop cleared the registration"
@@ -1984,8 +1988,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
-        // A link opened while the shutdown began (its welcome set its limits), and its
-        // judgement ending after `Off`.
+        // The `Off` check: a link that is current and has its limits, and its judgement
+        // ending after `Off`; only the `Off` check keeps that judgement out.
         lock(&core.reg).limits = limits;
         let (tx, mut late) = mpsc::unbounded_channel();
         let next = core.open_link(tx);
@@ -1998,7 +2002,8 @@ mod tests {
             "a judgement shows after Off: {s:?}"
         );
         assert!(late.try_recv().is_err(), "no report after Off");
-        // A registration the server loop never cleared: the shutdown drops its judgement.
+        // The shutdown's own end: a registration the server loop never cleared keeps its
+        // judgement until the shutdown drops it.
         lock(&core.reg).nat = Some(judged);
         ep.close();
         let s = ep.status();
