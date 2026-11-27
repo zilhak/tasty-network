@@ -207,6 +207,15 @@ OpenSSH의 `Match command`·`Match sessiontype`은 용도와 명령에 따라 �
 - 그래서 터널과 exec가 `Match command`로 다른 키를 고르는 설정이면 두 세션이 생긴다. 같은 값을 고르면 세션 하나다. transport의 공유 키(대상 레코드)는 세션 키와 따로이고, 같은 공유 키 아래에 세션이 둘일 수 있다.
 - 세션은 그 위 핸들(터널·`SshExec`·`SftpClient`)이 하나라도 살아 있는 동안 유지되고, 마지막 핸들이 닫히면 닫힌다. 세션을 붙들어 두는 시간은 두지 않는다(필요하면 android 요구와 함께 정한다, [후속 작업](#후속-작업과-미정)).
 
+### 포트 발견과 터널의 대상 일치
+
+용도마다 해석하므로 포트 발견과 터널이 `Match command`·`Match sessiontype`으로 다른 대상에 갈 수 있다. 발견한 레코드에는 토큰이 있고, handshake v2는 상대 기기 서명을 확인하기 전에 첫 메시지로 토큰을 보낸다([handshake v2](handshake.md)). 그래서 레코드는 발견과 같은 유효 대상으로 가는 터널에만 쓴다(android 요구 #7+).
+
+- 비교하는 값: 실제 호스트·포트·사용자와 `ProxyJump` 홉마다의 같은 세 값. 세션 키의 첫 두 묶음과 같다(위).
+- 비교하는 자리: 발견 결과로 터널을 만들거나 공유 터널을 다시 쓰고 레코드의 토큰을 넣는 transport 경로(`tasty-net-transport/src/ssh.rs`). 터널을 열거나 다시 쓰기 전, 토큰을 보내기 전에 비교한다. 다시 쓰는 공유 터널은 그 터널을 열 때의 해석 결과와 비교한다. 연결 전 설정 조회(`inspect`)의 결과로는 비교하지 않는다. 실제로 쓴 해석이 아니기 때문이다.
+- 내장 백엔드는 두 용도의 해석 결과를 그대로 비교한다. 시스템 백엔드는 OpenSSH가 용도마다 해석한 값을 이 레포가 보지 못한다. 얻는 방법은 판단을 올렸다([후속 작업](#후속-작업과-미정)).
+- 다르면 연결 시도는 `ConnectError::TargetMismatch`로 끝난다(transport의 새 변형, `ConnectError`는 `#[non_exhaustive]`). 설정이 같으면 다시 걸어도 결과가 같으므로 재시도하지 않는다: `HandshakeError::is_retryable`이 `Connect`에 싸인 이 변형도 `Cancelled`·`PeerTooOld`처럼 false로 본다(`reject.rs:259`). FFI는 같은 이름의 변형으로 넘긴다([모바일 바인딩 층](mobile.md#android-요구의-자리) #7+).
+
 ### 내장 백엔드: 세션 하나에 채널 여럿
 
 | 용도 | SSH 채널 | russh 0.65.4 |
@@ -622,6 +631,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 |---|---|---|---|
 | 1 | 앱이 준 폴더의 OpenSSH 형식 config·키·known_hosts로 접속, 비밀번호·passphrase·keyboard-interactive·호스트 키 확인을 콜백으로 | `embedded.home`·`embedded.ssh_dir`([설정값](#설정값))과 `SshPrompt`. 모르는 지시어 거부와 `@cert-authority` 불신은 [지시어 분류](#지시어-분류)·[호스트 키 판정](#호스트-키-판정)대로 | 내장 SSH 백엔드 |
 | 2 | 키를 파일 대신 메모리 바이트로 주기 | 대상 옵션에 메모리 키 원천을 더한다. 메모리 키는 `IdentityFile`보다 앞에 내민다(OpenSSH의 `-i`와 같은 자리). 바이트는 넘겨받은 뒤 이 레포가 소유하고 세션이 끝나거나 대상이 지워지면 지운다(zeroize). `inspect`·`ConfigNote`·`Debug`·오류에는 키 바이트도 passphrase도 내지 않고 "메모리 키 n개"와 공개키 지문만 낸다. 시스템 백엔드는 메모리 키를 쓸 수 없으므로 그런 대상은 내장 백엔드가 필요하다(`auto`에서 시스템을 고르면 `BackendUnavailable{reason: memory_key}`로 거절, 백엔드를 바꾸지 않는다) | 내장 SSH 백엔드 |
+| 7+ | 포트 발견 대상과 `direct-tcpip` 터널 대상의 일치 | [포트 발견과 터널의 대상 일치](#포트-발견과-터널의-대상-일치). 다르면 `ConnectError::TargetMismatch` | 내장 SSH 백엔드 |
 | 3 | exec: 스트림 또는 상한 있는 수집, 종료 상태, 시간 제한·취소, env | [공개 API](#공개-api-tasty-net-ssh)와 [출력 상한](#출력-상한과-세션-수신-루프) | 내장 SSH 백엔드 |
 | 4 | SFTP 연산과 실패 사유 구분 | 연산: `read_dir`(이름·종류·크기·mtime·권한·링크 대상), `metadata`·`symlink_metadata`, `canonicalize`, 범위 읽기(offset·len). `SftpError`는 적어도 `PermissionDenied`·`NotFound`·`SubsystemUnavailable`·`EndedBeforeSftp{ssh_exit, stderr_tail}`·`SessionLost`·`Timeout`·`Other{code, message}`(SFTP 상태 코드 그대로)를 가른다. `SubsystemUnavailable`은 서버가 `subsystem` 요청을 거절한 것을 원격 출력과 분리된 증거로 확인한 경우만이다: 내장은 그 요청의 `SSH_MSG_CHANNEL_FAILURE`. 시스템은 자식 stderr를 증거로 쓰지 않는다. stderr에는 OpenSSH 자신의 진단과 원격 채널의 stderr(확장 데이터)가 섞이므로, 원격 프로그램이 같은 문구를 쓰고 끝나도 구분할 수 없기 때문이다. 대신 SFTP 자식에 `-E <임시 파일>`을 주어 OpenSSH의 로그를 그 파일로 보낸다(`ssh.c:735`–`:737`, `:1167`–`:1168` `log_redirect_stderr_to`). 원격 stderr는 그 파일에 가지 않는다. 그 파일에 `subsystem request failed on channel` 줄(`clientloop.c:835`–`:846`)이 있을 때만 `SubsystemUnavailable`이고, 그 밖에 SFTP 판 협상 전에 자식이 끝나면(인증 거절, 호스트 키 불일치, 접속 실패, 원격 프로그램이 일찍 끝남, `LogLevel QUIET`) 분류할 수 없는 조기 종료 `EndedBeforeSftp`다. Windows OpenSSH에서 `-E`가 같은지는 확인하지 않았다([후속 작업](#후속-작업과-미정)). 확인되지 않은 판에서는 늘 `EndedBeforeSftp`다. SFTP 상태 코드 `SSH_FX_PERMISSION_DENIED`(3)·`SSH_FX_NO_SUCH_FILE`(2)을 앞의 둘로 옮긴다 | 내장 SSH 백엔드 |
 | 5 | SFTP 쓰기 | 공개 API에 이미 있다. 앱이 쓸지는 앱 쪽 결정 뒤다 | 보류 |
@@ -648,6 +658,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | `ChannelTimeout` 구현 | 후속 작업(내장 SSH 백엔드). 기준판 규칙대로의 종류 패턴(예: `sess*`) 비교와 `0`을 포함한 첫 일치, `global` 타이머의 뜻, 용도마다 다른 `global` 값을 고른 경우의 세션 공유, 시험 |
 | 터널 자식 stderr의 출처 | 후속 작업(내장 SSH 백엔드). 시스템 터널의 `ForkAfterAuthentication` 재시도는 자식 stderr의 문구로 정하는데, 그 stderr에는 로컬 `Match exec` 명령의 출력과 서버의 인증 전 Banner도 섞일 수 있다. 원격 출력과 무관한 증거(8.7 미만 판정과 같은 `ssh -G` 확인 등)로 바꿀지 |
 | 8.7 미만 판정의 기억 수명 | 후속 작업(내장 SSH 백엔드). 같은 경로의 `ssh`가 갱신으로 판이 바뀐 경우, 기억을 프로세스 동안 둘지와 파일이 같은지를 경로만으로 볼지(수정 시각 등도 볼지) |
+| 포트 발견과 터널의 대상 일치 | 후속 작업(내장 SSH 백엔드). 판단필요: 시스템 백엔드가 OpenSSH의 용도별 해석 값을 얻는 방법. (가) 실제 자식과 같은 인자로 용도마다 `ssh -G`를 한 번 더 돌려 `hostname`·`port`·`user`·`proxyjump`를 비교한다. 사용자 설정의 `Match exec`가 한 번 더 돈다. (나) 시스템 백엔드는 비교하지 않고 알려진 한계로 둔다(모바일은 시스템 백엔드가 없다). 추천: (가). OpenSSH가 실제로 해석한 값의 증거는 `ssh -G`뿐이고, 토큰이 다른 대상에 가는 것을 막는 쪽이 `Match exec`가 한 번 더 도는 비용보다 크다. 그 밖에 연결 목록 원인 이름과 시험 |
 | 비교 시험의 로컬 계정 읽기 | 후속 작업(OpenSSH 해석 이식). 실행 계정의 passwd 항목(이름·홈)을 시험이 읽는 방법(Linux·macOS) |
 | 터널 채널이 세션 수신 루프를 멈추는 경우 | 알려진 한계. 로컬 쪽이 읽지 않는 터널 채널은 russh 큐를 채워 같은 세션 전체를 멈춘다. 링크 읽기가 늘 읽으므로 막는 장치를 두지 않는다 |
 | android 요구의 세부 API | 후속 작업(내장 SSH 백엔드, 바인딩 크레이트). [android 요구의 자리](#android-요구의-자리) |

@@ -271,6 +271,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 | 연결 | 연결 열기·닫기, 연결 목록 조회, SSH 세션 목록 조회, `EventStream` | [전송 추상화](transport.md#연결-목록), [SSH 세션 목록](ssh-backends.md#ssh-세션-목록) |
 | SSH exec | 명령 실행, 표준 입력 쓰기, stdout·stderr 읽기, 종료 상태 | [터널·exec·SFTP](ssh-backends.md#터널execsftp) |
 | SFTP | 열기·읽기·쓰기·목록·정보·이름 바꾸기·지우기 | 같다 |
+| 요청 채널 | `RequestClient` 객체(호출·닫기), 상대 `caps` 조회 | [요청 클라이언트](transport.md#요청-클라이언트-dialer-쪽) |
 | 설정 | 설정값 쓰기·조회(`{key, value, source}`), SSH 설정 조회(`SshConnector::inspect`: 백엔드와 선택 이유, 읽은 파일, 거부·미지원 지시어) | 각 크레이트의 설정값 표, [설정 조회](ssh-backends.md#설정-조회) |
 
 ### android 요구의 자리
@@ -285,6 +286,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 5 | SFTP 쓰기 | 앱 쪽 결정 뒤. 보류 |
 | 6b | attach 없는 SSH 세션의 상태 | Rust 쪽은 `tasty-net-ssh`의 [SSH 세션 목록](ssh-backends.md#ssh-세션-목록)이다(transport 연결 목록은 바꾸지 않는다). ffi는 transport 연결 목록과 SSH 세션 목록의 이벤트를 앱에 하나의 `EventStream`으로 합쳐 내고, 이벤트마다 어느 목록의 것인지 종류를 붙인다. 현재 상태를 다시 읽는 조회도 낸다: 연결 목록 조회와 나란히 `SshConnector::sessions()`의 스냅샷을 FFI 조회 API로 낸다. 앱이 이벤트 흐름을 늦게 열었거나 `Lagged{dropped}`를 받은 뒤에는 두 조회로 상태를 다시 맞춘다. 메서드 이름·레코드 필드·보관 상한은 바인딩 크레이트 작업이 정한다 |
 | 7 | 원격 Tasty attach 경로의 노출 범위 | FFI가 내는 것: 대상으로 연결 열기(포트 발견 → `direct-tcpip` → handshake v2는 Rust 안에서 한다), 열린 연결 위 `attach`·`request`·`bulk` 채널 열기, 채널 위 프레임 읽기·쓰기(바이트), 닫기, 연결 레코드의 포트·인스턴스 ID·상대 기기 ID. 프레임의 도메인 해석은 앱·tasty 쪽이다. FFI가 내지 않는 것: 연결 토큰. 토큰은 Rust 안에서 포트 발견 결과에서 handshake로만 간다. FFI 레코드·오류 메시지·`Debug`·이벤트·설정 조회 어디에도 토큰을 싣지 않고, 시험이 그 출력들에 토큰 문자열이 없는지 본다. `PeerTooOld`(숫자 포트만 돌려주는 상대)는 FFI 오류 변형이다 |
+| 7+ | 요청 클라이언트, 상대 `caps`, `ResponseTooLarge`·`PeerTooOld`의 `evidence`, 발견과 터널의 대상 일치 | FFI는 transport의 [요청 클라이언트](transport.md#요청-클라이언트-dialer-쪽)를 객체로 감싸 호출과 닫기를 낸다. 상대 `caps`는 handshake 뒤 그 객체(와 attach 링크)의 조회로 낸다. `dial_request`가 `net.request`를 열기 조건으로 보지 않으므로 첫 호출 전 확인은 앱이 한다. `RequestError`는 변형마다 FFI 변형으로 옮기고 `ResponseTooLarge`를 따로 둔다. `PeerTooOld`는 두 경로(포트 발견의 `ConnectError::PeerTooOld`, handshake의 `HandshakeError::PeerTooOld`. `HandshakeError::Connect`에 싸인 앞의 것도) 모두 같은 FFI 변형에 `evidence`(`PortOnlyDiscovery`·`V1Ack`)를 싣는다. 발견과 터널의 대상이 다르면 [SSH 백엔드](ssh-backends.md#포트-발견과-터널의-대상-일치)의 `TargetMismatch`를 같은 이름의 FFI 변형으로 낸다. 객체·메서드 이름과 값 표현은 바인딩 크레이트 작업이 정한다 |
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
 | 9 | 앱 폴더의 기기 키 | `TastyNet::new`가 키 디렉터리를 받아 `DeviceKey::load_or_create`로 만든다. 비밀키는 FFI로 내지 않고 기기 ID만 낸다. `File::lock`이 Android에서 잠그는지는 연결 레코드 경로의 문제라 따로 확인하고 결과만 기록한다 |
@@ -336,6 +338,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
 | `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 앱 쪽 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
 | tasty 전환 뒤 태그의 모바일 조건 | 후속 작업(모바일 cross check). tasty 전환 태그 뒤의 태그에도 모바일 cross check 통과를 요구할지 |
+| FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, 상대 `caps` 조회를 링크와 요청 클라이언트에 함께 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
 | FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
