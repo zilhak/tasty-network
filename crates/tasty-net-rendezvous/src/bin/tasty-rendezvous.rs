@@ -176,7 +176,7 @@ fn keygen(args: &[String]) -> Result<(), String> {
         _ => return Err(USAGE.to_owned()),
     };
     let existed = dir.join(tasty_net_identity::DEVICE_KEY_FILE).exists();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // The identity crate creates missing directories itself, each at 0700 on Unix.
     let key = DeviceKey::load_or_create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     if existed {
         println!("existing server key kept");
@@ -249,5 +249,24 @@ fn main() -> ExitCode {
             eprintln!("tasty-rendezvous: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn keygen_makes_missing_directories_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::env::temp_dir().join(format!("tasty-rendezvous-keygen-{}", std::process::id()));
+        let dir = base.join("a").join("b");
+        super::keygen(&["--dir".to_owned(), dir.display().to_string()]).unwrap();
+        for d in [base.join("a"), dir.clone()] {
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
+        }
+        assert!(dir.join(tasty_net_identity::DEVICE_KEY_FILE).exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
