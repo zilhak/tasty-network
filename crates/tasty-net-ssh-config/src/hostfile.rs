@@ -1079,14 +1079,17 @@ fn read_lines(path: &Path) -> Option<Vec<u8>> {
     Some(read_lines_from(std::io::BufReader::new(file)))
 }
 
-/// The lines of `reader` up to its end or the first read error; a line cut by the error is
-/// dropped.
+/// The lines of `reader` up to its end or the first read error. The bytes read before the
+/// error are a last line, as glibc `getline` returns them with the error flag set and fails
+/// only on the next call (`getdelim`: it stops at the failed refill and returns what it has).
 fn read_lines_from(mut reader: impl std::io::BufRead) -> Vec<u8> {
     let mut text = Vec::new();
     loop {
         let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(_) if !line.is_empty() => text.extend_from_slice(&line),
+        let read = reader.read_until(b'\n', &mut line);
+        text.extend_from_slice(&line);
+        match read {
+            Ok(_) if !line.is_empty() => {}
             _ => break,
         }
     }
@@ -1187,7 +1190,7 @@ impl KnownHosts {
     /// [`crate::Resolution::known_hosts_files`]). A file that cannot be opened is skipped, as
     /// `load_hostkeys` skips a file it cannot open (`hostfile.c:291`-`:294`). A file is read
     /// line by line as `getline` reads it (`hostfile.c:806`): a read error ends the file and
-    /// keeps the lines read before it.
+    /// keeps the lines read before it, with the bytes of a line it cut as a last line.
     pub fn load(files: &[PathBuf]) -> KnownHosts {
         KnownHosts {
             files: files
@@ -1972,7 +1975,8 @@ mod tests {
 
     #[test]
     fn a_read_error_keeps_the_lines_before_it() {
-        struct Failing(&'static [u8]);
+        /// Gives the bytes, then fails every read.
+        struct Failing(Vec<u8>);
         impl std::io::Read for Failing {
             fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
                 if self.0.is_empty() {
@@ -1980,14 +1984,37 @@ mod tests {
                 }
                 let n = buf.len().min(self.0.len());
                 buf[..n].copy_from_slice(&self.0[..n]);
-                self.0 = &self.0[n..];
+                self.0.drain(..n);
                 Ok(n)
             }
         }
-        let got = read_lines_from(std::io::BufReader::new(Failing(b"one\ntwo\nthr")));
-        assert_eq!(got, b"one\ntwo\n", "the cut line is dropped");
+        let read = |text: &[u8]| read_lines_from(std::io::BufReader::new(Failing(text.to_vec())));
+        assert_eq!(
+            read(b"one\ntwo\nthr"),
+            b"one\ntwo\nthr",
+            "the piece before the error is a last line"
+        );
+        assert_eq!(read(b"one\n"), b"one\n");
+        assert_eq!(read(b""), b"");
         let got = read_lines_from(&b"one\nlast"[..]);
         assert_eq!(got, b"one\nlast", "the last line without a newline is kept");
+        // A last `@revoked` piece before the error revokes, as in `ssh`.
+        let a = ed25519_blob(31);
+        let k = line("ssh-ed25519", &a);
+        let path = PathBuf::from("known_hosts");
+        let kh = KnownHosts {
+            files: vec![(
+                path.clone(),
+                read(format!("h.example {k}\n@revoked h.example {k}").as_bytes()),
+            )],
+        };
+        assert_eq!(
+            kh.check(&q("h.example"), &a),
+            HostKeyVerdict::Revoked {
+                file: path,
+                line: 2
+            }
+        );
     }
 
     #[test]
