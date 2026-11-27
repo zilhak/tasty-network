@@ -148,6 +148,39 @@ fn refusal_names_the_bad_line() {
     assert_eq!(f.keyword.as_deref(), Some("nosuch"));
 }
 
+// Unix only: folder modes.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_folder_is_an_open_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+    const NO_READ: u32 = 0o300;
+    const OPEN: u32 = 0o755;
+    let dir = folder();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).expect("a folder");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(NO_READ)).expect("mode");
+    // A user who can open it anyway (root) cannot see the case.
+    if std::fs::File::open(&sub).is_ok() {
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(OPEN)).expect("mode");
+        return;
+    }
+    let top = write(&dir, "config", &format!("Include {}\n", sub.display()));
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(top),
+    })
+    .expect("load")
+    .resolve("web", &context(Vec::new()));
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(OPEN)).expect("mode");
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(f.keyword.as_deref(), Some("include"));
+    assert!(
+        f.message.contains("Can't open user config file"),
+        "{}",
+        f.message
+    );
+}
+
 // Unix only: the Include names an absolute path.
 #[cfg(unix)]
 #[test]

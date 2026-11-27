@@ -2170,21 +2170,22 @@ pub(crate) struct OpenFile {
 
 impl OpenFile {
     pub(crate) fn open(path: &Path) -> std::io::Result<OpenFile> {
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            // Windows opens a folder only with `FILE_FLAG_BACKUP_SEMANTICS`, which
-            // `File::open` does not ask for. Unix opens it, and it reads as an empty file
-            // there; a folder that does not open is the same empty file.
-            Err(e) => {
-                return match std::fs::metadata(path) {
-                    Ok(meta) if meta.is_dir() => Ok(OpenFile {
-                        file: None,
-                        owner_mode: owner_mode(&meta),
-                    }),
-                    _ => Err(e),
-                };
-            }
-        };
+        let file = std::fs::File::open(path);
+        // Windows opens a folder only with `FILE_FLAG_BACKUP_SEMANTICS`, which `File::open`
+        // does not ask for. Unix opens it, and it reads as an empty file there, so on Windows
+        // a folder that does not open is the same empty file. On Unix a folder that does not
+        // open (no read permission) is an open error, as `fopen` fails for OpenSSH.
+        #[cfg(windows)]
+        if file.is_err()
+            && let Ok(meta) = std::fs::metadata(path)
+            && meta.is_dir()
+        {
+            return Ok(OpenFile {
+                file: None,
+                owner_mode: owner_mode(&meta),
+            });
+        }
+        let file = file?;
         let meta = file.metadata()?;
         Ok(OpenFile {
             file: Some(file),
