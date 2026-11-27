@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use crate::close::P2pCloseReason;
 use crate::conn::{ConnInner, P2pCancel};
-use crate::endpoint::{AcceptSession, Core, Incoming, PunchSignal, RequestOutcome, lock};
+use crate::endpoint::{AcceptSession, Core, Incoming, PunchKey, PunchSignal, RequestOutcome, lock};
 use crate::error::P2pConnectError;
 use crate::events::{AttemptPhase, Cause, CauseDetail, EndpointPhase};
 use crate::info::{AppliedSetting, NatInfo, Side, Tracked};
@@ -135,14 +135,14 @@ impl Fail {
 /// also when its future is dropped (cancel).
 struct Cleanup {
     core: Arc<Core>,
-    punch_id: Option<u64>,
+    punch: Option<PunchKey>,
     session: Option<Arc<ProbeSession>>,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Some(id) = self.punch_id {
-            lock(&self.core.punches).remove(&id);
+        if let Some(key) = self.punch {
+            lock(&self.core.punches).remove(&key);
         }
         if let Some(s) = &self.session {
             self.core.router.remove_session(s);
@@ -176,12 +176,17 @@ async fn next_cancel(rx: &mut mpsc::UnboundedReceiver<PunchSignal>) -> CancelRea
     }
 }
 
-fn result(core: &Core, punch_id: u64, reason: Option<ResultReason>) {
-    let _sent = core.send(DeviceMessage::PunchResult(PunchResult {
-        punch_id,
-        ok: reason.is_none(),
-        reason,
-    }));
+/// Report a punch's end to the server it came from; after that registration ended, nothing is
+/// sent (docs/design/p2p.md "조정 연결을 잃으면").
+fn result(core: &Core, (generation, punch_id): PunchKey, reason: Option<ResultReason>) {
+    let _sent = core.send_on(
+        generation,
+        DeviceMessage::PunchResult(PunchResult {
+            punch_id,
+            ok: reason.is_none(),
+            reason,
+        }),
+    );
 }
 
 fn refused(reason: RefuseReason) -> Fail {
@@ -343,16 +348,22 @@ async fn punch_once(
     let request_id = core
         .next_request
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let Some(generation) = core.generation() else {
+        return Err(fail(Fail::new(
+            P2pConnectError::RendezvousLost,
+            "rendezvous_lost",
+        )));
+    };
     let (tx, rx) = oneshot::channel();
     lock(&core.requests).insert(request_id, tx);
     let asked = Asked {
         core: core.clone(),
         request_id,
     };
-    if !core.send(DeviceMessage::PunchRequest(PunchRequest {
-        request_id,
-        peer,
-    })) {
+    if !core.send_on(
+        generation,
+        DeviceMessage::PunchRequest(PunchRequest { request_id, peer }),
+    ) {
         return Err(fail(Fail::new(
             P2pConnectError::RendezvousLost,
             "rendezvous_lost",
@@ -378,7 +389,7 @@ async fn punch_once(
     let mode = Some(go.mode);
     let mut cleanup = Cleanup {
         core: core.clone(),
-        punch_id: Some(go.punch_id),
+        punch: Some((generation, go.punch_id)),
         session: None,
     };
     t.update(|r| {
@@ -391,7 +402,11 @@ async fn punch_once(
     });
     t.to(AttemptPhase::Scheduled, Cause::named("punch_go"));
     if let Some(key) = go_limits_invalid(p, limits, &go) {
-        result(core, go.punch_id, Some(ResultReason::LimitsInvalid));
+        result(
+            core,
+            (generation, go.punch_id),
+            Some(ResultReason::LimitsInvalid),
+        );
         return Err((
             mode,
             Retry::Fail(Fail::new(
@@ -445,7 +460,7 @@ async fn punch_once(
         r = next_cancel(&mut signals) => return Err(on_cancel(r)),
     };
     let Some(found) = found else {
-        result(core, go.punch_id, Some(ResultReason::Timeout));
+        result(core, (generation, go.punch_id), Some(ResultReason::Timeout));
         return Err((mode, Retry::Again(Cause::named("punch_window_elapsed"))));
     };
     t.update(|r| r.info.remote_candidate = Some(found));
@@ -477,11 +492,15 @@ async fn punch_once(
     };
     let conn = match conn {
         Err(_) => {
-            result(core, go.punch_id, Some(ResultReason::Timeout));
+            result(core, (generation, go.punch_id), Some(ResultReason::Timeout));
             return Err((mode, Retry::Again(Cause::named("handshake_timeout"))));
         }
         Ok(Err(e)) => {
-            result(core, go.punch_id, Some(ResultReason::HandshakeFailed));
+            result(
+                core,
+                (generation, go.punch_id),
+                Some(ResultReason::HandshakeFailed),
+            );
             return Err(match tls_stage(&e) {
                 Some(TlsStage::KeyRefused) => (
                     mode,
@@ -499,7 +518,7 @@ async fn punch_once(
         }
         Ok(Ok(c)) => c,
     };
-    result(core, go.punch_id, None);
+    result(core, (generation, go.punch_id), None);
     drop(cleanup);
     let wrapped = ConnInner::new(conn.clone(), t.id, peer);
     t.update(|r| r.conn = Some(conn.clone()));
@@ -515,13 +534,14 @@ async fn punch_once(
 }
 
 /// The acceptor (B) of `punch_offer{punch_id, from}`.
-pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
+pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from: DeviceId) {
     let p = &core.params;
+    let key: PunchKey = (generation, punch_id);
     let (sig_tx, mut signals) = mpsc::unbounded_channel();
-    lock(&core.punches).insert(punch_id, sig_tx);
+    lock(&core.punches).insert(key, sig_tx);
     let mut cleanup = Cleanup {
         core: core.clone(),
-        punch_id: Some(punch_id),
+        punch: Some(key),
         session: None,
     };
     let (mismatch, limits, local_nat, reflexive) = {
@@ -545,11 +565,14 @@ pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
         },
     );
     let answer = |accept: bool, reason: Option<AnswerReason>| {
-        core.send(DeviceMessage::PunchAnswer(PunchAnswer {
-            punch_id,
-            accept,
-            reason,
-        }))
+        core.send_on(
+            generation,
+            DeviceMessage::PunchAnswer(PunchAnswer {
+                punch_id,
+                accept,
+                reason,
+            }),
+        )
     };
     let (Some(limits), None) = (limits, mismatch) else {
         answer(false, Some(AnswerReason::LimitsInvalid));
@@ -591,7 +614,7 @@ pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
     });
     t.to(AttemptPhase::Scheduled, Cause::named("punch_go"));
     if go_limits_invalid(p, &limits, &go).is_some() {
-        result(&core, punch_id, Some(ResultReason::LimitsInvalid));
+        result(&core, key, Some(ResultReason::LimitsInvalid));
         t.to(AttemptPhase::Closed, Cause::named("server_limits_invalid"));
         return;
     }
@@ -652,14 +675,14 @@ pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
                             P2pCloseReason::NotPaired.var_int(),
                             P2pCloseReason::NotPaired.reason(),
                         );
-                        result(&core, punch_id, Some(ResultReason::HandshakeFailed));
+                        result(&core, key, Some(ResultReason::HandshakeFailed));
                         t.to(
                             AttemptPhase::Closed,
                             Cause::with("not_paired", CauseDetail::Close(P2pCloseReason::NotPaired)),
                         );
                         return;
                     }
-                    result(&core, punch_id, None);
+                    result(&core, key, None);
                     drop(cleanup);
                     let addr = crate::socket::canonical(conn.remote_address());
                     let wrapped = ConnInner::new(conn.clone(), t.id, from);
@@ -682,7 +705,7 @@ pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
             },
             () = tokio::time::sleep_until(accept_until), if pending == usize::MIN => {
                 probes.abort();
-                result(&core, punch_id, Some(ResultReason::Timeout));
+                result(&core, key, Some(ResultReason::Timeout));
                 t.to(AttemptPhase::Closed, Cause::named("accept_deadline_elapsed"));
                 return;
             }

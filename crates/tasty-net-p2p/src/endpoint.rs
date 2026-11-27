@@ -145,11 +145,16 @@ pub(crate) struct Registration {
     pub(crate) registered_since: Option<Instant>,
 }
 
-/// The current coordination connection's writer.
+/// The current coordination connection's writer, with the number of its registration.
 #[derive(Debug, Clone)]
 pub(crate) struct Link {
     pub(crate) tx: mpsc::UnboundedSender<DeviceMessage>,
+    pub(crate) generation: u64,
 }
+
+/// A punch's key: the registration its server messages came on and the server's punch number.
+/// A server that starts again numbers its punches anew.
+pub(crate) type PunchKey = (u64, u64);
 
 /// The endpoint's shared state.
 pub(crate) struct Core {
@@ -177,7 +182,9 @@ pub(crate) struct Core {
     pub(crate) reg_changed: watch::Sender<u64>,
     pub(crate) link: Mutex<Option<Link>>,
     pub(crate) requests: Mutex<HashMap<u64, oneshot::Sender<RequestOutcome>>>,
-    pub(crate) punches: Mutex<HashMap<u64, mpsc::UnboundedSender<PunchSignal>>>,
+    pub(crate) punches: Mutex<HashMap<PunchKey, mpsc::UnboundedSender<PunchSignal>>>,
+    /// The number of the last registration.
+    generations: AtomicU64,
     pub(crate) next_request: AtomicU64,
     pub(crate) accepting: Mutex<Vec<AcceptSession>>,
     pub(crate) accepted_tx: mpsc::UnboundedSender<Arc<ConnInner>>,
@@ -312,11 +319,24 @@ impl Core {
         }
     }
 
-    /// Send a message on the coordination connection; whether there is one.
-    pub(crate) fn send(&self, msg: DeviceMessage) -> bool {
+    /// Send a message on the coordination connection of registration `generation` only: work
+    /// begun on an earlier registration does not reach the next one.
+    pub(crate) fn send_on(&self, generation: u64, msg: DeviceMessage) -> bool {
         lock(&self.link)
             .as_ref()
-            .is_some_and(|l| l.tx.send(msg).is_ok())
+            .is_some_and(|l| l.generation == generation && l.tx.send(msg).is_ok())
+    }
+
+    /// The number of the current registration, if there is one.
+    pub(crate) fn generation(&self) -> Option<u64> {
+        lock(&self.link).as_ref().map(|l| l.generation)
+    }
+
+    /// Make `tx` the writer of a new registration; its number.
+    pub(crate) fn open_link(&self, tx: mpsc::UnboundedSender<DeviceMessage>) -> u64 {
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
+        *lock(&self.link) = Some(Link { tx, generation });
+        generation
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
@@ -569,6 +589,7 @@ impl P2pEndpoint {
             link: Mutex::new(None),
             requests: Mutex::default(),
             punches: Mutex::default(),
+            generations: AtomicU64::new(u64::MIN),
             next_request: AtomicU64::new(u64::MIN),
             accepting: Mutex::default(),
             accepted_tx,
@@ -1159,29 +1180,33 @@ mod tests {
         });
     }
 
-    /// A dial cancelled while it waits for `punch_go` leaves no request waiter behind, and a
-    /// `punch_go` for it that comes after the cancel leaves no punch channel behind.
-    #[test]
-    fn a_cancelled_request_leaves_no_waiter_behind() {
-        use tasty_net_rendezvous::wire::message::{
-            NatMapping, PunchGo, PunchMode, PunchToken, Role, ServerMessage,
-        };
-        let peer = DeviceKey::from_seed([22; 32]).id();
+    /// An endpoint whose server is never reached, with the test standing in for its
+    /// registration: the coordination messages it sends come out of the receiver.
+    struct StandIn {
+        ep: P2pEndpoint,
+        core: Arc<Core>,
+        generation: u64,
+        rx: mpsc::UnboundedReceiver<DeviceMessage>,
+    }
+
+    fn stand_in(seed: u8, peer: DeviceId, settings: &[(&str, crate::settings::Value)]) -> StandIn {
         let pairing = Arc::new(crate::pairing::PairingList::new());
         pairing.add(peer);
-        let mut config = P2pConfig::new(DeviceKey::from_seed([21; 32]), pairing);
+        let mut config = P2pConfig::new(DeviceKey::from_seed([seed; 32]), pairing);
         config.enabled = true;
         config.server = Some(RendezvousServer {
             addr: "192.0.2.10:3478".parse().unwrap(),
-            public_key: DeviceKey::from_seed([23; 32]).id(),
+            public_key: DeviceKey::from_seed([seed.wrapping_add(100); 32]).id(),
         });
         config.packet_io = Some(Arc::new(crate::probe::tests_support::Sink));
-        // The server is never reached: registration stays Connecting while the test stands
-        // in for it.
+        // Registration stays Connecting while the test stands in for it.
         config.settings.set(
             "rendezvous.connect_timeout",
             crate::settings::Value::Duration(Duration::from_secs(60)),
         );
+        for (key, value) in settings {
+            config.settings.set(key, value.clone());
+        }
         let ep = P2pEndpoint::bind(config).expect("bind");
         let core = ep.core().unwrap().clone();
         let until = Instant::now() + Duration::from_secs(10);
@@ -1189,7 +1214,6 @@ mod tests {
             assert!(Instant::now() < until, "connecting");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let (tx, mut rx) = mpsc::unbounded_channel();
         {
             let mut r = lock(&core.reg);
             r.phase = Some(EndpointPhase::Registered);
@@ -1204,16 +1228,70 @@ mod tests {
                 max_message_bytes: 65_536,
             });
         }
-        *lock(&core.link) = Some(Link { tx });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let generation = core.open_link(tx);
+        StandIn {
+            ep,
+            core,
+            generation,
+            rx,
+        }
+    }
+
+    /// The next coordination message within ten seconds.
+    fn next_sent(rx: &mut mpsc::UnboundedReceiver<DeviceMessage>) -> DeviceMessage {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(m) = rx.try_recv() {
+                return m;
+            }
+            assert!(Instant::now() < until, "no message");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn punch_go(punch_id: u64, request_id: Option<u64>, peer: DeviceId) -> PunchGo {
+        PunchGo {
+            punch_id,
+            request_id,
+            peer,
+            role: if request_id.is_some() {
+                Role::Controlling
+            } else {
+                Role::Controlled
+            },
+            mode: PunchMode::All,
+            candidates: Vec::new(),
+            peer_nat: NatMapping::default(),
+            token_local: PunchToken([1; 16]),
+            token_peer: PunchToken([2; 16]),
+            start_after_ms: 0,
+            window_ms: 300,
+            handshake_ms: 300,
+        }
+    }
+
+    use tasty_net_rendezvous::wire::message::{
+        CancelReason, NatMapping, PunchCancel, PunchGo, PunchMode, PunchOffer, PunchToken, Role,
+        ServerMessage,
+    };
+
+    /// A dial cancelled while it waits for `punch_go` leaves no request waiter behind, and a
+    /// `punch_go` for it that comes after the cancel leaves no punch channel behind.
+    #[test]
+    fn a_cancelled_request_leaves_no_waiter_behind() {
+        let peer = DeviceKey::from_seed([22; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(21, peer, &[]);
         let cancel = P2pCancel::new();
         let request_id = std::thread::scope(|s| {
             let dial = s.spawn(|| ep.connect_with_cancel(peer, &cancel));
-            let asked = loop {
-                assert!(Instant::now() < until, "punch_request");
-                match rx.try_recv() {
-                    Ok(DeviceMessage::PunchRequest(r)) => break r.request_id,
-                    Ok(_) | Err(_) => std::thread::sleep(Duration::from_millis(5)),
-                }
+            let DeviceMessage::PunchRequest(asked) = next_sent(&mut rx) else {
+                panic!("punch_request first");
             };
             assert_eq!(lock(&core.requests).len(), 1);
             cancel.cancel();
@@ -1222,27 +1300,87 @@ mod tests {
                 r.err().and_then(|e| e.connect_error().copied()),
                 Some(P2pConnectError::Cancelled)
             );
-            asked
+            asked.request_id
         });
         assert!(lock(&core.requests).is_empty());
-        let go = PunchGo {
-            punch_id: 7,
-            request_id: Some(request_id),
-            peer,
-            role: Role::Controlling,
-            mode: PunchMode::All,
-            candidates: Vec::new(),
-            peer_nat: NatMapping::default(),
-            token_local: PunchToken([1; 16]),
-            token_peer: PunchToken([2; 16]),
-            start_after_ms: 0,
-            window_ms: 1_000,
-            handshake_ms: 1_000,
-        };
         let _enter = core.handle.enter();
-        crate::server::dispatch(&core, ServerMessage::PunchGo(go));
+        crate::server::dispatch(
+            &core,
+            generation,
+            ServerMessage::PunchGo(punch_go(7, Some(request_id), peer)),
+        );
         assert!(lock(&core.punches).is_empty());
         drop(_enter);
+        ep.close();
+    }
+
+    /// A punch the acceptor took from one registration belongs to it: after the endpoint
+    /// registers again, a cancel with the same punch number from the new server does not end
+    /// it, and its result is not sent to the new server (docs/design/p2p.md "조정 연결을
+    /// 잃으면").
+    #[test]
+    fn a_punch_of_an_earlier_registration_stays_with_it() {
+        let peer = DeviceKey::from_seed([25; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(24, peer, &[]);
+        {
+            let _enter = core.handle.enter();
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchOffer(PunchOffer {
+                    punch_id: 5,
+                    from: peer,
+                }),
+            );
+        }
+        let DeviceMessage::PunchAnswer(answer) = next_sent(&mut rx) else {
+            panic!("punch_answer first");
+        };
+        assert!(answer.accept);
+        {
+            let _enter = core.handle.enter();
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchGo(punch_go(5, None, peer)),
+            );
+        }
+        // Registered again: the server numbers its punches anew.
+        let (tx, mut again) = mpsc::unbounded_channel();
+        let next = core.open_link(tx);
+        assert_ne!(next, generation);
+        crate::server::dispatch(
+            &core,
+            next,
+            ServerMessage::PunchCancel(PunchCancel {
+                punch_id: 5,
+                reason: CancelReason::Expired,
+            }),
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let closed = loop {
+            assert!(Instant::now() < until, "the attempt ends");
+            let ended = ep.events().into_iter().find_map(|e| match e {
+                P2pEvent::Transition {
+                    subject: crate::events::Subject::Connection(_),
+                    to: Phase::Attempt(AttemptPhase::Closed),
+                    cause,
+                    ..
+                } => Some(cause.name),
+                _ => None,
+            });
+            if let Some(name) = ended {
+                break name;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(closed, "accept_deadline_elapsed");
+        assert!(again.try_recv().is_err(), "nothing sent to the new server");
         ep.close();
     }
 }

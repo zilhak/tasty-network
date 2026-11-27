@@ -16,7 +16,7 @@ use tasty_net_rendezvous::wire::message::{
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::endpoint::{Core, Link, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
+use crate::endpoint::{Core, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
 use crate::error::StopCause;
 use crate::events::{Cause, CauseDetail, EndpointPhase};
 use crate::nat::{self, NatJudgement};
@@ -295,7 +295,7 @@ async fn registered(
         r.registered_since = Some(Instant::now());
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<DeviceMessage>();
-    *lock(&core.link) = Some(Link { tx });
+    let generation = core.open_link(tx);
     let server_limit = welcome.limits.max_message_bytes;
     core.endpoint_to(EndpointPhase::Registered, Cause::named("registered"));
     if let Some(key) = mismatch {
@@ -338,7 +338,7 @@ async fn registered(
             }
             r = msg_rx.recv() => match r {
                 Some(Ok(Some(body))) => match ServerMessage::parse(&body) {
-                    Ok(m) => dispatch(core, m),
+                    Ok(m) => dispatch(core, generation, m),
                     Err(e) => break close_malformed(conn, e),
                 },
                 Some(Ok(None)) | Some(Err(FrameError::Io(_))) | None => {
@@ -453,7 +453,8 @@ fn limits_detail(core: &Core, key: &'static str, l: &Limits) -> CauseDetail {
     }
 }
 
-pub(crate) fn dispatch(core: &Arc<Core>, m: ServerMessage) {
+/// Act on a message of the server of registration `generation`.
+pub(crate) fn dispatch(core: &Arc<Core>, generation: u64, m: ServerMessage) {
     match m {
         ServerMessage::Welcome(_) => debug!("a second welcome ignored"),
         ServerMessage::ReflexiveChanged(c) => {
@@ -472,24 +473,29 @@ pub(crate) fn dispatch(core: &Arc<Core>, m: ServerMessage) {
                     // follows at once is not lost.
                     let (sig_tx, sig_rx) = tokio::sync::mpsc::unbounded_channel();
                     let punch_id = go.punch_id;
-                    lock(&core.punches).insert(punch_id, sig_tx);
+                    lock(&core.punches).insert((generation, punch_id), sig_tx);
                     if tx.send(RequestOutcome::Go(go, sig_rx)).is_err() {
                         // The dialer gave the request up: nothing will remove the channel.
-                        lock(&core.punches).remove(&punch_id);
+                        lock(&core.punches).remove(&(generation, punch_id));
                     }
                 }
             }
             None => {
-                if let Some(tx) = lock(&core.punches).get(&go.punch_id) {
+                if let Some(tx) = lock(&core.punches).get(&(generation, go.punch_id)) {
                     let _sent = tx.send(PunchSignal::Go(go)).is_ok();
                 }
             }
         },
         ServerMessage::PunchOffer(o) => {
-            tokio::spawn(crate::attempt::accept(core.clone(), o.punch_id, o.from));
+            tokio::spawn(crate::attempt::accept(
+                core.clone(),
+                generation,
+                o.punch_id,
+                o.from,
+            ));
         }
         ServerMessage::PunchCancel(c) => {
-            if let Some(tx) = lock(&core.punches).get(&c.punch_id) {
+            if let Some(tx) = lock(&core.punches).get(&(generation, c.punch_id)) {
                 let _sent = tx.send(PunchSignal::Cancel(c.reason)).is_ok();
             }
         }
@@ -498,7 +504,11 @@ pub(crate) fn dispatch(core: &Arc<Core>, m: ServerMessage) {
 
 /// Judge the NAT again and report it (after registering, after `reflexive_changed`, before a
 /// punch retry). Returns the judgement.
+///
+/// A judgement begun on one registration is not written to the next one: the server it
+/// reports to and the STUN servers it asked belong to the registration it began on.
 pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
+    let generation = core.generation();
     let targets: Vec<_> = {
         let r = lock(&core.reg);
         std::iter::once(core.server.addr)
@@ -527,6 +537,10 @@ pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
     });
     let changed = {
         let mut r = lock(&core.reg);
+        if core.generation() != generation {
+            debug!("a judgement of an earlier registration dropped");
+            return j;
+        }
         let before = r
             .nat
             .as_ref()
@@ -535,7 +549,8 @@ pub(crate) async fn rejudge(core: Arc<Core>) -> NatJudgement {
         r.nat = Some(j.clone());
         changed && r.phase == Some(EndpointPhase::Registered)
     };
-    if core.send(report) && changed {
+    let sent = generation.is_some_and(|g| core.send_on(g, report));
+    if sent && changed {
         core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
     }
     j
