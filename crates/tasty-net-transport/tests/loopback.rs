@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tasty_net_frame::{ReadFailure, StreamTag};
 use tasty_net_identity::ConnectionToken;
 use tasty_net_transport::{
-    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelControl,
+    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, Cause, ChannelControl,
     ConnectError, Connection, ConnectionInfo, ConnectionState, ConnectionTable, DialAuth,
     Direction, DomainAccept, DomainPolicy, DomainReject, EdgeTransport, Endpoint, EndpointHandle,
     HandshakeError, Holder, LinkTimeouts, MAX_HANDSHAKE_LINE, P2pCloseReason, Phase, RawChannel,
@@ -275,6 +275,16 @@ fn accept_n(
     drain_cap: Duration,
     n: usize,
 ) -> (SocketAddr, std::thread::JoinHandle<Timed>) {
+    accept_n_reporting(take_bulk, drain_cap, n, None)
+}
+
+/// [`accept_n`] that reports its channels in `table`.
+fn accept_n_reporting(
+    take_bulk: bool,
+    drain_cap: Duration,
+    n: usize,
+    table: Option<ConnectionTable>,
+) -> (SocketAddr, std::thread::JoinHandle<Timed>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let config = AcceptConfig::new(
@@ -287,6 +297,10 @@ fn accept_n(
         drain_cap,
         ..timeouts()
     });
+    let config = match table {
+        Some(table) => config.with_connections(table),
+        None => config,
+    };
     let handle = std::thread::spawn(move || {
         (0..n)
             .map(|_| {
@@ -340,6 +354,49 @@ fn a_dropped_bulk_channel_closes_its_socket_under_a_live_parent() {
         started.elapsed()
     );
     drop(link);
+}
+
+/// The end of the parent link closes a bulk channel the consumer still holds, and its entry
+/// ends with it.
+#[test]
+fn a_parent_end_ends_the_entry_of_a_bulk_channel_still_held() {
+    let table = ConnectionTable::default();
+    let (addr, acceptor) =
+        accept_n_reporting(true, Duration::from_millis(500), 2, Some(table.clone()));
+    let transport = Loopback {
+        addr,
+        token: token('a'),
+    };
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let bulk = link.open_bulk(None).expect("bulk");
+    let mut accepted = acceptor.join().expect("acceptor").into_iter();
+    let parent = accepted.next().expect("parent").0.expect("parent link");
+    let far_bulk = match accepted.next().expect("bulk").0 {
+        Ok(Accepted::Bulk(bulk)) => bulk,
+        other => panic!("{other:?}"),
+    };
+    let entries = table.connections();
+    assert_eq!(entries.len(), 2, "{entries:#?}");
+    let (parent_id, bulk_id) = (entries[0].id, entries[1].id);
+    assert_eq!(entries[1].parent, Some(parent_id));
+    assert_eq!(entries[1].state, ConnectionState::Connected);
+
+    drop(parent);
+    wait_for(&table, "the bulk entry ends with its parent", |e| {
+        e.iter()
+            .filter(|i| i.id == bulk_id || i.id == parent_id)
+            .all(|i| i.state == ConnectionState::Disconnected)
+    });
+    let ended = table.connection(bulk_id).expect("kept");
+    assert_eq!(ended.bulk_channels, 0);
+    assert_eq!(
+        ended.last_cause,
+        Some(Cause::ClosedHere),
+        "the parent was closed here"
+    );
+    drop((far_bulk, bulk, link));
 }
 
 /// A refused bulk attempt closes the dialer's socket, so the accepting end's linger after the

@@ -554,19 +554,20 @@ impl EntryRef {
         });
     }
 
-    /// A bulk or request channel stands on the entry (counted until it ends); the entry is
-    /// `connected`.
+    /// A bulk or request channel stands on the entry (counted until it ends, or until its
+    /// `parent` link ends, which closes it); the entry is `connected`.
     pub(crate) fn channel_up(
         &self,
         kind: Counted,
         peer: &PeerInfo,
         closer: &LinkCloser,
+        parent: Option<&LinkCloser>,
         timeouts: &LinkTimeouts,
     ) {
         self.update(|info| *counter(info, kind) += 1);
         self.peer_up(peer, timeouts);
         let entry = self.clone();
-        on_end(closer, move |_| {
+        on_end_under(closer, parent, move |_| {
             entry.update(|info| {
                 let n = counter(info, kind);
                 *n = n.saturating_sub(1);
@@ -574,10 +575,11 @@ impl EntryRef {
         });
     }
 
-    /// Ends the entry (see [`EntryRef::end`]) when the link or channel of `closer` ends.
-    pub(crate) fn end_with(&self, closer: &LinkCloser) {
+    /// Ends the entry (see [`EntryRef::end`]) when the link or channel of `closer` ends, or
+    /// when its `parent` link ends, which closes it.
+    pub(crate) fn end_with(&self, closer: &LinkCloser, parent: Option<&LinkCloser>) {
         let entry = self.clone();
-        on_end(closer, move |cause| entry.end(cause));
+        on_end_under(closer, parent, move |cause| entry.end(cause));
     }
 
     /// The link of `closer` is on the entry: when it ends, the entry keeps its cause.
@@ -617,10 +619,30 @@ fn counter(info: &mut ConnectionInfo, kind: Counted) -> &mut u64 {
 /// Runs `f` with the end's cause once, when the link of `closer` ends or, if it never ends,
 /// when its closer is dropped.
 fn on_end(closer: &LinkCloser, f: impl FnOnce(Cause) + Send + 'static) {
+    on_end_under(closer, None, f);
+}
+
+/// [`on_end`] for a channel under the link of `parent`: the parent's end closes the channel
+/// without ending its own closer (a consumer may still hold it), so it also runs `f`, with
+/// the parent's cause. The parent holds the mark weakly and so does not keep it.
+fn on_end_under(
+    closer: &LinkCloser,
+    parent: Option<&LinkCloser>,
+    f: impl FnOnce(Cause) + Send + 'static,
+) {
     let mark = Arc::new(EndMark {
         run: Mutex::new(Some(Box::new(f))),
         watch: closer.watch(),
     });
+    if let Some(parent) = parent {
+        let weak = Arc::downgrade(&mark);
+        let watch = parent.watch();
+        parent.on_end(Box::new(move || {
+            if let Some(mark) = weak.upgrade() {
+                mark.fire_by(&watch);
+            }
+        }));
+    }
     closer.on_end(Box::new(move || mark.fire()));
 }
 
@@ -634,13 +656,18 @@ struct EndMark {
 
 impl EndMark {
     fn fire(&self) {
+        self.fire_by(&self.watch);
+    }
+
+    /// Runs the function with the cause `watch` reads.
+    fn fire_by(&self, watch: &crate::end::CloserWatch) {
         let Some(run) = lock(&self.run).take() else {
             return;
         };
-        let cause = match self.watch.raised() {
+        let cause = match watch.raised() {
             Some(EndReason::Lost) => Cause::Lost,
             // A link whose read failed first was lost, though this side closed it after.
-            Some(EndReason::Forced) if self.watch.lost_seen() => Cause::Lost,
+            Some(EndReason::Forced) if watch.lost_seen() => Cause::Lost,
             Some(EndReason::Forced) => Cause::ClosedHere,
             None => Cause::Ended,
         };

@@ -910,3 +910,34 @@ fn a_link_lost_under_a_live_tunnel_ends_as_lost_and_is_redialed() {
     });
     assert!(attempted, "{result:?}");
 }
+
+#[test]
+fn a_parent_end_uncounts_a_bulk_channel_still_held() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("held-bulk");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    // A second link keeps the tunnel and its entry.
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let second = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let bulk = link.open_bulk(None).expect("bulk");
+    let id = table.connections()[0].id;
+    assert_eq!(table.connection(id).map(|e| e.bulk_channels), Some(1));
+
+    drop(link);
+    wait_until("the bulk channel is no longer counted", || {
+        table.connection(id).is_some_and(|e| e.bulk_channels == 0)
+    });
+    let entry = table.connection(id).expect("the entry");
+    assert_eq!(
+        entry.state,
+        ConnectionState::Connected,
+        "the second link keeps it"
+    );
+    assert_eq!(entry.links.len(), 1);
+    drop((bulk, second));
+}

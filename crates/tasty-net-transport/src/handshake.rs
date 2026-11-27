@@ -921,7 +921,7 @@ pub fn dial_request(
     let client = dial_request_on(conn, config, cancel);
     match (&client, &entry) {
         (Ok((_, closer, peer)), Some(entry)) => {
-            entry.channel_up(Counted::Request, peer, closer, &config.timeouts);
+            entry.channel_up(Counted::Request, peer, closer, None, &config.timeouts);
         }
         (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
         (_, None) => {}
@@ -1008,7 +1008,13 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         .framed(&config.timeouts.channel(config.heartbeat))
         .map_err(HandshakeError::Io)?;
     if let Some(entry) = entry {
-        entry.channel_up(Counted::Bulk, &link.peer, &framed.closer, &config.timeouts);
+        entry.channel_up(
+            Counted::Bulk,
+            &link.peer,
+            &framed.closer,
+            Some(&link.closer),
+            &config.timeouts,
+        );
     }
     Ok(BulkChannel {
         reader: framed.reader,
@@ -1244,9 +1250,10 @@ fn accept_on(
                 Counted::Bulk,
                 &parent.peer,
                 &framed.closer,
+                Some(&parent.closer),
                 &config.timeouts,
             );
-            entry.end_with(&framed.closer);
+            entry.end_with(&framed.closer, Some(&parent.closer));
         }
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
@@ -1317,8 +1324,14 @@ fn accept_on(
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
         if let Some(entry) = &started.entry {
-            entry.channel_up(Counted::Request, &peer, &framed.closer, &config.timeouts);
-            entry.end_with(&framed.closer);
+            entry.channel_up(
+                Counted::Request,
+                &peer,
+                &framed.closer,
+                None,
+                &config.timeouts,
+            );
+            entry.end_with(&framed.closer, None);
         }
         return Ok(Accepted::Request(RequestServer {
             reader: framed.reader,
@@ -1419,7 +1432,7 @@ fn accept_on(
     let link_id = LinkId::of_credential(&credential);
     if let Some(entry) = &started.entry {
         entry.link_up(&peer, link_id, &closer, &config.timeouts);
-        entry.end_with(&closer);
+        entry.end_with(&closer, None);
     }
     Ok(Accepted::Link(Box::new(Link {
         ordered_shared,
