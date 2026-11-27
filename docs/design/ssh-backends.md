@@ -408,7 +408,7 @@ OpenSSH와 같은 형식을 같은 뜻으로 읽는다(이식 크레이트). 위
 | ssh-agent | `IdentityAgent`, 없으면 `SSH_AUTH_SOCK`. Windows는 `\\.\pipe\openssh-ssh-agent`와 Pageant | russh `AgentClient`. 소켓이 없으면 agent 인증을 건너뛰고 `ConfigNote`로 남긴다 |
 
 - `<ssh 폴더>`는 설정값 `embedded.ssh_dir`이다. 기본은 `~/.ssh`(`~`는 `embedded.home`)다. 모바일은 바인딩 층이 앱 저장소의 `ssh/` 폴더를 `configured`로 넣는다(tasty 설정으로 덮어쓸 수 있다).
-- `~` 펼침: 설정 파일 안의 `~/.ssh/` 로 시작하는 경로는 `<ssh 폴더>/`로, 그 밖의 `~/`는 `embedded.home`으로 펼친다. `embedded.ssh_dir`이 기본값이면 OpenSSH와 같다. 홈을 알 수 없고 설정도 없으면 `~`가 든 경로는 없는 파일로 다룬다.
+- `~` 펼침: 설정 파일 안의 `~/.ssh/` 로 시작하는 경로는 `<ssh 폴더>/`로, 그 밖의 `~/`는 `embedded.home`으로 펼친다. `embedded.ssh_dir`이 기본값이면 OpenSSH와 같다. 홈을 알 수 없고 설정도 없으면 `~`가 든 경로는 없는 파일로 다룬다: `Include`는 맞는 파일이 없는 것(GLOB_NOMATCH, 그 줄은 넘어간다), known_hosts 목록에서는 빠지고, `-i`는 건너뛴다. 없으면 `ssh`의 동작이 달라지는 경로(`ControlPath`·`IdentityAgent`·`ForwardAgent`의 소켓 경로, 읽지 못하면 `ssh`가 멈추는 `RevokedHostKeys`)는 판정 불가로 거부한다. 다른 사용자의 홈(`~user`)은 사용자 정보를 읽지 않으므로 `Include` 안에서도 판정 불가로 거부한다. 어느 경우에도 작업 폴더의 `~` 폴더를 가리키지 않는다.
 - 경로 구분자: 이식 크레이트의 절대 경로 판정(`path_absolute`, `misc.c:2668`–`:2672`)과 `Include`의 glob은 기준판(portable)대로 `/`만 본다. Windows에서도 같아서 `Include C:\...`·`C:/...`는 상대 경로가 되어 사용자 설정은 `~/.ssh/` 아래, 시스템 설정은 `/etc/ssh/` 아래로 바뀐다. Win32-OpenSSH 규칙을 따를지는 [후속 작업과 미정](#후속-작업과-미정)의 "Windows의 설정 경로 규칙"이다.
 
 ## 지시어 분류

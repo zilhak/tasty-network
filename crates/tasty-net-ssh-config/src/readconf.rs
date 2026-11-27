@@ -2091,9 +2091,22 @@ impl<'a> Reader<'a> {
             } else {
                 p
             };
-            // GLOB_TILDE: a `~` that cannot be expanded stays as written.
+            // GLOB_TILDE (`glob.c:364`-`:410`). Without the home the files are missing
+            // (GLOB_NOMATCH, the line goes on), never a `~` folder of the working directory.
+            // Another user's home is not looked up: OpenSSH would read files from it.
             let pattern = if pattern.starts_with('~') {
-                tilde_expand(&pattern, &self.env.account).unwrap_or(pattern)
+                match tilde_expand(&pattern, &self.env.account) {
+                    Ok(p) => p,
+                    Err(misc::TildeError::NoHome) => continue,
+                    Err(misc::TildeError::NoSuchUser(u)) => {
+                        return Err(LineErr::Fatal(fatal(
+                            RefusalKind::Undeterminable,
+                            Some(keyword),
+                            Some(origin),
+                            format!("Include {pattern}: the home of user {u} is not known"),
+                        )));
+                    }
+                }
             } else {
                 pattern
             };

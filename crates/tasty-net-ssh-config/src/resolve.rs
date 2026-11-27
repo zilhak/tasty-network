@@ -425,8 +425,10 @@ impl ConfigSet {
                     }
                 }
                 CommandLine::Identity(path) => {
-                    let p = tilde_path(&r.env.account, path, &origin)?;
-                    if Path::new(&p).exists() {
+                    // A path under an unknown home is a missing file, which `ssh` skips.
+                    if let Some(p) = tilde_path(&r.env.account, path, &origin)?
+                        && Path::new(&p).exists()
+                    {
                         r.o.add_identity_file(p.clone(), ProvidedBy::IdentityOption)
                             .map_err(|e| {
                                 config_error(
@@ -745,9 +747,23 @@ impl ConfigSet {
             expand(s, true, Some(&tokens), vars).map_err(|e| expand_refusal(what, e))
         };
         let account = r.env.account.clone();
+        // `None`: the file is under a home that is not known.
+        let file = |s: &str, what: &str| -> Result<Option<String>, Fatal> {
+            match tilde_path(&account, s, &Origin::Default)? {
+                Some(t) => percent_dollar(&t, what).map(Some),
+                None => Ok(None),
+            }
+        };
+        // A socket path the connection uses: without the home it cannot be known.
         let path = |s: &str, what: &str| -> Result<String, Fatal> {
-            let t = tilde_path(&account, s, &Origin::Default)?;
-            percent_dollar(&t, what)
+            file(s, what)?.ok_or_else(|| {
+                Fatal(Refusal {
+                    kind: RefusalKind::Undeterminable,
+                    keyword: Some(what.to_string()),
+                    origin: None,
+                    message: format!("{what}: the path needs the home folder, which is not known"),
+                })
+            })
         };
         if let Some(c) = r.o.remote_command.clone() {
             r.o.remote_command = Some(percent(&c, "remotecommand")?);
@@ -760,6 +776,8 @@ impl ConfigSet {
         }
         let revoked = std::mem::take(&mut r.o.revoked_host_keys);
         for k in revoked {
+            // `ssh` stops when it cannot read a revoked keys file (`sshconnect.c:1544`-`:1563`),
+            // so a file under an unknown home is not skipped.
             let v = path(&k, "revokedhostkeys")?;
             r.o.revoked_host_keys.push(v);
         }
@@ -785,8 +803,10 @@ impl ConfigSet {
         }
         let user_files = std::mem::take(&mut r.o.user_hostfiles);
         for f in user_files {
-            let v = path(&f, "userknownhostsfile")?;
-            r.o.user_hostfiles.push(v);
+            // A missing file: no key is known from it.
+            if let Some(v) = file(&f, "userknownhostsfile")? {
+                r.o.user_hostfiles.push(v);
+            }
         }
         let setenv = std::mem::take(&mut r.o.setenv);
         for e in setenv {
@@ -842,12 +862,13 @@ fn expand_refusal(what: &str, e: ExpandError) -> Fatal {
     })
 }
 
-/// `tilde_expand_filename`: a home that is not known leaves the path as written; another
-/// user's home cannot be looked up.
-fn tilde_path(account: &Account, s: &str, origin: &Origin) -> Result<String, Fatal> {
+/// `tilde_expand_filename`. `None` if the path needs the home and the home is not known: the
+/// file is missing (docs/design/ssh-backends.md "내장 백엔드가 읽는 파일"), never a `~`
+/// folder of the working directory. Another user's home cannot be looked up.
+fn tilde_path(account: &Account, s: &str, origin: &Origin) -> Result<Option<String>, Fatal> {
     match tilde_expand(s, account) {
-        Ok(p) => Ok(p),
-        Err(TildeError::NoHome) => Ok(s.to_string()),
+        Ok(p) => Ok(Some(p)),
+        Err(TildeError::NoHome) => Ok(None),
         Err(TildeError::NoSuchUser(u)) => Err(Fatal(Refusal {
             kind: RefusalKind::Undeterminable,
             keyword: None,

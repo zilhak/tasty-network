@@ -591,6 +591,62 @@ fn include_of_a_folder_reads_nothing() {
     assert_eq!(r.options.port, Some(2222));
 }
 
+// Unix only: the home is a temporary path, and `Include` sees only `/` as a separator.
+#[cfg(unix)]
+#[test]
+fn relative_include_goes_under_the_ssh_folder() {
+    let home = folder();
+    std::fs::create_dir_all(home.join(".ssh")).expect("the ssh folder");
+    write(&home, ".ssh/sub.conf", "Port 2222\n");
+    let top = write(&home, "config", "Include sub.conf\n");
+    let mut ctx = context(Vec::new());
+    ctx.home = Some(home.display().to_string());
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(top),
+    })
+    .expect("load")
+    .resolve("web", &ctx);
+    assert_eq!(refusal_kind(&r), None);
+    assert_eq!(r.options.port, Some(2222));
+}
+
+#[test]
+fn paths_under_an_unknown_home() {
+    let mut ctx = context(Vec::new());
+    ctx.home = None;
+    let run = |config: &str| {
+        let dir = folder();
+        let top = write(&dir, "config", config);
+        ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Only(top),
+        })
+        .expect("load")
+        .resolve("web", &ctx)
+    };
+    // An Include under the home matches no file; the line goes on.
+    let include = run("Include ~/.ssh/other.conf\nPort 2222\n");
+    assert_eq!(refusal_kind(&include), None);
+    assert_eq!(include.options.port, Some(2222));
+    // A known hosts file under the home is missing, not a `~` folder of the working directory.
+    let hosts = run("UserKnownHostsFile ~/.ssh/known_hosts /etc/ssh/extra_known_hosts\n");
+    assert_eq!(refusal_kind(&hosts), None);
+    assert_eq!(
+        hosts.options.user_hostfiles,
+        vec!["/etc/ssh/extra_known_hosts".to_string()]
+    );
+    // A socket path cannot be known.
+    let control = run("ControlPath ~/.ssh/cm-%C\n");
+    assert_eq!(refusal_kind(&control), Some(RefusalKind::Undeterminable));
+}
+
+#[test]
+fn include_of_another_users_home() {
+    let r = resolve("Include ~root/.ssh/extra.conf\n", "web");
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::Undeterminable);
+    assert_eq!(f.keyword.as_deref(), Some("include"));
+}
+
 #[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());
