@@ -1067,17 +1067,20 @@ fn failed(sessions: &[AcceptSession], cause: Option<Cause>) {
     }
 }
 
-/// Watch a connection that is up: its end, and (acceptor) the remote address quinn uses.
+/// Watch a connection that is up: its end, and (acceptor, with `observed_from`) changes of the
+/// remote address quinn uses from the one the connection was handed out with.
 pub(crate) async fn watch_connection(
     core: Arc<Core>,
     tracked: Tracked,
     conn: Arc<ConnInner>,
     quic: quinn::Connection,
-    poll_address: bool,
+    observed_from: Option<SocketAddr>,
 ) {
     tokio::spawn(refuse_uni_streams(quic.clone()));
     let mut tick = tokio::time::interval(core.params.path_poll_interval);
-    let mut last = canonical(quic.remote_address());
+    // The address the connection was handed out with, not the one at this task's first poll:
+    // the task may first run after the peer already moved, and that move is still a change.
+    let mut last = observed_from;
     let mut shutdown = core.shutdown.subscribe();
     let cause = loop {
         tokio::select! {
@@ -1086,17 +1089,17 @@ pub(crate) async fn watch_connection(
                 conn.close(P2pCloseReason::Closed);
                 break Cause::named("endpoint_off");
             }
-            _ = tick.tick(), if poll_address => {
+            _ = tick.tick(), if last.is_some() => {
                 let now = canonical(quic.remote_address());
-                if now != last {
+                if let Some(from) = last.filter(|from| *from != now) {
                     tracked.to(
                         AttemptPhase::Connected,
                         Cause::with(
                             "remote_address_observed_change",
-                            CauseDetail::Address { from: last, to: now },
+                            CauseDetail::Address { from, to: now },
                         ),
                     );
-                    last = now;
+                    last = Some(now);
                 }
             }
         }
@@ -2179,6 +2182,104 @@ mod tests {
             "a late reflexive_changed wrote the address back"
         );
         drop(judging);
+        ep.close();
+    }
+
+    /// The acceptor records a move of the peer's address from the one it handed the connection
+    /// out with, even when the move ends before the watcher first looks: the watcher starts
+    /// from that address, not from the one at its first poll. The test hands the watcher an
+    /// address other than the connection's current one, which is what a move that ended before
+    /// the watcher's first poll leaves.
+    #[test]
+    fn a_move_before_the_watcher_first_looks_is_recorded() {
+        use tasty_net_rendezvous::quic;
+        use tasty_net_rendezvous::tls::{self, TlsOptions};
+        use tasty_net_rendezvous::wire::ALPN_P2P;
+        let peer = DeviceKey::from_seed([57; 32]).id();
+        let StandIn { ep, core, .. } = stand_in(56, peer, &[]);
+        let _before = ep.events();
+        let p = core.params.quic.clone();
+        let options = TlsOptions {
+            max_fragment_size: p.tls_max_fragment_size,
+        };
+        let handed_out: SocketAddr = "192.0.2.99:40000".parse().unwrap();
+        let watcher = core.clone();
+        let (server, client, conn, now) = core.handle.block_on(async move {
+            let runtime = quinn::default_runtime().expect("tokio runtime");
+            let server_key = DeviceKey::from_seed([58; 32]);
+            let client_key = DeviceKey::from_seed([59; 32]);
+            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(
+                tls::server_config(&server_key, ALPN_P2P, options).unwrap(),
+            )
+            .unwrap();
+            let server = quinn::Endpoint::new(
+                quic::endpoint_config(&p),
+                Some(quic::server_config(&p, crypto)),
+                UdpSocket::bind("127.0.0.1:0").unwrap(),
+                runtime.clone(),
+            )
+            .unwrap();
+            let addr = server.local_addr().unwrap();
+            let client = quinn::Endpoint::new(
+                quic::endpoint_config(&p),
+                None,
+                UdpSocket::bind("127.0.0.1:0").unwrap(),
+                runtime,
+            )
+            .unwrap();
+            let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(
+                tls::client_config(&client_key, server_key.id(), ALPN_P2P, options).unwrap(),
+            )
+            .unwrap();
+            let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+            config.transport_config(Arc::new(quic::transport_config(&p)));
+            let connecting = client.connect_with(config, addr, tls::SERVER_NAME).unwrap();
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            let client_conn = connecting.await.unwrap();
+            let now = canonical(conn.remote_address());
+            let t = watcher.tracker.start(
+                crate::info::Side::Acceptor,
+                peer,
+                AttemptPhase::Connected,
+                Cause::named("quic_established"),
+                |_| {},
+            );
+            let wrapped = ConnInner::new(conn.clone(), t.id, peer);
+            tokio::spawn(watch_connection(
+                watcher,
+                t,
+                wrapped,
+                conn.clone(),
+                Some(handed_out),
+            ));
+            (server, client, (conn, client_conn), now)
+        });
+        let until = Instant::now() + Duration::from_secs(10);
+        let change = loop {
+            let left = until.saturating_duration_since(Instant::now());
+            match ep.next_event(left) {
+                Ok(Some(P2pEvent::Transition { cause, .. }))
+                    if cause.name == "remote_address_observed_change" =>
+                {
+                    break cause.detail;
+                }
+                Ok(Some(_)) => {}
+                other => panic!("the move before the first look was not recorded: {other:?}"),
+            }
+        };
+        assert_eq!(
+            change,
+            Some(CauseDetail::Address {
+                from: handed_out,
+                to: now
+            })
+        );
+        core.handle.block_on(async move {
+            drop(conn);
+            server.close(quinn::VarInt::default(), b"");
+            client.close(quinn::VarInt::default(), b"");
+        });
         ep.close();
     }
 

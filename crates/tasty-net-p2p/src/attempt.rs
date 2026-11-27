@@ -645,7 +645,7 @@ async fn punch_once(
         t.clone(),
         wrapped.clone(),
         conn,
-        false,
+        None,
     ));
     Ok(wrapped)
 }
@@ -840,12 +840,13 @@ async fn accept_punch(core: Arc<Core>, generation: u64, punch_id: u64, from: Dev
                     });
                     t.to(AttemptPhase::Connected, Cause::named("quic_established"));
                     let _queued = core.accepted_tx.send(wrapped.clone()).is_ok();
+                    // B observes the address from the one it hands the connection out with.
                     tokio::spawn(crate::endpoint::watch_connection(
                         core.clone(),
                         t.clone(),
                         wrapped,
                         conn,
-                        true,
+                        Some(addr),
                     ));
                     return;
                 }
