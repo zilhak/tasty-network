@@ -88,6 +88,10 @@ jobs:
         run: bash scripts/prepare-test-sshd.sh
       - name: test
         run: scripts/check.sh test --no-fail-fast
+      # Criterion D8 of docs/design/done-criteria.md: the P2P crates pass their tests
+      # built alone, without the features other workspace members turn on.
+      - name: test tasty-net-rendezvous alone
+        run: cargo test -p tasty-net-rendezvous --locked
 
   repo-checks:
     name: shellcheck, no-tasty-deps, p2p-isolation, no-hidden-constants
