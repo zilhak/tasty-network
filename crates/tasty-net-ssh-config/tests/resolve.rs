@@ -148,6 +148,30 @@ fn refusal_names_the_bad_line() {
     assert_eq!(f.keyword.as_deref(), Some("nosuch"));
 }
 
+// Unix only: the Include names an absolute path.
+#[cfg(unix)]
+#[test]
+fn include_refusal_names_its_own_line() {
+    // The included file is read first and its last keyword is `user`; the empty argument
+    // after it is the bad part of the Include line in the parent.
+    let dir = folder();
+    let good = write(&dir, "good.conf", "Port 2201\nUser alice\n");
+    let top = write(
+        &dir,
+        "config",
+        &format!("Port 2222\nInclude {} \"\"\n", good.display()),
+    );
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(top.clone()),
+    })
+    .expect("load")
+    .resolve("web", &context(Vec::new()));
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(f.keyword.as_deref(), Some("include"));
+    assert_eq!(f.origin, Some(Origin::File { path: top, line: 2 }));
+}
+
 #[test]
 fn service_name_port_is_refused() {
     // OpenSSH looks `ssh` up in the services database (`a2port`, `misc.c:592`-`:604`); this
