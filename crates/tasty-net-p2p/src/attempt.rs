@@ -62,6 +62,10 @@ fn go_limits_invalid(
         Some("punch.window_max")
     } else if go.handshake_ms > ms(p.handshake_timeout_max) {
         Some("quic.handshake_timeout_max")
+    } else if go.window_ms > l.punch_window_ms {
+        Some("punch_window_ms")
+    } else if go.handshake_ms > l.quic_handshake_ms {
+        Some("quic_handshake_ms")
     } else if go.start_after_ms > l.start_delay_max_ms {
         Some("start_delay_max_ms")
     } else if go.candidates.len() > p.max_candidates {
@@ -221,6 +225,30 @@ fn cancelled(reason: CancelReason) -> Cause {
     Cause::with("punch_cancelled", CauseDetail::Cancel(reason))
 }
 
+/// The end of a connection attempt at its bound: the cause of the phase it was in, the error
+/// by the rule of an elapsed window (docs/design/p2p.md "연결 시도 상태").
+fn bound_elapsed(t: &Tracked, last_mode: PunchMode) -> Fail {
+    if t.phase() == AttemptPhase::Requesting {
+        return Fail::new(P2pConnectError::RequestTimeout, "request_timeout");
+    }
+    let mut mode = last_mode;
+    t.update(|r| mode = r.info.nat.map_or(last_mode, |n| n.mode));
+    let error = if mode == PunchMode::HostOnly {
+        P2pConnectError::NatUnsupported
+    } else {
+        P2pConnectError::PunchFailed
+    };
+    let name = if t.phase() == AttemptPhase::Handshaking {
+        "handshake_timeout"
+    } else {
+        "punch_window_elapsed"
+    };
+    Fail {
+        error,
+        cause: Cause::with(name, CauseDetail::Connect(error)),
+    }
+}
+
 /// What ends a dialer's punch attempt that can be retried.
 enum Retry {
     /// Retry (or fail) with this cause.
@@ -271,6 +299,7 @@ async fn dial_attempts(
 ) -> Result<Arc<ConnInner>, Fail> {
     let p = &core.params;
     let mut last_mode = PunchMode::All;
+    let mut deadline = None;
     for n in 1..=p.punch_attempts {
         t.update(|r| r.info.attempt.number = n);
         let (limits, mismatch, local_nat, reflexive) = {
@@ -300,14 +329,18 @@ async fn dial_attempts(
                 "rendezvous_lost",
             ));
         };
-        if n == 1 {
-            let bound = attempt_bound(p, &limits);
-            t.update(|r| r.bound_at = Instant::now().into_std().checked_add(bound));
-        }
+        // The bound shown is the bound kept: past it the attempt ends where it is.
+        let end = *deadline.get_or_insert_with(|| {
+            let end = Instant::now() + attempt_bound(p, &limits);
+            t.update(|r| r.bound_at = Some(end.into_std()));
+            end
+        });
         t.update(|r| r.info.local_reflexive = reflexive);
-        let outcome = match punch_once(core, t, peer, &limits, local_nat, n).await {
-            Ok(conn) => return Ok(conn),
-            Err((mode, outcome)) => {
+        let once = tokio::time::timeout_at(end, punch_once(core, t, peer, &limits, local_nat, n));
+        let outcome = match once.await {
+            Err(_) => return Err(bound_elapsed(t, last_mode)),
+            Ok(Ok(conn)) => return Ok(conn),
+            Ok(Err((mode, outcome))) => {
                 last_mode = mode.unwrap_or(last_mode);
                 outcome
             }
@@ -336,8 +369,13 @@ async fn dial_attempts(
         t.update(|r| r.retry_at = Some(retry_at.into_std()));
         t.to(AttemptPhase::RetryWait, cause);
         let judge = tokio::spawn(crate::server::rejudge(core.clone()));
-        tokio::time::sleep_until(retry_at).await;
-        let _judged = judge.await.is_ok();
+        let waited = tokio::time::timeout_at(end, async {
+            tokio::time::sleep_until(retry_at).await;
+            judge.await.is_ok()
+        });
+        if waited.await.is_err() {
+            return Err(bound_elapsed(t, last_mode));
+        }
         t.update(|r| r.retry_at = None);
         t.to(AttemptPhase::Requesting, Cause::named("retry_elapsed"));
     }

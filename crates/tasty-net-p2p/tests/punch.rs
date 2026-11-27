@@ -1184,3 +1184,40 @@ fn punch_go_of_another_peer_or_role_is_refused() {
     assert!(closed_with(&lb.0, "server_limits_invalid"));
     assert_eq!(sent_to_ip(&r.b, r.n1.public_ip()), 0);
 }
+
+/// `punch_go` values within this device's caps but beyond the server's own `welcome.limits`
+/// are refused too: the attempt's bound is computed from `welcome.limits`, so a longer window
+/// or handshake would run past the bound the attempt shows (docs/design/p2p.md flow 3, "연결
+/// 시도 하나의 전체 상한").
+#[test]
+fn punch_go_beyond_the_welcome_limits_is_refused() {
+    let r = scripted(Script {
+        start_after_ms: 1000,
+        go_a: Box::new(|g| g.window_ms = 10_000),
+        ..Script::default()
+    });
+    assert_eq!(
+        error(r.a.ep.connect(r.b.id())),
+        P2pConnectError::ServerLimitsInvalid {
+            key: "punch_window_ms"
+        }
+    );
+    assert_eq!(sent_to_ip(&r.a, r.n2.public_ip()), 0);
+
+    let r = scripted(Script {
+        start_after_ms: 1000,
+        go_b: Box::new(|g| g.handshake_ms = 10_000),
+        ..Script::default()
+    });
+    assert_eq!(
+        error(r.a.ep.connect(r.b.id())),
+        P2pConnectError::PeerLimitsInvalid
+    );
+    let mut lb = Log::default();
+    assert!(
+        lb.wait(&r.b.ep, LONG, attempt_to(AttemptPhase::Closed))
+            .is_some()
+    );
+    assert!(closed_with(&lb.0, "server_limits_invalid"));
+    assert_eq!(sent_to_ip(&r.b, r.n1.public_ip()), 0);
+}
