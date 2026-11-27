@@ -135,7 +135,8 @@ pub struct Exploration {
     nodes: Vec<Node>,
     node_index: HashMap<NodeKey, (usize, bool)>,
     edges: Vec<Edge>,
-    edge_keys: HashSet<EdgeKey>,
+    /// Where each link's edge is in `edges`.
+    edge_index: HashMap<EdgeKey, usize>,
     /// The parts received per `(branch, from)`, to notice a missing one.
     parts: HashMap<(String, DeviceId), PartTrack>,
     /// The dones received per `(branch, from)`, counted like the parts.
@@ -143,8 +144,9 @@ pub struct Exploration {
     /// This device's local view was merged: its own edges are the local view's.
     local_merged: bool,
     /// This device's own edges as its local view had them when a remote exploration
-    /// started: a remote copy of one of them is merged as this copy, so its own edges are
-    /// the local ones even when the exploration never comes back to this device.
+    /// started: a remote copy with the same `link_id` as one of them is merged as this
+    /// copy, so its own edges are the local ones even when the exploration never comes back
+    /// to this device.
     own_edges: Vec<Edge>,
     /// Devices known to have an incomplete answer → who reported it (`None` when this
     /// device found it) and when (Unix ms). Kept apart from the nodes so a later direct
@@ -217,10 +219,25 @@ impl Exploration {
         if !self.local_merged {
             self.local_merged = true;
             self.edges.retain(|edge| !edge.touches(&me));
-            self.edge_keys = self.edges.iter().map(Edge::key).collect();
+            self.edge_index = self
+                .edges
+                .iter()
+                .enumerate()
+                .map(|(at, edge)| (edge.key(), at))
+                .collect();
         }
         for edge in view.edges {
-            if self.edge_keys.insert(edge.key()) {
+            self.merge_edge(edge);
+        }
+    }
+
+    /// Adds one edge, or merges it into the edge of the same link (docs/design/topology.md
+    /// "모델").
+    fn merge_edge(&mut self, edge: Edge) {
+        match self.edge_index.get(&edge.key()) {
+            Some(&at) => self.edges[at].merge_report(edge),
+            None => {
+                self.edge_index.insert(edge.key(), self.edges.len());
                 self.edges.push(edge);
             }
         }
@@ -243,46 +260,24 @@ impl Exploration {
             self.merge_node(node, &part.from, unix_ms);
         }
         for edge in part.edges {
-            let merged = if edge.touches(&self.me) {
+            let edge = if edge.touches(&self.me) {
                 if self.local_merged {
                     continue;
                 }
-                let own = self.own_copies(&edge);
-                if own.is_empty() { vec![edge] } else { own }
-            } else {
-                vec![edge]
-            };
-            for edge in merged {
-                if self.edge_keys.insert(edge.key()) {
-                    self.edges.push(edge);
+                // A remote copy of a link this device had when the exploration started is
+                // merged as the local copy; a link it did not have stays the remote copy.
+                match self
+                    .own_edges
+                    .iter()
+                    .find(|own| own.link_id == edge.link_id)
+                {
+                    Some(own) => own.clone(),
+                    None => edge,
                 }
-            }
-        }
-    }
-
-    /// The local copies of this device's edges that a remote copy `edge` stands for: the
-    /// local edges of the same link (same dialer, acceptor, holder and transport) with
-    /// the workspace ID the remote copy carries, or, when it carries none (or none of
-    /// them has it), every local edge of that link. Two attaches of the same link in
-    /// different workspaces are two edges, so one remote copy may stand for several.
-    fn own_copies(&self, edge: &Edge) -> Vec<Edge> {
-        let same: Vec<&Edge> = self
-            .own_edges
-            .iter()
-            .filter(|own| same_link(own, edge))
-            .collect();
-        let wanted = edge.workspace.as_ref().and_then(|w| w.id.as_ref());
-        let by_id: Vec<Edge> = same
-            .iter()
-            .filter(|own| {
-                wanted.is_some() && own.workspace.as_ref().and_then(|w| w.id.as_ref()) == wanted
-            })
-            .map(|own| (*own).clone())
-            .collect();
-        if by_id.is_empty() {
-            same.into_iter().cloned().collect()
-        } else {
-            by_id
+            } else {
+                edge
+            };
+            self.merge_edge(edge);
         }
     }
 
@@ -478,15 +473,6 @@ impl Exploration {
     }
 }
 
-/// Whether two copies of an edge describe the same link (their workspace fields may
-/// differ by what each side shares).
-fn same_link(a: &Edge, b: &Edge) -> bool {
-    a.dialer == b.dialer
-        && a.acceptor == b.acceptor
-        && a.holder == b.holder
-        && a.transport == b.transport
-}
-
 fn report_rank(status: NodeStatus) -> u8 {
     match status {
         NodeStatus::AuthRejected => 3,
@@ -607,7 +593,7 @@ impl Agent {
             nodes: Vec::new(),
             node_index: HashMap::new(),
             edges: Vec::new(),
-            edge_keys: HashSet::new(),
+            edge_index: HashMap::new(),
             parts: HashMap::new(),
             done_parts: HashMap::new(),
             local_merged: false,
@@ -1607,6 +1593,7 @@ mod tests {
         };
         let mut agent = Agent::new(me, AgentConfig::default());
         let links = [LocalLink {
+            link_id: crate::LinkId::from_bytes([1; 16]),
             peer: id(1),
             local_side: Side::Acceptor,
             holder: Side::Dialer,
@@ -1682,6 +1669,7 @@ mod tests {
         };
         let mut agent = Agent::new(me, AgentConfig::default());
         let links = [LocalLink {
+            link_id: crate::LinkId::from_bytes([1; 16]),
             peer: id(1),
             local_side: Side::Acceptor,
             holder: Side::Dialer,

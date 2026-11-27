@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tasty_net_identity::DeviceId;
 
-use crate::model::{Edge, EdgeKey, Node, NodeStatus, Side, TransportKind, WorkspaceRef};
+use crate::model::{Edge, EdgeKey, LinkId, Node, NodeStatus, Side, TransportKind, WorkspaceRef};
 
 /// What kind of authenticated link a [`LocalLink`] is. Only [`LinkKind::Attach`] becomes
 /// an edge.
@@ -27,12 +27,15 @@ pub enum LinkKind {
 /// sees only the snapshot it is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalLink {
+    /// The link ID both ends of the link know (the transport connection table gives it).
+    pub link_id: LinkId,
     /// The device ID the handshake proved for the other end.
     pub peer: DeviceId,
     /// Whether this device opened ([`Side::Dialer`]) or accepted the link.
     pub local_side: Side,
     /// Which end holds the workspace.
     pub holder: Side,
+    /// The value from this link's holder and path kind ([`TransportKind`]).
     pub transport: TransportKind,
     pub rtt: Option<Duration>,
     /// When the link was authenticated, Unix ms.
@@ -126,10 +129,9 @@ pub struct View {
     pub edges: Vec<Edge>,
 }
 
-/// The edges of `links`: only [`LinkKind::Attach`] links, with the same
-/// `(dialer, acceptor, holder, transport, workspace)` merged into one. A merged edge keeps
-/// the earliest `connected_at` and that link's RTT. The order is the order of first
-/// appearance.
+/// The edges of `links`: one per [`LinkKind::Attach`] link. Links with the same `link_id`
+/// are one edge, merged field by field (a carried workspace field, the smaller RTT, the
+/// earlier `connected_at`). The order is the order of first appearance.
 pub fn aggregate_edges(me: &DeviceId, links: &[LocalLink]) -> Vec<Edge> {
     dedup_edges(
         links
@@ -145,6 +147,7 @@ fn edge_of(me: &DeviceId, link: &LocalLink) -> Edge {
         Side::Acceptor => (link.peer, *me),
     };
     Edge {
+        link_id: link.link_id,
         dialer,
         acceptor,
         holder: link.holder,
@@ -162,11 +165,7 @@ fn dedup_edges(edges: impl IntoIterator<Item = Edge>) -> Vec<Edge> {
     let mut index: HashMap<EdgeKey, usize> = HashMap::new();
     for edge in edges {
         match index.get(&edge.key()) {
-            Some(&at) => {
-                if edge.connected_at < out[at].connected_at {
-                    out[at] = edge;
-                }
-            }
+            Some(&at) => out[at].merge_report(edge),
             None => {
                 index.insert(edge.key(), out.len());
                 out.push(edge);
@@ -192,7 +191,7 @@ pub fn local_view(
 
 /// The view of this device for a remote query. With sharing off it is only this device as
 /// [`NodeStatus::SharingOff`]. With sharing on, workspace fields outside
-/// [`Sharing::workspace`] are dropped (edges that then become equal are merged).
+/// [`Sharing::workspace`] are dropped; each link stays its own edge.
 pub fn remote_answer(
     me: &SelfInfo,
     links: &[LocalLink],
@@ -206,17 +205,16 @@ pub fn remote_answer(
             edges: Vec::new(),
         };
     }
-    let edges = dedup_edges(
-        aggregate_edges(&me.device_id, links)
-            .into_iter()
-            .map(|mut edge| {
-                edge.workspace = edge
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| sharing.workspace.apply(w));
-                edge
-            }),
-    );
+    let edges: Vec<Edge> = aggregate_edges(&me.device_id, links)
+        .into_iter()
+        .map(|mut edge| {
+            edge.workspace = edge
+                .workspace
+                .as_ref()
+                .and_then(|w| sharing.workspace.apply(w));
+            edge
+        })
+        .collect();
     let mut nodes = vec![self_node(me, NodeStatus::Online, now_unix_ms)];
     nodes.extend(failure_nodes(me, &edges, failures));
     View { nodes, edges }
@@ -278,8 +276,16 @@ mod tests {
         }
     }
 
-    fn link(peer: u8, kind: LinkKind, connected_at: u64, workspace: Option<&str>) -> LocalLink {
+    /// A link with the link ID `[link; 16]`.
+    fn link(
+        link: u8,
+        peer: u8,
+        kind: LinkKind,
+        connected_at: u64,
+        workspace: Option<&str>,
+    ) -> LocalLink {
         LocalLink {
+            link_id: LinkId::from_bytes([link; 16]),
             peer: id(peer),
             local_side: Side::Dialer,
             holder: Side::Dialer,
@@ -295,20 +301,26 @@ mod tests {
     }
 
     #[test]
-    fn only_attach_links_become_edges_and_equal_ones_merge() {
+    fn only_attach_links_become_edges_and_one_link_id_is_one_edge() {
         let links = [
-            link(2, LinkKind::Attach, 30, Some("w")),
-            link(2, LinkKind::Attach, 10, Some("w")),
-            link(2, LinkKind::Attach, 20, Some("other")),
-            link(3, LinkKind::Bulk, 1, None),
-            link(3, LinkKind::Request, 1, None),
-            link(3, LinkKind::DebugEcho, 1, None),
+            link(1, 2, LinkKind::Attach, 30, Some("w")),
+            link(1, 2, LinkKind::Attach, 10, None),
+            link(2, 2, LinkKind::Attach, 20, Some("other")),
+            link(3, 3, LinkKind::Bulk, 1, None),
+            link(4, 3, LinkKind::Request, 1, None),
+            link(5, 3, LinkKind::DebugEcho, 1, None),
         ];
         let edges = aggregate_edges(&id(1), &links);
         assert_eq!(edges.len(), 2);
-        // The merged edge keeps the earliest link and its RTT.
+        // The two reports of link 1 merge field by field: the earlier time, the smaller
+        // RTT, the workspace one of them carries.
+        assert_eq!(edges[0].link_id, LinkId::from_bytes([1; 16]));
         assert_eq!(edges[0].connected_at, 10);
         assert_eq!(edges[0].rtt_ms, Some(10));
+        assert_eq!(
+            edges[0].workspace.as_ref().unwrap().name.as_deref(),
+            Some("w")
+        );
         assert_eq!(
             edges[1].workspace.as_ref().unwrap().name.as_deref(),
             Some("other")
@@ -322,7 +334,7 @@ mod tests {
 
     #[test]
     fn an_accepted_link_puts_the_peer_as_dialer() {
-        let mut accepted = link(2, LinkKind::Attach, 1, None);
+        let mut accepted = link(1, 2, LinkKind::Attach, 1, None);
         accepted.local_side = Side::Acceptor;
         accepted.holder = Side::Acceptor;
         accepted.transport = TransportKind::SshRoleReversed;
@@ -334,8 +346,8 @@ mod tests {
     #[test]
     fn the_local_view_keeps_what_the_remote_answer_drops() {
         let links = [
-            link(2, LinkKind::Attach, 1, Some("a")),
-            link(2, LinkKind::Attach, 2, Some("b")),
+            link(1, 2, LinkKind::Attach, 1, Some("a")),
+            link(2, 2, LinkKind::Attach, 2, Some("b")),
         ];
         let local = local_view(&me(), &links, &[], 0);
         assert_eq!(local.edges.len(), 2);
@@ -360,15 +372,15 @@ mod tests {
             w.id.is_some() && w.name.is_none()
         }));
 
-        // With no workspace field exposed the two attaches become one edge.
+        // With no workspace field exposed the two attaches are still two links.
         let remote = remote_answer(&me(), &links, &[], Sharing::default(), 0);
-        assert_eq!(remote.edges.len(), 1);
-        assert_eq!(remote.edges[0].workspace, None);
+        assert_eq!(remote.edges.len(), 2);
+        assert!(remote.edges.iter().all(|e| e.workspace.is_none()));
     }
 
     #[test]
     fn sharing_off_answers_only_this_device() {
-        let links = [link(2, LinkKind::Attach, 1, None)];
+        let links = [link(1, 2, LinkKind::Attach, 1, None)];
         let failures = [ConnectFailure {
             peer_hint: None,
             device_id: Some(id(5)),

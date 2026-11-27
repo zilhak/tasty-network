@@ -488,8 +488,16 @@ mod tests {
         }
     }
 
+    /// A link ID made from `n`, so every `n` is its own link.
+    fn link_id(n: u32) -> crate::LinkId {
+        let mut bytes = [0u8; 16];
+        bytes[..4].copy_from_slice(&n.to_be_bytes());
+        crate::LinkId::from_bytes(bytes)
+    }
+
     fn edge(n: u32) -> Edge {
         Edge {
+            link_id: link_id(n),
             dialer: id(n),
             acceptor: id(n + 1),
             holder: Side::Dialer,
@@ -629,6 +637,13 @@ mod limit_tests {
         DeviceKey::from_seed(seed).id()
     }
 
+    /// A link ID made from `n`, so every `n` is its own link.
+    fn link_id(n: u32) -> crate::LinkId {
+        let mut bytes = [0u8; 16];
+        bytes[..4].copy_from_slice(&n.to_be_bytes());
+        crate::LinkId::from_bytes(bytes)
+    }
+
     fn header(hops: u32) -> ResultHeader {
         ResultHeader {
             request_id: "r".into(),
@@ -737,6 +752,7 @@ mod limit_tests {
         let h = header(1);
         let edges: Vec<Edge> = (0..=MAX_PARTS)
             .map(|n| Edge {
+                link_id: link_id(n),
                 dialer: id(n),
                 acceptor: id(n + 10_000),
                 holder: Side::Dialer,

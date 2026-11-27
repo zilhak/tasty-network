@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_topology::{
     Agent, AgentConfig, ConnectFailure, Exploration, ExplorationState, ExploreRequest, FailureKind,
-    LinkKind, Local, LocalLink, MAX_MESSAGE_JSON, MAX_ROUTE_HOPS, Message, NodeReason, NodeStatus,
-    Now, Outbox, RouteError, SelfInfo, SendError, Sharing, Side, TopologyError, TransportKind,
-    WorkspaceExposure, WorkspaceRef,
+    LinkId, LinkKind, Local, LocalLink, MAX_MESSAGE_JSON, MAX_ROUTE_HOPS, Message, NodeReason,
+    NodeStatus, Now, Outbox, RouteError, SelfInfo, SendError, Sharing, Side, TopologyError,
+    TransportKind, WorkspaceExposure, WorkspaceRef,
 };
 
 fn id(n: u8) -> DeviceId {
@@ -51,6 +51,8 @@ struct Net {
     queue: Vec<InFlight>,
     delay: Vec<DelayRule>,
     max_part: u32,
+    /// The number of links made by `link_on`, for their link IDs.
+    links_made: u32,
     /// Every delivered message: (link sender, receiver, message).
     log: Vec<(DeviceId, DeviceId, Message)>,
     /// Sends matching a rule fail with `SendError::Failed`.
@@ -110,6 +112,7 @@ impl Net {
             queue: Vec::new(),
             delay: Vec::new(),
             max_part: 0,
+            links_made: 0,
             log: Vec::new(),
             fail: Vec::new(),
         };
@@ -131,7 +134,11 @@ impl Net {
 
     fn link_on(&mut self, a: u8, b: u8, workspace: Option<WorkspaceRef>) -> &mut Self {
         let at = 1_000 + u64::from(a) * 10 + u64::from(b);
+        // Both ends know the same link ID; every call is a link of its own.
+        self.links_made += 1;
+        let link_id = many_link_id(0xA0, 0, self.links_made);
         let make = |peer: u8, local_side: Side| LocalLink {
+            link_id,
             peer: id(peer),
             local_side,
             holder: Side::Dialer,
@@ -815,6 +822,7 @@ fn a_large_answer_crosses_in_parts_and_merges_whole() {
         seed[..4].copy_from_slice(&n.to_be_bytes());
         let peer = DeviceKey::from_seed(seed).id();
         net.links.get_mut(&id(B)).unwrap().push(LocalLink {
+            link_id: many_link_id(0xEE, B, n),
             peer,
             local_side: Side::Acceptor,
             holder: Side::Dialer,
@@ -1121,6 +1129,7 @@ fn many_timed_out_neighbors_come_back_in_several_dones() {
         let peer = DeviceKey::from_seed(seed).id();
         net.silent.insert(peer);
         net.links.get_mut(&id(B)).unwrap().push(LocalLink {
+            link_id: many_link_id(0xDD, B, n),
             peer,
             local_side: Side::Dialer,
             holder: Side::Dialer,
@@ -1180,11 +1189,21 @@ fn an_entry_too_large_to_send_marks_the_answer_incomplete() {
     assert_eq!(x.edges().len(), 1);
 }
 
+/// A link ID made from a marker, a device and a number, so each test link is its own.
+fn many_link_id(marker: u8, device: u8, n: u32) -> LinkId {
+    let mut bytes = [0u8; 16];
+    bytes[0] = marker;
+    bytes[1] = device;
+    bytes[2..6].copy_from_slice(&n.to_be_bytes());
+    LinkId::from_bytes(bytes)
+}
+
 fn add_many_links(net: &mut Net, device: u8, count: u32) {
     for n in 0..count {
         let mut seed = [0xCCu8; 32];
         seed[..4].copy_from_slice(&n.to_be_bytes());
         net.links.get_mut(&id(device)).unwrap().push(LocalLink {
+            link_id: many_link_id(0xCC, device, n),
             peer: DeviceKey::from_seed(seed).id(),
             local_side: Side::Acceptor,
             holder: Side::Dialer,
@@ -1716,9 +1735,9 @@ fn the_requesters_own_edges_are_its_local_view_when_it_is_not_visited_again() {
 }
 
 #[test]
-fn two_attaches_of_one_link_stay_two_local_edges_when_not_visited_again() {
-    // A dials B twice, the same way, for two workspaces. B shares the workspace ID only,
-    // or no workspace field at all.
+fn two_attaches_between_two_devices_stay_two_local_edges_when_not_visited_again() {
+    // A dials B twice, the same way, for two workspaces: two links. B shares the workspace
+    // ID only, or no workspace field at all.
     for exposure in [
         WorkspaceExposure {
             id: true,

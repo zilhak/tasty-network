@@ -32,7 +32,9 @@ pub use message::{
     MAX_PARTS, MAX_QUERY_MS, MAX_ROUTE_HOPS, Message, MessageError, Query, ResultHeader,
     ResultPart, RouteError, Suppressed, split_done, split_result, validate_route,
 };
-pub use model::{Edge, Node, NodeReason, NodeStatus, Side, TransportKind, WorkspaceRef};
+pub use model::{
+    Edge, LinkId, LinkIdParseError, Node, NodeReason, NodeStatus, Side, TransportKind, WorkspaceRef,
+};
 
 /// Why a local topology call failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
