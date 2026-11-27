@@ -29,6 +29,7 @@
 - 허용 규칙(한 문장): 호스트 후보는 사설 IPv4([RFC 1918](https://www.rfc-editor.org/rfc/rfc1918))와 전역 유니캐스트 IPv6(`2000::/3`)만, 반사 후보(`server_reflexive`·`reported_reflexive`)는 미지정·멀티캐스트·브로드캐스트·링크 로컬이 아닌 주소만 받고, 모든 후보의 포트는 1–65535이며, 그 밖은 버리고 버린 수를 센다.
 - 반사 후보에 루프백을 막지 않는 것은 같은 머신의 루프백 서버로 도는 예제와 시험 때문이다. 서버 반사 주소는 서버가 관측한 값이다. 보고 반사 주소는 기기의 주장이므로 종류를 `reported_reflexive`로 따로 표시하고, 서버 반사 주소와 주소족이 같은 것만 받는다.
 - 중복 제거: 같은 주소·포트는 하나만 남기고, 앞선 종류를 남긴다.
+- 저장 상한: 서버는 `hello`·`nat_report`에서 받은 주소를 저장할 때도 중복을 빼고 개수를 막는다. 보고 반사 주소는 `max_reported_reflexive + 1`개, 호스트 주소는 `max_host_candidates + max_reported_reflexive + 1`개까지 받은 순서대로 남기고 나머지는 절단으로 센다. 더 둔 몫은 같은 기기의 앞선 종류와 겹쳐 `punch_go`에서 빠질 수 있는 자리라, 저장한 목록으로 만든 `punch_go`가 전체 목록으로 만든 것과 같다.
 - 우선순위와 상한: 서버는 `server_reflexive`(1개) → `reported_reflexive`(최대 `max_reported_reflexive`) → `host`(기기가 보낸 순서로 최대 `max_host_candidates`) 순으로 싣는다. `mode = host_only`면 `host`만 싣는다. 그래서 `punch_go.candidates`는 `1 + max_reported_reflexive + max_host_candidates`개를 넘지 않는다.
 - 상한의 관계: `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`(기기 설정)여야 한다. 기기는 `welcome.limits`의 두 값으로 이것을 검사하고, 어긋나면 `server_limits_mismatch`를 낸다(아래). 우선순위에 따른 절단은 서버의 정상 동작이다. 기기 상한을 넘는 후보가 실린 `punch_go`가 기기에 도착하면 서버가 이 규칙을 어긴 것이므로, 기기는 그 후보를 잘라 쓰지 않고 `limits_invalid`로 끝낸다(아래 "한계값 검사" 2).
 - 기기는 `host_candidates`를 자기 우선순위(사설 IPv4, 전역 IPv6 고정 주소, 전역 IPv6 임시 주소)로 정렬해 보낸다.

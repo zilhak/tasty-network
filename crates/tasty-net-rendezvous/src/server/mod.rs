@@ -36,7 +36,7 @@ use crate::wire::message::{
 use crate::wire::stun::{ServerStunAction, server_answer};
 use crate::wire::{ALPN_RENDEZVOUS, CloseCode, PROTO};
 
-use state::{After, Counters, RegisterRefusal, Registration, State, filter_host};
+use state::{After, Counters, RegisterRefusal, Registration, State, filter_host, stored_host};
 
 /// What a server is started with.
 #[derive(Clone)]
@@ -732,11 +732,17 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
 
     let reflexive = conn.remote_address();
     let advertised = inner.advertised(reflexive);
-    let (host, dropped) = filter_host(&hello.host_candidates);
-    inner.counters.candidates_rejected.fetch_add(
-        u64::try_from(dropped).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
+    let host = filter_host(&hello.host_candidates, stored_host(p));
+    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    inner
+        .counters
+        .candidates_rejected
+        .fetch_add(count(host.rejected), Ordering::Relaxed);
+    inner
+        .counters
+        .candidates_truncated
+        .fetch_add(count(host.truncated), Ordering::Relaxed);
+    let host = host.addrs;
     let (tx, rx) = mpsc::channel(p.max_queued_messages);
     let now = Instant::now();
     let registered = {
@@ -856,7 +862,7 @@ async fn reader(
             match msg {
                 DeviceMessage::Hello(_) => After::Nothing,
                 DeviceMessage::NatReport(r) => {
-                    state.nat_report(&inner.counters, device, r);
+                    state.nat_report(p, &inner.counters, device, r);
                     After::Nothing
                 }
                 DeviceMessage::PunchRequest(r) => {

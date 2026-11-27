@@ -261,12 +261,18 @@ impl State {
     }
 
     /// `nat_report`.
-    pub fn nat_report(&mut self, counters: &Counters, device: DeviceId, report: NatReport) {
+    pub fn nat_report(
+        &mut self,
+        p: &ServerParams,
+        counters: &Counters,
+        device: DeviceId,
+        report: NatReport,
+    ) {
         let Some(reg) = self.devices.get_mut(&device) else {
             return;
         };
         reg.nat = report.mapping;
-        let mut reported = Vec::new();
+        let mut reported = Kept::new(stored_reported(p));
         let mut rejected = 0;
         for r in &report.stun_results {
             let server = parse_address(&r.server);
@@ -284,13 +290,16 @@ impl State {
                 _ => rejected += 1,
             }
         }
-        reg.reported_reflexive = reported;
+        let mut truncated = reported.truncated;
+        reg.reported_reflexive = reported.addrs;
         if let Some(host) = &report.host_candidates {
-            let (kept, dropped) = filter_host(host);
-            reg.host = kept;
-            rejected += dropped;
+            let host = filter_host(host, stored_host(p));
+            reg.host = host.addrs;
+            rejected += host.rejected;
+            truncated += host.truncated;
         }
         add(&counters.candidates_rejected, rejected);
+        add(&counters.candidates_truncated, truncated);
         info!(device = %device, mapping = ?reg.nat, "nat report");
         debug!(device = %device, reported = ?reg.reported_reflexive, host = ?reg.host, "nat report addresses");
     }
@@ -629,15 +638,140 @@ impl State {
     }
 }
 
-/// Parse and filter host candidates: kept in order, and how many were dropped.
-pub(crate) fn filter_host(texts: &[String]) -> (Vec<SocketAddr>, usize) {
-    let mut kept = Vec::new();
-    let mut dropped = 0;
+/// Addresses kept in order without duplicates, up to a cap.
+#[derive(Default)]
+pub(crate) struct Kept {
+    pub addrs: Vec<SocketAddr>,
+    cap: usize,
+    /// Host texts that did not parse or broke the rule.
+    pub rejected: usize,
+    /// Unique addresses past the cap.
+    pub truncated: usize,
+}
+
+impl Kept {
+    fn new(cap: usize) -> Self {
+        Kept {
+            cap,
+            ..Kept::default()
+        }
+    }
+
+    fn push(&mut self, addr: SocketAddr) {
+        if self.addrs.contains(&addr) {
+            return;
+        }
+        if self.addrs.len() >= self.cap {
+            self.truncated += 1;
+            return;
+        }
+        self.addrs.push(addr);
+    }
+}
+
+/// How many reported reflexive addresses a registration stores: `max_reported_reflexive`,
+/// and one more because one of them may be the server reflexive address and give way to it
+/// when `punch_go` is built (docs/design/rendezvous.md "후보 주소 규칙").
+pub(crate) fn stored_reported(p: &ServerParams) -> usize {
+    p.max_reported_reflexive.saturating_add(1)
+}
+
+/// How many host candidates a registration stores: `max_host_candidates`, and as many more as
+/// the reflexive candidates of the same device that may take the place of a duplicate. So the
+/// stored lists give the same `punch_go` as the full lists while staying within the cap of
+/// the candidate rule (at most 64 in all).
+pub(crate) fn stored_host(p: &ServerParams) -> usize {
+    p.max_host_candidates
+        .saturating_add(p.max_reported_reflexive)
+        .saturating_add(1)
+}
+
+/// Parse and filter host candidates: in order, without duplicates, at most `cap`.
+pub(crate) fn filter_host(texts: &[String], cap: usize) -> Kept {
+    let mut kept = Kept::new(cap);
     for t in texts {
         match parse_address(t) {
             Some(a) if candidate_allowed(CandidateKind::Host, a) => kept.push(a),
-            _ => dropped += 1,
+            _ => kept.rejected += 1,
         }
     }
-    (kept, dropped)
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_candidates_are_unique_and_capped() {
+        let texts: Vec<String> = [
+            "192.168.1.2:5000",
+            "192.168.1.2:5000",
+            "8.8.8.8:5000",
+            "10.0.0.2:5000",
+            "not an address",
+            "10.0.0.3:5000",
+            "10.0.0.2:5000",
+            "10.0.0.4:5000",
+        ]
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+        let kept = filter_host(&texts, 3);
+        let want: Vec<SocketAddr> = ["192.168.1.2:5000", "10.0.0.2:5000", "10.0.0.3:5000"]
+            .iter()
+            .map(|t| t.parse().unwrap())
+            .collect();
+        assert_eq!(kept.addrs, want);
+        assert_eq!(kept.rejected, 2);
+        // 10.0.0.4 is past the cap; the repeated 10.0.0.2 is a duplicate, not counted.
+        assert_eq!(kept.truncated, 1);
+        let p = crate::settings::ServerSettings::new()
+            .set(
+                "listen.primary",
+                crate::settings::Value::Address("127.0.0.1:0".parse().unwrap()),
+            )
+            .unwrap()
+            .resolve()
+            .unwrap();
+        // Defaults: 4 host + 3 reported + 1 server reflexive, and 3 + 1 reported.
+        assert_eq!(stored_host(&p), 8);
+        assert_eq!(stored_reported(&p), 4);
+    }
+
+    #[test]
+    fn stored_lists_give_the_same_punch_go() {
+        use crate::wire::candidate::{CandidateLimits, select_candidates};
+        use crate::wire::message::PunchMode;
+        let limits = CandidateLimits {
+            max_reported_reflexive: 1,
+            max_host_candidates: 2,
+        };
+        let a = |t: &str| -> SocketAddr { t.parse().unwrap() };
+        // The device's own global IPv6 address is its reflexive address and its first host
+        // candidate (no NAT); the reported address repeats it too.
+        let reflexive = a("[2001:db8::1]:5000");
+        let reported = vec![reflexive, a("[2001:db8::2]:5000"), a("[2001:db8::3]:5000")];
+        let host = vec![
+            reflexive,
+            a("[2001:db8::2]:5000"),
+            a("[2001:db8::4]:5000"),
+            a("[2001:db8::5]:5000"),
+            a("[2001:db8::6]:5000"),
+        ];
+        let stored = |list: &[SocketAddr], cap| {
+            let mut k = Kept::new(cap);
+            for x in list {
+                k.push(*x);
+            }
+            k.addrs
+        };
+        let stored_reported = stored(&reported, 1 + 1);
+        let stored_host = stored(&host, 2 + 1 + 1);
+        for mode in [PunchMode::All, PunchMode::HostOnly] {
+            let full = select_candidates(reflexive, &reported, &host, mode, limits);
+            let kept = select_candidates(reflexive, &stored_reported, &stored_host, mode, limits);
+            assert_eq!(full.candidates, kept.candidates, "{mode:?}");
+        }
+    }
 }

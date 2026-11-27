@@ -64,7 +64,7 @@ allow	crates/tasty-net-rendezvous/src/server/state.rs	next_punch_id: 1	punch_id�
 allow	crates/tasty-net-rendezvous/src/server/state.rs	next_conn_id: 1	연결 번호는 1부터 매긴다
 allow	crates/tasty-net-rendezvous/src/server/state.rs	+= 1	세기·번호 매기기: 하나씩
 allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut rejected = 0	세기: 버린 호스트 후보 수의 시작
-allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut dropped = 0	세기: 버린 반사 주소 수의 시작
+allow	crates/tasty-net-rendezvous/src/server/state.rs	saturating_add(1)	후보 규칙의 서버 반사 주소 하나(rendezvous.md 후보 주소 규칙)
 allow	crates/tasty-net-rendezvous/src/server/state.rs	/ 2	start_after 식의 절반 RTT (rendezvous.md 서버 상태)
 allow	crates/tasty-net-rendezvous/src/access.rs	index + 1	오류의 행 번호는 1부터
 allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	skip(1)	argv 첫 칸은 실행 파일 이름
