@@ -669,10 +669,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// Fake `ssh` tests. The early-exit fake is a shell script. The forwarding fake is this
-    /// test binary run as `fake_ssh_forwarder_entry`: it listens on the `-L` local port of real
-    /// TCP and forwards to the remote port, or writes ssh's channel failure line if nothing
-    /// listens there.
     /// A connection that is made only after the deadline (one that runs over the time it was
     /// given) is a timeout, and every attempt gets no more than the time left.
     #[test]
@@ -728,6 +724,42 @@ mod tests {
         );
     }
 
+    /// Every ready attempt gets the time left at that moment: after a first attempt used part of
+    /// the time, the second gets less than the first, and no more than was left when the first
+    /// ended.
+    #[test]
+    fn each_ready_attempt_gets_the_time_left_then() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut given: Vec<(Duration, Instant)> = Vec::new();
+        let readiness = poll_until_ready(
+            deadline,
+            Duration::from_millis(10),
+            || Ok(None),
+            |left| {
+                let first = given.is_empty();
+                if first {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                given.push((left, Instant::now()));
+                !first
+            },
+        )
+        .expect("no wait error");
+        assert_eq!(readiness, Readiness::Ready);
+        let [(first, first_ended), (second, _)] = given[..] else {
+            panic!("two attempts, not {}", given.len());
+        };
+        assert!(second < first, "{second:?} after {first:?}");
+        assert!(
+            second <= deadline.saturating_duration_since(first_ended),
+            "{second:?}"
+        );
+    }
+
+    /// Fake `ssh` tests. The early-exit fake is a shell script. The forwarding fake is this
+    /// test binary run as `fake_ssh_forwarder_entry`: it listens on the `-L` local port of real
+    /// TCP and forwards to the remote port, or writes ssh's channel failure line if nothing
+    /// listens there.
     #[cfg(unix)]
     mod fake {
         use super::*;
