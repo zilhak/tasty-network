@@ -155,8 +155,15 @@ fn reconnect_after_tunnel_kill() {
         matches!(failure, "peer_closed" | "heartbeat_timeout"),
         "a dropped tunnel is a closed peer or a heartbeat timeout: {lost}"
     );
-    // The holder does not dial: its side of the link ends and waits for the launcher.
-    server.expect_prefix("server link-ended client=1 ", LOCAL_STEP);
+    // The holder does not dial: its side of the link ends, classified like the dialer's, and
+    // it waits for the launcher.
+    let ended = server.expect_prefix("server link-ended client=1 ", LOCAL_STEP);
+    let server_end = field(&ended, "end").unwrap_or("");
+    log(&format!("the server classified the loss as {server_end}"));
+    assert!(
+        matches!(server_end, "peer_closed" | "heartbeat_timeout"),
+        "the holder sees a dropped tunnel as a closed peer or a heartbeat timeout: {ended}"
+    );
 
     let after = reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 2);
     log(&format!("tunnel ssh pid before={before} after={after}"));
