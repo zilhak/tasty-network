@@ -61,6 +61,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 - 서버가 듣는 주소(`listen.*`, wildcard 가능)와 기기에게 알려 주는 주소(`advertise.*`)를 따로 둔다. wildcard 주소와 컨테이너 안 주소는 기기에게 알리지 않는다.
 - 주 주소는 알리지 않는다. 기기는 자기가 접속한 주소(설정한 서버 `host:port`를 풀어 실제로 붙은 주소)를 주 STUN 주소로 쓴다.
 - 보조 포트와 두 번째 IP는 `advertise.alternate_port`, `advertise.alternate_ip`로 준다. 서버는 이 값으로 `welcome.stun`을 만든다. 보조 포트를 듣는데 광고할 공인 주소를 정할 수 없으면(주 주소를 wildcard로 듣고 `advertise.primary_ip`도 없으면) 시작하지 않는다.
+- 광고 값의 검사: `advertise.primary_ip`·`advertise.alternate_ip`는 wildcard를 받지 않고, 대응하는 바인딩(`listen.primary`, 있으면 `listen.alternate_ip`)과 주소족이 같아야 한다(IPv6 wildcard 바인딩은 두 족을 다 받는다). `advertise.alternate_port`는 0을 받지 않는다. 광고 값이 없을 때의 기본은 소켓이 실제로 묶인 주소다(소켓을 주입해 띄우면 `listen.*`와 다를 수 있다). 시작 검사도 실제 주소로 한 번 더 한다.
 - 주소족: 서버는 기기가 붙은 주소족과 같은 족의 광고 주소만 `welcome.stun`에 싣는다. 기기도 자기 서버 연결과 같은 족의 주소에만 STUN을 보낸다.
 
 ## 기기 인증

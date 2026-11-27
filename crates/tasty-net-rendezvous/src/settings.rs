@@ -1072,14 +1072,54 @@ impl Resolver<'_> {
             "a wildcard listen.primary needs advertise.primary_ip for the alternate STUN address",
             &["listen.primary", "advertise.primary_ip"],
         )?;
+        let listen_alternate_ip = self.opt_ip("listen.alternate_ip");
+        let advertise_alternate_ip = self.opt_ip("advertise.alternate_ip");
+        for (key, ip, bound_key, bound) in [
+            (
+                "advertise.primary_ip",
+                advertise_primary_ip,
+                "listen.primary",
+                Some(listen_primary.ip()),
+            ),
+            (
+                "advertise.alternate_ip",
+                advertise_alternate_ip,
+                "listen.alternate_ip",
+                listen_alternate_ip,
+            ),
+        ] {
+            let Some(ip) = ip else { continue };
+            if ip.is_unspecified() {
+                return Err(SettingsError::OutOfRange {
+                    key,
+                    value: self.value(key),
+                    expected: "not a wildcard address",
+                });
+            }
+            if let Some(bound) = bound {
+                self.relation(
+                    advertise_fits(bound, ip),
+                    "an advertised IP has the address family of the IP it stands for",
+                    &[key, bound_key],
+                )?;
+            }
+        }
+        let advertise_alternate_port = self.port("advertise.alternate_port");
+        if advertise_alternate_port == Some(u16::MIN) {
+            return Err(SettingsError::OutOfRange {
+                key: "advertise.alternate_port",
+                value: self.value("advertise.alternate_port"),
+                expected: "1 to 65535",
+            });
+        }
         let quic = self.quic(keepalive_interval, idle_timeout)?;
         let params = ServerParams {
             listen_primary,
             listen_alternate_port: self.port("listen.alternate_port").unwrap_or_default(),
-            listen_alternate_ip: self.opt_ip("listen.alternate_ip"),
+            listen_alternate_ip,
             advertise_primary_ip,
-            advertise_alternate_port: self.port("advertise.alternate_port"),
-            advertise_alternate_ip: self.opt_ip("advertise.alternate_ip"),
+            advertise_alternate_port,
+            advertise_alternate_ip,
             hello_timeout: self.duration("hello_timeout"),
             frame_timeout,
             keepalive_interval,
@@ -1251,6 +1291,17 @@ impl Resolver<'_> {
             idle_timeout,
             tls_tickets: 0,
         })
+    }
+}
+
+/// Whether `advertised` may stand for the bound IP `bound`: the same address family, where an
+/// IPv6 wildcard binding (dual stack) takes both families.
+pub(crate) fn advertise_fits(bound: IpAddr, advertised: IpAddr) -> bool {
+    let advertised = advertised.to_canonical();
+    match bound.to_canonical() {
+        IpAddr::V4(_) => advertised.is_ipv4(),
+        IpAddr::V6(b) if b.is_unspecified() => true,
+        IpAddr::V6(_) => advertised.is_ipv6(),
     }
 }
 
@@ -1647,6 +1698,104 @@ mod tests {
         )
         .unwrap();
         assert!(s.resolve().is_ok());
+        // An advertised IP is not a wildcard, has the family of its binding and an advertised
+        // port is not 0.
+        let ip = |t: &str| Value::Ip(t.parse().unwrap());
+        let advertise: Vec<(&str, Value, &str, Value, bool)> = vec![
+            (
+                "advertise.primary_ip",
+                ip("0.0.0.0"),
+                "listen.primary",
+                Value::Address("0.0.0.0:3478".parse().unwrap()),
+                false,
+            ),
+            (
+                "advertise.primary_ip",
+                ip("::"),
+                "listen.primary",
+                Value::Address("[::]:3478".parse().unwrap()),
+                false,
+            ),
+            (
+                "advertise.primary_ip",
+                ip("2001:db8::1"),
+                "listen.primary",
+                Value::Address("127.0.0.1:0".parse().unwrap()),
+                false,
+            ),
+            (
+                "advertise.primary_ip",
+                ip("203.0.113.5"),
+                "listen.primary",
+                Value::Address("[2001:db8::2]:0".parse().unwrap()),
+                false,
+            ),
+            (
+                "advertise.primary_ip",
+                ip("203.0.113.5"),
+                "listen.primary",
+                Value::Address("[::]:3478".parse().unwrap()),
+                true,
+            ),
+            (
+                "advertise.primary_ip",
+                ip("2001:db8::1"),
+                "listen.primary",
+                Value::Address("[::]:3478".parse().unwrap()),
+                true,
+            ),
+            (
+                "advertise.alternate_ip",
+                ip("0.0.0.0"),
+                "listen.alternate_ip",
+                Value::Absent(Absent::None),
+                false,
+            ),
+            (
+                "advertise.alternate_ip",
+                ip("2001:db8::1"),
+                "listen.alternate_ip",
+                ip("127.0.0.2"),
+                false,
+            ),
+            (
+                "advertise.alternate_ip",
+                ip("203.0.113.6"),
+                "listen.alternate_ip",
+                ip("127.0.0.2"),
+                true,
+            ),
+            // Without a second binding the family is filtered per device instead.
+            (
+                "advertise.alternate_ip",
+                ip("2001:db8::1"),
+                "listen.alternate_ip",
+                Value::Absent(Absent::None),
+                true,
+            ),
+        ];
+        for (key, value, bound_key, bound, ok) in advertise {
+            let mut s = local();
+            s.set(bound_key, bound).unwrap();
+            s.set(key, value).unwrap();
+            if key == "advertise.alternate_ip" || bound_key != "listen.primary" {
+                s.set("advertise.primary_ip", ip("203.0.113.5")).unwrap();
+            }
+            match s.resolve() {
+                Ok(_) => assert!(ok, "{key} = {value} with {bound_key} = {bound} accepted"),
+                Err(e) => {
+                    assert!(!ok, "{key} = {value} with {bound_key} = {bound}: {e}");
+                    assert!(e.to_string().contains(key), "{e}");
+                }
+            }
+        }
+        let mut s = local();
+        s.set("advertise.alternate_port", Value::Port(0)).unwrap();
+        let err = s.resolve().expect_err("advertised port 0");
+        assert!(
+            err.to_string().contains("advertise.alternate_port"),
+            "{err}"
+        );
         // Boundaries that are accepted.
         let mut s = local();
         s.set("start_delay_margin", d(1000)).unwrap();

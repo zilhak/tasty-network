@@ -24,7 +24,9 @@ use tracing::{debug, info, warn};
 
 use crate::access::{AccessPolicy, Everyone};
 use crate::packet_io::{DemuxCounters, DemuxSocket, PacketIo, StunSink, UdpPacketIo};
-use crate::settings::{ServerParams, ServerSettings, SettingEntry, SettingsError};
+use crate::settings::{
+    Absent, ServerParams, ServerSettings, SettingEntry, SettingsError, Value, advertise_fits,
+};
 use crate::tls::{self, TlsError, TlsOptions};
 use crate::wire::demux::{PacketClass, classify};
 use crate::wire::frame::{FrameError, read_frame, write_frame};
@@ -232,15 +234,17 @@ impl Inner {
         let alt_port = p
             .advertise_alternate_port
             .unwrap_or_else(|| a.alternate_port.port());
+        // Without an advertised IP, the IP the socket is really bound to.
         let primary_ip = p
             .advertise_primary_ip
-            .or(Some(p.listen_primary.ip()).filter(|ip| !ip.is_unspecified()));
+            .or(Some(a.primary.ip()).filter(|ip| !ip.is_unspecified()));
         if let Some(ip) = primary_ip {
             out.push(SocketAddr::new(ip, alt_port));
         }
-        let second_ip = p
-            .advertise_alternate_ip
-            .or(p.listen_alternate_ip.filter(|ip| !ip.is_unspecified()));
+        let second_ip = p.advertise_alternate_ip.or(a
+            .alternate_ip
+            .map(|(primary, _)| primary.ip())
+            .filter(|ip| !ip.is_unspecified()));
         if let Some(ip) = second_ip {
             out.push(SocketAddr::new(ip, a.primary.port()));
             out.push(SocketAddr::new(ip, alt_port));
@@ -375,6 +379,7 @@ impl Server {
                 None => None,
             },
         };
+        check_advertise(&params, &addrs).map_err(StartError::Settings)?;
         let tls_config = tls::server_config(
             &config.key,
             ALPN_RENDEZVOUS,
@@ -483,6 +488,46 @@ impl Drop for Server {
             t.abort();
         }
     }
+}
+
+/// The checks of docs/design/rendezvous.md "광고 주소와 바인딩 주소" against the addresses the
+/// sockets are really bound to (they differ from `listen.*` with injected packet I/O).
+fn check_advertise(p: &ServerParams, a: &ServerAddrs) -> Result<(), SettingsError> {
+    let relation = |rule, values| Err(SettingsError::Relation { rule, values });
+    match p.advertise_primary_ip {
+        None if a.primary.ip().is_unspecified() => {
+            return relation(
+                "a wildcard primary socket needs advertise.primary_ip for the alternate STUN \
+                 address",
+                vec![
+                    ("listen.primary", Value::Address(a.primary)),
+                    ("advertise.primary_ip", Value::Absent(Absent::None)),
+                ],
+            );
+        }
+        Some(ip) if !advertise_fits(a.primary.ip(), ip) => {
+            return relation(
+                "an advertised IP has the address family of the IP it stands for",
+                vec![
+                    ("advertise.primary_ip", Value::Ip(ip)),
+                    ("listen.primary", Value::Address(a.primary)),
+                ],
+            );
+        }
+        _ => {}
+    }
+    if let (Some(ip), Some((second, _))) = (p.advertise_alternate_ip, a.alternate_ip)
+        && !advertise_fits(second.ip(), ip)
+    {
+        return relation(
+            "an advertised IP has the address family of the IP it stands for",
+            vec![
+                ("advertise.alternate_ip", Value::Ip(ip)),
+                ("listen.alternate_ip", Value::Ip(second.ip())),
+            ],
+        );
+    }
+    Ok(())
 }
 
 async fn bind(addr: SocketAddr) -> Result<Arc<dyn PacketIo>, StartError> {

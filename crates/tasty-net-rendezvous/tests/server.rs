@@ -9,7 +9,8 @@ use std::time::Duration;
 use quinn::crypto::rustls::QuicClientConfig;
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_rendezvous::access::Allowlist;
-use tasty_net_rendezvous::server::{Server, ServerConfig, StartError};
+use tasty_net_rendezvous::packet_io::{PacketIo, UdpPacketIo};
+use tasty_net_rendezvous::server::{Server, ServerConfig, ServerIo, StartError};
 use tasty_net_rendezvous::settings::{ServerSettings, Source, Value};
 use tasty_net_rendezvous::tls::{self, TlsOptions};
 use tasty_net_rendezvous::wire::candidate::CandidateKind;
@@ -847,6 +848,55 @@ async fn advertised_addresses_are_used() {
     assert_eq!(w.limits.max_host_candidates, 4);
     assert_eq!(w.limits.max_reported_reflexive, 3);
     assert_eq!(w.limits.punch_session_ttl_ms, 21_000);
+}
+
+#[tokio::test]
+async fn advertise_defaults_follow_the_bound_sockets() {
+    // With injected packet I/O, listen.* is not what the sockets are bound to: the alternate
+    // STUN address takes the IP of the primary socket and the port of the alternate socket.
+    let mut s = local_settings();
+    s.set(
+        "listen.primary",
+        Value::Address("127.0.0.9:3478".parse().unwrap()),
+    )
+    .unwrap();
+    let io = |addr: &str| {
+        let addr: SocketAddr = addr.parse().unwrap();
+        async move {
+            let io: Arc<dyn PacketIo> = Arc::new(UdpPacketIo::bind(addr).await.unwrap());
+            io
+        }
+    };
+    let mut config = ServerConfig::new(key(100));
+    config.settings = s.clone();
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: io("127.0.0.1:0").await,
+            alternate_port: io("127.0.0.1:0").await,
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    let (_d, w) = Device::register(&server, &key(1), &[]).await;
+    assert_eq!(w.stun, vec![server.addrs().alternate_port]);
+    // A wildcard primary socket without advertise.primary_ip is refused.
+    let mut config = ServerConfig::new(key(100));
+    config.settings = s;
+    match Server::start_with_io(
+        config,
+        ServerIo {
+            primary: io("0.0.0.0:0").await,
+            alternate_port: io("0.0.0.0:0").await,
+            alternate_ip: None,
+        },
+    )
+    .await
+    {
+        Err(StartError::Settings(e)) => assert!(e.to_string().contains("advertise.primary_ip")),
+        other => panic!("expected a settings error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
