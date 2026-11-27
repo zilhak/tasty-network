@@ -579,7 +579,7 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
             .collect(),
         host_candidates: Some(crate::endpoint::host_candidates(&core)),
     });
-    let (sent, changed) = {
+    let changed = {
         let mut r = lock(&core.reg);
         if core.generation() != Some(generation) {
             debug!("a judgement of an earlier registration dropped");
@@ -587,17 +587,21 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
         }
         // The report goes into the link's queue before the judgement shows in the status:
         // whatever this device asks after seeing it (a punch_request) reaches the server
-        // after the report, on the same stream.
-        let sent = core.send_on(generation, report);
+        // after the report, on the same stream. A report the link no longer takes (the
+        // session is ending) leaves the status as it was.
+        if !core.send_on(generation, report) {
+            debug!("a judgement the coordination link no longer takes dropped");
+            return;
+        }
         let before = r
             .nat
             .as_ref()
             .map(|n| (n.mapping, n.answers.first().and_then(|a| a.reflexive)));
         let changed = before != Some((j.mapping, j.answers.first().and_then(|a| a.reflexive)));
         r.nat = Some(j);
-        (sent, changed && r.phase == Some(EndpointPhase::Registered))
+        changed && r.phase == Some(EndpointPhase::Registered)
     };
-    if sent && changed {
+    if changed {
         core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
     }
 }

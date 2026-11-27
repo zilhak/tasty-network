@@ -1811,6 +1811,48 @@ mod tests {
         ep.close();
     }
 
+    /// A judgement whose report the coordination link no longer takes (its receiver is gone
+    /// while the session ends) does not show in the status: only a queued report does.
+    #[test]
+    fn a_judgement_the_link_does_not_take_stays_out_of_the_status() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([43; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            rx,
+        } = stand_in(
+            42,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        let nat_changed = |events: Vec<P2pEvent>| {
+            events.iter().any(
+                |e| matches!(e, P2pEvent::Transition { cause, .. } if cause.name == "nat_changed"),
+            )
+        };
+        let _before = ep.events();
+        drop(rx);
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert!(lock(&core.reg).nat.is_none(), "an unqueued judgement shows");
+        assert!(ep.status().nat_answers.is_empty());
+        assert!(!nat_changed(ep.events()), "no nat_changed for it");
+        // The control: on a link that takes the report, the judgement shows.
+        let (tx, mut again) = mpsc::unbounded_channel();
+        let next = core.open_link(tx);
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), next));
+        assert!(matches!(again.try_recv(), Ok(DeviceMessage::NatReport(_))));
+        assert!(!ep.status().nat_answers.is_empty());
+        assert!(nat_changed(ep.events()), "the control reports nat_changed");
+        ep.close();
+    }
+
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
     /// judgement that wait started ends with it: no STUN request goes out after that and no
     /// transaction ID waits. Only the shutdown signal is sent, so the runtime still runs and a
