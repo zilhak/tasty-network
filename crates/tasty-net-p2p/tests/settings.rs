@@ -21,7 +21,7 @@ fn server_ips(s: &TestServer) -> Vec<IpAddr> {
     vec![ip, IpAddr::from([o[0], o[1], o[2], o[3] + 1])]
 }
 
-const PREFIXES: [&str; 5] = ["punch.", "quic.", "nat.", "path.", "history."];
+const PREFIXES: [&str; 6] = ["punch.", "socket.", "quic.", "nat.", "path.", "history."];
 
 #[test]
 fn connection_reports_applied_settings() {
