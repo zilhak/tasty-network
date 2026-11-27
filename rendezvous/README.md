@@ -8,6 +8,7 @@ tasty-network의 P2P 연결은 rendezvous 서버 하나로 서로를 찾는다. 
 | `rendezvous.toml` | 설정 예시. 기본값과 같은 값은 주석으로만 적었다 |
 | `compose.yaml` | Docker Compose 예시. UDP 3478·3479를 게시하고 서버 키를 볼륨에 둔다 |
 | `check-config.sh` | 예시 설정 검사와 주·보조 포트의 STUN 응답 확인(CI `rendezvous-check` 잡) |
+| `container-check.sh` | 이미지로 띄운 서버에 `p2p_peer` 예제 두 개를 붙이는 연결 확인(원격 빌드 환경, 동작 수준 기준 D5 (b)) |
 
 외부 서버 이미지는 쓰지 않는다. 이미지의 서버 판은 빌드한 트리의 workspace 버전이다([버전·호환](../docs/design/versioning.md)). 배포할 판은 그 태그(`v<semver>`)를 checkout한 트리에서 빌드한다.
 
@@ -132,3 +133,16 @@ bash rendezvous/check-config.sh               # 서버와 stun_probe 예제를 �
 cargo run --locked -p tasty-net-rendezvous --example stun_probe -- 203.0.113.10:3479 2000
 # stun-probe server=203.0.113.10:3479 local=... mapped=<바깥에서 보인 주소>
 ```
+
+## 연결 확인
+
+```bash
+bash rendezvous/container-check.sh --self-test   # docker 없이 검사 자체를 시험한다
+bash rendezvous/container-check.sh               # 이미지와 p2p_peer 예제를 빌드해 두 기기를 붙인다
+```
+
+`container-check.sh`는 이 폴더의 `Dockerfile`로 이미지를 빌드하고, 예시 설정의 광고 주소만 바꿔 서버를 띄운 뒤 같은 머신의 `p2p_peer` 예제 두 프로세스(`crates/tasty-net-p2p/examples/p2p_peer.rs`)를 그 서버로 붙여 echo한다. 두 예제의 연결 정보 줄(경로·주소쌍·서버)과 서버 쪽 수신 카운터를 적고, 마지막 줄이 `rendezvous-check result=ok ...`면 통과다. 구성과 단계별 판정은 스크립트 머리 주석에 있다.
+
+- Linux Docker Engine에서 돈다. 게시 포트는 호스트의 `127.0.0.1` 빈 UDP 포트를 골라 쓰므로 `check-config.sh`의 3478·3479와 겹치지 않는다.
+- 기기는 이 머신의 사설 IPv4를 호스트 후보로 알린다. 경로를 물어 정한 값이 사설 IPv4가 아니면 `CONTAINER_CHECK_HOST_IP`로 준다.
+- 다른 망의 기기 사이 펀칭은 이 확인의 범위가 아니다([P2P 설계](../docs/design/p2p.md#펀칭-실험)).

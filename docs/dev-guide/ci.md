@@ -14,7 +14,7 @@
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
 - `rendezvous.yml`은 `rendezvous/` 밖만 바뀐 커밋에서도 돈다. `develop`의 어느 커밋이든 D5 (a)의 실행 ID를 남기기 위해서다. 아래 concurrency 규칙은 두 워크플로가 같고 그룹 이름의 앞머리(`ci-`·`rendezvous-`)만 다르다.
-- `rendezvous-check`는 서버를 이미지가 아니라 그 커밋에서 빌드한 실행 파일로 띄운다(`cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe`). D5 (a)가 보는 것(예시 설정으로 뜸, 주·보조 포트의 STUN 응답, 설정값 조회)은 이미지 안과 같은 실행 파일의 동작이고, 이미지 빌드는 러너에서 몇 분을 더 쓴다. STUN 응답은 이 레포의 STUN 코덱을 쓰는 `stun_probe` 예제로 보므로 외부 STUN 클라이언트가 없다.
+- `rendezvous-check`는 서버를 이미지가 아니라 그 커밋에서 빌드한 실행 파일로 띄운다(`cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe`). D5 (a)가 보는 것(예시 설정으로 뜸, 주·보조 포트의 STUN 응답, 설정값 조회)은 이미지 안과 같은 실행 파일의 동작이고, 이미지 빌드는 러너에서 몇 분을 더 쓴다. STUN 응답은 이 레포의 STUN 코덱을 쓰는 `stun_probe` 예제로 보므로 외부 STUN 클라이언트가 없다. 이미지로 띄운 서버는 CI가 아니라 원격 빌드 환경의 `rendezvous/container-check.sh`(D5 (b))가 본다. 그 스크립트가 매번 이미지를 빌드한다.
 - push와 수동 실행은 브랜치와 커밋마다 다른 concurrency 그룹을 쓴다. 그래서 서로 다른 커밋의 push는 각자 실행이 남는다. 같은 ref·같은 커밋의 push와 수동 실행은 그룹을 함께 쓰므로, 그 그룹에서 대기 중인 앞 실행은 같은 ref·커밋의 새 요청에 밀려 취소될 수 있다.
 - PR은 PR마다 그룹 하나를 쓰고, 새 커밋이 오면 앞 커밋의 실행을 취소한다.
 - Windows 잡은 Git Bash(`shell: bash`)로 돈다.
@@ -50,6 +50,7 @@
 - D8(P2P 크레이트 격리)의 격리 부분은 `repo-checks` 잡의 `p2p-isolation` 단계 결론으로 본다. 단독 실행 부분은 `clippy-test` 세 잡의 `test tasty-net-rendezvous alone`·`test tasty-net-p2p alone` 단계 로그로 본다. 의존 그래프는 OS와 무관하게 `cargo metadata` 하나로 정해지므로(선택 의존과 모든 target을 넣어 읽는다) ubuntu 잡 하나에서 돈다.
 - D10(설정값 노출)의 정적 검사 부분은 `repo-checks` 잡의 `no-hidden-constants` 단계 결론으로 본다. 소스와 설계 문서만 읽으므로 ubuntu 잡 하나에서 돈다. 대상·허용 목록·표 대응은 `scripts/no-hidden-constants.list` 한 파일이다.
 - D5 (a)(rendezvous 설정 기동)는 `rendezvous.yml`의 `rendezvous-check` 잡 결론과 로그의 `rendezvous-check result=ok` 줄로 본다.
+- D5 (b)(이미지로 띄운 서버로 두 기기 연결)는 CI 잡이 아니다. 원격 빌드 환경에서 돌린 `bash rendezvous/container-check.sh`의 종료 코드와 출력(`rendezvous-check result=ok` 줄, 예제의 연결 정보 줄, 실행 sha)으로 본다([rendezvous 패키지 안내](../../rendezvous/README.md#연결-확인)).
 - 기준과 증거 형식의 정본은 [동작 수준 기준](../design/done-criteria.md)이다.
 
 ## cargo deny
