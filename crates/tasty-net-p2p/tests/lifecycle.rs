@@ -1191,6 +1191,93 @@ fn a_connection_outlives_the_endpoint_handles() {
     b.ep.close();
 }
 
+/// What a test keeps of an endpoint after its endpoint handles are dropped.
+#[derive(Clone, Copy, Debug)]
+enum Kept {
+    Connection,
+    Stream,
+}
+
+/// With every endpoint handle dropped first, the last connection handle, or the last stream
+/// handle alone, keeps the endpoint running; dropping it ends the endpoint within a bound.
+/// The end is seen in two ways the endpoint's own runtime decides: the key is free again
+/// (given up at `Off`), and the pairing list the endpoint was bound with has no other owner
+/// (the endpoint's state, its TLS verifiers and every task of its runtime that held them are
+/// gone, which happens when the owner thread has run the shutdown and dropped the runtime).
+fn the_endpoint_ends_after_its_last_handle(kept: Kept) {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    let a = device(&n1, 2, 1, &s, settings(&[]));
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    let (ca, cb) = connected(&a, &b);
+    let key = support::device_key(&a.port, 1);
+    let Device {
+        ep, port, pairing, ..
+    } = a;
+    drop(ep);
+    let mut stream = None;
+    let last: Box<dyn FnOnce()> = match kept {
+        Kept::Connection => Box::new(move || drop(ca)),
+        Kept::Stream => {
+            let mut sa = ca.open_bi().expect("stream");
+            sa.set_write_timeout(Some(LONG));
+            std::io::Write::write_all(&mut sa, b"held").expect("write");
+            let mut sb = cb.accept_bi(Some(LONG)).expect("accept stream");
+            sb.set_read_timeout(Some(LONG));
+            let mut got = [0; 4];
+            std::io::Read::read_exact(&mut sb, &mut got).expect("read");
+            assert_eq!(&got, b"held");
+            drop(ca);
+            stream = Some(sb);
+            Box::new(move || drop(sa))
+        }
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(Arc::strong_count(&pairing) > 1, "the endpoint still runs");
+    let rebind = || {
+        let mut c =
+            tasty_net_p2p::P2pConfig::new(key.clone(), Arc::new(tasty_net_p2p::PairingList::new()));
+        c.enabled = true;
+        c.server = Some(s.info);
+        c.packet_io = Some(Arc::new(support::MockIo(n1.socket(3))));
+        tasty_net_p2p::P2pEndpoint::bind(c)
+    };
+    assert!(
+        matches!(rebind(), Err(tasty_net_p2p::P2pError::EndpointInUse)),
+        "the key is still the running endpoint's"
+    );
+    last();
+    let mut again = None;
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            again = rebind().ok();
+            again.is_some()
+        }),
+        "the key is free after the last handle ({kept:?})"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || Arc::strong_count(&pairing) == 1),
+        "pairing list owners: {} ({kept:?})",
+        Arc::strong_count(&pairing)
+    );
+    if let Some(again) = again {
+        again.close();
+    }
+    drop((stream, port));
+    b.ep.close();
+}
+
+#[test]
+fn the_endpoint_ends_after_its_last_connection() {
+    the_endpoint_ends_after_its_last_handle(Kept::Connection);
+}
+
+#[test]
+fn the_endpoint_ends_after_its_last_stream() {
+    the_endpoint_ends_after_its_last_handle(Kept::Stream);
+}
+
 /// After `close`, a connection handle still held answers without a panic and its calls end at
 /// once; the socket is given up although the endpoint and the connection handles live.
 #[test]
