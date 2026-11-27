@@ -1205,7 +1205,7 @@ mod tests {
             crate::settings::Value::Duration(Duration::from_secs(60)),
         );
         for (key, value) in settings {
-            config.settings.set(key, value.clone());
+            config.settings.set(key, *value);
         }
         let ep = P2pEndpoint::bind(config).expect("bind");
         let core = ep.core().unwrap().clone();
