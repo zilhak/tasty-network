@@ -1112,6 +1112,133 @@ fn a_scoped_link_local_list_entry_is_judged_with_the_address_given() {
 }
 
 #[test]
+fn key_files_keep_order_origin_and_expansion() {
+    let dir = folder();
+    let key = write(&dir, "key", "").display().to_string();
+    let mut ctx = context(vec![
+        CommandLineValue {
+            value: CommandLine::Identity(key.clone()),
+            label: "target".to_string(),
+        },
+        option("IdentityFile=/o/%r", "override"),
+    ]);
+    ctx.env
+        .insert("TASTY_KEYS".to_string(), "/keys".to_string());
+    let path = write(
+        &dir,
+        "config",
+        "Host web\n  User alice\n  IdentityFile ~/.ssh/id_%h\n  IdentityFile NONE\n  \
+         IdentityFile ${TASTY_KEYS}/k_%u\n  CertificateFile ~/c_%r\n  CertificateFile none\n  \
+         IdentitiesOnly yes\n",
+    );
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(path.clone()),
+    })
+    .expect("load")
+    .resolve("web", &ctx);
+    assert!(r.refusal.is_none(), "{:?}", r.refusal);
+    let line = |n| Origin::File {
+        path: path.clone(),
+        line: n,
+    };
+    let cl = |l: &str| Origin::CommandLine {
+        label: l.to_string(),
+    };
+    let ids: Vec<(&str, Option<&str>, ProvidedBy, Origin)> = r
+        .identity_files
+        .iter()
+        .map(|k| {
+            (
+                k.written.as_str(),
+                k.path.as_deref(),
+                k.provided_by,
+                k.origin.clone(),
+            )
+        })
+        .collect();
+    // `-i` first, then `-o`, then the file in order; `none` (any case) is left out.
+    assert_eq!(
+        ids,
+        vec![
+            (
+                key.as_str(),
+                Some(key.as_str()),
+                ProvidedBy::IdentityOption,
+                cl("target")
+            ),
+            (
+                "/o/%r",
+                Some("/o/alice"),
+                ProvidedBy::UserConfig,
+                cl("override")
+            ),
+            (
+                "~/.ssh/id_%h",
+                Some("/home/tester/.ssh/id_web"),
+                ProvidedBy::UserConfig,
+                line(3)
+            ),
+            (
+                "${TASTY_KEYS}/k_%u",
+                Some("/keys/k_tester"),
+                ProvidedBy::UserConfig,
+                line(5)
+            ),
+        ]
+    );
+    // `ssh -G` keeps `none`.
+    assert_eq!(r.options.identity_files.len(), 5);
+    // Certificates have no `none` skip (`ssh.c:2454`-`:2482`).
+    let certs: Vec<(&str, Option<&str>, Origin)> = r
+        .certificate_files
+        .iter()
+        .map(|k| (k.written.as_str(), k.path.as_deref(), k.origin.clone()))
+        .collect();
+    assert_eq!(
+        certs,
+        vec![
+            ("~/c_%r", Some("/home/tester/c_alice"), line(6)),
+            ("none", Some("none"), line(7)),
+        ]
+    );
+    assert_eq!(r.options.identities_only, Some(Flag::Yes));
+    assert_eq!(r.source_of("identitiesonly"), line(8));
+}
+
+#[test]
+fn default_key_files_are_marked_default() {
+    let r = resolve("Host web\n  IdentitiesOnly no\n", "web");
+    assert!(!r.identity_files.is_empty());
+    for k in &r.identity_files {
+        assert_eq!(k.origin, Origin::Default, "{k:?}");
+        assert_eq!(k.provided_by, ProvidedBy::NotUser, "{k:?}");
+        let p = k.path.as_deref().expect("under the known home");
+        assert!(p.starts_with("/home/tester/.ssh/id_"), "{p}");
+    }
+    assert!(r.certificate_files.is_empty());
+    assert_eq!(r.options.identities_only, Some(Flag::No));
+    // Without a home the default files cannot be named: they are kept without a path.
+    let dir = folder();
+    let path = write(&dir, "config", "");
+    let mut ctx = context(Vec::new());
+    ctx.home = None;
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(path),
+    })
+    .expect("load")
+    .resolve("web", &ctx);
+    assert!(r.identity_files.iter().all(|k| k.path.is_none()));
+}
+
+#[test]
+fn an_unset_variable_in_a_key_file_refuses() {
+    let r = resolve("IdentityFile /k/${TASTY_UNSET_FOR_TEST}\n", "web");
+    let f = r.refusal.as_ref().expect("refused");
+    assert_eq!(f.keyword.as_deref(), Some("identityfile"));
+    assert!(r.identity_files.is_empty());
+}
+
+#[test]
 fn known_hosts_files_and_query() {
     let r = resolve(
         "Host web\n  Port 2222\n  UserKnownHostsFile ~/kh %d/kh2\n  \

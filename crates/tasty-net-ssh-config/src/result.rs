@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::options::ProvidedBy;
+
 /// Where a value or a note comes from (docs/design/ssh-backends.md "옵션 적용 순서").
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Origin {
@@ -42,6 +44,25 @@ pub struct ValueSource {
     /// The value as written.
     pub value: String,
     /// Where it came from.
+    pub origin: Origin,
+}
+
+/// An `IdentityFile` or `CertificateFile` entry as `ssh` loads it before authenticating
+/// (`load_public_identity_files`, `ssh.c:2354`-`:2497`). The crate does not open the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyFile {
+    /// The value as written, the way `ssh -G` shows it.
+    pub written: String,
+    /// The file `ssh` reads: `~` expanded (`tilde_expand_filename`), then the `%` tokens and
+    /// `${NAME}` (`default_client_percent_dollar_expand`). `None` when the path is under a
+    /// home that is not known: a missing file, which `ssh` skips (docs/design/ssh-backends.md
+    /// "내장 백엔드가 읽는 파일").
+    pub path: Option<String>,
+    /// Who gave it (`identity_file_userprovided`, `certificate_file_userprovided`).
+    pub provided_by: ProvidedBy,
+    /// Where it was written: a file line, the command line (`-i`, `-o`), or
+    /// [`Origin::Default`] for the default key files `fill_default_options` adds when no
+    /// identity is given.
     pub origin: Origin,
 }
 

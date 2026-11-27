@@ -118,7 +118,9 @@ use crate::readconf::{
     DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, OpenFile, Reader, connection_hash,
     parse_ssh_uri, valid_hostname, valid_ruser,
 };
-use crate::result::{ConfigNote, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource};
+use crate::result::{
+    ConfigNote, KeyFile, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource,
+};
 use crate::settings;
 
 /// Which configuration files to read (`ssh -F`, docs/design/ssh-backends.md
@@ -254,6 +256,16 @@ pub struct Resolution {
     /// [`Origin::Default`] for the default `ask`. [`Resolution::source_of`] gives the first
     /// written `StrictHostKeyChecking`, which can be a value this crate does not apply.
     pub host_key_checking_origin: Origin,
+    /// The `IdentityFile` entries in the order `ssh` offers them, as `ssh` expands them
+    /// before authenticating (`load_public_identity_files`, `ssh.c:2354`-`:2497`). Entries
+    /// written `none` are left out (`ssh.c:2403`-`:2409`); [`Options::identity_files`] keeps
+    /// every entry as `ssh -G` shows it. When [`Resolution::certificate_files`] is empty,
+    /// `ssh` also tries `<path>-cert` after each entry and offers it next when that file holds
+    /// a certificate (`ssh.c:2425`-`:2451`). Empty when the resolution is refused before the
+    /// end.
+    pub identity_files: Vec<KeyFile>,
+    /// The `CertificateFile` entries in order, expanded the same way (`ssh.c:2454`-`:2482`).
+    pub certificate_files: Vec<KeyFile>,
     /// The known_hosts files `ssh` reads, in its order: `UserKnownHostsFile` (as
     /// [`Options::user_hostfiles`]), then `GlobalKnownHostsFile` with `~` expanded
     /// (`ssh.c:1791`-`:1793`). A file under a home that is not known is left out (a missing
@@ -413,6 +425,8 @@ impl ConfigSet {
             refusal: r.refusal,
             host_key_checking,
             host_key_checking_origin,
+            identity_files: std::mem::take(&mut st.identity_files),
+            certificate_files: std::mem::take(&mut st.certificate_files),
             known_hosts_files: std::mem::take(&mut st.known_hosts_files),
         }
     }
@@ -465,6 +479,7 @@ impl ConfigSet {
                     if let Some(p) = tilde_path(&r.env.account, path, &origin)?
                         && Path::new(&p).exists()
                     {
+                        let before = r.o.identity_files.len();
                         r.o.add_identity_file(p.clone(), ProvidedBy::IdentityOption)
                             .map_err(|e| {
                                 config_error(
@@ -472,6 +487,9 @@ impl ConfigSet {
                                     format!("Too many identity files specified (max {})", e.max),
                                 )
                             })?;
+                        if r.o.identity_files.len() > before {
+                            r.identity_origins.push(origin.clone());
+                        }
                         push_source(r, Op::IdentityFile, &p, &origin);
                     }
                 }
@@ -644,6 +662,9 @@ impl ConfigSet {
                 format!("{}: bad algorithm list", crate::keywords::keyword_name(e.0)),
             )
         })?;
+        // The entries `fill_default_options` added are the default key files.
+        let written = r.o.identity_files.len();
+        r.identity_origins.resize(written, Origin::Default);
         // `ssh -G` stops on this in `dump_client_config` and `ssh` when it connects
         // (`sshconnect2.c:245`); the resolution stops here.
         if r.o.assembled_hostkeyalgorithms().is_none() {
@@ -873,6 +894,37 @@ impl ConfigSet {
                 st.known_hosts_files.push(PathBuf::from(p));
             }
         }
+        // `load_public_identity_files`: `~`, then the `%` tokens and `${NAME}`.
+        let key_file = |(written, by): &(String, ProvidedBy),
+                        origin: Option<&Origin>,
+                        what: &str|
+         -> Result<KeyFile, Fatal> {
+            let origin = origin.cloned().unwrap_or(Origin::Default);
+            let with_origin = |Fatal(mut f): Fatal| {
+                f.origin.get_or_insert_with(|| origin.clone());
+                Fatal(f)
+            };
+            let path = match tilde_path(&account, written, &origin)? {
+                Some(t) => Some(percent_dollar(&t, what).map_err(with_origin)?),
+                None => None,
+            };
+            Ok(KeyFile {
+                written: written.clone(),
+                path,
+                provided_by: *by,
+                origin,
+            })
+        };
+        for (i, f) in r.o.identity_files.iter().enumerate() {
+            if !f.0.eq_ignore_ascii_case("none") {
+                let k = key_file(f, r.identity_origins.get(i), "identityfile")?;
+                st.identity_files.push(k);
+            }
+        }
+        for (i, f) in r.o.certificate_files.iter().enumerate() {
+            let k = key_file(f, r.certificate_origins.get(i), "certificatefile")?;
+            st.certificate_files.push(k);
+        }
         let setenv = std::mem::take(&mut r.o.setenv);
         for e in setenv {
             let (name, value) = e.split_once('=').unwrap_or((&e, ""));
@@ -896,6 +948,8 @@ impl ConfigSet {
 #[derive(Default)]
 struct State {
     host: String,
+    identity_files: Vec<KeyFile>,
+    certificate_files: Vec<KeyFile>,
     known_hosts_files: Vec<PathBuf>,
 }
 

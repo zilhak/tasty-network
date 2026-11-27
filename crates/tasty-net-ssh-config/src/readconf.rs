@@ -272,6 +272,11 @@ pub(crate) struct Reader<'a> {
     pub(crate) localhost_values: Vec<(Flag, Origin)>,
     /// Every `SessionType` value read in an applied block, in order.
     pub(crate) session_type_values: Vec<(SessionType, Origin)>,
+    /// Where each entry of `o.identity_files` was written, in the same order (an entry
+    /// `add_identity_file` drops as a duplicate has none). The default files come later.
+    pub(crate) identity_origins: Vec<Origin>,
+    /// The same for `o.certificate_files`.
+    pub(crate) certificate_origins: Vec<Origin>,
     /// The keyword of the line being read (lower-cased), for the refusal of a bad line.
     line_keyword: Option<String>,
     /// Why the `Match localnetwork` list of the line being read has addresses that depend on
@@ -640,6 +645,8 @@ impl<'a> Reader<'a> {
             strict_values: Vec::new(),
             localhost_values: Vec::new(),
             session_type_values: Vec::new(),
+            identity_origins: Vec::new(),
+            certificate_origins: Vec::new(),
             line_keyword: None,
             match_note: None,
         }
@@ -1408,6 +1415,11 @@ impl<'a> Reader<'a> {
                 let arg = required!("Missing argument.");
                 if a {
                     let ident = op == Op::IdentityFile;
+                    let before = if ident {
+                        self.o.identity_files.len()
+                    } else {
+                        self.o.certificate_files.len()
+                    };
                     // `readconf.c:1412`-`:1442` checks the count before `add_*_file`, which
                     // checks it again.
                     let added = if ident {
@@ -1422,6 +1434,17 @@ impl<'a> Reader<'a> {
                             if ident { "identity" } else { "certificate" },
                             e.max
                         ));
+                    }
+                    let (files, origins) = if ident {
+                        (self.o.identity_files.len(), &mut self.identity_origins)
+                    } else {
+                        (
+                            self.o.certificate_files.len(),
+                            &mut self.certificate_origins,
+                        )
+                    };
+                    if files > before {
+                        origins.push(origin.clone());
                     }
                     self.record(op, &arg, origin);
                 }

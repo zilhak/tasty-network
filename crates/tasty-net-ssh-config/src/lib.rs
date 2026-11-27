@@ -39,4 +39,6 @@ pub use resolve::{
     CommandLine, CommandLineValue, ConfigError, ConfigFiles, ConfigInputs, ConfigSet, Resolution,
     ResolveContext,
 };
-pub use result::{ConfigNote, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource};
+pub use result::{
+    ConfigNote, KeyFile, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource,
+};
