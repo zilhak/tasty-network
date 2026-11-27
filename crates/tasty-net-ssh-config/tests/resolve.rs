@@ -1069,3 +1069,11 @@ fn a_localnetwork_refusal_names_the_c_library_readings() {
     let f = r.refusal.expect("a refusal");
     assert!(!f.message.contains("C libraries"), "{}", f.message);
 }
+
+#[test]
+fn a_unicast_prefix_based_multicast_host_is_kept_on_every_os() {
+    // Flags 0x30: not link-local multicast for Darwin, so no interface is read.
+    let r = resolve("Host m\n    HostName ff32:40:fe80::1234\n", "m");
+    assert!(r.refusal.is_none(), "{:?}", r.refusal);
+    assert_eq!(r.host, "ff32:40:fe80::1234");
+}

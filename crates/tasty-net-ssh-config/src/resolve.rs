@@ -1206,6 +1206,19 @@ mod tests {
             ["ff11:1::1", "ff11:1::1", "refused", "refused"],
         ),
         ("ff05:1::1", Family::Any, ["ff05:1::1"; 4]),
+        // A unicast-prefix-based multicast address (flags 0x30) is not link-local for
+        // Darwin; any other flags are, and node-local has no flags condition.
+        ("ff32:40:fe80::1234", Family::Any, ["ff32:40:fe80::1234"; 4]),
+        (
+            "ff72:1::1",
+            Family::Any,
+            ["ff72:1::1", "ff72:1::1", "refused", "refused"],
+        ),
+        (
+            "ff31:1::1",
+            Family::Any,
+            ["ff31:1::1", "ff31:1::1", "refused", "refused"],
+        ),
         ("fe80:1::1", Family::Inet, ["-"; 4]),
         // An IPv4-mapped address asked for IPv4: only glibc takes the IPv4 address.
         (

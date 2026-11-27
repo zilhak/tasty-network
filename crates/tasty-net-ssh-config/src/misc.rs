@@ -765,23 +765,30 @@ pub(crate) fn numeric_host(name: &str, family: Family) -> Result<Option<IpAddr>,
 
 /// The scope field of a multicast address (the low four bits of the first word).
 const MC_SCOPE_MASK: u16 = 0x000f;
-/// Multicast scope node-local (`IN6_IS_ADDR_MC_NODELOCAL`).
+/// Multicast scope node-local (`__IPV6_ADDR_SCOPE_NODELOCAL`).
 const MC_SCOPE_NODE_LOCAL: u16 = 0x1;
-/// Multicast scope link-local (`IN6_IS_ADDR_MC_LINKLOCAL`).
+/// Multicast scope link-local (`__IPV6_ADDR_SCOPE_LINKLOCAL`).
 const MC_SCOPE_LINK_LOCAL: u16 = 0x2;
+/// The flags field of a multicast address (the next four bits of the first word).
+const MC_FLAGS_MASK: u16 = 0x00f0;
+/// The flags of a unicast-prefix-based multicast address
+/// (`IPV6_ADDR_MC_FLAGS_UNICAST_BASED`, transient and prefix).
+const MC_FLAGS_UNICAST_BASED: u16 = 0x0030;
 
 /// Whether Libinfo takes the second word of `a` as an interface index: `si_addrinfo_v6`
-/// moves it out of a link-local address, and `getnameinfo` reads it from link-local and
-/// node- or link-local multicast addresses. The multicast test does not look at the flags
-/// that newer Apple headers check, so it may refuse more than Darwin needs.
+/// moves it out of a link-local address, and `getnameinfo` reads it from addresses that
+/// pass `IN6_IS_ADDR_LINKLOCAL`, `IN6_IS_ADDR_MC_NODELOCAL` or `IN6_IS_ADDR_MC_LINKLOCAL`.
+/// The user-space macros of xnu `bsd/netinet6/in6.h` leave out of the link-local multicast
+/// test a unicast-prefix-based address (flags `0x30`, `ff32:40:fe80::1234`), whose second
+/// word is the prefix length; the node-local test has no flags condition.
 fn embeds_scope(a: Ipv6Addr) -> bool {
     let [w0, w1, ..] = a.segments();
-    let multicast = a.is_multicast()
-        && matches!(
-            w0 & MC_SCOPE_MASK,
-            MC_SCOPE_NODE_LOCAL | MC_SCOPE_LINK_LOCAL
-        );
-    w1 != 0 && (a.is_unicast_link_local() || multicast)
+    let scope = w0 & MC_SCOPE_MASK;
+    let node_local = a.is_multicast() && scope == MC_SCOPE_NODE_LOCAL;
+    let link_local = a.is_multicast()
+        && w0 & MC_FLAGS_MASK != MC_FLAGS_UNICAST_BASED
+        && scope == MC_SCOPE_LINK_LOCAL;
+    w1 != 0 && (a.is_unicast_link_local() || node_local || link_local)
 }
 
 /// How `libc` reads `name` ([`numeric_host`]).
