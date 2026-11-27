@@ -2233,10 +2233,22 @@ mod tests {
             .unwrap();
             let mut config = quinn::ClientConfig::new(Arc::new(crypto));
             config.transport_config(Arc::new(quic::transport_config(&p)));
+            // The whole loopback setup has one deadline: an Initial that never arrives fails
+            // the test at the step it stopped in instead of stalling the test binary.
+            let setup_by = tokio::time::Instant::now() + Duration::from_secs(10);
             let connecting = client.connect_with(config, addr, tls::SERVER_NAME).unwrap();
-            let incoming = server.accept().await.unwrap();
-            let conn = incoming.await.unwrap();
-            let client_conn = connecting.await.unwrap();
+            let incoming = tokio::time::timeout_at(setup_by, server.accept())
+                .await
+                .expect("the loopback setup stopped at server.accept")
+                .expect("the server endpoint closed before an Initial came");
+            let conn = tokio::time::timeout_at(setup_by, incoming)
+                .await
+                .expect("the loopback setup stopped at the server's handshake")
+                .unwrap();
+            let client_conn = tokio::time::timeout_at(setup_by, connecting)
+                .await
+                .expect("the loopback setup stopped at the client's handshake")
+                .unwrap();
             let now = canonical(conn.remote_address());
             let t = watcher.tracker.start(
                 crate::info::Side::Acceptor,
