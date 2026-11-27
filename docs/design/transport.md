@@ -244,7 +244,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 - 이력 상한: 항목마다 `connections.history_limit`(기본 32)개다. 넘치면 오래된 것부터 버리고 버린 수를 센다. 근거: 재연결 몇 번 분량의 상태 전이와 주소 변화를 담는다. P2P의 `history.limit`과 같은 값이다.
 - 끝난 항목: `disconnected` 항목은 `connections.keep_closed`(기본 16)개까지 최근 것만 남기고 지운다. 근거: 끊긴 이유를 사용자가 볼 수 있게 하되 목록이 끝없이 자라지 않게 한다. 재연결 사슬(`previous`)이 지워진 항목을 가리키면 조회에 `previous_dropped`로 보인다.
 - 이벤트 큐: `connections.event_queue_limit`(기본 256). 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 하나를 남긴다. 근거: P2P의 `events.queue_limit`과 같다. 이벤트를 읽지 않는 소비자 때문에 메모리가 늘지 않게 한다.
-- 재연결 도우미 `Redialer`: 소비자가 고르는 선택지다. `reconnecting` 항목을 만들고 아래 값으로 backoff를 한다. 거절 사유의 `is_retryable()`이 false면 멈춘다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 소비자가 `Redialer`를 쓰지 않고 직접 다시 걸 때도 새 연결은 `previous`를 줄 수 있다(`connect`의 선택 인자). "언제 다시 거는지는 소비자가 정한다"(위 "터널 수명과 재연결")는 규칙은 그대로이고, `Redialer`는 그 결정을 설정값으로 맡길 수 있게 한다.
+- 재연결 도우미 `Redialer`: 소비자가 고르는 선택지다. `reconnecting` 항목을 만들고 아래 값으로 backoff를 한다. 거절 사유의 `is_retryable()`이 false면 멈춘다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 소비자가 `Redialer`를 쓰지 않고 직접 다시 걸 때도 새 연결은 `previous`를 줄 수 있다(`Transport::connect_with`에 `ConnectOptions::after(previous)`를 준다. `connect`의 서명은 그대로다). "언제 다시 거는지는 소비자가 정한다"(위 "터널 수명과 재연결")는 규칙은 그대로이고, `Redialer`는 그 결정을 설정값으로 맡길 수 있게 한다.
 
 | 키 | 기본 | 근거 |
 |---|---|---|
@@ -260,9 +260,11 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 
 - backoff는 새 항목이 `connected`가 되면 처음 간격으로 돌아간다(`Backoff::reset`과 같다). 다시 거는 대상이 아닌 끊김(사용자가 끊음, 상대가 강제로 끊음, `is_retryable()`이 false)에는 `Redialer`가 움직이지 않는다.
 - 조회: 위 값은 `ConnectionTable::settings()`와 `Redialer::settings()`가 `{key, value, source}`로 돌려준다. 바꾸기는 `ConnectionTableConfig`·`RedialerConfig`로 준다. 이 값들은 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 처음부터 따른다. transport의 나머지 기존 상수는 그 규칙의 후속 작업 대상이다.
+- 항목의 `applied`에서 `LinkTimeouts` 값의 키는 `link.read_timeout`·`link.write_timeout`·`link.handshake_timeout`·`link.role_proposal_timeout`·`link.drain_cap`이다. `LinkTimeouts`는 값마다 출처를 들고 있지 않으므로 `LinkTimeouts::default()`와 다른 값을 `configured`로 보인다.
 
 ### 토폴로지와의 관계
 
 - topology의 자기 엣지 보고(`LocalLink`)는 이 목록의 attach 링크에서 만든다. 엣지는 attach 링크 하나에 하나이고 그 링크의 `link_id`를 싣는다. 항목 하나에 attach 링크가 여럿이면 엣지도 여럿이다.
 - 엣지의 `transport` 값은 링크마다 그 링크의 holder와 경로 종류로 정한다: SSH는 holder = dialer → `ssh_forward`, holder = acceptor → `ssh_role_reversed`, P2P는 `p2p_udp`. 항목의 `direction`(요약, `mixed`일 수 있다)은 쓰지 않는다. 그래서 한 터널 위에 정방향 링크와 역할 반전 링크가 함께 있어도 링크마다 양 끝의 `transport`가 같다. 받는 쪽의 `ssh_inbound` 항목도 같은 규칙으로 값을 낸다. `ssh_inbound`는 이 목록의 `path`에만 있고 엣지 값으로 쓰지 않는다.
+- 링크별 엣지 값은 항목의 `links` 행마다 있는 `LinkInfo.transport`(`EdgeTransport`: `ssh_forward`·`ssh_role_reversed`·`p2p_udp`)다. 같은 행의 `local_side`가 그 링크의 방향(이 기기가 링크를 열었는지 받았는지)이고, 항목의 `local_side`(물리 연결의 방향)와 따로 읽는다.
 - `rtt`가 `rtt_ms`가 된다([토폴로지](topology.md#엣지-목록-입력)). 주소·서버 필드는 원격 응답에 싣지 않는다.
