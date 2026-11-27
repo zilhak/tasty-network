@@ -280,7 +280,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 2 | 메모리 바이트 키 | FFI는 키 바이트를 `Vec<u8>`로 한 번 받아 바로 Rust 쪽 소유로 옮긴다. 그 뒤 FFI 쪽 사본을 지운다. 키 바이트를 다시 돌려주는 메서드는 없고, 조회는 지문만 낸다. Kotlin 쪽 배열을 지우는 것은 앱의 몫이다 |
 | 3·4·6 | exec·SFTP·세션 공유 | Rust API를 그대로 옮긴다. SFTP 실패 사유(`PermissionDenied`·`NotFound`·`SubsystemUnavailable` 등)는 FFI 오류 enum의 변형으로 낸다(문자열로 가르지 않는다, 위 "오류 변환") |
 | 5 | SFTP 쓰기 | 앱 쪽 결정 뒤. 보류 |
-| 6b | attach 없는 SSH 세션의 상태 | 연결 목록 항목 종류 `ssh_session`을 다른 항목과 같은 `EventStream`·레코드로 낸다. 별도 이벤트 경로를 두지 않는다 |
+| 6b | attach 없는 SSH 세션의 상태 | Rust 쪽은 `tasty-net-ssh`의 [SSH 세션 목록](ssh-backends.md#ssh-세션-목록)이다(transport 연결 목록은 바꾸지 않는다). ffi는 transport 연결 목록과 SSH 세션 목록의 이벤트를 앱에 하나의 `EventStream`으로 합쳐 내고, 이벤트마다 어느 목록의 것인지 종류를 붙인다 |
 | 7 | 원격 Tasty attach 경로의 노출 범위 | FFI가 내는 것: 대상으로 연결 열기(포트 발견 → `direct-tcpip` → handshake v2는 Rust 안에서 한다), 열린 연결 위 `attach`·`request`·`bulk` 채널 열기, 채널 위 프레임 읽기·쓰기(바이트), 닫기, 연결 레코드의 포트·인스턴스 ID·상대 기기 ID. 프레임의 도메인 해석은 앱·tasty 쪽이다. FFI가 내지 않는 것: 연결 토큰. 토큰은 Rust 안에서 포트 발견 결과에서 handshake로만 간다. FFI 레코드·오류 메시지·`Debug`·이벤트·설정 조회 어디에도 토큰을 싣지 않고, 시험이 그 출력들에 토큰 문자열이 없는지 본다. `PeerTooOld`(숫자 포트만 돌려주는 상대)는 FFI 오류 변형이다 |
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
