@@ -251,3 +251,42 @@ allow	crates/tasty-net-ssh/src/tunnel.rs	static TUNNEL_DROP_NANOS: AtomicU64 = A
 allow	crates/tasty-net-ssh/src/tunnel.rs	static TUNNEL_DROP_COUNT: AtomicU64 = AtomicU64::new(0)	터널 해제 횟수는 0에서 시작
 allow	crates/tasty-net-ssh/src/tunnel.rs	unwrap_or(u64::MAX)	나노초 변환이 넘치면 타입 최대로 포화
 allow	crates/tasty-net-ssh/src/tunnel.rs	TUNNEL_DROP_COUNT.fetch_add(1,	터널 해제 한 번을 센다
+# tasty-net-p2p
+target	crates/tasty-net-p2p/src/
+settings	crates/tasty-net-p2p/src/settings.rs
+table	crates/tasty-net-p2p/src/settings.rs	p2p.md	이 레포가 정하는 값
+table	crates/tasty-net-p2p/src/settings.rs	p2p.md	의존성이 노출하는 값
+table	crates/tasty-net-p2p/src/settings.rs	p2p.md	고정값 (설정 불가, 조회에는 보임)
+allow	crates/tasty-net-p2p/src/attempt.rs	saturating_sub(1)	하나 빼기: 시도 사이 대기는 punch.attempts − 1번, 끝난 수신 하나를 진행 중 수에서 뺌
+allow	crates/tasty-net-p2p/src/attempt.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-p2p/src/attempt.rs	1..=p.punch_attempts	펀칭 시도 번호는 1부터 punch.attempts까지 (p2p.md 연결 정보)
+allow	crates/tasty-net-p2p/src/attempt.rs	n == 1	첫 시도에서 시도 전체 한도를 잡는다
+allow	crates/tasty-net-p2p/src/attempt.rs	attempt.number = 1	B는 punch_go를 받으면 시도 번호 1 (p2p.md 연결 정보)
+allow	crates/tasty-net-p2p/src/attempt.rs	usize::MIN	진행 중인 수신 수의 시작과 없음 비교(0)
+allow	crates/tasty-net-p2p/src/attempt.rs	pending += 1	세기: 시작된 수신 하나
+allow	crates/tasty-net-p2p/src/attempt.rs	fetch_add(1,	세기: 사건 하나
+allow	crates/tasty-net-p2p/src/close.rs	const CODE_CLOSED: u64 = 0	와이어 형식: 기기 사이 QUIC 종료 코드 0 closed (p2p.md 와이어 형식 상수, handshake.md)
+allow	crates/tasty-net-p2p/src/close.rs	const CODE_NOT_PAIRED: u64 = 1	와이어 형식: 기기 사이 QUIC 종료 코드 1 not_paired (p2p.md 와이어 형식 상수)
+allow	crates/tasty-net-p2p/src/close.rs	const CODE_SESSION_MISMATCH: u64 = 4	와이어 형식: 기기 사이 QUIC 종료 코드 4 session_mismatch (p2p.md 와이어 형식 상수)
+allow	crates/tasty-net-p2p/src/endpoint.rs	wrapping_add(1)	등록 변화 알림 번호를 하나 올림
+allow	crates/tasty-net-p2p/src/endpoint.rs	u16::MIN	포트 0: 보내지 않고 경로만 묻는 소켓은 OS가 포트를 고른다
+allow	crates/tasty-net-p2p/src/endpoint.rs	u64::MIN	세기·번호의 시작 0
+allow	crates/tasty-net-p2p/src/endpoint.rs	fetch_add(1,	세기: 사건 하나
+allow	crates/tasty-net-p2p/src/events.rs	+= 1	세기: 버린 이벤트 하나
+allow	crates/tasty-net-p2p/src/events.rs	u64::MIN	버린 이벤트가 없으면(0) Lagged를 내지 않는다
+allow	crates/tasty-net-p2p/src/info.rs	u64::MIN	연결 ID·버린 기록 수의 시작 0
+allow	crates/tasty-net-p2p/src/info.rs	fetch_add(1,	연결 ID를 하나씩 매김
+allow	crates/tasty-net-p2p/src/info.rs	+= 1	세기: 버린 기록 하나
+allow	crates/tasty-net-p2p/src/nat.rs	got.len() <= 1	답이 하나 이하면 비교할 짝이 없다
+allow	crates/tasty-net-p2p/src/nat.rs	got.windows(2).any(|w| w[0] != w[1])	이웃한 두 답을 비교(창 길이 2와 그 첨자)
+allow	crates/tasty-net-p2p/src/nat.rs	sent = 0	세기의 시작: 보낸 요청 수
+allow	crates/tasty-net-p2p/src/nat.rs	sent += 1	세기: 보낸 요청 하나
+allow	crates/tasty-net-p2p/src/probe.rs	usize::MIN	후보 차례의 시작 첨자 0
+allow	crates/tasty-net-p2p/src/probe.rs	wrapping_add(1)	다음 후보로 한 칸
+allow	crates/tasty-net-p2p/src/server.rs	u64::MIN	연속 실패 수의 시작·초기화, 0은 무제한 (p2p.md rendezvous.reconnect.max_attempts)
+allow	crates/tasty-net-p2p/src/server.rs	+= 1	세기: 재연결 번호, 연속 실패 수
+allow	crates/tasty-net-p2p/src/server.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-p2p/src/server.rs	saturating_add(1)	후보 수에 서버 반사 주소 1개를 더함 (p2p.md punch.max_candidates 근거)
+allow	crates/tasty-net-p2p/src/socket.rs	v4.port(), 0, 0)	IPv4-mapped IPv6 주소의 flowinfo·scope_id 0
+allow	crates/tasty-net-p2p/src/socket.rs	u16::MIN	포트 0: 소켓은 [::]:0 또는 0.0.0.0:0으로 연다 (p2p.md 소켓 하나와 패킷 나누기)
+allow	crates/tasty-net-p2p/src/socket.rs	fetch_add(1,	세기: 패킷 하나
