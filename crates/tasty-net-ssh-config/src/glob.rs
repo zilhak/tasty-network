@@ -52,7 +52,7 @@
 //! `/` needs a folder); the results are sorted by bytes (`strcmp`). The flags of the call
 //! leave out `GLOB_BRACE`, `GLOB_NOCHECK`, `GLOB_MARK` and the limits. For `GLOB_TILDE` the
 //! caller gives the configured home, and it is put in front after quoting, where
-//! `globtilde` (`:364`–`:410`) puts it.
+//! `globtilde` (`:364`–`:421`) puts it.
 
 use std::path::PathBuf;
 
@@ -99,7 +99,7 @@ fn is_meta(c: Char) -> bool {
 
 /// `PATH_MAX` of the C library: a pattern this long matches nothing and a path may not
 /// reach it. 1024 on the BSD family (macOS, iOS, FreeBSD), 4096 elsewhere.
-const PATH_MAX: usize = if cfg!(any(
+pub(crate) const PATH_MAX: usize = if cfg!(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "freebsd"
@@ -148,7 +148,7 @@ pub(crate) fn glob(pattern: &str) -> Result<Vec<PathBuf>, GlobFailed> {
 /// `~` part; `written` is the length of the pattern as written, with its `~` part. In the
 /// order of the original: `glob` returns `GLOB_NOMATCH` when the written pattern reaches
 /// `PATH_MAX` (`glob.c:200`) and protects the quoted characters (`:206`-`:219`), then
-/// `globtilde` (`:364`-`:410`) puts the home in front, so a `\` in `home` is a plain
+/// `globtilde` (`:364`-`:421`) puts the home in front, so a `\` in `home` is a plain
 /// character, and cuts the result to `PATH_MAX - 1` characters without an error.
 pub(crate) fn glob_tilde(
     home: &str,

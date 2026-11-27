@@ -1128,4 +1128,40 @@ mod tests {
             "ssh -l u -p 2222 -J first -F /c -W '[%h]:%p' hop"
         );
     }
+
+    #[test]
+    fn an_include_of_path_max_bytes_is_skipped_before_the_home() {
+        // `glob.c:200` judges the written length before the home of `~user` is looked up.
+        let dir = std::env::temp_dir().join(format!(
+            "tasty-net-ssh-config-long-include-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let top = dir.join("config");
+        let ctx = ResolveContext {
+            local_user: Some("tester".to_string()),
+            home: Some("/home/tester".to_string()),
+            ..ResolveContext::default()
+        };
+        let head = "~nosuchaccount/";
+        let run = |len: usize| {
+            let arg = format!("{head}{}", "a".repeat(len - head.len()));
+            std::fs::write(&top, format!("Include {arg}\nPort 2222\n")).expect("write");
+            ConfigSet::load(ConfigInputs {
+                files: ConfigFiles::Only(top.clone()),
+            })
+            .expect("load")
+            .resolve("web", &ctx)
+        };
+        // `PATH_MAX` bytes: no match, the line goes on.
+        let long = run(crate::glob::PATH_MAX);
+        assert!(long.refusal.is_none(), "{:?}", long.refusal);
+        assert_eq!(long.options.port, Some(2222));
+        // One byte shorter: the home of the unknown user is needed.
+        let short = run(crate::glob::PATH_MAX - 1);
+        let f = short.refusal.expect("a refusal");
+        assert_eq!(f.kind, RefusalKind::Undeterminable);
+        assert_eq!(f.keyword.as_deref(), Some("include"));
+        std::fs::remove_dir_all(&dir).expect("remove the folder");
+    }
 }

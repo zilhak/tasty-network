@@ -2099,10 +2099,16 @@ impl<'a> Reader<'a> {
             } else {
                 p
             };
-            // GLOB_TILDE (`glob.c:364`-`:410`). Without the home the files are missing
+            // `glob()` judges the length of the written pattern before `glob0` looks up the
+            // home (`glob.c:200`): a pattern of `PATH_MAX` bytes is GLOB_NOMATCH and the
+            // argument is skipped (`readconf.c:2116`-`:2120`), whatever its `~` names.
+            let written = pattern.len();
+            if written >= crate::glob::PATH_MAX {
+                continue;
+            }
+            // GLOB_TILDE (`glob.c:364`-`:421`). Without the home the files are missing
             // (GLOB_NOMATCH, the line goes on), never a `~` folder of the working directory.
             // Another user's home is not looked up: OpenSSH would read files from it.
-            let written = pattern.len();
             let (home, pattern) = if pattern.starts_with('~') {
                 match misc::tilde_split(&pattern, &self.env.account) {
                     Ok((home, rest)) => (home, rest.to_string()),
