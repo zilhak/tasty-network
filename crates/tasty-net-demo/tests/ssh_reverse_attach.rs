@@ -7,14 +7,20 @@
 //! scene of `ssh_attach.rs` ([`support::scene`]) and run one at a time for the same reason.
 //!
 //! Evidence lines go to stderr unconditionally (`[ssh_reverse_attach] ...`): `sshd=<server>`,
-//! the process IDs, both ends' role lines and the tunnel PIDs before and after a reconnect.
+//! the process IDs, both ends' role lines, the tunnel PIDs before and after a reconnect, and
+//! the connection table entries and links of the connection table tests
+//! (docs/design/testing.md "연결 목록 시험").
 
 mod support;
 
 use std::time::Duration;
 
 use support::process::{Proc, log, terminate};
-use support::scene::{LOCAL_STEP, Ready, SSH_STEP, Scene, number, one_at_a_time};
+use support::scene::{LOCAL_STEP, Ready, SSH_STEP, Scene, echo, number, one_at_a_time};
+use support::table::{
+    ROLE_REVERSED, check_reconnected, check_tunnel_entries, dialer_instance, in_state, local_links,
+    read_table, wait_table,
+};
 use tasty_net_demo::{Snapshot, field};
 
 /// The role table of a reversed SSH link, as both ends print it after `local=`.
@@ -315,6 +321,149 @@ fn self_attach_is_rejected() {
     );
 
     drop(dialer);
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// The connection tables of both ends for a role reversed link whose tunnel also carries a
+/// bulk and a request channel, before and after the tunnel is killed and the dialer connects
+/// again.
+#[test]
+fn connection_table_reports_ssh_role_reversed() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let mut dialer = start_reversing_dialer(&mut scene, &["--channels"]);
+    let before = reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
+    dialer.expect_prefix("dialer channels-open ", LOCAL_STEP);
+    held_echo(&mut server, &mut dialer, 1, "hello-1");
+    let instance = dialer_instance(&server, 1);
+    let tunnel = check_tunnel_entries(
+        &scene,
+        &mut server,
+        &ready,
+        &mut dialer,
+        &instance,
+        &ROLE_REVERSED,
+    );
+
+    log(&format!("ending the tunnel ssh pid={before}"));
+    terminate(before);
+    dialer.expect_prefix("dialer lost ", LOCAL_STEP);
+    let after = reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 2);
+    assert_ne!(before, after, "a new tunnel ssh");
+    check_reconnected(&mut server, &mut dialer, &tunnel, &ROLE_REVERSED);
+    held_echo(&mut server, &mut dialer, 2, "hello-again");
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// Logs both ends' links in topology's input terms and checks that they are the same.
+fn matching_links(server: &mut Proc, dialer: &mut Proc, links: usize) -> Vec<[String; 5]> {
+    let near = wait_table(dialer, "dialer", "the attach links", |v| {
+        local_links(v).len() == links
+    });
+    let far = wait_table(server, "server", "the attach links", |v| {
+        local_links(v).len() == links
+    });
+    let (near_links, far_links) = (local_links(&near), local_links(&far));
+    for (end, rows) in [("dialer", &near_links), ("server", &far_links)] {
+        for [link_id, dialer, acceptor, holder, transport] in rows {
+            log(&format!(
+                "{end} link {link_id}: dialer={dialer} acceptor={acceptor} holder={holder} \
+                 transport={transport}"
+            ));
+        }
+    }
+    assert_eq!(
+        near_links, far_links,
+        "both ends report each link with the same values"
+    );
+    assert_ne!(near.device, far.device);
+    near_links
+}
+
+/// Both ends of one role reversed SSH link give the same `LocalLink` input: link ID, dialer,
+/// acceptor, holder and edge value. The server's bulk and request entries carry no link.
+#[test]
+fn both_ends_produce_matching_local_links() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let mut dialer = start_reversing_dialer(&mut scene, &["--channels"]);
+    reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
+    dialer.expect_prefix("dialer channels-open ", LOCAL_STEP);
+    let links = matching_links(&mut server, &mut dialer, 1);
+    let [_, dialer_device, acceptor_device, holder, transport] = &links[0];
+    assert_ne!(dialer_device, acceptor_device);
+    assert_eq!(holder, acceptor_device, "the acceptor holds");
+    assert_eq!(transport, "ssh_role_reversed");
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// One tunnel carries a forward link and a role reversed link: the entry of the end that
+/// launched ssh is `mixed`, the server has one entry per link with that link's direction, and
+/// each link has the same values on both ends (one `ssh_forward`, one `ssh_role_reversed`).
+#[test]
+fn mixed_holders_on_one_tunnel() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let record = scene.record.clone();
+    let mut dialer = scene.start_dialer_with(&record, &["--also-holder", "acceptor"], &[]);
+    let line = scene.connected(&mut dialer);
+    assert_eq!(field(&line, "instance"), Some(ready.instance.as_str()));
+    let extra = dialer.expect_prefix("dialer extra-connected ", LOCAL_STEP);
+    assert_eq!(field(&extra, "holder"), Some("acceptor"), "{extra}");
+    server.expect_prefix("server control client=2 ", LOCAL_STEP);
+    // Both links work: the dialer holds the first, the server the second.
+    echo(&mut dialer, "hello-forward");
+    server.send_line("send hello-reversed");
+    let served = "dialer extra-served hello-reversed";
+    dialer.expect(&format!("{served:?}"), LOCAL_STEP, |l| l == served);
+    let echoed = "server echo client=2 hello-reversed";
+    server.expect(&format!("{echoed:?}"), LOCAL_STEP, |l| l == echoed);
+
+    let links = matching_links(&mut server, &mut dialer, 2);
+    let transports: Vec<&str> = links.iter().map(|l| l[4].as_str()).collect();
+    let mut sorted = transports.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, ["ssh_forward", "ssh_role_reversed"], "{links:?}");
+
+    let near = read_table(&mut dialer, "dialer");
+    let tunnel = in_state(&near, "connected");
+    assert_eq!(tunnel.len(), 1, "one tunnel: {near:#?}");
+    let entry = tunnel[0];
+    log(&format!("dialer entry: {:?}", entry.row));
+    assert_eq!(entry.value("direction"), "mixed");
+    assert_eq!(
+        entry.value("path"),
+        "ssh_forward",
+        "the profile's direction"
+    );
+    assert_eq!(entry.value("local_side"), "dialer");
+    assert_eq!(entry.links.len(), 2);
+    assert!(
+        entry
+            .links
+            .iter()
+            .all(|l| l.value("local_side") == "dialer"),
+        "this end opened both links: {entry:?}"
+    );
+    let far = read_table(&mut server, "server");
+    let mut directions: Vec<&str> = in_state(&far, "connected")
+        .iter()
+        .map(|e| e.value("direction"))
+        .collect();
+    directions.sort_unstable();
+    assert_eq!(directions, ["forward", "role_reversed"], "{far:#?}");
+
+    scene.quit_dialer(dialer);
     Scene::stop_server(server);
     scene.finish();
 }
