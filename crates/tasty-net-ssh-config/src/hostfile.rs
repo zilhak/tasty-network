@@ -1,7 +1,8 @@
 // This file is derived from OpenSSH, modified: a Rust port of parts of hostfile.c,
 // hostfile.h, sshkey.c, ssh-ed25519.c, ssh-ed25519-sk.c, ssh-mldsa-eddsa.c, ssh-ecdsa.c,
-// ssh-ecdsa-sk.c, ssh-rsa.c, sshbuf-getput-basic.c, sshbuf-getput-crypto.c, sshbuf.h,
-// sshkey.h, crypto_api.h, misc.c and sshconnect.c of OpenSSH portable 10.6p2 (commit
+// ssh-ecdsa-sk.c, ssh-rsa.c, sshbuf-getput-basic.c, sshbuf-getput-crypto.c, sshbuf-misc.c,
+// sshbuf.h, sshkey.h, ssh2.h, crypto_api.h, misc.c and sshconnect.c of OpenSSH portable 10.6p2
+// (commit
 // d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The notices of those files follow as written
 // there; LICENSE-OpenSSH has the OpenSSH licence.
 //
@@ -297,6 +298,31 @@
 //  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //  */
 //
+// ssh2.h:
+// /*
+//  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+//  *
+//  * Redistribution and use in source and binary forms, with or without
+//  * modification, are permitted provided that the following conditions
+//  * are met:
+//  * 1. Redistributions of source code must retain the above copyright
+//  *    notice, this list of conditions and the following disclaimer.
+//  * 2. Redistributions in binary form must reproduce the above copyright
+//  *    notice, this list of conditions and the following disclaimer in the
+//  *    documentation and/or other materials provided with the distribution.
+//  *
+//  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+//  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+//  * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+//  * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+//  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+//  * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+//  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+//  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+//  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+//  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//  */
+//
 // crypto_api.h:
 // /*
 //  * Assembled from generated headers and source files by Markus Friedl.
@@ -345,15 +371,14 @@
 //! (`load_hostkeys_file` and `load_hostkeys`, `hostfile.c:265`-`:298`).
 //!
 //! A key is read as `sshkey_read` (`sshkey.c:1298`-`:1370`) does: the type name, the base64
-//! blob and the public part of the blob (`sshkey_from_blob_internal` and the
-//! `deserialize_public` of each key type). The checks that need the curve arithmetic or a
-//! signature are not made: an ECDSA point is checked for its form and length but not for
-//! being on the curve (`EC_POINT_oct2point`, `sshkey_ec_validate_public`), and the body and
-//! signature of a certificate are not read (`cert_parse`). Such a line reads as a key here and
-//! is skipped as invalid by `ssh`: a server cannot complete the key exchange with a point off
-//! the curve, and certificates are never trusted here, so the difference can only reject more
-//! (an `@revoked` line of a bad certificate still revokes its key). Keys are compared by type
-//! and public part, as `sshkey_equal` and `sshkey_equal_public` (`sshkey.c:821`-`:844`) do.
+//! blob and the blob (`sshkey_from_blob_internal`, the `deserialize_public` of each key type,
+//! and for a certificate the fields of `cert_parse`). The checks that need the curve
+//! arithmetic or a signature are not made: an ECDSA point is checked for its form and length
+//! but not for being on the curve (`EC_POINT_oct2point`, `sshkey_ec_validate_public`), and the
+//! CA signature of a certificate is not verified (`sshkey_verify` in `cert_parse`). Such a
+//! key reads as a key here and is invalid to `ssh` (docs/design/ssh-backends.md "OpenSSH 해석
+//! 이식 크레이트" has which way each case moves the verdict). Keys are compared by type and
+//! public part, as `sshkey_equal` and `sshkey_equal_public` (`sshkey.c:821`-`:844`) do.
 //!
 //! `@cert-authority` lines are never a reason to accept a key (docs/design/ssh-backends.md
 //! "호스트 키 판정"): they are reported as [`HostKeyVerdict::DistrustedCaLine`] when nothing
@@ -404,6 +429,16 @@ const RSA_MINIMUM_MODULUS_BITS: usize = 1024;
 const BITS_PER_BYTE: usize = 8;
 /// The `uint32` length before an SSH string.
 const STRING_LENGTH_BYTES: usize = 4;
+/// An SSH `uint32` (`sshbuf_get_u32`).
+const U32_BYTES: usize = 4;
+/// An SSH `uint64` (`sshbuf_get_u64`).
+const U64_BYTES: usize = 8;
+/// `SSHKEY_CERT_MAX_PRINCIPALS` (`sshkey.h:96`).
+const CERT_MAX_PRINCIPALS: usize = 256;
+/// `SSH2_CERT_TYPE_USER` (`ssh2.h:179`).
+const CERT_TYPE_USER: u32 = 1;
+/// `SSH2_CERT_TYPE_HOST` (`ssh2.h:180`).
+const CERT_TYPE_HOST: u32 = 2;
 /// `SSHBUF_SIZE_MAX` (`sshbuf.h:39`): the largest buffer, so the largest decoded key blob
 /// (`sshbuf_b64tod`, `sshbuf-misc.c:183`-`:203`).
 const SSHBUF_SIZE_MAX: usize = 0x0800_0000;
@@ -622,6 +657,13 @@ impl Key {
 struct Buf<'a>(&'a [u8]);
 
 impl<'a> Buf<'a> {
+    /// `n` bytes (`sshbuf_get_u32`, `sshbuf_get_u64`).
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (value, rest) = self.0.split_at_checked(n)?;
+        self.0 = rest;
+        Some(value)
+    }
+
     /// `sshbuf_get_string_direct`.
     fn string(&mut self) -> Option<&'a [u8]> {
         let (len, rest) = self.0.split_at_checked(STRING_LENGTH_BYTES)?;
@@ -696,12 +738,20 @@ fn bits(n: &[u8]) -> usize {
     })
 }
 
-/// `sshkey_from_blob_internal` with certificates allowed (`sshkey.c:2004`-`:2077`), without
-/// `cert_parse`.
+/// `sshkey_from_blob_internal` with certificates allowed (`sshkey.c:2004`-`:2077`), with
+/// [`cert_body`] for a certificate.
 fn parse_blob(blob: &[u8]) -> Option<Key> {
+    parse_blob_internal(blob, true)
+}
+
+/// `sshkey_from_blob_internal`; `allow_cert` as there (a CA key is read without it).
+fn parse_blob_internal(blob: &[u8], allow_cert: bool) -> Option<Key> {
     let mut b = Buf(blob);
     let name = b.cstring()?;
     let imp = impl_by_name(name)?;
+    if imp.cert && !allow_cert {
+        return None;
+    }
     if imp.cert {
         // The nonce before every certificate.
         b.string()?;
@@ -737,8 +787,10 @@ fn parse_blob(blob: &[u8]) -> Option<Key> {
             vec![e.to_vec(), n.to_vec()]
         }
     };
-    // The rest of a certificate is its body and signature, which are not read here.
-    if !imp.cert && !b.0.is_empty() {
+    if imp.cert {
+        cert_body(&mut b)?;
+    }
+    if !b.0.is_empty() {
         return None;
     }
     Some(Key {
@@ -748,6 +800,52 @@ fn parse_blob(blob: &[u8]) -> Option<Key> {
         public,
         blob: blob.to_vec(),
     })
+}
+
+/// `cert_parse` (`sshkey.c:1854`-`:1993`) up to the signature check: the body fields, the
+/// principals (at most [`CERT_MAX_PRINCIPALS`]), the critical options and extensions as
+/// pairs of strings, the CA key (a key that is not a certificate), the certificate type
+/// (user or host) and the signature type name. `sshkey_verify` of the CA signature
+/// (`:1976`) is not made: that needs the signature algorithms, and the CA is not trusted
+/// here (docs/design/ssh-backends.md "호스트 키 판정").
+fn cert_body(b: &mut Buf<'_>) -> Option<()> {
+    b.take(U64_BYTES)?;
+    let kind = u32::from_be_bytes(b.take(U32_BYTES)?.try_into().ok()?);
+    b.cstring()?;
+    let principals = b.string()?;
+    b.take(U64_BYTES)?;
+    b.take(U64_BYTES)?;
+    let critical = b.string()?;
+    let extensions = b.string()?;
+    b.string()?;
+    let ca = b.string()?;
+    let signature = b.string()?;
+    // `sshkey_get_sigtype` (`sshkey.c:2119`-`:2142`).
+    Buf(signature).cstring()?;
+    if parse_blob_internal(ca, false)?.cert {
+        return None;
+    }
+    if kind != CERT_TYPE_USER && kind != CERT_TYPE_HOST {
+        return None;
+    }
+    let mut p = Buf(principals);
+    for () in std::iter::repeat_n((), CERT_MAX_PRINCIPALS) {
+        if p.0.is_empty() {
+            break;
+        }
+        p.cstring()?;
+    }
+    if !p.0.is_empty() {
+        return None;
+    }
+    for section in [critical, extensions] {
+        let mut s = Buf(section);
+        while !s.0.is_empty() {
+            s.string()?;
+            s.string()?;
+        }
+    }
+    Some(())
 }
 
 /// `b64_pton`: whitespace (`isspace`) anywhere is skipped, the padding is required and the
@@ -1207,6 +1305,34 @@ mod tests {
         blob(&[b"ssh-ed25519", &[seed; 32]])
     }
 
+    /// An Ed25519 host certificate of the key `pk` as `cert_parse` reads it: `body` replaces
+    /// the fields after the key when given.
+    fn cert_with(pk: u8, body: Option<Vec<u8>>) -> Vec<u8> {
+        let ca = ed25519_blob(0xca);
+        let body = body.unwrap_or_else(|| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&1u64.to_be_bytes());
+            b.extend_from_slice(&CERT_TYPE_HOST.to_be_bytes());
+            b.extend(string(b"id"));
+            b.extend(string(&blob(&[b"host.example"])));
+            b.extend_from_slice(&0u64.to_be_bytes());
+            b.extend_from_slice(&u64::MAX.to_be_bytes());
+            b.extend(string(b""));
+            b.extend(string(&blob(&[b"ext", b""])));
+            b.extend(string(b""));
+            b.extend(string(&ca));
+            b.extend(string(&blob(&[b"ssh-ed25519", &[0; 64]])));
+            b
+        });
+        let mut out = blob(&[b"ssh-ed25519-cert-v01@openssh.com", b"nonce", &[pk; 32]]);
+        out.extend(body);
+        out
+    }
+
+    fn cert(pk: u8) -> Vec<u8> {
+        cert_with(pk, None)
+    }
+
     fn line(kind: &str, b: &[u8]) -> String {
         format!("{kind} {}", STANDARD.encode(b))
     }
@@ -1427,14 +1553,6 @@ mod tests {
     #[test]
     fn a_certificate_is_judged_as_its_plain_key() {
         let a = ed25519_blob(5);
-        let cert = |pk: u8| {
-            blob(&[
-                b"ssh-ed25519-cert-v01@openssh.com",
-                b"nonce",
-                &[pk; 32],
-                b"the rest is not read",
-            ])
-        };
         let text = format!(
             "@cert-authority ca.example {k}\nhost.example {k}\nca.example {}\n",
             line("ssh-ed25519-cert-v01@openssh.com", &cert(5)),
@@ -1467,15 +1585,9 @@ mod tests {
     #[test]
     fn a_revoked_certificate_line_revokes_its_key() {
         let a = ed25519_blob(3);
-        let cert = blob(&[
-            b"ssh-ed25519-cert-v01@openssh.com",
-            b"nonce",
-            &[3; 32],
-            b"the rest is not read",
-        ]);
         let text = format!(
             "@revoked * {}\n",
-            line("ssh-ed25519-cert-v01@openssh.com", &cert)
+            line("ssh-ed25519-cert-v01@openssh.com", &cert(3))
         );
         let (dir, kh) = hosts(&text);
         assert_eq!(
@@ -1551,6 +1663,122 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let kh = KnownHosts::load(&[dir.0.join("none"), path]);
         assert_eq!(kh.files().count(), 1, "the file that exists is opened");
+    }
+
+    #[test]
+    fn a_certificate_reads_as_cert_parse() {
+        let key = |b: &[u8]| parse_blob(b).map(|k| k.cert);
+        assert_eq!(key(&cert(1)), Some(true));
+        let full = cert(1);
+        let header = blob(&[b"ssh-ed25519-cert-v01@openssh.com", b"nonce", &[1; 32]]).len();
+        for cut in [header, header + 4, full.len() - 1] {
+            assert_eq!(key(&full[..cut]), None, "cut at {cut} of {}", full.len());
+        }
+        let mut trailing = full.clone();
+        trailing.push(0);
+        assert_eq!(key(&trailing), None, "bytes after the signature");
+
+        // The body with one field changed: `(serial, type, principals, ca, signature)`.
+        let body = |kind: u32, principals: Vec<u8>, ca: Vec<u8>, signature: Vec<u8>| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&1u64.to_be_bytes());
+            b.extend_from_slice(&kind.to_be_bytes());
+            b.extend(string(b"id"));
+            b.extend(string(&principals));
+            b.extend_from_slice(&0u64.to_be_bytes());
+            b.extend_from_slice(&u64::MAX.to_be_bytes());
+            b.extend(string(b""));
+            b.extend(string(b""));
+            b.extend(string(b""));
+            b.extend(string(&ca));
+            b.extend(string(&signature));
+            Some(b)
+        };
+        let ca = ed25519_blob(0xca);
+        let sig = blob(&[b"ssh-ed25519", &[0; 64]]);
+        let names = |n: usize| -> Vec<u8> { (0..n).flat_map(|_| string(b"h")).collect() };
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(CERT_TYPE_USER, names(1), ca.clone(), sig.clone())
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            key(&cert_with(1, body(3, names(1), ca.clone(), sig.clone()))),
+            None,
+            "type 3"
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(
+                    CERT_TYPE_HOST,
+                    names(CERT_MAX_PRINCIPALS),
+                    ca.clone(),
+                    sig.clone()
+                )
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(
+                    CERT_TYPE_HOST,
+                    names(CERT_MAX_PRINCIPALS + 1),
+                    ca.clone(),
+                    sig.clone()
+                )
+            )),
+            None,
+            "too many principals"
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(CERT_TYPE_HOST, b"\0\0".to_vec(), ca.clone(), sig.clone())
+            )),
+            None,
+            "a cut principal"
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(CERT_TYPE_HOST, names(1), cert(2), sig.clone())
+            )),
+            None,
+            "a certificate as the CA"
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(CERT_TYPE_HOST, names(1), b"junk".to_vec(), sig.clone())
+            )),
+            None,
+            "a CA that is not a key"
+        );
+        assert_eq!(
+            key(&cert_with(
+                1,
+                body(CERT_TYPE_HOST, names(1), ca.clone(), Vec::new())
+            )),
+            None,
+            "a signature without its type"
+        );
+        // A line with a cut certificate is not a key (`sshkey_read` fails).
+        let text = format!(
+            "cut.example {}\n",
+            line("ssh-ed25519-cert-v01@openssh.com", &full[..header])
+        );
+        let (_dir, kh) = hosts(&text);
+        let entries = kh.entries(&q("cut.example"));
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].key.is_none());
+        assert_eq!(
+            kh.check(&q("cut.example"), &full[..header]),
+            HostKeyVerdict::NotFound
+        );
     }
 
     #[test]

@@ -58,13 +58,14 @@ those files (BSD-3-Clause; `charclass.h` is in the public domain).
 | `src/settings.rs` | `version.h` | `SSH_RELEASE` |
 | `src/hostfile.rs` | `hostfile.c` | `extract_salt` (`:68`–`:113`), `host_hash` (`:115`–`:150`), `hostfile_read_key` (`:157`–`:178`), `check_markers` (`:180`–`:213`), `load_hostkeys_file` and `load_hostkeys` (`:265`–`:298`), `check_key_not_revoked` (`:315`–`:332`), `check_hostkeys_by_key_or_type` for a given key (`:349`–`:405`), `match_maybe_hashed` (`:769`–`:787`), `hostkeys_foreach_file` with `HKF_WANT_MATCH` (`:789`–`:963`) |
 | | `hostfile.h` | `HASH_MAGIC`, `HASH_DELIM`, `CA_MARKER`, `REVOKE_MARKER` (`:59`–`:63`) |
-| | `sshkey.c` | `keyimpls[]` order, names, short names and types (`:120`), `type_from_name` and `sshkey_type_from_name` (`:230`–`:252`), `sshkey_curve_name_to_nid` (`:569`–`:580`), `sshkey_equal_public` and `sshkey_equal` (`:821`–`:844`), `peek_type_nid` (`:1277`–`:1295`), `sshkey_read` (`:1298`–`:1370`), `sshkey_check_rsa_length` (`:1454`–`:1469`), `sshkey_deserialize_sk` (`:1995`–`:2002`), `sshkey_from_blob_internal` without `cert_parse` (`:2004`–`:2077`) |
+| | `sshkey.c` | `keyimpls[]` order, names, short names and types (`:120`), `type_from_name` and `sshkey_type_from_name` (`:230`–`:252`), `sshkey_curve_name_to_nid` (`:569`–`:580`), `sshkey_equal_public` and `sshkey_equal` (`:821`–`:844`), `peek_type_nid` (`:1277`–`:1295`), `sshkey_read` (`:1298`–`:1370`), `sshkey_check_rsa_length` (`:1454`–`:1469`), `sshkey_deserialize_sk` (`:1995`–`:2002`), `cert_parse` up to the signature check (`:1853`–`:1974`), `sshkey_from_blob_internal` (`:2004`–`:2077`), `sshkey_get_sigtype` (`:2119`–`:2142`), `sshkey_type_is_valid_ca` (`:398`–`:407`) |
 | | `ssh-ed25519.c`, `ssh-ed25519-sk.c`, `ssh-mldsa-eddsa.c` | `ssh_ed25519_deserialize_public` (`:102`–`:118`), `ssh_ed25519_sk_deserialize_public` (`:96`–`:107`), `ssh_mldsa44_ed25519_deserialize_public` (`:278`–`:294`), their `sshkey_impl` entries |
 | | `ssh-ecdsa.c`, `ssh-ecdsa-sk.c` | `ssh_ecdsa_deserialize_public` without `sshkey_ec_validate_public` (`:224`–`:275`), `ssh_ecdsa_sk_deserialize_public` (`:113`–`:124`), their `sshkey_impl` entries |
 | | `ssh-rsa.c` | `ssh_rsa_deserialize_public` (`:192`–`:229`), its `sshkey_impl` entries (`:594`–`:665`) |
 | | `sshbuf-getput-basic.c` | `sshbuf_get_string_direct` (`:211`–`:235`), `sshbuf_get_cstring` (`:268`–`:301`), `sshbuf_get_bignum2_bytes_direct` (`:597`–`:631`) |
 | | `sshbuf-getput-crypto.c` | the checks of `get_ec` before `EC_POINT_oct2point` (`:56`–`:68`) |
-| | `sshbuf.h`, `sshkey.h`, `crypto_api.h` | `SSHBUF_MAX_BIGNUM`, `SSHBUF_MAX_ECPOINT`, `SSH_RSA_MINIMUM_MODULUS_SIZE`, `ED25519_PK_SZ`, `MLDSA44_ED25519_PK_SZ` |
+| | `sshbuf-misc.c` | the buffer `sshbuf_b64tod` decodes into (`:182`–`:203`) |
+| | `sshbuf.h`, `sshkey.h`, `ssh2.h`, `crypto_api.h` | `SSHBUF_SIZE_MAX`, `SSHBUF_MAX_BIGNUM`, `SSHBUF_MAX_ECPOINT`, `SSH_RSA_MINIMUM_MODULUS_SIZE`, `SSHKEY_CERT_MAX_PRINCIPALS`, `SSH2_CERT_TYPE_USER`, `SSH2_CERT_TYPE_HOST`, `ED25519_PK_SZ`, `MLDSA44_ED25519_PK_SZ` |
 | | `misc.c` | `put_host_port` (`:801`–`:812`) |
 | | `sshconnect.c` | `get_hostfile_hostname_ipaddr` (`:648`–`:700`), the retry with the plain key of a host certificate in `check_host_key` (`:1474`–`:1486`) |
 
