@@ -246,7 +246,7 @@ PY
                 local a
                 for a in "$@"; do
                     case "$a" in
-                        */source.properties)
+                        (*/source.properties)
                             if [ "$setup" = props-moved-fail ]; then
                                 command mv "$@" || return 1
                                 (INSTALL_TMP="" CLAIMED_DEST="" PREFIX="$pfx" install_main >/dev/null 2>&1)
@@ -254,7 +254,7 @@ PY
                                 return 1
                             fi
                             ;;
-                        */wrap.sh)
+                        (*/wrap.sh)
                             if [ "$setup" = filling ] || [ "$setup" = filling-fail ]; then
                                 (INSTALL_TMP="" CLAIMED_DEST="" PREFIX="$pfx" install_main >/dev/null 2>&1)
                                 echo "$?" >"$work/other.rc"
