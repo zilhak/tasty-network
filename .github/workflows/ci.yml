@@ -92,6 +92,12 @@ jobs:
       # built alone, without the features other workspace members turn on.
       - name: test tasty-net-rendezvous alone
         run: cargo test -p tasty-net-rendezvous --locked
+      - name: test tasty-net-p2p alone
+        run: cargo test -p tasty-net-p2p --locked
+      # Criterion D1: the rendezvous server and two p2p_peer example processes punch,
+      # connect and echo over loopback (docs/design/testing.md).
+      - name: p2p example pair
+        run: scripts/check.sh p2p-example-pair
 
   repo-checks:
     name: shellcheck, no-tasty-deps, p2p-isolation, no-hidden-constants

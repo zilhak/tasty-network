@@ -13,6 +13,9 @@
 #   scripts/check.sh no-hidden-constants
 #                                   판정 자체 시험 뒤 숨은 동작값 없음과 설정 표 키 대조
 #                                   (scripts/check-no-hidden-constants.sh, 목록 scripts/no-hidden-constants.list)
+#   scripts/check.sh p2p-example-pair
+#                                   서버와 p2p_peer 예제 두 개를 루프백에 띄워 펀칭·연결·echo
+#                                   (scripts/check-p2p-example-pair.sh). all에 없고 CI의 clippy·test 잡이 부른다
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
 # 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
@@ -45,6 +48,7 @@ cmd_no_hidden_constants() {
     run bash scripts/check-no-hidden-constants.sh --self-test
     run bash scripts/check-no-hidden-constants.sh
 }
+cmd_p2p_example_pair() { run bash scripts/check-p2p-example-pair.sh; }
 # advisories는 커밋과 무관하게 새 공지로 실패하므로 여기서 보지 않는다(docs/dev-guide/ci.md).
 cmd_deny() { run cargo deny --locked --workspace check licenses bans sources; }
 
@@ -102,9 +106,10 @@ case "$sub" in
     no-tasty-deps) cmd_no_tasty_deps ;;
     p2p-isolation) cmd_p2p_isolation ;;
     no-hidden-constants) cmd_no_hidden_constants ;;
+    p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
     -h | --help | help)
-        sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

@@ -65,7 +65,7 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 - `cargo test -p tasty-net-p2p --locked`와 `cargo test -p tasty-net-rendezvous --locked`가 각각 다른 workspace 크레이트의 시험 도구 없이 통과해야 한다(의존 범위는 [크레이트 구성](crates.md#p2p-크레이트-격리)).
 - 크레이트 안의 두 프로세스 시험은 시험 바이너리가 자기 자신을 자식 프로세스로 다시 실행해 두 번째 기기를 만든다. 서버는 부모 시험 프로세스 안에 있다.
 - 예제: `cargo run -p tasty-net-rendezvous --bin tasty-rendezvous -- --config <예시 설정>`으로 서버를 띄우고, `cargo run -p tasty-net-p2p --example p2p_peer -- --listen ...`과 `-- --dial <기기 ID> ...` 두 프로세스가 펀칭·연결·echo를 한다. 예제는 같은 머신 루프백과 같은 망의 두 기기에서 돈다. 예제가 빌드되는지는 D1의 clippy(`--all-targets`)가 본다.
-- 예제 두 프로세스 실행은 `cargo test`의 시험이 아니라 검사 단계 `bash scripts/check.sh p2p-example-pair`(후속 작업이 만든다)가 본다. 시험 바이너리는 예제 경로를 받을 길이 없기 때문이다(`CARGO_BIN_EXE_*`는 `[[bin]]`에만 생긴다, [크레이트 구성](crates.md#크레이트-표)). 이 단계는 `cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous`와 `cargo build --locked -p tasty-net-p2p --example p2p_peer`를 `--message-format=json`으로 돌려 출력의 `executable` 값에서 두 실행 파일 경로를 얻는다. 그래서 OS마다 다른 경로(`target/debug/examples/p2p_peer.exe` 등)를 스크립트가 짐작하지 않는다. 그 뒤 서버 하나와 예제 두 개를 루프백에 띄워 echo를 확인하고, 셋 모두 끝났는지 확인한다. CI는 세 OS의 clippy·test 잡에서 이 단계를 부른다.
+- 예제 두 프로세스 실행은 `cargo test`의 시험이 아니라 검사 단계 `bash scripts/check.sh p2p-example-pair`(`scripts/check-p2p-example-pair.sh`)가 본다. 시험 바이너리는 예제 경로를 받을 길이 없기 때문이다(`CARGO_BIN_EXE_*`는 `[[bin]]`에만 생긴다, [크레이트 구성](crates.md#크레이트-표)). 이 단계는 `cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous`와 `cargo build --locked -p tasty-net-p2p --example p2p_peer`를 `--message-format=json`으로 돌려 출력의 `executable` 값에서 두 실행 파일 경로를 얻는다. 그래서 OS마다 다른 경로(`target/debug/examples/p2p_peer.exe` 등)를 스크립트가 짐작하지 않는다. 그 뒤 서버 하나와 예제 두 개를 루프백에 띄워 echo를 확인하고, 셋 모두 끝났는지 확인한다. CI는 세 OS의 clippy·test 잡에서 이 단계를 부른다.
 
 ### 모의 NAT
 
