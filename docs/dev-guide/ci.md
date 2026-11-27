@@ -121,3 +121,5 @@ bash check-mobile-deps.sh --manifest-path <앱 작업 공간>/Cargo.toml --app \
 ## shellcheck
 
 `scripts/install-shellcheck.sh`가 러너에 shellcheck가 없을 때만 고정 판(SHA-256 대조)을 잡의 임시 폴더에 받는다.
+
+`scripts/check.sh shell`은 shellcheck와 함께 `$이름` 바로 뒤에 ASCII 밖 글자가 붙은 줄을 찾는다. macOS의 bash 3.2는 UTF-8 로케일에서 그 바이트를 변수 이름으로 읽기 때문이다. 판정 규칙과 예외 표시는 `scripts/check-shell-assets.sh`의 `scan_var_nonascii` 주석에 있다.

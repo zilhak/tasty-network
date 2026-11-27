@@ -12,7 +12,7 @@
 |---|---|---|
 | M.1 | 진행 중인 merge를 커밋하면 아래 merge 커밋 판정으로 허용 여부를 본다 | `scripts/lib/merge-policy.sh` |
 | A.2 | 커밋 대상에 `.rs`가 있으면 `scripts/check.sh fmt` | `scripts/check.sh` |
-| A.3 | 커밋 대상 중 셸 자산(`.sh`, 셸 shebang 파일)을 shellcheck로 검사한다. shellcheck가 없어 판정하지 못해도 커밋을 막는다 | `scripts/check-shell-assets.sh` |
+| A.3 | 커밋 대상 중 셸 자산(`.sh`, 셸 shebang 파일)을 shellcheck로 검사하고, macOS bash 3.2가 잘못 읽는 `$이름` 바로 뒤 ASCII 밖 글자가 없는지 본다. shellcheck가 없어 판정하지 못해도 커밋을 막는다 | `scripts/check-shell-assets.sh` |
 
 ## pre-merge-commit
 

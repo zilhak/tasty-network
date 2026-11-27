@@ -11,7 +11,8 @@
 #                                   그래프 판정 자체 시험 뒤 tasty-net-transport를 SSH 없이(--no-default-features)
 #                                   clippy·시험·문서(깨진 문서 링크는 실패)하고, 그 의존 그래프에
 #                                   tasty-net-ssh가 없는지 본다
-#   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
+#   scripts/check.sh shell          판정 자체 시험 뒤 추적된 셸 자산 전체의 shellcheck와 ASCII 밖 글자 앞 $이름 검사
+#                                   (scripts/check-shell-assets.sh)
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh p2p-isolation  판정 자체 시험 뒤 P2P 크레이트의 workspace 안 의존 범위 (scripts/check-p2p-isolation.sh)
 #   scripts/check.sh no-hidden-constants
@@ -50,7 +51,10 @@ cmd_fmt() { run cargo fmt --all --check; }
 cmd_lint() { run cargo clippy --workspace --all-targets --locked -- -D warnings; }
 cmd_test() { run cargo test --workspace --locked "$@"; }
 cmd_check() { run cargo check --workspace --all-targets --locked; }
-cmd_shell() { run bash scripts/check-shell-assets.sh; }
+cmd_shell() {
+    run bash scripts/check-shell-assets.sh --self-test
+    run bash scripts/check-shell-assets.sh
+}
 # transport의 의존 그래프(모든 target, 일반·빌드·dev 의존)를 패키지마다 한 줄로 찍는다.
 # 자체 시험이 이 함수를 가짜로 바꿔 끼운다.
 transport_tree() {
