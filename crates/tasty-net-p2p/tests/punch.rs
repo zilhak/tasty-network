@@ -632,6 +632,15 @@ fn quic_from_other_device_gets_session_mismatch() {
         }
         let (stun, _) = b.ep.counters().unwrap();
         assert_eq!(stun.session_mismatch.load(Ordering::Relaxed), 1);
+        // B's one session took that Initial, so the failure is that session's: B closes the
+        // attempt with the cause at once (docs/design/p2p.md "연결 시도 상태").
+        let mut lb = Log::default();
+        assert!(
+            lb.wait(&b.ep, LONG, attempt_to(AttemptPhase::Closed))
+                .is_some()
+        );
+        assert!(closed_with(&lb.0, "session_mismatch"), "{:?}", lb.0);
+        assert_eq!(phase_before_close(&lb.0), Some(AttemptPhase::Handshaking));
         cancel.cancel();
         assert_eq!(error(h.join().unwrap()), P2pConnectError::Cancelled);
     });
@@ -1220,4 +1229,43 @@ fn punch_go_beyond_the_welcome_limits_is_refused() {
     );
     assert!(closed_with(&lb.0, "server_limits_invalid"));
     assert_eq!(sent_to_ip(&r.b, r.n1.public_ip()), 0);
+}
+
+/// B's session that the same dialer superseded ends even while B takes a handshake on it
+/// (docs/design/p2p.md "진행 중 `punch_cancel`": B ends the old attempt).
+#[test]
+fn a_superseded_acceptor_session_ends_while_handshaking() {
+    let r = scripted(Script::default());
+    // B's QUIC is held back, so B stays Handshaking.
+    r.n2.set_rule(Arc::new(|dest: SocketAddr, p: &[u8]| {
+        if is_quic(p) && dest.ip() != IpAddr::from([198, 51, 100, 9]) {
+            Verdict::Delay(Duration::from_secs(3))
+        } else {
+            Verdict::Pass
+        }
+    }));
+    std::thread::scope(|sc| {
+        let (cancel, h) = hanging_dial(sc, &r.a, r.b.id());
+        let mut lb = Log::default();
+        assert!(
+            lb.wait(&r.b.ep, LONG, attempt_to(AttemptPhase::Handshaking))
+                .is_some()
+        );
+        r.fake.send(
+            r.b.id(),
+            ServerMessage::PunchCancel(PunchCancel {
+                punch_id: r.fake.last_punch().unwrap(),
+                reason: CancelReason::Superseded,
+            }),
+        );
+        assert!(
+            lb.wait(&r.b.ep, LONG, attempt_to(AttemptPhase::Closed))
+                .is_some()
+        );
+        assert!(closed_by_cancel(&lb.0, CancelReason::Superseded));
+        assert_eq!(phase_before_close(&lb.0), Some(AttemptPhase::Handshaking));
+        cancel.cancel();
+        let _ended = h.join();
+    });
+    drop(r.w);
 }

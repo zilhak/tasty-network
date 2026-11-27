@@ -254,11 +254,11 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `Scheduled` → `Closed` | `server_limits_invalid`(받은 `punch_go`가 상한을 벗어남. A·B 모두 재시도 없음) |
 | `Scheduled`·`Punching`·`Handshaking` → `Closed` | `punch_cancelled(peer_limits_invalid)`(재시도 없음. A의 오류는 `PeerLimitsInvalid`) |
 | `Scheduled` → `Punching` | `start_elapsed` |
-| `Scheduled`·`Punching` → `RetryWait` / `Closed` | `punch_cancelled(reason)`, 사유는 `peer_gone`·`expired`·`superseded`(A는 남은 시도가 있으면 `RetryWait`, B는 `Closed`) |
+| `Scheduled`·`Punching` → `RetryWait` / `Closed` | `punch_cancelled(reason)`, 사유는 `peer_gone`·`expired`·`superseded`(A는 남은 시도가 있으면 `RetryWait`, B는 `Closed`. B의 `superseded`는 `Handshaking`에서도 `Closed`) |
 | `Punching` → `Handshaking` | A: `probe_succeeded`(주소 포함). B: `quic_incoming`(세션에 묶인 주소에서 온 Initial) |
 | `Punching` → `RetryWait` / `Closed` | A: `punch_window_elapsed`(남은 시도가 있으면 `RetryWait`, 없으면 `Closed`. 마지막 시도가 `host_only`면 오류는 `NatUnsupported`, 아니면 `PunchFailed`). B: `accept_deadline_elapsed`(`Closed`) |
 | `Handshaking` → `Connected` | `quic_established` |
-| `Handshaking` → `RetryWait` / `Closed` | `handshake_timeout`(A는 남은 시도가 있으면 `RetryWait`. 오류는 위 `Punching`과 같은 규칙), `peer_identity_mismatch`(바로 `Closed`), `session_mismatch`(B, 바로 `Closed`), `alpn_mismatch`(바로 `Closed`) |
+| `Handshaking` → `RetryWait` / `Closed` | `handshake_timeout`(A는 남은 시도가 있으면 `RetryWait`. 오류는 위 `Punching`과 같은 규칙), `peer_identity_mismatch`(바로 `Closed`), `session_mismatch`(B, 바로 `Closed`), `alpn_mismatch`(바로 `Closed`). B는 받은 Initial의 주소가 맞은 세션이 하나뿐일 때만 그 handshake의 실패를 그 세션의 원인으로 보고, 여럿이면 어느 세션의 실패인지 모르므로 받기 기한까지 기다린다 |
 | `RetryWait` → `Requesting` | `retry_elapsed` |
 | `Connected` → `Connected` | `remote_address_observed_change`(B에서만, 아래) |
 | `Connected` → `Closed` | `closed_by_local(code)`, `closed_by_peer(code)`, `idle_timeout`, `endpoint_off` |

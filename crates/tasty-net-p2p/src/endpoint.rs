@@ -116,6 +116,9 @@ pub(crate) enum Incoming {
     Started,
     /// One of those handshakes ended without a connection for this session.
     Ended,
+    /// One of those handshakes failed, and this session was the only one its address fitted:
+    /// the failure is this session's, with this cause.
+    Failed(Cause),
     /// The connection is up and its device ID is the session's peer.
     Established(quinn::Connection),
 }
@@ -828,8 +831,10 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
 
 /// The session a connection from `addr` whose TLS device ID is `id` belongs to: among the
 /// sessions that took its Initial, the one whose peer is `id` (docs/design/p2p.md "펀칭 절차" 9).
+/// When several sessions with that peer fit (a retry of the same dialer), the newest one: the
+/// older ones are superseded (docs/design/p2p.md "진행 중 `punch_cancel`").
 pub(crate) fn pick_session(sessions: &[AcceptSession], id: &DeviceId) -> Option<AcceptSession> {
-    sessions.iter().find(|s| s.probe.peer == *id).cloned()
+    sessions.iter().rev().find(|s| s.probe.peer == *id).cloned()
 }
 
 /// Take QUIC Initials only from addresses of active punch sessions; bind every connection to
@@ -879,12 +884,21 @@ async fn accept_loop(core: Arc<Core>) {
                 Ok(Ok(c)) => c,
                 Ok(Err(e)) => {
                     debug!(error = %e, %addr, "incoming QUIC handshake failed");
-                    ended(&matching);
+                    let cause = match crate::server::incoming_tls_stage(&e) {
+                        Some(crate::server::TlsStage::KeyRefused) => {
+                            Some(Cause::named("peer_identity_mismatch"))
+                        }
+                        Some(crate::server::TlsStage::NoAlpn) => {
+                            Some(Cause::named("alpn_mismatch"))
+                        }
+                        None => None,
+                    };
+                    failed(&matching, cause);
                     return;
                 }
                 Err(_) => {
                     debug!(%addr, "incoming QUIC handshake timed out");
-                    ended(&matching);
+                    failed(&matching, Some(Cause::named("handshake_timeout")));
                     return;
                 }
             };
@@ -893,7 +907,7 @@ async fn accept_loop(core: Arc<Core>) {
                     P2pCloseReason::SessionMismatch.var_int(),
                     P2pCloseReason::SessionMismatch.reason(),
                 );
-                ended(&matching);
+                failed(&matching, Some(session_mismatch()));
                 return;
             };
             match pick_session(&matching, &id) {
@@ -918,16 +932,33 @@ async fn accept_loop(core: Arc<Core>) {
                         P2pCloseReason::SessionMismatch.var_int(),
                         P2pCloseReason::SessionMismatch.reason(),
                     );
-                    ended(&matching);
+                    failed(&matching, Some(session_mismatch()));
                 }
             }
         });
     }
 }
 
-fn ended(sessions: &[AcceptSession]) {
-    for s in sessions {
-        let _sent = s.to.send(Incoming::Ended).is_ok();
+fn session_mismatch() -> Cause {
+    Cause::with(
+        "session_mismatch",
+        CauseDetail::Close(P2pCloseReason::SessionMismatch),
+    )
+}
+
+/// A handshake from an address several sessions fit failed: which session it was for is not
+/// known, so each only counts it ended. With one session, the failure and its cause are that
+/// session's.
+fn failed(sessions: &[AcceptSession], cause: Option<Cause>) {
+    match (sessions, cause) {
+        ([only], Some(cause)) => {
+            let _sent = only.to.send(Incoming::Failed(cause)).is_ok();
+        }
+        _ => {
+            for s in sessions {
+                let _sent = s.to.send(Incoming::Ended).is_ok();
+            }
+        }
     }
 }
 
@@ -1178,6 +1209,38 @@ mod tests {
             conn.close(quinn::VarInt::default(), b"");
             let _done = accepting.await;
         });
+    }
+
+    /// Sessions of one peer that fit the same address (a retry of the same dialer): the
+    /// connection goes to the newest.
+    #[test]
+    fn the_newest_session_of_a_peer_takes_its_connection() {
+        let peer = DeviceKey::from_seed([31; 32]).id();
+        let other = DeviceKey::from_seed([32; 32]).id();
+        let session = |peer: DeviceId| {
+            let (to, _rx) = mpsc::unbounded_channel();
+            AcceptSession {
+                probe: Arc::new(ProbeSession::new(
+                    peer,
+                    PunchToken([1; 16]),
+                    PunchToken([2; 16]),
+                    PunchMode::All,
+                    Duration::from_secs(1),
+                    Vec::new(),
+                    8,
+                )),
+                to,
+            }
+        };
+        let sessions = [session(peer), session(other), session(peer)];
+        let picked = pick_session(&sessions, &peer).expect("a session");
+        assert!(Arc::ptr_eq(&picked.probe, &sessions[2].probe));
+        assert!(Arc::ptr_eq(
+            &pick_session(&sessions, &other).unwrap().probe,
+            &sessions[1].probe
+        ));
+        let stranger = DeviceKey::from_seed([33; 32]).id();
+        assert!(pick_session(&sessions, &stranger).is_none());
     }
 
     /// An endpoint whose server is never reached, with the test standing in for its

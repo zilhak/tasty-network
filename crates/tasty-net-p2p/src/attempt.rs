@@ -717,6 +717,20 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
                     }
                 }
                 Some(Incoming::Ended) => pending = pending.saturating_sub(1),
+                Some(Incoming::Failed(cause)) => {
+                    pending = pending.saturating_sub(1);
+                    if pending == usize::MIN {
+                        probes.abort();
+                        let reason = if cause.name == "handshake_timeout" {
+                            ResultReason::Timeout
+                        } else {
+                            ResultReason::HandshakeFailed
+                        };
+                        result(&core, key, Some(reason));
+                        t.to(AttemptPhase::Closed, cause);
+                        return;
+                    }
+                }
                 Some(Incoming::Established(conn)) => {
                     probes.abort();
                     if t.phase() == AttemptPhase::Punching {
@@ -758,12 +772,21 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
             () = tokio::time::sleep_until(accept_until), if pending == usize::MIN => {
                 probes.abort();
                 result(&core, key, Some(ResultReason::Timeout));
-                t.to(AttemptPhase::Closed, Cause::named("accept_deadline_elapsed"));
+                // A handshake was taken: its deadline is what passed.
+                let name = if t.phase() == AttemptPhase::Handshaking {
+                    "handshake_timeout"
+                } else {
+                    "accept_deadline_elapsed"
+                };
+                t.to(AttemptPhase::Closed, Cause::named(name));
                 return;
             }
             r = next_cancel(&mut signals) => {
+                // A superseded session ends in any phase: the dialer moved to a new one.
                 let handshaking = t.phase() == AttemptPhase::Handshaking;
-                if r == CancelReason::PeerLimitsInvalid || !handshaking {
+                if matches!(r, CancelReason::PeerLimitsInvalid | CancelReason::Superseded)
+                    || !handshaking
+                {
                     probes.abort();
                     t.to(AttemptPhase::Closed, cancelled(r));
                     return;

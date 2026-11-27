@@ -91,6 +91,20 @@ fn alert_code(alert: rustls::AlertDescription) -> quinn::TransportErrorCode {
 /// one (`access_denied`), a key that is not a valid ed25519 raw public key (`bad_certificate`)
 /// or a signature it does not verify (`decrypt_error`). Other local errors (QUIC transport
 /// parameters, a protocol violation) are not the key's.
+/// The TLS stage of a handshake this side took (the acceptor): its own verifier refused the
+/// key, or it offered none of the peer's protocols.
+pub(crate) fn incoming_tls_stage(e: &ConnectionError) -> Option<TlsStage> {
+    match e {
+        ConnectionError::TransportError(t) if key_refused(t.code) => Some(TlsStage::KeyRefused),
+        ConnectionError::TransportError(t)
+            if t.code == alert_code(rustls::AlertDescription::NoApplicationProtocol) =>
+        {
+            Some(TlsStage::NoAlpn)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn tls_stage(e: &ConnectionError) -> Option<TlsStage> {
     match e {
         ConnectionError::TransportError(t) if key_refused(t.code) => Some(TlsStage::KeyRefused),
