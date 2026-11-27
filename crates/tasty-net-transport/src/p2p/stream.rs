@@ -370,7 +370,8 @@ pub(crate) fn channel(
 /// `tasty-net-p2p`'s `open_bi` waits without a limit while the peer allows no more streams
 /// (`quic.max_bidi_streams`) and takes no cancel, so it runs on a thread of its own and the
 /// cancel ends the wait here. A stream that opens after its attempt was cancelled is refused at
-/// once; the thread ends with the open, which the connection's close ends too.
+/// once; the thread ends with the open, which the connection's close ends too. Without a thread
+/// for it the open fails with the error of the thread's start.
 pub(crate) fn open(
     conn: &P2pConnection,
     cancel: &AttemptCancel,
@@ -387,9 +388,10 @@ pub(crate) fn open(
             .spawn(move || opening.opened(conn.open_bi()))
     };
     if let Err(error) = spawned {
-        // Without the thread the open waits here, as `open_bi` does.
+        // Waiting here would be a wait the cancel cannot end: the attempt fails instead, and
+        // the connection stays for the channels it carries.
         tracing::debug!(%error, "no thread for a P2P stream open");
-        return conn.open_bi().map_err(ConnectError::Io);
+        return Err(ConnectError::Io(error));
     }
     opening.wait()
 }
