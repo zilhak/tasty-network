@@ -51,7 +51,11 @@ const MAX_PROPOSALS: usize = 40;
 /// `match_pattern`: whether `s` matches `pattern`, where `*` matches any run and `?` any
 /// one byte. The match is on bytes and case-sensitive.
 pub(crate) fn match_pattern(s: &str, pattern: &str) -> bool {
-    let p = pattern.as_bytes();
+    match_pattern_bytes(s.as_bytes(), pattern.as_bytes())
+}
+
+/// [`match_pattern`] on bytes, as the C function sees them.
+fn match_pattern_bytes(s: &[u8], p: &[u8]) -> bool {
     if p.is_empty() {
         return s.is_empty();
     }
@@ -70,7 +74,7 @@ pub(crate) fn match_pattern(s: &str, pattern: &str) -> bool {
         *first = true;
     }
     closure(&mut states);
-    for c in s.bytes() {
+    for &c in s {
         let mut next = vec![false; p.len() + 1];
         for (i, pc) in p.iter().enumerate() {
             if !states.get(i).copied().unwrap_or_default() {
@@ -110,7 +114,12 @@ pub(crate) enum ListMatch {
 /// `match_pattern_list`: match `s` against a comma list of subpatterns, each maybe preceded
 /// by `!`. With `dolower` the subpatterns are lower-cased first (not `s`).
 pub(crate) fn match_pattern_list(s: &str, pattern: &str, dolower: bool) -> ListMatch {
-    let b = pattern.as_bytes();
+    match_pattern_list_bytes(s.as_bytes(), pattern.as_bytes(), dolower)
+}
+
+/// [`match_pattern_list`] on bytes: a pattern that is not UTF-8 (a known_hosts host field) is
+/// matched byte for byte, as the C function matches it.
+fn match_pattern_list_bytes(s: &[u8], b: &[u8], dolower: bool) -> ListMatch {
     let mut got_positive = false;
     let mut i = 0;
     while i < b.len() {
@@ -134,10 +143,7 @@ pub(crate) fn match_pattern_list(s: &str, pattern: &str, dolower: bool) -> ListM
         } else {
             raw.to_vec()
         };
-        // Byte patterns of a &str split at ASCII ',' are valid UTF-8 and the lowering is
-        // ASCII-only, so this never falls back.
-        let sub = String::from_utf8(sub).unwrap_or_default();
-        if match_pattern(s, &sub) {
+        if match_pattern_bytes(s, &sub) {
             if negated {
                 return ListMatch::Negated;
             }
@@ -153,7 +159,13 @@ pub(crate) fn match_pattern_list(s: &str, pattern: &str, dolower: bool) -> ListM
 
 /// `match_hostname`: [`match_pattern_list`] with the host and patterns lower-cased.
 pub(crate) fn match_hostname(host: &str, pattern: &str) -> ListMatch {
-    match_pattern_list(&host.to_ascii_lowercase(), pattern, true)
+    match_hostname_bytes(host, pattern.as_bytes())
+}
+
+/// [`match_hostname`] with the patterns as bytes (a known_hosts host field, which need not be
+/// UTF-8).
+pub(crate) fn match_hostname_bytes(host: &str, pattern: &[u8]) -> ListMatch {
+    match_pattern_list_bytes(host.to_ascii_lowercase().as_bytes(), pattern, true)
 }
 
 /// `match_list`: the first name of `client` that is also in `server`. Both lists stop at

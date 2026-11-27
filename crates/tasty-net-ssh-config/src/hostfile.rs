@@ -348,7 +348,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, KeyInit as _, Mac as _};
 
-use crate::matching::{ListMatch, match_hostname};
+use crate::matching::{ListMatch, match_hostname_bytes};
 use crate::misc::is_c_space;
 use crate::readconf::DEFAULT_SSH_PORT;
 
@@ -769,9 +769,8 @@ fn host_matches(host: &str, names: &[u8]) -> Option<bool> {
         let hashed = host_hash(host, names)?;
         return Some(hashed.as_bytes() == names);
     }
-    // A host field that is not UTF-8 is matched with each bad sequence replaced; such a
-    // field cannot name a host given as text in either case.
-    Some(match_hostname(host, &String::from_utf8_lossy(names)) == ListMatch::Positive)
+    // The host field is matched as bytes, as `match_hostname` sees it in C.
+    Some(match_hostname_bytes(host, names) == ListMatch::Positive)
 }
 
 fn is_blank(c: u8) -> bool {
@@ -1494,5 +1493,29 @@ mod tests {
         let dir = tempdir::Dir::new();
         let kh = KnownHosts::load(&[dir.0.join("none"), dir.0.clone()]);
         assert_eq!(kh.files().count(), 0);
+    }
+
+    #[test]
+    fn host_fields_match_as_bytes() {
+        let a = ed25519_blob(11);
+        let mut text = b"bad\xffname.example ".to_vec();
+        text.extend_from_slice(line("ssh-ed25519", &a).as_bytes());
+        text.push(b'\n');
+        text.extend_from_slice(format!("ok.example {}\n", line("ssh-ed25519", &a)).as_bytes());
+        let dir = tempdir::Dir::new();
+        let path = dir.0.join("known_hosts");
+        std::fs::write(&path, &text).unwrap();
+        let kh = KnownHosts::load(&[path]);
+        // `from_utf8_lossy` would make the byte U+FFFD.
+        assert_eq!(kh.entries(&q("bad\u{fffd}name.example")), Vec::new());
+        assert_eq!(
+            kh.check(&q("bad\u{fffd}name.example"), &a),
+            HostKeyVerdict::NotFound
+        );
+        assert_eq!(
+            kh.entries(&q("ok.example")).len(),
+            1,
+            "the line after it is read"
+        );
     }
 }
