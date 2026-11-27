@@ -426,8 +426,12 @@ pub(crate) mod fault {
         static COMPETITOR: Cell<Option<&'static [u8]>> = const { Cell::new(None) };
     }
 
+    /// The injection guards are used only by the tests of the rename that refuses to replace,
+    /// which run where that rename exists.
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     pub(crate) struct ErrorGuard(&'static LocalKey<Cell<Option<i32>>>);
 
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     impl Drop for ErrorGuard {
         fn drop(&mut self) {
             self.0.with(|f| f.set(None));
@@ -444,7 +448,7 @@ pub(crate) mod fault {
 
     /// Make the rename that refuses to replace fail with the OS error `code` on this thread
     /// while the guard lives.
-    #[cfg_attr(windows, allow(dead_code, reason = "Windows always links"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     pub(crate) fn fail_rename(code: i32) -> ErrorGuard {
         RENAME_ERROR.with(|f| f.set(Some(code)));
         ErrorGuard(&RENAME_ERROR)
@@ -452,7 +456,7 @@ pub(crate) mod fault {
 
     /// Make hard links fail with the OS error `code` on this thread while the guard lives (the
     /// Android app sandbox refuses them with `EACCES`).
-    #[cfg_attr(windows, allow(dead_code, reason = "Windows always links"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     pub(crate) fn fail_link(code: i32) -> ErrorGuard {
         LINK_ERROR.with(|f| f.set(Some(code)));
         ErrorGuard(&LINK_ERROR)
