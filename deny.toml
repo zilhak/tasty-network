@@ -29,6 +29,7 @@ allow = [
   "MPL-2.0",         # 파일 단위 copyleft — 링크만 하고 소스를 고치지 않는다
   "OFL-1.1",         # 글꼴 자산
   "Ubuntu-font-1.0", # 글꼴 자산
+  "SSH-short",       # tasty-net-ssh-config: OpenSSH 이식 파일의 Tatu Ylonen 조항(docs/design/ssh-backends.md 라이선스). tasty 목록에는 없다
 ]
 
 [bans]
