@@ -7,11 +7,15 @@
 //! attempt fails in a way connecting again can change) the dialer connects again from
 //! discovery through the transport's `Redialer` with its default settings
 //! (docs/design/transport.md "보관 상한과 재연결 도우미"): the new connection's entry in the
-//! connection table names the lost one. A refusal that connecting again cannot change (a
-//! wrong token, for example) ends the dialer with exit code 3; when the redialer gives up
-//! (`redial.give_up_after`), or the loss is not one to redial, it ends with exit code 4.
-//! `quit` or the end of stdin detaches and ends with exit code 0. The stdin line `table`
-//! prints the connection table in the lines of `tasty_net_demo::table`.
+//! connection table names the lost one. Exit code 3 is only for a refusal with a handshake
+//! refusal reason: the peer refused with a refusing ACK (a wrong token, a refused role
+//! proposal) or the peer turned out to be this instance (`self_attach`). Every other failure
+//! that connecting again cannot change (a protocol error, a bad signature, a cancel that did
+//! not come from `quit`) is not one to redial and ends the dialer with exit code 4, as when
+//! the redialer gives up (`redial.give_up_after`). `quit` or the end of stdin detaches and
+//! ends with exit code 0, also when it cancelled an attempt in the SSH connection or in the
+//! handshake. The stdin line `table` prints the connection table in the lines of
+//! `tasty_net_demo::table`.
 //!
 //! `--holder acceptor` proposes the role reversal (docs/design/transport.md "역할" (b)): the
 //! server holds and this end provides the workspace over the same `-L` tunnel, and this end
@@ -73,8 +77,8 @@
 //! | `dialer send-failed error=<text>` | a `send` line found no link, or writing failed |
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
-//! | `dialer rejected reason=<reason or -> error=<text>` | it did not; the dialer ends. The reason is the peer's wire reason, or `self_attach` when the peer turned out to be this instance |
-//! | `dialer gave-up error=<text>` | the redialer gave up, or the loss was not one to redial; the dialer ends |
+//! | `dialer rejected reason=<reason> error=<text>` | the peer refused with a refusing ACK, or it is this instance; the dialer ends with code 3. The reason is the peer's wire reason, or `self_attach` |
+//! | `dialer gave-up error=<text>` | the redialer gave up, or the failure or loss was not one to redial; the dialer ends with code 4 |
 //! | `dialer table ...` · `dialer conn ...` · `dialer link ...` · `dialer table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `dialer stdin-thread-late limit_ms=<ms>` | after `quit`, the stdin thread's Detach did not end in time |
 //! | `dialer stdin-thread-panicked` | after `quit`, the stdin thread had panicked |
@@ -332,11 +336,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Next::Rejected,
                 NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error)),
             )) => {
-                let reason = match &error {
-                    HandshakeError::Rejected { reason, .. } => reason.as_str().to_string(),
-                    HandshakeError::SelfAttach => "self_attach".into(),
-                    _ => "-".into(),
-                };
+                let reason = refusal(&error).unwrap_or("-");
                 emit(&format!(
                     "dialer rejected reason={reason} error={}",
                     error_chain(&error)
@@ -349,14 +349,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 drop(dial);
                 return Ok(ExitCode::from(EXIT_REJECTED));
             }
-            Err((_, NoLink::Redial(error))) => {
-                emit(&format!("dialer gave-up error={}", error_chain(&error)));
-                drop(error);
+            Err((_, no_link)) => {
+                let error = match &no_link {
+                    NoLink::Attempt(error) => error_chain(error),
+                    NoLink::Redial(error) => error_chain(error),
+                };
+                emit(&format!("dialer gave-up error={error}"));
+                drop(no_link);
                 drop(dial);
                 return Ok(ExitCode::from(EXIT_GAVE_UP));
-            }
-            Err((_, NoLink::Attempt(error))) => {
-                return Err(format!("an attempt ended unclassified: {error}").into());
             }
         };
         let entry = entry_of(&connections, link.link_id());
@@ -426,9 +427,9 @@ enum Next {
     Quit,
     /// The first attempt failed in a way connecting again can change: redial its entry.
     Redial,
-    /// A refusal connecting again cannot change: end with code 3.
+    /// A refusal with a handshake refusal reason ([`refusal`]): end with code 3.
     Rejected,
-    /// The redialer gave up, or the loss is not one to redial: end with code 4.
+    /// The redialer gave up, or the failure or loss is not one to redial: end with code 4.
     GaveUp,
 }
 
@@ -440,8 +441,20 @@ fn cancelled(error: &HandshakeError) -> bool {
     )
 }
 
+/// The refusal reason of `error` when it is a refusal: the peer's refusing ACK, or the peer
+/// being this instance. Other failures carry no refusal reason.
+fn refusal(error: &HandshakeError) -> Option<&str> {
+    match error {
+        HandshakeError::Rejected { reason, .. } => Some(reason.as_str()),
+        HandshakeError::SelfAttach => Some("self_attach"),
+        _ => None,
+    }
+}
+
 /// The [`Next`] step after `no_link`. `quitting` is whether `quit` came (it cancels the
-/// attempt), so a cancelled attempt is the end that `quit` asked for.
+/// attempt), so a cancelled attempt is the end that `quit` asked for. A cancel without `quit`
+/// has no cause in this binary (only `quit` cancels); should one come, it is not one to
+/// redial and ends with code 4.
 fn next_after(no_link: &NoLink, quitting: bool) -> Next {
     match no_link {
         NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error))
@@ -451,8 +464,12 @@ fn next_after(no_link: &NoLink, quitting: bool) -> Next {
         }
         NoLink::Redial(RedialError::Cancelled) if quitting => Next::Quit,
         NoLink::Attempt(error) if error.is_retryable() => Next::Redial,
-        NoLink::Attempt(_) | NoLink::Redial(RedialError::Failed(_)) => Next::Rejected,
-        NoLink::Redial(_) => Next::GaveUp,
+        NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error))
+            if refusal(error).is_some() =>
+        {
+            Next::Rejected
+        }
+        NoLink::Attempt(_) | NoLink::Redial(_) => Next::GaveUp,
     }
 }
 
@@ -757,7 +774,8 @@ mod tests {
     }
 
     /// A cancel in the SSH connection ends like a cancel in the handshake, on the first
-    /// attempt and in a redial; refusals and the redialer's end keep their codes.
+    /// attempt and in a redial. Only a refusal with a refusal reason is code 3; any other
+    /// failure that is not retried, and the redialer's end, is code 4.
     #[test]
     fn a_cancel_after_quit_is_a_quit_wherever_it_came() {
         let connect = || HandshakeError::Connect(ConnectError::Cancelled);
@@ -782,13 +800,37 @@ mod tests {
             (NoLink::Attempt(HandshakeError::TimedOut), Next::Redial),
             (NoLink::Redial(RedialError::Exhausted(None)), Next::GaveUp),
             (NoLink::Redial(RedialError::NotRedialed), Next::GaveUp),
+            (NoLink::Attempt(protocol()), Next::GaveUp),
+            (
+                NoLink::Redial(RedialError::Failed(protocol())),
+                Next::GaveUp,
+            ),
+            (
+                NoLink::Attempt(HandshakeError::SignatureInvalid),
+                Next::GaveUp,
+            ),
         ];
         for (no_link, want) in &cases {
             assert_eq!(next_after(no_link, true), *want, "{}", describe(no_link));
         }
-        // Without quit nothing cancels; a cancel then is not taken for one.
+        // Without quit a cancel is not one to redial and has no refusal reason: code 4.
+        let without_quit = [
+            NoLink::Attempt(connect()),
+            NoLink::Attempt(HandshakeError::Cancelled),
+            NoLink::Redial(RedialError::Cancelled),
+            NoLink::Redial(RedialError::Failed(connect())),
+        ];
+        for no_link in &without_quit {
+            assert_eq!(
+                next_after(no_link, false),
+                Next::GaveUp,
+                "{}",
+                describe(no_link)
+            );
+        }
+        // Refusals keep code 3 without quit too.
         assert_eq!(
-            next_after(&NoLink::Attempt(connect()), false),
+            next_after(&NoLink::Attempt(HandshakeError::SelfAttach), false),
             Next::Rejected
         );
     }
@@ -802,6 +844,10 @@ mod tests {
         request_quit(&shared);
         assert!(cancel.is_cancelled(), "quit cancels the one in progress");
         assert!(aux_cancel(&shared).is_none(), "none starts after quit");
+    }
+
+    fn protocol() -> HandshakeError {
+        HandshakeError::Protocol("an unexpected first reply")
     }
 
     fn describe(no_link: &NoLink) -> String {
