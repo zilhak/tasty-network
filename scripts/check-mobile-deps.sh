@@ -93,7 +93,7 @@ judge_features() {
 }
 
 # 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지나 그 feature 노드가 있으면 그 경로를
-# "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍는다.
+# "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍고, 끝에 "end"를 찍는다.
 judge_inverted() {
     awk '
         {
@@ -114,11 +114,12 @@ judge_inverted() {
                 }
             }
         }
-        END { if (!found) print "no-process-node" }
+        END { if (!found) print "no-process-node"; print "end" }
     '
 }
 
-# target 하나의 판정. 통과 0, 위반 1, 판정 불가 2.
+# target 하나의 판정. 통과 0, 위반 1, 판정 불가 2. 이 함수는 ||의 왼쪽에서 불리므로 errexit가
+# 꺼져 있다. 그래서 명령마다 종료 코드와 필요한 출력 줄을 직접 본다.
 check_target() {
     local t=$1 tree rc=0 verdict viol count vers v inv inv_rc
     tree=$(feature_tree "$t") || rc=$?
@@ -130,9 +131,16 @@ check_target() {
         echo "$TAG 판정 불가: cargo tree 출력에 $PKG 줄이 없다(target $t)" >&2
         return 2
     fi
-    verdict=$(judge_features <<<"$tree")
+    if ! verdict=$(judge_features <<<"$tree"); then
+        echo "$TAG 판정 불가: feature 나무 판정이 실패했다(target $t)" >&2
+        return 2
+    fi
+    count=$(sed -n 's/^packages \([1-9][0-9]*\)$/\1/p' <<<"$verdict")
+    if [[ -z "$count" ]]; then
+        echo "$TAG 판정 불가: feature 나무 판정이 패키지 줄을 하나도 읽지 못했다(target $t)" >&2
+        return 2
+    fi
     viol=$(grep '^위반: ' <<<"$verdict" || true)
-    count=$(sed -n 's/^packages //p' <<<"$verdict")
     vers=$(sed -n 's/^tokio-process //p' <<<"$verdict")
     for v in $vers; do
         inv_rc=0
@@ -141,7 +149,10 @@ check_target() {
             echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 cargo tree가 실패했다(target $t, 종료 코드 $inv_rc)" >&2
             return 2
         fi
-        inv=$(judge_inverted <<<"$inv")
+        if ! inv=$(judge_inverted <<<"$inv") || ! grep -qx 'end' <<<"$inv"; then
+            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무의 판정이 실패했다(target $t)" >&2
+            return 2
+        fi
         if grep -qx 'no-process-node' <<<"$inv"; then
             echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무에 tokio feature \"process\"가 없다(target $t)" >&2
             return 2
@@ -172,8 +183,10 @@ self_test() {
     local inv_net='0tokio v1.54.1;1tokio feature "process";2tokio feature "full";3tasty-net-transport v0.1.0 (/w/t);4app v0.1.0 (/w/app);1tokio feature "rt"'
     local inv_feat='0tokio v1.54.1;1tokio feature "process";2tasty-net-ssh feature "embedded-ssh";3app v0.1.0 (/w/app)'
     local inv_none='0tokio v1.54.1;1tokio feature "rt";2app v0.1.0 (/w/app)'
-    local failed=0 name app want st_tree st_trc st_inv st_irc got
-    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드(나무의 줄은 ;로 나눈다)
+    local failed=0 name app want st_tree st_trc st_inv st_irc st_awk got
+    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드#awk 고장(없음·fail·empty)
+    # (나무의 줄은 ;로 나눈다. fail은 awk가 아무것도 찍지 않고 3으로 끝나고, empty는 0으로 끝나며 아무것도
+    # 찍지 않는다)
     local cases=(
         "정상: process 없는 tokio와 embedded-ssh#0#0#$root;$tk;$ssh_e#0##0"
         "tokio의 process(이 레포 기준)#0#1#$root;$tkp#0##0"
@@ -189,9 +202,13 @@ self_test() {
         "tasty-net-ssh의 feature 노드를 거쳐 켠 tokio의 process(앱 기준)#1#1#$root;$tkp#0#$inv_feat#0"
         "거꾸로 본 나무에 process 노드가 없다(앱 기준)#1#2#$root;$tkp#0#$inv_none#0"
         "거꾸로 본 cargo tree가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_app#101"
+        "feature 판정의 awk가 실패한다#0#2#$root;$tkp#0##0#fail"
+        "feature 판정의 awk가 아무것도 찍지 않는다#0#2#$root;$tkp#0##0#empty"
+        "거꾸로 본 나무 판정의 awk가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-inverted"
     )
     for c in "${cases[@]}"; do
-        IFS='#' read -r name app want st_tree st_trc st_inv st_irc <<<"$c"
+        st_awk=""
+        IFS='#' read -r name app want st_tree st_trc st_inv st_irc st_awk <<<"$c"
         got=0
         (
             # shellcheck disable=SC2329  # check_target이 부른다
@@ -204,6 +221,14 @@ self_test() {
                 [[ -n "$out" ]] && tr ';' '\n' <<<"$out"
                 return "$rc"
             }
+            case "$st_awk" in
+                fail) awk() { return 3; } ;;
+                empty) awk() { cat >/dev/null; } ;;
+                fail-inverted)
+                    # shellcheck disable=SC2329  # check_target이 부른다
+                    judge_inverted() { return 3; }
+                    ;;
+            esac
             PKG=app
             APP=$app
             check_target aarch64-linux-android
