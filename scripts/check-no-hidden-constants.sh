@@ -424,6 +424,8 @@ def self_test():
             got = len(v)
         except ListError as e:
             v, got = [str(e)], "목록 오류"
+        except ScanError as e:
+            v, got = [str(e)], "판정 불가"
         cases.append((title, got, want, v))
 
     case("숨은 값(retries = 1, max_inflight = 1, Duration::from_millis(0))", "target\tsrc\n",
@@ -504,6 +506,10 @@ def self_test():
     files["src/field.rs"] = ("struct S { #[cfg(test)] a: u8, b: [u8; 4] }\n"
                              "enum E { #[cfg(test)] A = 1, B = 2 }\nfn f() -> u8 { 3 }\n")
     case("항목이 아닌 자리(필드·변형)의 시험 cfg는 그 요소만 지운다", "target\tsrc\n", {"src/field.rs"}, 3)
+    files["src/label.rs"] = "fn f() -> u8 { #[cfg(test)] 'a: loop { break 'a; } 7 }\n"
+    case("시험 cfg 이름표 반복은 그 블록까지만 지운다", "target\tsrc\n", {"src/label.rs"}, 1)
+    files["src/compare.rs"] = "fn f() -> [bool; 2] { [#[cfg(test)] a < b, 9 > c] }\n"
+    case("시험 cfg 원소의 비교 a < b 뒤 다른 원소의 > (판정 불가)", "target\tsrc\n", {"src/compare.rs"}, "판정 불가")
     files["src/settings.rs"] = settings_mod + "/* entry(\"removed\", 1) */\n// fixed(\"gone\", \"x\", \"x\")\n"
     case("주석 안의 entry는 키가 아니다",
          "target\tsrc\nsettings\tsrc/settings.rs\ntable\tsrc/settings.rs\td.md\t표\n",

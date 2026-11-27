@@ -117,7 +117,8 @@ def tokenize(text):
 
 
 def matching_close(toks, i):
-    """toks[i]가 여는 괄호일 때 짝 닫는 괄호의 위치."""
+    """toks[i]가 여는 괄호일 때 짝 닫는 괄호의 위치. 짝이 없으면 ScanError(나머지를 한 덩어리로
+    보지 않는다)."""
     pairs = {"(": ")", "[": "]", "{": "}"}
     open_, close = toks[i][1], pairs[toks[i][1]]
     depth = 0
@@ -129,7 +130,7 @@ def matching_close(toks, i):
                 depth -= 1
                 if depth == 0:
                     return j
-    return len(toks) - 1
+    raise ScanError(f"{toks[i][2]}행: 괄호 {open_}가 닫히지 않았다")
 
 
 # 바깥 깊이의 ;에서 끝나는 항목. 그 안의 {…}(제네릭 인수의 블록, 초기식)는 항목을 끝내지 않는다.
@@ -172,7 +173,7 @@ def item_end(toks, i):
             depth -= 1
         elif t == ";" and depth == 0:
             return j
-    return len(toks) - 1
+    raise ScanError(f"{toks[i][2]}행: 항목의 끝을 찾지 못했다")
 
 
 def is_test_cfg(words):
@@ -217,15 +218,38 @@ def _skip_attrs_and_vis(toks, j):
     return j
 
 
+def _macro_brace(toks, j):
+    """j에서 경로 매크로 호출(::? 이름(::이름)* ! {)이 시작하면 그 { 위치, 아니면 None."""
+    n = len(toks)
+    k = j + 1 if j < n and toks[j][1] == "::" else j
+    while k < n and toks[k][0] == "ident" and not toks[k][1].startswith("'"):
+        if k + 2 < n and toks[k + 1][1] == "!" and toks[k + 2][1] == "{":
+            return k + 2
+        if k + 1 < n and toks[k + 1][1] == "::":
+            k += 2
+            continue
+        return None
+    return None
+
+
 def _cfg_item_end(toks, start):
-    """시험 cfg 속성 바로 뒤(start)부터 지울 범위의 끝(포함). 항목·let은 item_end, 블록 식 문장과
-    블록·매크로 문장은 그 블록 끝, 그 밖(필드·변형·원소·식 문장)은 바깥 깊이의 쉼표(포함)나 ;(포함)
-    나 둘러싼 괄호의 닫힘 앞이다. 끝을 정할 수 없으면 ScanError."""
+    """시험 cfg 속성 바로 뒤(start)부터 지울 범위의 끝(포함). 항목·let은 item_end, 블록 식 문장
+    (이름표가 붙은 것 포함)·인라인 const 블록·블록·매크로 문장은 그 블록 끝, 그 밖(필드·변형·원소·식
+    문장)은 바깥 깊이의 쉼표(포함)나 ;(포함)나 둘러싼 괄호의 닫힘 앞이다. 끝을 확실히 정할 수 없으면
+    (꺾쇠가 제네릭인지 비교인지 모르는 쉼표 포함) 더 지우지 않고 ScanError."""
     n = len(toks)
     j = _skip_attrs_and_vis(toks, start)
     if j >= n:
         raise ScanError(f"{toks[-1][2]}행: 시험 cfg 뒤에 항목이 없다")
+    if toks[j][0] == "ident" and toks[j][1].startswith("'"):
+        # 이름표('a:) 뒤에는 반복이나 블록만 온다.
+        if not (j + 2 < n and toks[j + 1][1] == ":"
+                and toks[j + 2][1] in ("loop", "while", "for", "{")):
+            raise ScanError(f"{toks[j][2]}행: 시험 cfg 뒤 이름표 {toks[j][1]}의 문장을 모른다")
+        j += 2
     first = toks[j][1] if toks[j][0] in ("ident", "punct") else None
+    if first == "const" and j + 1 < n and toks[j + 1][1] == "{":
+        return matching_close(toks, j + 1)
     if first in ITEM_START:
         end = item_end(toks, j)
         # 둘러싼 괄호를 넘지 않는다(깊이가 음수가 되기 전에 멈춘다).
@@ -258,9 +282,9 @@ def _cfg_item_end(toks, start):
                 raise ScanError(f"{toks[j][2]}행: 시험 cfg if 문장의 else 블록을 찾지 못했다")
             end = matching_close(toks, k)
         return end
-    if (toks[j][0] == "ident" and j + 2 < n and toks[j + 1][1] == "!"
-            and toks[j + 2][1] == "{"):
-        return matching_close(toks, j + 2)
+    brace = _macro_brace(toks, j)
+    if brace is not None:
+        return matching_close(toks, brace)
     depth, angle = 0, 0
     for k in range(j, n):
         kind, t, line = toks[k]
@@ -282,7 +306,9 @@ def _cfg_item_end(toks, start):
             raise ScanError(f"{line}행: 시험 cfg가 붙은 match 갈래의 끝을 정하지 않는다")
         elif depth == 0 and t == ";":
             return k
-        elif depth == 0 and t == "," and angle == 0:
+        elif depth == 0 and t == ",":
+            if angle:
+                raise ScanError(f"{line}행: 시험 cfg가 붙은 요소의 쉼표가 제네릭 안인지 비교 뒤인지 모른다")
             return k
     raise ScanError(f"{toks[j][2]}행: 시험 cfg가 붙은 요소의 끝을 찾지 못했다")
 

@@ -389,9 +389,18 @@ def self_test():
         ("시험 cfg enum 변형 뒤의 금지 경로", "enum E { #[cfg(test)] A, B }\nfn g() { std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg 배열 원소 뒤의 금지 경로", "fn h() -> Vec<u8> { vec![#[cfg(test)] 1, 2] }\nfn g() { std::process::Command::new(\"x\"); }\n"),
         ("cfg(all(test, unix)) 마지막 필드 뒤의 금지 경로", "struct S { b: u8, #[cfg(all(test, unix))] a: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
-        ("제네릭 타입 필드(HashMap<u8, u16>) 뒤의 금지 경로", "struct S { #[cfg(test)] a: HashMap<u8, u16>, b: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg if 문장 뒤 같은 블록의 금지 경로", "fn f(x: bool) { #[cfg(test)] if x { a(); } else { b(); } std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg 매크로 문장 m! { } 뒤의 금지 경로", "fn f() { #[cfg(test)] m! { 1 } std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 이름표 반복 'a: loop { } 뒤의 금지 경로",
+         "fn f() { #[cfg(test)] 'a: loop { break 'a; } std::process::Command::new(\"x\").spawn(); }\n"),
+        ("시험 cfg 이름표 블록 'b: { } 뒤의 금지 경로",
+         "fn f() { #[cfg(test)] 'b: { } let c = std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 이름표 while 뒤의 금지 경로",
+         "fn f() { #[cfg(test)] 'c: while g() {} std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 인라인 const { } 뒤의 금지 경로",
+         "fn f() { #[cfg(test)] const { assert!(true) } std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 경로 매크로 문장 m::n! { } 뒤의 금지 경로",
+         "fn f() { #[cfg(test)] m::n! { 1 } std::process::Command::new(\"x\"); }\n"),
     ]
     good = [
         ("use std::process::{id, exit};", "use std::process::{id, exit};\n"),
@@ -414,10 +423,19 @@ def self_test():
          "fn f<'a>(x: &'a u8) -> impl Copy + use<'a> { *x }\nfn g<T>() -> impl Sized + use<T> {}\n"),
         ("시험 cfg 필드의 금지 타입만 지운다", "struct S { #[cfg(test)] c: std::process::Child, b: u8 }\n"),
         ("시험 cfg 블록 문장 안의 금지 경로", "fn f() { #[cfg(test)] { std::process::Command::new(\"x\"); } }\n"),
+        ("시험 cfg 이름표 반복 안의 금지 경로", "fn f() { #[cfg(test)] 'a: loop { std::process::Command::new(\"x\"); } }\n"),
     ]
     unreadable = [
         ("시험 cfg match 갈래는 끝을 정하지 않고 판정 불가", "fn f(x: u8) { match x { #[cfg(test)] 1 => a(), _ => b() } }\n"),
         ("시험 cfg 원소의 끝을 못 찾으면(a < b, c) 판정 불가", "fn f() { let _ = [#[cfg(test)] a < b, c]; }\n"),
+        ("시험 cfg 원소의 비교 a < b 뒤 원소의 > (판정 불가)",
+         "fn f() { let _ = [#[cfg(test)] a < b, std::process::Command::new(\"x\") > y]; }\n"),
+        ("시험 cfg 원소의 비교 a < b 뒤 다른 원소의 a > b (판정 불가)",
+         "fn f() { let _ = [#[cfg(test)] a < b, { let _ = std::process::Command::new(\"x\"); true }, a > b, true]; }\n"),
+        ("시험 cfg 필드의 제네릭 쉼표 HashMap<u8, u16>(비교와 가르지 못해 판정 불가)",
+         "struct S { #[cfg(test)] a: HashMap<u8, u16>, b: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 블록이 닫히지 않는다(판정 불가)", "fn f() { #[cfg(test)] { a(); std::process::Command::new(\"x\");\n"),
+        ("시험 cfg use가 ;로 끝나지 않는다(판정 불가)", "#[cfg(test)] use a::b\nfn g() { std::process::Command::new(\"x\"); }\n"),
     ]
     cases = []
     for title, src in bad:
