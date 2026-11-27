@@ -18,8 +18,8 @@ use tasty_net_ssh::{
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 use crate::channel::RawChannel;
 use crate::connection_table::{
-    Cause, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, Joined, NewEntry, PathKind,
-    Phase, Segment, Via,
+    Cause, ConnectionInfo, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, Joined,
+    NewEntry, PathKind, Phase, Segment, Via,
 };
 use crate::lock::lock;
 use crate::reject::TooOldEvidence;
@@ -264,7 +264,9 @@ impl SshTransport {
                 if let Via::Ssh { remote_port, .. } = &mut info.via {
                     *remote_port = Some(record.port);
                 }
+                // Not yet verified: the handshake confirms it.
                 info.peer.instance_id = Some(record.instance_id.clone());
+                info.peer.instance_verified = false;
                 info.segments.push(Segment {
                     name: "remote_listener",
                     local: None,
@@ -315,7 +317,7 @@ impl SshTransport {
                         info.segments.insert(
                             0,
                             Segment {
-                                name: "local_forward",
+                                name: LOCAL_FORWARD,
                                 local: Some(loopback(tunnel.local_port())),
                                 remote: None,
                             },
@@ -386,15 +388,77 @@ fn open_through(
         return Err(ConnectError::Cancelled);
     }
     let stream = connected.map_err(ConnectError::Io)?;
+    let local = stream.local_addr();
     let channel = RawChannel::from_tcp_as(stream, TransportKind::Ssh).map_err(ConnectError::Io)?;
     let channel = channel
         .with_verdict(verdict)
         .keep_alive(Arc::clone(hold) as Arc<dyn std::any::Any + Send + Sync>);
     Ok(match &hold.entry {
-        Some(entry) => channel.with_entry(entry.clone()),
+        Some(entry) => {
+            let channel = match local {
+                Ok(local) => channel.keep_alive(Arc::new(ForwardedChannel::open(entry, local))),
+                Err(error) => {
+                    tracing::debug!(%error, "no local address for a channel through the tunnel");
+                    channel
+                }
+            };
+            channel.with_entry(entry.clone())
+        }
         None => channel,
     })
 }
+
+/// The name of the segment between the local forwarding end and the channels opened on it.
+const LOCAL_FORWARD: &str = "local_forward";
+
+/// A channel open on the tunnel's forwarding end: its local address is listed on the
+/// entry's `local_forward` segment while the channel lives.
+struct ForwardedChannel {
+    entry: EntryRef,
+    addr: String,
+}
+
+impl ForwardedChannel {
+    fn open(entry: &EntryRef, local: SocketAddr) -> Self {
+        let addr = local.to_string();
+        entry.update(|info| forwarded(info, |list| list.push(addr.clone())));
+        Self {
+            entry: entry.clone(),
+            addr,
+        }
+    }
+}
+
+impl Drop for ForwardedChannel {
+    fn drop(&mut self) {
+        let addr = &self.addr;
+        self.entry.update(|info| {
+            forwarded(info, |list| {
+                if let Some(at) = list.iter().position(|a| a == addr) {
+                    list.remove(at);
+                }
+            });
+        });
+    }
+}
+
+/// Changes the channel addresses on the `local_forward` segment of `info`: its remote side
+/// lists them, joined with [`FORWARDED_SEPARATOR`], or is empty without channels.
+fn forwarded(info: &mut ConnectionInfo, change: impl FnOnce(&mut Vec<String>)) {
+    let Some(segment) = info.segments.iter_mut().find(|s| s.name == LOCAL_FORWARD) else {
+        return;
+    };
+    let mut list: Vec<String> = segment
+        .remote
+        .as_deref()
+        .map(|r| r.split(FORWARDED_SEPARATOR).map(String::from).collect())
+        .unwrap_or_default();
+    change(&mut list);
+    segment.remote = (!list.is_empty()).then(|| list.join(FORWARDED_SEPARATOR));
+}
+
+/// Between two channel addresses on the `local_forward` segment.
+pub const FORWARDED_SEPARATOR: &str = ", ";
 
 impl Transport for SshTransport {
     type Target = SshTarget;

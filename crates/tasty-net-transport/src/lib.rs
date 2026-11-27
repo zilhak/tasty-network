@@ -88,7 +88,7 @@ pub use request::{
     RESPONSE_TOO_LARGE, RequestClient, RequestError, RequestHandler, RequestServer, ServeError,
 };
 pub use role::{Holder, Roles, Side, roles};
-pub use ssh::{LOCAL_CONNECT_TIMEOUT, SshTransport};
+pub use ssh::{FORWARDED_SEPARATOR, LOCAL_CONNECT_TIMEOUT, SshTransport};
 pub use transport::{
     AcceptError, ConnectError, ConnectOptions, Connection, DialAuth, Endpoint, EndpointHandle,
     Listener, Transport, TransportKind,

@@ -6,7 +6,7 @@
 mod common;
 
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,10 +18,10 @@ use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionState,
-    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, Finish, HandshakeError,
-    Holder, LinkTimeouts, PathKind, Phase, RedialError, Redialer, RedialerConfig, RejectReason,
-    Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake,
-    dial_request,
+    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, FORWARDED_SEPARATOR, Finish,
+    HandshakeError, Holder, LinkTimeouts, PathKind, Phase, RedialError, Redialer, RedialerConfig,
+    RejectReason, Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via,
+    dial_handshake, dial_request,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
@@ -1015,4 +1015,76 @@ fn links_on_one_tunnel_show_their_own_applied_values() {
     assert_eq!(read_timeout(&entry.links[0].applied), secs(10));
     assert_eq!(read_timeout(&entry.applied), secs(10));
     drop(first);
+}
+
+#[test]
+fn the_forwarding_segment_lists_the_open_channels_and_the_instance_is_verified() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("forwarded");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let channels = |table: &ConnectionTable| {
+        let entry = table.connections().pop().expect("the tunnel entry");
+        let segment = entry
+            .segments
+            .iter()
+            .find(|s| s.name == "local_forward")
+            .cloned()
+            .expect("the forwarding segment");
+        let forward: SocketAddr = segment
+            .local
+            .as_deref()
+            .expect("the forwarding end")
+            .parse()
+            .expect("an address");
+        let open: Vec<SocketAddr> = segment
+            .remote
+            .as_deref()
+            .map(|r| {
+                r.split(FORWARDED_SEPARATOR)
+                    .map(|a| a.parse().expect("an address"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            open.iter()
+                .all(|a| a.ip().is_loopback() && a.port() != forward.port()),
+            "{open:?} on {forward}"
+        );
+        open.len()
+    };
+
+    // Before the handshake the instance comes from the record only.
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let entry = table.connections().pop().expect("the tunnel entry");
+    assert_eq!(entry.peer.instance_id.as_deref(), Some("instance-1"));
+    assert!(!entry.peer.instance_verified);
+    assert_eq!(channels(&table), 1);
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let entry = table.connections().pop().expect("the tunnel entry");
+    assert_eq!(entry.peer.instance_id.as_deref(), Some("acceptor-1"));
+    assert!(entry.peer.instance_verified);
+
+    // Each new channel on the forwarding end is listed while it lives.
+    let bulk = link.open_bulk(None).expect("bulk");
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let second = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    assert_eq!(fake.tunnels_started(), 1);
+    assert_eq!(channels(&table), 3);
+    drop(bulk);
+    wait_until("the bulk channel leaves the list", || channels(&table) == 2);
+    drop(second);
+    wait_until("the second link leaves the list", || channels(&table) == 1);
+    drop(link);
+
+    // A connection that failed before its handshake keeps the record's value, unverified.
+    fake.publish_record(server.addr.port(), token('b'), "instance-2");
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    assert!(dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).is_err());
+    let failed = table.connections().pop().expect("the failed entry");
+    assert_eq!(failed.state, ConnectionState::Disconnected);
+    assert_eq!(failed.peer.instance_id.as_deref(), Some("instance-2"));
+    assert!(!failed.peer.instance_verified);
 }

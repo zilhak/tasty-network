@@ -601,6 +601,7 @@ impl EntryRef {
         self.update(|info| {
             info.peer.device_id = Some(peer.device_id);
             info.peer.instance_id = Some(peer.instance_id.clone());
+            info.peer.instance_verified = true;
             // The first channel's values stay: a later link or channel on the same tunnel
             // shows its own on its link row, without changing what the others run with.
             let applied = link_timeouts(timeouts);

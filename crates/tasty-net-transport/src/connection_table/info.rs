@@ -296,7 +296,9 @@ pub struct Segment {
     pub name: &'static str,
     /// The local address, when the segment has one.
     pub local: Option<String>,
-    /// The remote address, when the segment has one.
+    /// The remote address, when the segment has one. On `local_forward` it is the local
+    /// addresses of the channels open on the forwarding end, joined with
+    /// [`FORWARDED_SEPARATOR`](crate::FORWARDED_SEPARATOR), and none without channels.
     pub remote: Option<String>,
 }
 
@@ -323,6 +325,9 @@ pub struct ConnectionPeer {
     pub device_id: Option<DeviceId>,
     /// The instance ID (from the record before the handshake, from the handshake after it).
     pub instance_id: Option<String>,
+    /// Whether a handshake confirmed `instance_id`. False while it only comes from the
+    /// discovery record, which is what a connection that failed before its handshake keeps.
+    pub instance_verified: bool,
     /// The display name the consumer gave.
     pub name: Option<String>,
 }
