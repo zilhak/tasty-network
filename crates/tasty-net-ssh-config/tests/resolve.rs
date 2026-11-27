@@ -453,6 +453,38 @@ fn include_cycle_stops_at_the_limit() {
 }
 
 #[test]
+fn identity_file_limit() {
+    // 100 files (SSH_MAX_IDENTITY_FILES), then a duplicate: the limit comes first.
+    let mut config: String = (0..100).map(|i| format!("IdentityFile /k{i}\n")).collect();
+    let full = resolve(&config, "web");
+    assert_eq!(refusal_kind(&full), None);
+    assert_eq!(full.options.identity_files.len(), 100);
+    config.push_str("IdentityFile /k0\n");
+    let over = resolve(&config, "web");
+    assert_eq!(refusal_kind(&over), Some(RefusalKind::ConfigError));
+
+    // `-i` goes through the same limit.
+    let dir = folder();
+    let mut command_line: Vec<CommandLineValue> = (0..100)
+        .map(|i| CommandLineValue {
+            value: CommandLine::Identity(write(&dir, &format!("k{i}"), "").display().to_string()),
+            label: "target".to_string(),
+        })
+        .collect();
+    let ok = resolve_with("", "web", command_line.clone());
+    assert_eq!(refusal_kind(&ok), None);
+    command_line.push(command_line[0].clone());
+    let over_cli = resolve_with("", "web", command_line);
+    let f = over_cli.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert!(
+        f.message.contains("Too many identity files"),
+        "{}",
+        f.message
+    );
+}
+
+#[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());
     ctx.env.insert("NAME".to_string(), "value".to_string());

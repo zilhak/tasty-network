@@ -326,6 +326,8 @@ allow	crates/tasty-net-ssh-config/src/misc.rs	2	두 글자 접두(${·%%)
 allow	crates/tasty-net-ssh-config/src/misc.rs	3	urldecode의 %XX 세 글자(misc.c urldecode)
 allow	crates/tasty-net-ssh-config/src/misc.rs	i32::MAX	C int 상한(misc.c atoi_err·convtime)
 allow	crates/tasty-net-ssh-config/src/misc.rs	const HEX_RADIX: u32 = 16	urldecode의 16진수 기수
+allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_IDENTITY_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_IDENTITY_FILES 100
+allow	crates/tasty-net-ssh-config/src/options.rs	const MAX_CERTIFICATE_FILES: usize = 100	OpenSSH ssh.h SSH_MAX_CERTIFICATE_FILES 100
 allow	crates/tasty-net-ssh-config/src/options.rs	const FORWARD_X11_TIMEOUT: i32 = 1200	readconf.c fill_default_options ForwardX11Timeout 기본 1200초
 allow	crates/tasty-net-ssh-config/src/options.rs	const STREAMLOCAL_BIND_MASK: u32 = 0o177	readconf.c fill_default_options StreamLocalBindMask 기본 0177
 allow	crates/tasty-net-ssh-config/src/options.rs	const CONNECTION_ATTEMPTS: i32 = 1	readconf.c fill_default_options ConnectionAttempts 기본 1
@@ -338,7 +340,6 @@ allow	crates/tasty-net-ssh-config/src/options.rs	const META: u8 = 0x80	vis(3) �
 allow	crates/tasty-net-ssh-config/src/options.rs	const DEL: u8 = 0x7f	ASCII DEL 0x7f(vis(3))
 allow	crates/tasty-net-ssh-config/src/options.rs	0	C 값 0(끔·없음)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const DEFAULT_SSH_PORT: u16 = 22	SSH 기본 포트 22(readconf.c default_ssh_port)
-allow	crates/tasty-net-ssh-config/src/readconf.rs	const MAX_IDENTITY_FILES: usize = 100	OpenSSH readconf.h SSH_MAX_IDENTITY_FILES 100
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const MAX_HOSTS_FILES: usize = 32	OpenSSH readconf.h SSH_MAX_HOSTS_FILES 32
 allow	crates/tasty-net-ssh-config/src/readconf.rs	u128::MAX	Match localnetwork 마스크 길이 0: 주소 전체가 호스트 부분(addr.c addr_hostmask, 128비트 이동은 넘친다)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const REKEY_LIMIT_MIN: i64 = 16	readconf.c RekeyLimit 최솟값 16

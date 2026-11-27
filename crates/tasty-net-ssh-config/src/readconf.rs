@@ -62,8 +62,6 @@ use crate::scaled::scan_scaled;
 /// `SSH_DEFAULT_PORT` (`ssh.h`); `default_ssh_port` gives it when the services database has
 /// no `ssh` entry, and the usual entry has the same port.
 pub(crate) const DEFAULT_SSH_PORT: u16 = 22;
-/// `SSH_MAX_IDENTITY_FILES`, `SSH_MAX_CERTIFICATE_FILES` (`ssh.h`).
-const MAX_IDENTITY_FILES: usize = 100;
 /// `SSH_MAX_HOSTS_FILES` (`readconf.h`).
 const MAX_HOSTS_FILES: usize = 32;
 /// The smallest nonzero `RekeyLimit` (`readconf.c:1386`).
@@ -1257,18 +1255,19 @@ impl<'a> Reader<'a> {
                 let arg = required!("Missing argument.");
                 if a {
                     let ident = op == Op::IdentityFile;
-                    let count = if ident {
-                        self.o.identity_files.len()
+                    // `readconf.c:1412`-`:1442` checks the count before `add_*_file`, which
+                    // checks it again.
+                    let added = if ident {
+                        self.o.add_identity_file(arg.clone(), flags.user_conf)
                     } else {
-                        self.o.certificate_files.len()
+                        self.o.add_certificate_file(arg.clone(), flags.user_conf)
                     };
-                    if count >= MAX_IDENTITY_FILES {
-                        return bad("Too many identity files specified");
-                    }
-                    if ident {
-                        self.o.add_identity_file(arg.clone(), flags.user_conf);
-                    } else {
-                        self.o.add_certificate_file(arg.clone(), flags.user_conf);
+                    if let Err(e) = added {
+                        return bad(format!(
+                            "Too many {} files specified (max {})",
+                            if ident { "identity" } else { "certificate" },
+                            e.max
+                        ));
                     }
                     self.record(op, &arg, origin);
                 }

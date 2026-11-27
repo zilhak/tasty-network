@@ -421,6 +421,33 @@ pub struct Options {
 }
 
 /// `fill_default_options` values (`readconf.c:2860`–`:3034`).
+/// `SSH_MAX_IDENTITY_FILES` (`ssh.h`).
+pub(crate) const MAX_IDENTITY_FILES: usize = 100;
+/// `SSH_MAX_CERTIFICATE_FILES` (`ssh.h`).
+pub(crate) const MAX_CERTIFICATE_FILES: usize = 100;
+
+/// `add_identity_file` and `add_certificate_file` reached their limit (OpenSSH stops with
+/// `fatal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TooManyFiles {
+    pub(crate) max: usize,
+}
+
+fn add_file(
+    list: &mut Vec<(String, bool)>,
+    path: String,
+    userprovided: bool,
+    max: usize,
+) -> Result<(), TooManyFiles> {
+    if list.len() >= max {
+        return Err(TooManyFiles { max });
+    }
+    if !list.iter().any(|(p, u)| *u == userprovided && *p == path) {
+        list.push((path, userprovided));
+    }
+    Ok(())
+}
+
 const FORWARD_X11_TIMEOUT: i32 = 1200;
 const STREAMLOCAL_BIND_MASK: u32 = 0o177;
 const CONNECTION_ATTEMPTS: i32 = 1;
@@ -520,7 +547,10 @@ impl Options {
         );
         if self.identity_files.is_empty() {
             for f in DEFAULT_IDENTITY_FILES {
-                self.add_identity_file(f.to_string(), false);
+                // The list is empty here, so the limit is not reached.
+                if self.add_identity_file(f.to_string(), false).is_err() {
+                    break;
+                }
             }
         }
         or(&mut self.escape_char, EscapeChar::Byte(b'~'));
@@ -634,26 +664,33 @@ impl Options {
         Ok(())
     }
 
-    /// `add_identity_file` without a directory: duplicates of the same origin are dropped.
-    pub(crate) fn add_identity_file(&mut self, path: String, userprovided: bool) {
-        if !self
-            .identity_files
-            .iter()
-            .any(|(p, u)| *u == userprovided && *p == path)
-        {
-            self.identity_files.push((path, userprovided));
-        }
+    /// `add_identity_file` without a directory: the limit is checked first (even for a
+    /// duplicate), then duplicates of the same origin are dropped.
+    pub(crate) fn add_identity_file(
+        &mut self,
+        path: String,
+        userprovided: bool,
+    ) -> Result<(), TooManyFiles> {
+        add_file(
+            &mut self.identity_files,
+            path,
+            userprovided,
+            MAX_IDENTITY_FILES,
+        )
     }
 
-    /// `add_certificate_file`.
-    pub(crate) fn add_certificate_file(&mut self, path: String, userprovided: bool) {
-        if !self
-            .certificate_files
-            .iter()
-            .any(|(p, u)| *u == userprovided && *p == path)
-        {
-            self.certificate_files.push((path, userprovided));
-        }
+    /// `add_certificate_file`, the same way.
+    pub(crate) fn add_certificate_file(
+        &mut self,
+        path: String,
+        userprovided: bool,
+    ) -> Result<(), TooManyFiles> {
+        add_file(
+            &mut self.certificate_files,
+            path,
+            userprovided,
+            MAX_CERTIFICATE_FILES,
+        )
     }
 
     /// `dump_client_config`: the text `ssh -G` prints, for the final host name `host`.

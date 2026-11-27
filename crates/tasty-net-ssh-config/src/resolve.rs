@@ -429,7 +429,12 @@ impl ConfigSet {
                 CommandLine::Identity(path) => {
                     let p = tilde_path(&r.env.account, path, &origin)?;
                     if Path::new(&p).exists() {
-                        r.o.add_identity_file(p.clone(), true);
+                        r.o.add_identity_file(p.clone(), true).map_err(|e| {
+                            config_error(
+                                Some(&origin),
+                                format!("Too many identity files specified (max {})", e.max),
+                            )
+                        })?;
                         push_source(r, Op::IdentityFile, &p, &origin);
                     }
                 }
