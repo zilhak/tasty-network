@@ -24,7 +24,7 @@ use tasty_net_p2p::{P2pCloseReason, P2pConnection, P2pStream};
 
 use crate::cancel::Cancellable;
 use crate::channel::RawChannel;
-use crate::connection_table::{Cause, ConnectionInfo, ConnectionState, EntryRef};
+use crate::connection_table::{Cause, ConnectionState, EntryRef};
 use crate::lock::lock;
 
 use super::listener::Queue;
@@ -45,9 +45,9 @@ pub(crate) enum ConnSide {
 pub(crate) struct ConnState {
     pub(crate) conn: P2pConnection,
     /// The connection's number in this process, which bulk credentials are bound to
-    /// (docs/design/handshake.md "bulk 자격"). `P2pConnection::id` is unique only within its
-    /// endpoint (docs/design/p2p.md "연결 정보"), and endpoints may share one acceptor's
-    /// credentials.
+    /// (docs/design/handshake.md "bulk 자격") and which owns its entry
+    /// ([`EntryRef::own_p2p`]). `P2pConnection::id` is unique only within its endpoint
+    /// (docs/design/p2p.md "연결 정보"), and endpoints may share one acceptor's credentials.
     pub(crate) scope: u64,
     pub(crate) side: ConnSide,
     /// How long the accepting side waits for the dialer's close, and how long a stream's finish
@@ -86,13 +86,14 @@ impl ConnState {
         followed: Followed,
     ) -> Arc<Self> {
         let id = conn.id();
+        let scope = NEXT_SCOPE.fetch_add(1, Ordering::Relaxed);
         if let Some(entry) = &entry {
-            // From here on the entry shows this connection (see `owns_entry`).
-            entry.update(|info| info.p2p_id = Some(id));
+            // From here on the entry shows this connection, and only its thread changes it.
+            entry.own_p2p(scope, |info| info.p2p_id = Some(id));
         }
         let state = Arc::new(Self {
             conn,
-            scope: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
+            scope,
             side,
             drain_cap,
             channels: Mutex::new(Channels::default()),
@@ -104,13 +105,6 @@ impl ConnState {
         state
     }
 
-    /// Whether `info` still shows this connection. A redialer's entry moves on to the next
-    /// attempt (which clears its `p2p_id`); the thread of an earlier connection then no longer
-    /// changes it.
-    fn shown_in(&self, info: &ConnectionInfo) -> bool {
-        info.p2p_id == Some(self.conn.id())
-    }
-
     /// `channel` on this connection, in the connection's entry.
     pub(crate) fn entered(&self, channel: RawChannel) -> RawChannel {
         match &self.entry {
@@ -119,18 +113,15 @@ impl ConnState {
         }
     }
 
-    /// Copies what `tasty-net-p2p` shows of the connection into its entry.
+    /// Copies what `tasty-net-p2p` shows of the connection into its entry, while the
+    /// connection owns the entry: a redialer's entry moves on to the next attempt, and the
+    /// thread of an earlier connection then no longer changes it.
     fn follow(&self) {
         let Some(entry) = &self.entry else {
             return;
         };
-        let mut shown = false;
-        entry.update(|info| shown = self.shown_in(info));
-        if !shown {
-            return;
-        }
         if let Some(info) = self.conn.info() {
-            follow(entry, &info, &mut lock(&self.followed));
+            follow(entry, &info, &mut lock(&self.followed), Some(self.scope));
         }
     }
 
@@ -144,20 +135,18 @@ impl ConnState {
             return;
         };
         let closing = lock(&self.channels).closing;
-        let (state, recorded) = entry
-            .status()
-            .unwrap_or((ConnectionState::Disconnected, None));
-        // A copied P2P transition is no failure of this end.
-        let failure = recorded.filter(|c| !matches!(c, Cause::P2p(_)));
-        let cause = match failure {
-            Some(cause) if closing || state != ConnectionState::Connected => cause,
-            _ if closing => Cause::Ended,
-            _ => match self.conn.close_reason() {
-                Some(reason) => Cause::P2pClosed(reason),
-                None => Cause::Lost,
-            },
-        };
-        entry.end_if(|info| self.shown_in(info), cause);
+        entry.end_owned(self.scope, |state, recorded| {
+            // A copied P2P transition is no failure of this end.
+            let failure = recorded.filter(|c| !matches!(c, Cause::P2p(_))).cloned();
+            match failure {
+                Some(cause) if closing || state != ConnectionState::Connected => cause,
+                _ if closing => Cause::Ended,
+                _ => match self.conn.close_reason() {
+                    Some(reason) => Cause::P2pClosed(reason),
+                    None => Cause::Lost,
+                },
+            }
+        });
     }
 
     /// Whether the QUIC connection ended.

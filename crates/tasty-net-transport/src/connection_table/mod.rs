@@ -136,6 +136,20 @@ struct Stored {
     held: bool,
     /// The consumer chose the path; otherwise the first attach link's holder sets it.
     path_fixed: bool,
+    /// The P2P connection (by its number in the process) whose thread changes the entry; the
+    /// redialer's next attempt takes the entry from it.
+    p2p_owner: Option<u64>,
+}
+
+impl Stored {
+    /// Whether `owner` may change the entry: `None` is the attempt that holds the entry while
+    /// it punches, a number the P2P connection that must still own it.
+    fn owned_by(&self, owner: Option<u64>) -> bool {
+        match owner {
+            None => true,
+            Some(owner) => self.p2p_owner == Some(owner),
+        }
+    }
 }
 
 impl fmt::Debug for ConnectionTable {
@@ -232,6 +246,7 @@ impl ConnectionTable {
                 next_attempt_at: None,
                 held: new.held,
                 path_fixed: new.path_fixed,
+                p2p_owner: None,
             },
         );
         state.record(config, id, None);
@@ -343,6 +358,38 @@ impl State {
                 }
             }
         }
+    }
+
+    /// [`EntryRef::step_owned`] on the entry `id`.
+    fn step(
+        &mut self,
+        config: &ConnectionTableConfig,
+        id: ConnectionId,
+        phase: Phase,
+        cause: Cause,
+    ) {
+        let Some(current) = self.entries.get(&id).map(|s| s.info.state) else {
+            return;
+        };
+        match current {
+            ConnectionState::Connecting | ConnectionState::Reconnecting => {
+                self.transition(config, id, current, Some(phase), Some(cause));
+            }
+            ConnectionState::Connected => self.record(config, id, Some(cause)),
+            ConnectionState::Disconnected => {}
+        }
+    }
+
+    /// [`EntryRef::end`] on the entry `id`.
+    fn end(&mut self, config: &ConnectionTableConfig, id: ConnectionId, cause: Cause) {
+        let Some(stored) = self.entries.get_mut(&id) else {
+            return;
+        };
+        if stored.held && stored.info.state != ConnectionState::Connected {
+            stored.info.last_cause = Some(cause);
+            return;
+        }
+        self.transition(config, id, ConnectionState::Disconnected, None, Some(cause));
     }
 
     fn drop_entry(&mut self, config: &ConnectionTableConfig, id: ConnectionId) {
@@ -492,17 +539,16 @@ impl EntryRef {
     /// Moves a connection being set up to `phase` with `cause`, keeping its state. On an entry
     /// past its setup (`connected`) it only adds `cause` to the history, with the state and
     /// phase it has; on a `disconnected` entry it does nothing.
-    pub(crate) fn step(&self, phase: Phase, cause: Cause) {
+    /// All of it only while `owner` owns the entry ([`EntryRef::own_p2p`]; `None` always),
+    /// checked in one step with the change.
+    pub(crate) fn step_owned(&self, owner: Option<u64>, phase: Phase, cause: Cause) {
         self.table.with_state(|state, config| {
-            let Some(current) = state.entries.get(&self.id).map(|s| s.info.state) else {
-                return;
-            };
-            match current {
-                ConnectionState::Connecting | ConnectionState::Reconnecting => {
-                    state.transition(config, self.id, current, Some(phase), Some(cause));
-                }
-                ConnectionState::Connected => state.record(config, self.id, Some(cause)),
-                ConnectionState::Disconnected => {}
+            if state
+                .entries
+                .get(&self.id)
+                .is_some_and(|s| s.owned_by(owner))
+            {
+                state.step(config, self.id, phase, cause);
             }
         });
     }
@@ -510,30 +556,67 @@ impl EntryRef {
     /// The end of a failed attempt or of the physical connection: `disconnected` with
     /// `cause`, unless the redialer holds the entry, which then only keeps the cause.
     pub(crate) fn end(&self, cause: Cause) {
-        self.end_if(|_| true, cause);
+        self.table
+            .with_state(|state, config| state.end(config, self.id, cause));
     }
 
-    /// [`EntryRef::end`] if `still` holds for the entry, checked in one step with the end.
-    pub(crate) fn end_if(&self, still: impl FnOnce(&ConnectionInfo) -> bool, cause: Cause) {
+    /// [`EntryRef::end`] while the P2P connection `owner` owns the entry, checked in one step
+    /// with the end; `cause` is chosen from the entry's state and last cause in the same step.
+    pub(crate) fn end_owned(
+        &self,
+        owner: u64,
+        cause: impl FnOnce(ConnectionState, Option<&Cause>) -> Cause,
+    ) {
         self.table.with_state(|state, config| {
-            let Some(stored) = state.entries.get_mut(&self.id) else {
+            let Some(stored) = state.entries.get(&self.id) else {
                 return;
             };
-            if !still(&stored.info) {
+            if !stored.owned_by(Some(owner)) {
                 return;
             }
-            if stored.held && stored.info.state != ConnectionState::Connected {
-                stored.info.last_cause = Some(cause);
-                return;
-            }
-            state.transition(
-                config,
-                self.id,
-                ConnectionState::Disconnected,
-                None,
-                Some(cause),
-            );
+            let cause = cause(stored.info.state, stored.info.last_cause.as_ref());
+            state.end(config, self.id, cause);
         });
+    }
+
+    /// Makes the P2P connection `owner` (its number in the process) the one whose thread
+    /// changes the entry from here on, and applies `f`, in one step.
+    pub(crate) fn own_p2p(&self, owner: u64, f: impl FnOnce(&mut ConnectionInfo)) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                stored.p2p_owner = Some(owner);
+                f(&mut stored.info);
+            }
+        });
+    }
+
+    /// Takes the entry from the P2P connection that owned it and applies `f`, in one step:
+    /// the redialer's next attempt fills it, and the thread of the earlier connection no
+    /// longer changes it.
+    pub(crate) fn disown_p2p(&self, f: impl FnOnce(&mut ConnectionInfo)) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                stored.p2p_owner = None;
+                f(&mut stored.info);
+            }
+        });
+    }
+
+    /// `f` on the entry while `owner` owns it, checked in one step with the change; whether
+    /// it ran.
+    pub(crate) fn update_owned(
+        &self,
+        owner: Option<u64>,
+        f: impl FnOnce(&mut ConnectionInfo),
+    ) -> bool {
+        self.table
+            .with_state(|state, _| match state.entries.get_mut(&self.id) {
+                Some(stored) if stored.owned_by(owner) => {
+                    f(&mut stored.info);
+                    true
+                }
+                _ => false,
+            })
     }
 
     /// Records `cause` as the last one without a transition, while the entry is not yet

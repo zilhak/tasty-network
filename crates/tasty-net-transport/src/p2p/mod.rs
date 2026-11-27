@@ -233,7 +233,7 @@ impl P2pTransport {
                         }
                         let mut followed = lock(followed);
                         if let Some(info) = self.attempt_of(peer, followed.id(), &before) {
-                            follow(entry, &info, &mut followed);
+                            follow(entry, &info, &mut followed, None);
                         }
                     }
                 });

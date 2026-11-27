@@ -50,7 +50,7 @@ pub(crate) fn open_entry(
 
 /// Makes the redialer's entry a `p2p_udp` one for the attempt it starts.
 pub(crate) fn take_pending(pending: &EntryRef) {
-    pending.update(|info| {
+    pending.disown_p2p(|info| {
         info.path = PathKind::P2pUdp;
         info.local_side = Side::Dialer;
         info.segments = Vec::new();
@@ -90,15 +90,22 @@ impl Followed {
 
 /// Copies `info` into `entry`: the address segment, the server and candidate, the RTT, the
 /// attempt and the applied values, and every transition after the ones `followed` copied
-/// already. A new P2P connection (another ID) starts its history from its first entry.
-pub(crate) fn follow(entry: &EntryRef, info: &P2pConnectionInfo, followed: &mut Followed) {
+/// already. A new P2P connection (another ID) starts its history from its first entry. With
+/// `owner` (the P2P connection's number in the process, [`EntryRef::own_p2p`]) every change
+/// is made only while that connection still owns the entry, checked in the same step.
+pub(crate) fn follow(
+    entry: &EntryRef,
+    info: &P2pConnectionInfo,
+    followed: &mut Followed,
+    owner: Option<u64>,
+) {
     if followed.id != Some(info.id) {
         *followed = Followed {
             id: Some(info.id),
             seen: 0,
         };
     }
-    entry.update(|e| {
+    let owned = entry.update_owned(owner, |e| {
         e.p2p_id = Some(info.id);
         e.local_side = match info.side {
             P2pSide::Dialer => Side::Dialer,
@@ -122,6 +129,9 @@ pub(crate) fn follow(entry: &EntryRef, info: &P2pConnectionInfo, followed: &mut 
             source: SettingSource::P2p(a.source),
         }));
     });
+    if !owned {
+        return;
+    }
     let total = info
         .history_dropped
         .saturating_add(u64::try_from(info.history.len()).unwrap_or(u64::MAX));
@@ -137,7 +147,7 @@ pub(crate) fn follow(entry: &EntryRef, info: &P2pConnectionInfo, followed: &mut 
             AttemptPhase::Connected => Phase::Handshake,
             other => Phase::P2p(other),
         };
-        entry.step(phase, Cause::P2p(item.cause.clone()));
+        entry.step_owned(owner, phase, Cause::P2p(item.cause.clone()));
     }
     followed.seen = total;
 }
@@ -160,4 +170,74 @@ fn udp_segment(info: &P2pConnectionInfo) -> Segment {
 
 fn text(addr: Option<SocketAddr>) -> String {
     addr.map_or_else(|| UNKNOWN.to_owned(), |a| a.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use tasty_net_identity::DeviceKey;
+    use tasty_net_p2p::{AttemptInfo, HistoryEntry};
+
+    use super::*;
+
+    /// What `tasty-net-p2p` shows of a connection numbered `id` that stood.
+    fn connected(id: u64) -> P2pConnectionInfo {
+        P2pConnectionInfo {
+            id,
+            peer: DeviceKey::from_seed([9; 32]).id(),
+            side: P2pSide::Dialer,
+            state: AttemptPhase::Connected,
+            local_bind: None,
+            local_ip: None,
+            local_reflexive: None,
+            remote_addr: None,
+            remote_candidate: None,
+            rendezvous: None,
+            nat: None,
+            attempt: AttemptInfo::default(),
+            rtt: None,
+            last_cause: None,
+            history: vec![HistoryEntry {
+                from: Some(AttemptPhase::Handshaking),
+                to: AttemptPhase::Connected,
+                cause: tasty_net_p2p::Cause::named("handshake_done"),
+                at: SystemTime::now(),
+            }],
+            history_dropped: 0,
+            applied: Vec::new(),
+        }
+    }
+
+    /// The thread of an earlier connection wakes late: the redialer's next attempt took the
+    /// entry between that thread's look at the entry and its copy. Nothing of the earlier
+    /// connection reaches the entry, and its end does not end the entry; the connection that
+    /// owns the entry next changes it, also with the same P2P number (another endpoint's).
+    #[test]
+    fn an_earlier_connection_leaves_the_entry_the_next_attempt_took() {
+        let table = ConnectionTable::default();
+        let entry = open_entry(&table, Side::Dialer, None, ConnectionPeer::default());
+        entry.own_p2p(1, |info| info.p2p_id = Some(5));
+        take_pending(&entry);
+        let taken = table.connection(entry.id()).expect("the entry");
+        follow(&entry, &connected(5), &mut Followed::default(), Some(1));
+        entry.end_owned(1, |_, _| Cause::Lost);
+        let after = table.connection(entry.id()).expect("the entry");
+        assert_eq!(after.p2p_id, None);
+        assert_eq!(after.state, taken.state);
+        assert_eq!(
+            after.history.len(),
+            taken.history.len(),
+            "{:#?}",
+            after.history
+        );
+        entry.own_p2p(2, |info| info.p2p_id = Some(5));
+        follow(&entry, &connected(5), &mut Followed::default(), Some(1));
+        let held = table.connection(entry.id()).expect("the entry");
+        assert_eq!(held.history.len(), taken.history.len());
+        follow(&entry, &connected(5), &mut Followed::default(), Some(2));
+        let followed = table.connection(entry.id()).expect("the entry");
+        assert_eq!(followed.history.len(), taken.history.len() + 1);
+        assert_eq!(followed.phase, Some(Phase::Handshake));
+    }
 }
