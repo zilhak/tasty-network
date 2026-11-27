@@ -493,7 +493,7 @@ mod tests {
             dialer: id(n),
             acceptor: id(n + 1),
             holder: Side::Dialer,
-            transport: TransportKind::P2pDirect,
+            transport: TransportKind::P2pUdp,
             rtt_ms: Some(3),
             connected_at: 1_700_000_000_000,
             workspace: None,

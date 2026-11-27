@@ -82,26 +82,31 @@ pub enum Side {
     Acceptor,
 }
 
-/// How an edge is carried.
+/// How an edge is carried: the path kind and the attach direction of one link.
 ///
-/// Mapping from what a consumer sees on a link of `tasty-net-transport` (`peer()` gives
-/// its `TransportKind` and the handshake `holder`, docs/design/transport.md "역할"):
+/// The value comes from each link's own holder and path kind, never from the `direction`
+/// summary of a connection table entry (docs/design/transport.md "토폴로지와의 관계"). Mapping
+/// from what a consumer sees on a link of `tasty-net-transport` (`peer()` gives its
+/// `TransportKind`, the handshake gives the `holder`):
 ///
 /// | transport `TransportKind` | holder | this value |
 /// |---|---|---|
 /// | `Ssh` or `Tcp` | dialer | [`TransportKind::SshForward`] |
 /// | `Ssh` or `Tcp` | acceptor | [`TransportKind::SshRoleReversed`] |
-/// | `P2p`, selected path `is_ip` | either | [`TransportKind::P2pDirect`] |
-/// | `P2p`, selected path `is_relay` | either | [`TransportKind::P2pRelay`] |
+/// | `P2p` | either | [`TransportKind::P2pUdp`] |
 ///
-/// `Memory` links are test links and are not edges.
+/// The accepting end of an SSH forward (its connection table entry has `path = ssh_inbound`)
+/// follows the same rows by the holder, so both ends report the same value; `ssh_inbound`
+/// is not an edge value. `Memory` links are test links and are not edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
+    /// An SSH (or loopback TCP) link whose dialer holds the workspace.
     SshForward,
+    /// An SSH (or loopback TCP) link whose acceptor holds the workspace.
     SshRoleReversed,
-    P2pDirect,
-    P2pRelay,
+    /// A QUIC connection over a punched direct UDP path.
+    P2pUdp,
 }
 
 /// The workspace an attach is on. Which fields a remote answer carries is decided by the
@@ -190,7 +195,7 @@ mod tests {
         let bare = Edge {
             rtt_ms: None,
             workspace: None,
-            transport: TransportKind::P2pRelay,
+            transport: TransportKind::P2pUdp,
             ..edge
         };
         let json = serde_json::to_string(&bare).unwrap();
@@ -204,7 +209,7 @@ mod tests {
             dialer: id(1),
             acceptor: id(2),
             holder: Side::Dialer,
-            transport: TransportKind::P2pDirect,
+            transport: TransportKind::P2pUdp,
             rtt_ms: None,
             connected_at: 0,
             workspace: None,
@@ -212,13 +217,21 @@ mod tests {
         let value = serde_json::to_value(&edge).unwrap();
         assert_eq!(value["dialer"], id(1).to_string());
         assert_eq!(value["holder"], "dialer");
-        assert_eq!(value["transport"], "p2p_direct");
+        assert_eq!(value["transport"], "p2p_udp");
         for (kind, name) in [
             (TransportKind::SshForward, "ssh_forward"),
             (TransportKind::SshRoleReversed, "ssh_role_reversed"),
-            (TransportKind::P2pRelay, "p2p_relay"),
+            (TransportKind::P2pUdp, "p2p_udp"),
         ] {
             assert_eq!(serde_json::to_value(kind).unwrap(), name);
+            assert_eq!(
+                serde_json::from_value::<TransportKind>(name.into()).unwrap(),
+                kind
+            );
+        }
+        // The P2P values of the earlier design are gone, and no old value is read.
+        for old in ["p2p_direct", "p2p_relay", "ssh_inbound"] {
+            assert!(serde_json::from_value::<TransportKind>(old.into()).is_err());
         }
         for (status, name) in [
             (NodeStatus::Online, "online"),
