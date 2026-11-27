@@ -353,15 +353,16 @@ struct SshInspection {
 ### 결과 API
 
 ```text
-ConfigSet::load(inputs: ConfigInputs) -> Result<ConfigSet, ConfigError>   // 파일 읽기, Include 펼치기
-ConfigSet::resolve(&self, host: &str, ctx: ResolveContext) -> Resolution
-Resolution { options: Options, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal> }
+ConfigSet::load(inputs: ConfigInputs) -> Result<ConfigSet, ConfigError>   // 맨 위 설정 파일 읽기
+ConfigSet::resolve(&self, host: &str, ctx: &ResolveContext) -> Resolution  // Include는 여기서 읽는다
+Resolution { options: Options, host: String, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal>, host_key_checking: StrictHostKey }
 KnownHosts::load(files: &[PathBuf]) -> KnownHosts
 KnownHosts::check(&self, host: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict
 enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { file, line }, NotFound, DistrustedCaLine { file, line } }
 ```
 
-- `ResolveContext`는 명령행에 해당하는 값(위 순서 1~8), 로컬 사용자, 홈, `ssh/` 폴더, 지금 판정 중인 단계(`final` 여부)를 갖는다.
+- `ResolveContext`는 명령행에 해당하는 값(위 순서 1~8), 로컬 사용자, 홈, `ssh/` 폴더, 로컬 uid·호스트 이름, `${}`에 쓰는 환경 값, 원격 명령을 갖는다. `final` 두 번째 읽기는 `resolve`가 OpenSSH처럼 안에서 한다(`ssh.c:1246`–`:1265`).
+- `Include`는 `resolve`가 읽는다. OpenSSH는 `Include` 인자의 `%` 토큰과 `${}`를 대상마다 펼치고(`readconf.c:2086`의 `expand_match_exec_or_include_path`), 그 줄에 닿은 블록의 적용 여부에 따라 `NEVERMATCH`로 읽으므로 대상 없이 미리 펼칠 수 없다.
 - `Refusal`이 있으면 내장 백엔드는 네트워크에 나가기 전에 `SshBackendError::ConfigRefused`로 끝낸다.
 
 ### 라이선스
