@@ -288,7 +288,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
 | 9 | 앱 폴더의 기기 키 | `TastyNet::new`가 키 디렉터리를 받아 `DeviceKey::load_or_create`로 만든다. 비밀키는 FFI로 내지 않고 기기 ID만 낸다. `File::lock`이 Android에서 잠그는지는 연결 레코드 경로의 문제라 따로 확인하고 결과만 기록한다 |
-| 10 | Android용 태그 | 앱이 소비하는 기준은 tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)다. 앱은 따로 태그를 받지 않고 그 태그의 rev를 쓴다. 그 태그는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29)가 통과한 커밋에만 붙인다. 태그 규칙은 [버전·호환](versioning.md)이다. 태그를 붙인 사실을 앱 쪽에 알리는 경로는 이 설계 밖이다 |
+| 10 | Android용 태그 | 앱이 소비하는 기준은 tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)다. 앱은 따로 태그를 받지 않고 그 태그의 rev를 쓴다. 그 태그는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29)가 통과한 커밋에만 붙인다. 정본은 [버전·호환](versioning.md#태그와-브랜치)의 태그 규칙이다. 태그를 붙인 사실을 앱 쪽에 알리는 경로는 이 설계 밖이다 |
 | 11 | 내장 백엔드의 PowerShell·cmd 포트 발견 | Rust 쪽 시험이 맡는다. FFI에는 더할 것이 없다 |
 
 ## 모바일 cross check
@@ -322,6 +322,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 
 [동작 수준 기준](done-criteria.md)은 이 문서가 고치지 않는다. D11(모바일 target 빌드 검사)과 내장 백엔드 attach 시험을 기준에 넣을지는 판단을 따로 올렸다(director가 정한다). 정해지면 그 문서와 이 절을 같은 커밋에서 고친다.
 
+- 태그 규칙([버전·호환](versioning.md#태그와-브랜치))이 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, D11을 기준에 넣든 넣지 않든 모바일 cross check CI(모바일 cross check 작업)가 tasty 전환 태그보다 먼저 있어야 한다.
 - 내장 백엔드 조합이 D11에 들려면 이식 크레이트(`tasty-net-ssh-config`)와 내장 백엔드 작업이 먼저 develop에 있어야 한다. 그 전의 D11은 위 cross check 표의 "모바일 cross check 작업부터" 행만 본다.
 
 ## 후속 작업과 미정
