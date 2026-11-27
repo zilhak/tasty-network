@@ -37,7 +37,8 @@
 #   8. stop: docker stop(SIGINT)으로 멈추고 종료 코드 0과 종료 로그를 본다.
 #   9. cleanup: 예제가 남았으면 SIGTERM 뒤 기한 안에 끝나는지 보고 남으면 SIGKILL로 끝내 거둔다. 이 실행의
 #      컨테이너·볼륨·이미지를 지우고 남지 않았는지 본다. 하나라도 실패하면 result=fail step=cleanup이고
-#      종료 코드 1이다. 결과 줄은 정리가 끝난 뒤에 쓴다.
+#      종료 코드 1이다. 결과 줄은 정리가 끝난 뒤에 쓴다. 실패·판정 불가로 끝나는 경로도 같다: 정리 뒤에
+#      result=fail step=<단계>와 그 종료 코드(1 또는 2)를 쓰고, 정리가 실패하면 step=cleanup·종료 코드 1로 덮는다.
 #  10. 결과를 rendezvous-check step=<단계> ok 줄들과 마지막 줄 rendezvous-check result=ok|fail로 쓴다.
 #      result=ok 줄에 기기 구성(devices=same-host-processes), 경로, 실행 sha를 함께 적는다.
 # 컨테이너·볼륨·이미지 이름은 실행마다 /dev/urandom에서 얻은 조각을 붙여 정하고, 만들기 전에 같은 이름이
@@ -323,6 +324,16 @@ self_test() {
     check test "$(reflexive_of "$(log_after "$clog"$'\n'"$dlog" 2)")" = 172.31.255.1:7001
     check test "$(log_after "$clog" 0)" = "$clog"
     check not log_after "$clog" x
+    # 실패·판정 불가 경로: 정리 뒤에 결과 줄을 쓰고, 정리가 실패하면 step=cleanup·rc 1로 덮는다.
+    local out rc
+    out=$(release() { return 0; }; STEP=probe; unsure "self-test" 2>/dev/null) && rc=0 || rc=$?
+    check test "$rc/$(tail -n 1 <<<"$out")" = "2/rendezvous-check result=fail step=probe"
+    out=$(release() { return 1; }; STEP=probe; unsure "self-test" 2>/dev/null) && rc=0 || rc=$?
+    check test "$rc/$(tail -n 1 <<<"$out")" = "1/rendezvous-check result=fail step=cleanup"
+    out=$(release() { return 0; }; STEP=probe; fail_at "self-test" 2>/dev/null) && rc=0 || rc=$?
+    check test "$rc/$(tail -n 1 <<<"$out")" = "1/rendezvous-check result=fail step=probe"
+    out=$(release() { echo "rendezvous-check released"; return 1; }; STEP=probe; fail_at "self-test" 2>/dev/null) && rc=0 || rc=$?
+    check test "$rc/$(sed -n 1p <<<"$out")/$(tail -n 1 <<<"$out")" = "1/rendezvous-check released/rendezvous-check result=fail step=cleanup"
     if [[ "$fails" -eq 0 ]]; then
         log "자체 시험 통과 — 사례 ${n}개"
         echo "rendezvous-check container self-test result=ok"
@@ -428,13 +439,23 @@ fail_at() {
         log "--- $(basename "$f")"
         cat "$f" >&2
     done
-    echo "rendezvous-check result=fail step=$STEP"
-    exit 1
+    finish 1
 }
 unsure() {
     log "판정 불가: $1"
-    echo "rendezvous-check result=fail step=$STEP"
-    exit 2
+    finish 2
+}
+# finish <rc>: 실패·판정 불가 경로의 끝. 성공 경로와 같은 규칙으로 정리(release)를 먼저 하고 결과 줄을 쓴다.
+# 정리가 되면 result=fail step=<단계>와 rc, 정리가 실패하면 결과를 result=fail step=cleanup과 rc 1로 덮는다.
+finish() {
+    if release; then
+        trap - EXIT
+        echo "rendezvous-check result=fail step=$STEP"
+        exit "$1"
+    fi
+    trap - EXIT
+    echo "rendezvous-check result=fail step=cleanup"
+    exit 1
 }
 step_ok() { echo "rendezvous-check step=$STEP ok${1:+ $1}"; }
 
