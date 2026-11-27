@@ -137,7 +137,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 - endpoint는 이벤트마다 두 값과 붙들기 값 하나로 목표를 다시 계산한다. 목표가 "등록"인 조건은 `망 있음 && (앞 || lifecycle.background_registration = keep || 붙들기)`이고, 아니면 "멈춤"이다. 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
 - 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산하고, 전이 원인은 `background_hold`(켜짐)·`background_hold_released`(꺼짐)다.
 - 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`·`Backoff`로 가지 않고(재시도할 오류도 `Paused`로 간다), 목표가 "등록"인 동안에는 `Paused`로 가지 않는다. 실행 중에 `lifecycle.background_registration`이 어느 방향으로 바뀌든 목표를 다시 계산하고 그 목표의 기존 행을 따른다(원인 `setting_changed`).
-- 예정된 닫기: `Registered`에서 목표가 "멈춤"이 되면(`app_background`, `background_hold_released`) 바로 닫지 않고 `lifecycle.background_grace` 뒤로 닫기를 예약한다(`network_lost`는 예약 없이 바로 `Paused`). 예약이 끝나기 전에 목표가 다시 "등록"이 되면(`app_foreground`, `background_hold`, 설정 바뀜) 예약을 취소한다. endpoint는 `Registered` 그대로이고 이력에는 취소한 원인만 남는다. 예약이 끝나는 때에 목표를 한 번 더 보고, 그때도 "멈춤"일 때만 닫는다.
+- 예정된 닫기: `Registered`에서 목표가 "멈춤"이 되면(`app_background`, `background_hold_released`, `setting_changed`) 바로 닫지 않고 `lifecycle.background_grace` 뒤로 닫기를 예약한다(`network_lost`는 예약 없이 바로 `Paused`). 예약이 끝나기 전에 목표가 다시 "등록"이 되면(`app_foreground`, `background_hold`, 설정 바뀜) 예약을 취소한다. endpoint는 `Registered` 그대로이고 이력에는 취소한 원인만 남는다. 예약이 끝나는 때에 목표를 한 번 더 보고, 그때도 "멈춤"일 때만 닫는다.
 
 ### endpoint 상태 (p2p.md에 더할 것)
 
@@ -146,7 +146,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 | `Registered` → `Paused` | 예약한 닫기가 끝남(목표 "멈춤", 서버 연결을 코드 0으로 닫음), `network_lost`(바로) |
 | `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | 조정 연결이 예약보다 먼저 끊김(`idle_timeout`, `io` 등 P2P 정본이 `Backoff`로 보내는 원인). 목표가 "멈춤"이므로 `Backoff`로 가지 않는다. 예약을 지우고 backoff 대기도 만들지 않는다. 원인은 끊긴 원인 그대로 남긴다. `Stopped`로 가는 재시도하지 않는 원인(`superseded`·`access_denied` 등)은 P2P 정본 그대로 `Stopped`다 |
 | `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | `network_changed`. 옛 망의 조정 연결을 예약 끝까지 둘 까닭이 없으므로 예약을 지우고 바로 코드 0으로 닫는다. 다시 등록은 목표가 "등록"이 될 때(`Paused → Connecting`)다 |
-| `Connecting`·`Backoff` → `Paused` | `app_background`, `background_hold_released`, `network_lost`(모두 목표 "멈춤"일 때, 바로). 하던 시도와 backoff 대기를 멈춘다 |
+| `Connecting`·`Backoff` → `Paused` | `app_background`, `background_hold_released`, `setting_changed`, `network_lost`(모두 목표 "멈춤"일 때, 바로). 하던 시도와 backoff 대기를 멈춘다 |
 | `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`, `setting_changed`(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
 | `Backoff` → `Connecting` | `network_changed`(목표 "등록"일 때, 대기를 끝내고 바로, 시도 번호 1). 목표가 "멈춤"이면 위 `Paused` 행이다 |
 | `Registered` → `Connecting` | `network_changed`(목표 "등록"일 때, 아래 "망 바뀜") |
