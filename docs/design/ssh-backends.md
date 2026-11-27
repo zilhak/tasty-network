@@ -353,6 +353,7 @@ struct SshInspection {
 | `pathnames.h`(194), `sshconnect.h`(108), `defines.h`(1026) | 기본 경로(`_PATH_SSH_USER_DIR`, 기본 키 파일, known_hosts), `%` 토큰 목록 `DEFAULT_CLIENT_PERCENT_EXPAND_ARGS`, `IPTOS_*` 값 |
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
+- 서비스 데이터베이스는 읽지 않는다. `a2port`(`misc.c:592`–`:604`)는 숫자 포트만 받는다. 원본은 `getservbyname`으로 서비스 이름(`Port ssh`)도 받지만, 이 크레이트는 그 줄을 설정 오류(`ConfigError`, 키워드 `port`)로 거부한다.
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 

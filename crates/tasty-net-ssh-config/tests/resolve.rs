@@ -149,6 +149,19 @@ fn refusal_names_the_bad_line() {
 }
 
 #[test]
+fn service_name_port_is_refused() {
+    // OpenSSH looks `ssh` up in the services database (`a2port`, `misc.c:592`-`:604`); this
+    // crate takes numeric ports only, so the line is a configuration error.
+    let r = resolve("Host *\n    Port ssh\n", "web");
+    assert_eq!(refusal_kind(&r), Some(RefusalKind::ConfigError));
+    assert_eq!(refusal_place(&r), (Some("port".to_string()), Some(2)));
+    let cli = resolve_with("", "web", vec![option("Port=ssh", "override")]);
+    let f = cli.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(f.keyword.as_deref(), Some("port"));
+}
+
+#[test]
 fn ignore_unknown_applies_only_before_the_line() {
     let before = resolve("IgnoreUnknown NoSuch*\nNoSuchOption yes\n", "web");
     assert_eq!(refusal_kind(&before), None);
