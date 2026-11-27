@@ -23,7 +23,9 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::access::{AccessPolicy, Everyone};
-use crate::packet_io::{DemuxCounters, DemuxSocket, PacketIo, StunSink, UdpPacketIo};
+use crate::packet_io::{
+    DemuxCounters, DemuxSocket, PacketIo, StunSink, UdpPacketIo, receive_error_is_fatal,
+};
 use crate::settings::{
     Absent, ServerParams, ServerSettings, SettingEntry, SettingsError, Value, advertise_fits,
 };
@@ -588,7 +590,17 @@ async fn stun_only_loop(inner: Arc<Inner>, io: Arc<dyn PacketIo>) {
                     inner.counters.stun_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Err(e) => debug!(error = %e, "STUN port receive failed"),
+            Err(e) if receive_error_is_fatal(&e) => {
+                warn!(error = %e, "STUN port socket is broken, the port stops");
+                return;
+            }
+            Err(e) => {
+                // One datagram's error: count it and let other tasks run (and this task be
+                // aborted) before the next receive, even when every receive fails.
+                inner.demux.receive_errors.fetch_add(1, Ordering::Relaxed);
+                debug!(error = %e, "STUN port receive failed");
+                tokio::task::yield_now().await;
+            }
         }
     }
 }

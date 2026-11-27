@@ -1149,6 +1149,98 @@ async fn datagram_receive_error_is_dropped() {
     assert_eq!(server.status().registrations, 1);
 }
 
+/// Packet I/O whose every receive fails at once with `kind`.
+#[derive(Debug)]
+struct AlwaysFails {
+    kind: std::io::ErrorKind,
+    polls: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PacketIo for AlwaysFails {
+    fn poll_recv_from(
+        &self,
+        _: &mut std::task::Context<'_>,
+        _: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::task::Poll::Ready(Err(self.kind.into()))
+    }
+    fn poll_send_ready(
+        &self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn try_send_to(&self, _: &[u8], _: SocketAddr) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, 9)))
+    }
+}
+
+async fn server_with_failing_stun_port(
+    kind: std::io::ErrorKind,
+) -> (Server, Arc<std::sync::atomic::AtomicU64>) {
+    let polls = Arc::<std::sync::atomic::AtomicU64>::default();
+    let mut config = ServerConfig::new(key(100));
+    config.settings = local_settings();
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(
+                UdpPacketIo::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                    .await
+                    .unwrap(),
+            ),
+            alternate_port: Arc::new(AlwaysFails {
+                kind,
+                polls: polls.clone(),
+            }),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    (server, polls)
+}
+
+/// The receive count stays the same for a while once the port has received at least once:
+/// the task that polls has ended.
+async fn polls_stopped(polls: &std::sync::atomic::AtomicU64) -> bool {
+    let load = || polls.load(std::sync::atomic::Ordering::Relaxed);
+    eventually("the port receives", || load() > 0).await;
+    let before = load();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    load() == before
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stun_port_errors_do_not_hold_the_executor() {
+    // A receive error of one datagram, over and over: the port keeps trying but yields, so the
+    // server still serves and its shutdown ends the task.
+    let (server, polls) = server_with_failing_stun_port(std::io::ErrorKind::ConnectionReset).await;
+    let (_d, _) = Device::register(&server, &key(1), &[]).await;
+    assert!(!polls_stopped(&polls).await, "the port keeps receiving");
+    assert!(server.status().receive_errors > 0);
+    tokio::time::timeout(DEADLINE, server.shutdown())
+        .await
+        .expect("shutdown ends in time");
+    assert!(
+        polls_stopped(&polls).await,
+        "the port task ended with the server"
+    );
+    // A broken socket ends its port at once.
+    let (server, polls) = server_with_failing_stun_port(std::io::ErrorKind::NotConnected).await;
+    assert!(polls_stopped(&polls).await, "the port task ended by itself");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let (_d, _) = Device::register(&server, &key(1), &[]).await;
+    tokio::time::timeout(DEADLINE, server.shutdown())
+        .await
+        .expect("shutdown ends in time");
+}
+
 #[tokio::test]
 async fn wrong_alpn_fails_in_tls() {
     let server = start(local_settings()).await;
