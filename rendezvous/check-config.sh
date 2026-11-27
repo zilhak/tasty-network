@@ -50,13 +50,19 @@ log() { echo "[rendezvous-check] $*" >&2; }
 show_help() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
 # 지금 시각(마이크로초). bash 5의 EPOCHREALTIME을 쓰고, 없으면 date의 나노초에서 얻는다.
+# date가 %N을 모르면(BSD date는 1764230400N처럼 글자를 그대로 낸다) 초를 마이크로초로 바꿔 쓴다.
+# 그때 해상도는 1초다.
 now_us() {
     local t=${EPOCHREALTIME:-}
     if [[ -n "$t" ]]; then
         t=${t/[.,]/}
     else
         t=$(date +%s%N)
-        t=${t%???}
+        if [[ "$t" =~ ^[0-9]+$ ]]; then
+            t=${t%???}
+        else
+            t=$(($(date +%s) * 1000000))
+        fi
     fi
     echo "$((10#$t))"
 }
@@ -482,6 +488,42 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
     expect ok "now_us: 늘어나는 마이크로초" test "$(now_us)" -gt 1000000000000000
     now_from_date() { local a b; a=$(now_us); b=$(unset EPOCHREALTIME; now_us); [[ "$b" -ge "$a" && $((b - a)) -lt 5000000 ]]; }
     expect ok "now_us: EPOCHREALTIME이 없으면 date로 같은 단위" now_from_date
+    # 가짜 date를 PATH 앞에 둔다. +%s는 FAKE_EPOCH(없으면 지금 초)를, +%s%N은 그 뒤에 FAKE_NS를 붙여 낸다.
+    # FAKE_NS=N은 %N을 모르는 date(BSD), 아홉 자리 숫자는 나노초를 내는 date(GNU)를 흉내 낸다.
+    mkdir "$t/fake-date"
+    cat >"$t/fake-date/date" <<'EOF'
+#!/bin/sh
+s=${FAKE_EPOCH:-$("$REAL_DATE" +%s)}
+case "$1" in
++%s%N) echo "$s$FAKE_NS" ;;
++%s) echo "$s" ;;
+esac
+EOF
+    chmod +x "$t/fake-date/date"
+    with_fake_date() { # with_fake_date <FAKE_NS> <FAKE_EPOCH 또는 빈 값> <명령...>
+        local PATH="$t/fake-date:$PATH" REAL_DATE FAKE_NS=$1 FAKE_EPOCH=$2
+        REAL_DATE=$(PATH=${PATH#*:} command -v date)
+        export REAL_DATE FAKE_NS FAKE_EPOCH
+        [[ -n "$FAKE_EPOCH" ]] || unset FAKE_EPOCH
+        shift 2
+        unset EPOCHREALTIME
+        "$@"
+    }
+    expect ok "now_us: %N을 모르는 date는 초를 마이크로초로 쓴다" test "$(with_fake_date N 1764230400 now_us)" == 1764230400000000
+    expect ok "now_us: 숫자 나노초를 내는 date는 마이크로초로 자른다" test "$(with_fake_date 123456789 1764230400 now_us)" == 1764230400123456
+    date_wait() { # %N을 모르는 date로도 기한 0.3 s의 실패 대기가 몇 초 안에 끝난다.
+        local p
+        (! with_fake_date N "" wait_until 0.3 false) &
+        p=$!
+        if wait_until 4 gone "$p"; then
+            wait "$p"
+        else
+            kill -s KILL "$p" 2>/dev/null
+            wait "$p" 2>/dev/null
+            return 1
+        fi
+    }
+    expect ok "wait_until: %N을 모르는 date로도 기한 뒤 끝난다" date_wait
 
     # 실제 예시 파일에도 판정 함수가 기대대로 걸리는지 본다(빌드 없이).
     expect ok "예시: 표 안에 적은 키가 있다" test -n "$(configured_keys "$EXAMPLE")"
