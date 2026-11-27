@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_topology::{
-    Agent, AgentConfig, ConnectFailure, Exploration, ExplorationState, ExploreRequest, FailureKind,
-    LinkId, LinkKind, Local, LocalLink, MAX_MESSAGE_JSON, MAX_ROUTE_HOPS, Message, NodeReason,
-    NodeStatus, Now, Outbox, RouteError, SelfInfo, SendError, Sharing, Side, TopologyError,
-    TransportKind, WorkspaceExposure, WorkspaceRef,
+    Agent, ConnectFailure, Exploration, ExplorationState, ExploreRequest, FailureKind, LinkId,
+    LinkKind, Local, LocalLink, MAX_MESSAGE_JSON, Message, NodeReason, NodeStatus, Now, Outbox,
+    RouteError, SelfInfo, SendError, Sharing, Side, TopologyError, TopologySettings, TransportKind,
+    WorkspaceExposure, WorkspaceRef, settings::Value,
 };
 
 fn id(n: u8) -> DeviceId {
@@ -86,7 +86,9 @@ impl Outbox for Sends<'_> {
         // Every message crosses its wire form.
         let json = message.to_json().expect("message fits its frame limit");
         assert!(json.len() <= MAX_MESSAGE_JSON);
-        let back = Message::from_json(&json).expect("message reads back");
+        // Every agent of the net has the default limits.
+        let back =
+            Message::from_json(&json, &TopologySettings::default()).expect("message reads back");
         assert_eq!(&back, message);
         self.out.push((*to, back));
         Ok(())
@@ -95,10 +97,12 @@ impl Outbox for Sends<'_> {
 
 impl Net {
     fn new(devices: &[u8]) -> Self {
-        let config = AgentConfig {
-            hop_timeout: Duration::from_secs(2),
-            hop_reserve: Duration::from_millis(100),
-        };
+        let mut config = TopologySettings::new();
+        config
+            .set("hop_timeout", Value::Duration(Duration::from_secs(2)))
+            .unwrap()
+            .set("hop_reserve", Value::Duration(Duration::from_millis(100)))
+            .unwrap();
         let mut net = Self {
             base: Instant::now(),
             clock_ms: 0,
@@ -121,7 +125,7 @@ impl Net {
                 device_id: id(n),
                 display_name: Some(format!("dev-{n}")),
             };
-            net.agents.insert(id(n), Agent::new(me, config));
+            net.agents.insert(id(n), Agent::new(me, config.clone()));
             net.links.insert(id(n), Vec::new());
         }
         net
@@ -646,7 +650,8 @@ fn a_remote_answer_drops_workspace_fields_outside_its_scope() {
 fn route_over_hop_limit_is_rejected() {
     let mut net = Net::new(&[A, B]);
     net.link(A, B);
-    let route: Vec<DeviceId> = (10..10 + MAX_ROUTE_HOPS as u8 + 1).map(id).collect();
+    let max_hops = u8::try_from(TopologySettings::default().max_route_hops()).unwrap();
+    let route: Vec<DeviceId> = (10..10 + max_hops + 1).map(id).collect();
     let err = net
         .explore(
             A,
@@ -662,7 +667,7 @@ fn route_over_hop_limit_is_rejected() {
     assert!(net.queue.is_empty());
 
     // The limit itself is allowed (the first hop is then simply missing).
-    let route: Vec<DeviceId> = (10..10 + MAX_ROUTE_HOPS as u8).map(id).collect();
+    let route: Vec<DeviceId> = (10..10 + max_hops).map(id).collect();
     let err = net
         .explore(
             A,
@@ -1845,16 +1850,18 @@ fn a_first_hop_without_the_capability_stays_in_the_result() {
 #[test]
 fn a_hop_timeout_of_duration_max_does_not_panic() {
     let mut net = Net::new(&[A, B, C]);
-    let config = AgentConfig {
-        hop_timeout: Duration::MAX,
-        hop_reserve: Duration::from_millis(100),
-    };
+    let mut config = TopologySettings::new();
+    config
+        .set("hop_timeout", Value::Duration(Duration::MAX))
+        .unwrap()
+        .set("hop_reserve", Value::Duration(Duration::from_millis(100)))
+        .unwrap();
     for n in [A, B, C] {
         let me = SelfInfo {
             device_id: id(n),
             display_name: None,
         };
-        net.agents.insert(id(n), Agent::new(me, config));
+        net.agents.insert(id(n), Agent::new(me, config.clone()));
     }
     net.link(A, B).link(B, C);
     net.silent.insert(id(C));

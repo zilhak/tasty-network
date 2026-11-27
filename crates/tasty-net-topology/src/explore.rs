@@ -21,10 +21,11 @@ use crate::local::{
     self_node,
 };
 use crate::message::{
-    Done, MAX_MESSAGE_JSON, MAX_QUERY_MS, Message, MessageError, Query, ResultHeader, ResultPart,
-    Suppressed, split_done, split_result, validate_route,
+    Done, MAX_MESSAGE_JSON, Message, MessageError, Query, ResultHeader, ResultPart, Suppressed,
+    split_done, split_result, validate_route,
 };
 use crate::model::{Edge, EdgeKey, FromHolder, Node, NodeReason, NodeStatus};
+use crate::settings::TopologySettings;
 
 /// Sends one message to one neighbor over its authenticated attach link.
 pub trait Outbox {
@@ -71,26 +72,6 @@ pub struct Now {
     pub unix_ms: u64,
 }
 
-/// Timing of an [`Agent`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AgentConfig {
-    /// How long a forwarding device waits for the first message of a neighbor (a result
-    /// part or a suppression) before it gives the neighbor up as timed out.
-    pub hop_timeout: Duration,
-    /// Time a device keeps back when it forwards, so its neighbors finish before its own
-    /// deadline and its `done` still reaches the requester in time.
-    pub hop_reserve: Duration,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            hop_timeout: Duration::from_secs(5),
-            hop_reserve: Duration::from_millis(250),
-        }
-    }
-}
-
 /// What the requester asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExploreRequest {
@@ -99,7 +80,8 @@ pub struct ExploreRequest {
     /// The devices between this device and the origin (see [`Query::route`]).
     pub route: Vec<DeviceId>,
     pub depth: u32,
-    /// The whole time limit, capped at [`MAX_QUERY_MS`].
+    /// The whole time limit, capped at `max_query_time`
+    /// ([`TopologySettings::max_query_time`]).
     pub timeout: Duration,
 }
 
@@ -552,7 +534,7 @@ struct Wait {
 /// The topology state machine of one device.
 pub struct Agent {
     me: SelfInfo,
-    config: AgentConfig,
+    settings: TopologySettings,
     answered: HashMap<String, Answered>,
     waits: HashMap<String, Wait>,
     /// Child branch → the branch of ours that forwarded it.
@@ -565,10 +547,12 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(me: SelfInfo, config: AgentConfig) -> Self {
+    /// An agent that runs with `settings`: the hop timeout and reserve, and the limits it
+    /// applies to the queries and answers it sends and receives.
+    pub fn new(me: SelfInfo, settings: TopologySettings) -> Self {
         Self {
             me,
-            config,
+            settings,
             answered: HashMap::new(),
             waits: HashMap::new(),
             children: HashMap::new(),
@@ -580,6 +564,13 @@ impl Agent {
 
     pub fn device_id(&self) -> &DeviceId {
         &self.me.device_id
+    }
+
+    /// The settings this agent runs with; [`TopologySettings::entries`] lists each value in
+    /// effect and its source. A consumer reads received messages with them
+    /// ([`Message::from_json`]).
+    pub fn settings(&self) -> &TopologySettings {
+        &self.settings
     }
 
     /// Starts an exploration from this device and returns its request ID. The route is
@@ -596,9 +587,9 @@ impl Agent {
         now: Now,
     ) -> Result<String, TopologyError> {
         let me = self.me.device_id;
-        validate_route(&me, &request.origin, &request.route)
+        validate_route(&me, &request.origin, &request.route, &self.settings)
             .map_err(TopologyError::InvalidRoute)?;
-        let timeout = request.timeout.min(Duration::from_millis(MAX_QUERY_MS));
+        let timeout = request.timeout.min(self.settings.max_query_time());
         let request_id = random_id()?;
         let branch = random_id()?;
         let query = Query {
@@ -608,7 +599,7 @@ impl Agent {
             route: request.route.clone(),
             path: Vec::new(),
             depth: request.depth,
-            remaining_ms: millis(timeout.saturating_sub(self.config.hop_reserve)),
+            remaining_ms: millis(timeout.saturating_sub(self.settings.hop_reserve())),
             branch: branch.clone(),
         };
         let mut exploration = Exploration {
@@ -726,12 +717,13 @@ impl Agent {
     ) {
         let me = self.me.device_id;
         self.answered.retain(|_, seen| seen.expires > now.mono);
-        let deadline = now.mono + Duration::from_millis(query.remaining_ms.min(MAX_QUERY_MS));
+        let deadline =
+            now.mono + Duration::from_millis(query.remaining_ms.min(self.settings.max_query_ms()));
         if query.path.is_empty() && query.origin != me {
             self.relay_route(from, query, local, out, now, deadline);
             return;
         }
-        if !query_path_ok(&me, from, &query) {
+        if !query_path_ok(&me, from, &query, &self.settings) {
             tracing::debug!("topology query whose path does not match its link dropped");
             return;
         }
@@ -822,7 +814,7 @@ impl Agent {
         let child_ms = millis(
             deadline
                 .saturating_duration_since(now.mono)
-                .saturating_sub(self.config.hop_reserve),
+                .saturating_sub(self.settings.hop_reserve()),
         );
         if query.depth > 0 && child_ms > 0 {
             let mut path = query.path.clone();
@@ -848,7 +840,11 @@ impl Agent {
                             branch,
                             Child {
                                 peer,
-                                answer_by: answer_by(now.mono, self.config.hop_timeout, deadline),
+                                answer_by: answer_by(
+                                    now.mono,
+                                    self.settings.hop_timeout(),
+                                    deadline,
+                                ),
                                 answered: false,
                             },
                         );
@@ -957,7 +953,14 @@ impl Agent {
             tracing::debug!("topology route query that does not match its link dropped");
             return;
         };
-        if validate_route(&query.requester, &query.origin, &query.route).is_err() {
+        if validate_route(
+            &query.requester,
+            &query.origin,
+            &query.route,
+            &self.settings,
+        )
+        .is_err()
+        {
             self.stop_route(
                 &header,
                 &query,
@@ -983,7 +986,7 @@ impl Agent {
         let child_ms = millis(
             deadline
                 .saturating_duration_since(now.mono)
-                .saturating_sub(self.config.hop_reserve),
+                .saturating_sub(self.settings.hop_reserve()),
         );
         if child_ms == 0 {
             self.stop_route(&header, &query, None, None, out, now);
@@ -1087,17 +1090,18 @@ impl Agent {
             view.nodes.clone(),
             view.edges.clone(),
             MAX_MESSAGE_JSON,
+            &self.settings,
         ) {
             Ok(parts) => parts,
             Err(MessageError::EntryTooLarge) => {
                 // Leave out the entries that cannot fit alone and say so: this device's
                 // own node becomes timed out with reason `incomplete`.
-                let fits_node = |n: &Node| {
-                    split_result(header, vec![n.clone()], Vec::new(), MAX_MESSAGE_JSON).is_ok()
+                let settings = &self.settings;
+                let fits = |nodes, edges| {
+                    split_result(header, nodes, edges, MAX_MESSAGE_JSON, settings).is_ok()
                 };
-                let fits_edge = |e: &Edge| {
-                    split_result(header, Vec::new(), vec![e.clone()], MAX_MESSAGE_JSON).is_ok()
-                };
+                let fits_node = |n: &Node| fits(vec![n.clone()], Vec::new());
+                let fits_edge = |e: &Edge| fits(Vec::new(), vec![e.clone()]);
                 let me = self.me.device_id;
                 let own = |n: &Node| n.device_id == Some(me) && n.reported_by.is_none();
                 let marker = Node {
@@ -1114,7 +1118,7 @@ impl Agent {
                     .collect();
                 let edges: Vec<Edge> = view.edges.into_iter().filter(fits_edge).collect();
                 tracing::warn!("topology entries too large for one message left out");
-                match split_result(header, nodes, edges, MAX_MESSAGE_JSON) {
+                match split_result(header, nodes, edges, MAX_MESSAGE_JSON, &self.settings) {
                     Ok(parts) => parts,
                     Err(e) => {
                         tracing::warn!(error = %e, "topology answer not sent");
@@ -1149,7 +1153,14 @@ impl Agent {
             from: self.me.device_id,
             ..header.clone()
         };
-        let dones = match split_done(&header, timed_out, incomplete, is_final, MAX_MESSAGE_JSON) {
+        let dones = match split_done(
+            &header,
+            timed_out,
+            incomplete,
+            is_final,
+            MAX_MESSAGE_JSON,
+            &self.settings,
+        ) {
             Ok(dones) => dones,
             Err(e) => {
                 tracing::warn!(error = %e, "topology done not sent");
@@ -1270,7 +1281,7 @@ impl Agent {
                     // (or the missing done) and marks the answer incomplete.
                     tracing::debug!(error = %e, "topology reply not relayed");
                     self.failed_relays
-                        .insert(relay_key, now.mono + Duration::from_millis(MAX_QUERY_MS));
+                        .insert(relay_key, now.mono + self.settings.max_query_time());
                     if let Some(link) = link {
                         self.note_failed_relay(link, &reply, &branch, from, out, now);
                     }
@@ -1422,7 +1433,7 @@ impl Agent {
     }
 
     /// Applies every deadline that passed by `now`: gives up neighbors that did not answer
-    /// in [`AgentConfig::hop_timeout`], ends branches whose deadline passed, forgets
+    /// in `hop_timeout` ([`TopologySettings::hop_timeout`]), ends branches whose deadline passed, forgets
     /// expired answer records, and ends explorations past the requester's deadline.
     pub fn poll(&mut self, out: &mut dyn Outbox, now: Now) {
         // The requester's whole deadline first: a late poll must not let this device's own
@@ -1507,8 +1518,13 @@ impl Agent {
 /// the route rules hold; at the origin the sender is the last route hop (or the requester
 /// with no route); past it the sender is the last device of `path`, `path` starts at the
 /// origin, has no device twice and does not contain this device.
-fn query_path_ok(me: &DeviceId, from: Option<&DeviceId>, query: &Query) -> bool {
-    if validate_route(&query.requester, &query.origin, &query.route).is_err() {
+fn query_path_ok(
+    me: &DeviceId,
+    from: Option<&DeviceId>,
+    query: &Query,
+    settings: &TopologySettings,
+) -> bool {
+    if validate_route(&query.requester, &query.origin, &query.route, settings).is_err() {
         return false;
     }
     let Some(last) = query.path.last() else {
@@ -1624,7 +1640,7 @@ mod tests {
             device_id: id(2),
             display_name: None,
         };
-        let mut agent = Agent::new(me, AgentConfig::default());
+        let mut agent = Agent::new(me, TopologySettings::default());
         let links = [LocalLink {
             link_id: crate::LinkId::from_bytes([1; 16]),
             peer: id(1),
@@ -1700,7 +1716,7 @@ mod tests {
             device_id: id(2),
             display_name: None,
         };
-        let mut agent = Agent::new(me, AgentConfig::default());
+        let mut agent = Agent::new(me, TopologySettings::default());
         let links = [LocalLink {
             link_id: crate::LinkId::from_bytes([1; 16]),
             peer: id(1),

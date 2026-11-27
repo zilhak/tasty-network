@@ -11,6 +11,7 @@ use tasty_net_identity::DeviceId;
 
 use crate::ids;
 use crate::model::{Edge, Node};
+use crate::settings::TopologySettings;
 
 /// The capability name a device announces in the handshake `caps` when it answers
 /// topology queries.
@@ -25,20 +26,9 @@ pub const EVENT_SUPPRESSED: &str = "net.topology.suppressed";
 /// `event` value of [`Done`].
 pub const EVENT_DONE: &str = "net.topology.done";
 
-/// Upper bound of the `route` length.
-pub const MAX_ROUTE_HOPS: usize = 16;
-
-/// Upper bound of `remaining_ms`: no device waits longer than this for one query.
-pub const MAX_QUERY_MS: u64 = 30_000;
-
 /// Upper bound of the JSON of one message: half of `MAX_FRAME_LEN`, the rule of tasty's
-/// remote read results.
+/// remote read results. A wire format limit, not a setting.
 pub const MAX_MESSAGE_JSON: usize = tasty_net_frame::MAX_FRAME_LEN as usize / 2;
-
-/// Upper bound of the result parts, and separately of the dones, of one answer (one
-/// `branch` and `from`): `part` is below it. A message with a larger `part` is malformed,
-/// and an answer that would need more is not sent.
-pub const MAX_PARTS: u32 = 1_024;
 
 /// A topology query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +50,8 @@ pub struct Query {
     pub path: Vec<DeviceId>,
     /// The remaining depth.
     pub depth: u32,
-    /// The time left when the query was sent, at most [`MAX_QUERY_MS`].
+    /// The time left when the query was sent. The receiver caps it at its own
+    /// `max_query_time` ([`TopologySettings::max_query_time`]).
     pub remaining_ms: u64,
     /// The ID of this one forward (128-bit random hex).
     pub branch: String,
@@ -163,9 +154,10 @@ impl Message {
     }
 
     /// Reads one message. Longer than [`MAX_MESSAGE_JSON`] is [`MessageError::TooLarge`]
-    /// before parsing. A result or done whose `part` is [`MAX_PARTS`] or more is
-    /// [`MessageError::Malformed`].
-    pub fn from_json(bytes: &[u8]) -> Result<Self, MessageError> {
+    /// before parsing. A result or done whose `part` is `max_parts` of `settings` or more is
+    /// [`MessageError::Malformed`]. A consumer passes the settings of its [`crate::Agent`]
+    /// ([`crate::Agent::settings`]).
+    pub fn from_json(bytes: &[u8], settings: &TopologySettings) -> Result<Self, MessageError> {
         if bytes.len() > MAX_MESSAGE_JSON {
             return Err(MessageError::TooLarge);
         }
@@ -175,7 +167,7 @@ impl Message {
             Self::Done(done) => done.part,
             Self::Query(_) | Self::Suppressed(_) => 0,
         };
-        if part >= MAX_PARTS {
+        if part >= settings.max_parts() {
             return Err(MessageError::Malformed);
         }
         Ok(message)
@@ -239,14 +231,16 @@ pub struct ResultHeader {
 /// bytes. Parts are numbered from 0 and only the final one has `last: true`. An empty
 /// answer is one empty part. Concatenating the `nodes` and `edges` of the parts in order
 /// gives the input back. [`MessageError::TooLarge`] when the header alone does not fit or
-/// more than [`MAX_PARTS`] parts would be needed, [`MessageError::EntryTooLarge`] when
-/// one entry does not fit with it.
+/// more than `max_parts` of `settings` parts would be needed, [`MessageError::EntryTooLarge`]
+/// when one entry does not fit with it.
 pub fn split_result(
     header: &ResultHeader,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     limit: usize,
+    settings: &TopologySettings,
 ) -> Result<Vec<ResultPart>, MessageError> {
+    let max_parts = settings.max_parts();
     let empty = |part: u32, last: bool| ResultPart {
         request_id: header.request_id.clone(),
         branch: header.branch.clone(),
@@ -283,7 +277,7 @@ pub fn split_result(
             return Err(MessageError::EntryTooLarge);
         }
         if size + len > limit {
-            let next = empty(next_part(current.part)?, false);
+            let next = empty(next_part(current.part, max_parts)?, false);
             parts.push(std::mem::replace(&mut current, next));
             size = base;
         }
@@ -296,7 +290,7 @@ pub fn split_result(
             return Err(MessageError::EntryTooLarge);
         }
         if size + len > limit {
-            let next = empty(next_part(current.part)?, false);
+            let next = empty(next_part(current.part, max_parts)?, false);
             parts.push(std::mem::replace(&mut current, next));
             size = base;
         }
@@ -313,14 +307,16 @@ pub fn split_result(
 /// from 0, all but the last with `more: true` and `final: false`; the last carries
 /// `is_final`. Concatenating each
 /// list over the messages in order gives the input back. [`MessageError::TooLarge`] when
-/// the header alone does not fit or more than [`MAX_PARTS`] dones would be needed.
+/// the header alone does not fit or more than `max_parts` of `settings` dones would be needed.
 pub fn split_done(
     header: &ResultHeader,
     timed_out: Vec<DeviceId>,
     incomplete: Vec<DeviceId>,
     is_final: bool,
     limit: usize,
+    settings: &TopologySettings,
 ) -> Result<Vec<Done>, MessageError> {
+    let max_parts = settings.max_parts();
     let empty = || Done {
         request_id: header.request_id.clone(),
         branch: header.branch.clone(),
@@ -373,7 +369,7 @@ pub fn split_done(
             return Err(MessageError::TooLarge);
         }
         if size + len > limit {
-            let part = next_part(current.part)?;
+            let part = next_part(current.part, max_parts)?;
             dones.push(std::mem::replace(&mut current, Done { part, ..empty() }));
             size = base;
         }
@@ -390,10 +386,10 @@ pub fn split_done(
     Ok(dones)
 }
 
-/// The number after `part`. [`MessageError::TooLarge`] when it reaches [`MAX_PARTS`].
-fn next_part(part: u32) -> Result<u32, MessageError> {
+/// The number after `part`. [`MessageError::TooLarge`] when it reaches `max_parts`.
+fn next_part(part: u32, max_parts: u32) -> Result<u32, MessageError> {
     part.checked_add(1)
-        .filter(|next| *next < MAX_PARTS)
+        .filter(|next| *next < max_parts)
         .ok_or(MessageError::TooLarge)
 }
 
@@ -407,7 +403,7 @@ fn json_len<T: Serialize>(value: &T) -> Result<usize, MessageError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RouteError {
-    /// Longer than [`MAX_ROUTE_HOPS`].
+    /// Longer than `max_route_hops` ([`TopologySettings::max_route_hops`]).
     TooLong,
     /// A device appears twice.
     Repeated,
@@ -420,7 +416,7 @@ pub enum RouteError {
 impl fmt::Display for RouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::TooLong => "the route is longer than MAX_ROUTE_HOPS",
+            Self::TooLong => "the route is longer than max_route_hops",
             Self::Repeated => "a device appears twice in the route",
             Self::ContainsEnd => "the route contains the requester or the origin",
             Self::NotEmptyForSelf => "the route is not empty although the requester is the origin",
@@ -430,14 +426,15 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {}
 
-/// Checks the route rules: at most [`MAX_ROUTE_HOPS`] hops, no device twice, neither the
-/// requester nor the origin in it, and empty when the requester is the origin.
+/// Checks the route rules: at most `max_route_hops` of `settings` hops, no device twice,
+/// neither the requester nor the origin in it, and empty when the requester is the origin.
 pub fn validate_route(
     requester: &DeviceId,
     origin: &DeviceId,
     route: &[DeviceId],
+    settings: &TopologySettings,
 ) -> Result<(), RouteError> {
-    if route.len() > MAX_ROUTE_HOPS {
+    if route.len() > settings.max_route_hops() {
         return Err(RouteError::TooLong);
     }
     if requester == origin && !route.is_empty() {
@@ -460,6 +457,25 @@ mod tests {
     use super::*;
     use crate::model::{NodeStatus, Side, TransportKind};
     use tasty_net_identity::DeviceKey;
+
+    /// [`super::split_result`] with the default settings.
+    fn split_result(
+        header: &ResultHeader,
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        limit: usize,
+    ) -> Result<Vec<ResultPart>, MessageError> {
+        super::split_result(header, nodes, edges, limit, &TopologySettings::default())
+    }
+
+    /// [`super::validate_route`] with the default settings.
+    fn validate_route(
+        requester: &DeviceId,
+        origin: &DeviceId,
+        route: &[DeviceId],
+    ) -> Result<(), RouteError> {
+        super::validate_route(requester, origin, route, &TopologySettings::default())
+    }
 
     fn id(n: u32) -> DeviceId {
         let mut seed = [0u8; 32];
@@ -594,13 +610,19 @@ mod tests {
         let json = query.to_json().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["event"], EVENT_QUERY);
-        assert_eq!(Message::from_json(&json).unwrap(), query);
+        assert_eq!(
+            Message::from_json(&json, &TopologySettings::default()).unwrap(),
+            query
+        );
         for event in [EVENT_QUERY, EVENT_RESULT, EVENT_SUPPRESSED, EVENT_DONE] {
             assert!(Message::is_topology_event(event));
         }
         assert!(!Message::is_topology_event("net.topology.v2"));
         assert_eq!(
-            Message::from_json(br#"{"event":"net.topology.other"}"#),
+            Message::from_json(
+                br#"{"event":"net.topology.other"}"#,
+                &TopologySettings::default()
+            ),
             Err(MessageError::Malformed)
         );
     }
@@ -619,9 +641,10 @@ mod tests {
             validate_route(&r, &r, &[id(3)]),
             Err(RouteError::NotEmptyForSelf)
         );
-        let limit: Vec<DeviceId> = (10..10 + MAX_ROUTE_HOPS as u32).map(id).collect();
+        let max_hops = u32::try_from(TopologySettings::default().max_route_hops()).unwrap();
+        let limit: Vec<DeviceId> = (10..10 + max_hops).map(id).collect();
         assert_eq!(validate_route(&r, &o, &limit), Ok(()));
-        let over: Vec<DeviceId> = (10..11 + MAX_ROUTE_HOPS as u32).map(id).collect();
+        let over: Vec<DeviceId> = (10..11 + max_hops).map(id).collect();
         assert_eq!(validate_route(&r, &o, &over), Err(RouteError::TooLong));
     }
 }
@@ -630,6 +653,28 @@ mod tests {
 mod limit_tests {
     use super::*;
     use tasty_net_identity::DeviceKey;
+
+    /// [`super::split_result`] with the default settings.
+    fn split_result(
+        header: &ResultHeader,
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        limit: usize,
+    ) -> Result<Vec<ResultPart>, MessageError> {
+        super::split_result(header, nodes, edges, limit, &TopologySettings::default())
+    }
+
+    /// [`super::split_done`] with the default settings.
+    fn split_done(
+        header: &ResultHeader,
+        timed_out: Vec<DeviceId>,
+        incomplete: Vec<DeviceId>,
+        is_final: bool,
+        limit: usize,
+    ) -> Result<Vec<Done>, MessageError> {
+        let settings = TopologySettings::default();
+        super::split_done(header, timed_out, incomplete, is_final, limit, &settings)
+    }
 
     fn id(n: u32) -> DeviceId {
         let mut seed = [7u8; 32];
@@ -667,10 +712,13 @@ mod limit_tests {
             incomplete: Vec::new(),
         });
         let mut json = done.to_json().unwrap();
-        assert!(Message::from_json(&json).is_ok());
+        assert!(Message::from_json(&json, &TopologySettings::default()).is_ok());
         // Valid JSON padded with spaces past the limit.
         json.resize(MAX_MESSAGE_JSON + 1, b' ');
-        assert_eq!(Message::from_json(&json), Err(MessageError::TooLarge));
+        assert_eq!(
+            Message::from_json(&json, &TopologySettings::default()),
+            Err(MessageError::TooLarge)
+        );
     }
 
     #[test]
@@ -732,11 +780,12 @@ mod limit_tests {
                 incomplete: Vec::new(),
             })
         };
-        for n in [MAX_PARTS - 1, MAX_PARTS, u32::MAX] {
-            let ok = n < MAX_PARTS;
+        let max_parts = TopologySettings::default().max_parts();
+        for n in [max_parts - 1, max_parts, u32::MAX] {
+            let ok = n < max_parts;
             for message in [part(n), done(n)] {
                 let json = message.to_json().unwrap();
-                let read = Message::from_json(&json);
+                let read = Message::from_json(&json, &TopologySettings::default());
                 if ok {
                     assert_eq!(read, Ok(message));
                 } else {
@@ -750,7 +799,8 @@ mod limit_tests {
     fn an_answer_needing_more_parts_than_the_limit_is_refused() {
         use crate::model::{Side, TransportKind};
         let h = header(1);
-        let edges: Vec<Edge> = (0..=MAX_PARTS)
+        let max_parts = TopologySettings::default().max_parts();
+        let edges: Vec<Edge> = (0..=max_parts)
             .map(|n| Edge {
                 link_id: link_id(n),
                 dialer: id(n),
@@ -769,10 +819,10 @@ mod limit_tests {
             split_result(&h, Vec::new(), edges.clone(), limit),
             Err(MessageError::TooLarge)
         );
-        let allowed = usize::try_from(MAX_PARTS).unwrap();
+        let allowed = usize::try_from(max_parts).unwrap();
         let parts = split_result(&h, Vec::new(), edges[..allowed].to_vec(), limit).unwrap();
         assert_eq!(parts.len(), allowed);
-        assert_eq!(parts.last().unwrap().part, MAX_PARTS - 1);
+        assert_eq!(parts.last().unwrap().part, max_parts - 1);
     }
 }
 
@@ -781,6 +831,28 @@ mod exact_fit_tests {
     use super::*;
     use crate::model::NodeStatus;
     use tasty_net_identity::DeviceKey;
+
+    /// [`super::split_result`] with the default settings.
+    fn split_result(
+        header: &ResultHeader,
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        limit: usize,
+    ) -> Result<Vec<ResultPart>, MessageError> {
+        super::split_result(header, nodes, edges, limit, &TopologySettings::default())
+    }
+
+    /// [`super::split_done`] with the default settings.
+    fn split_done(
+        header: &ResultHeader,
+        timed_out: Vec<DeviceId>,
+        incomplete: Vec<DeviceId>,
+        is_final: bool,
+        limit: usize,
+    ) -> Result<Vec<Done>, MessageError> {
+        let settings = TopologySettings::default();
+        super::split_done(header, timed_out, incomplete, is_final, limit, &settings)
+    }
 
     fn id(n: u8) -> DeviceId {
         DeviceKey::from_seed([n; 32]).id()

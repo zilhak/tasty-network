@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_topology::{
-    Agent, AgentConfig, Edge, Exploration, ExplorationState, ExploreRequest, LinkId, LinkKind,
-    Local, LocalLink, Message, Now, Outbox, SelfInfo, SendError, Sharing, Side, TransportKind,
+    Agent, Edge, Exploration, ExplorationState, ExploreRequest, LinkId, LinkKind, Local, LocalLink,
+    Message, Now, Outbox, SelfInfo, SendError, Sharing, Side, TopologySettings, TransportKind,
     WorkspaceExposure, WorkspaceRef,
 };
 
@@ -103,7 +103,7 @@ impl Net {
                 display_name: None,
             };
             net.agents
-                .insert(id(n), Agent::new(me, AgentConfig::default()));
+                .insert(id(n), Agent::new(me, TopologySettings::default()));
             net.links.insert(id(n), Vec::new());
         }
         net
