@@ -41,7 +41,9 @@ pub(crate) struct Stream {
     write_timeout: Mutex<Option<Duration>>,
     conn: P2pConnection,
     side: ConnSide,
-    drain_cap: Duration,
+    /// How long the stream waits for the peer's end: the connection's drain cap, and once the
+    /// channel is framed for a link the drain cap of that link (`LinkTimeouts::drain_cap`).
+    drain_cap: Mutex<Duration>,
     end: Mutex<EndState>,
     end_changed: Condvar,
     /// The channel's place on its connection, until the channel is closed
@@ -107,10 +109,10 @@ impl Stream {
             .name("p2p-finish".into())
             .spawn(move || {
                 let started = Instant::now();
+                let cap = *lock(&stream.drain_cap);
                 let mut end = lock(&stream.end);
                 while end.finish_wanted && !end.finished && !end.aborted {
-                    let Some(left) = stream
-                        .drain_cap
+                    let Some(left) = cap
                         .checked_sub(started.elapsed())
                         .filter(|d| !d.is_zero())
                     else {
@@ -181,7 +183,8 @@ impl Stream {
     /// Both halves were dropped without a forced close: the sending side ends, and the place
     /// on the connection goes once the peer's end was read. The dialer closes the connection
     /// after its last channel, so a channel whose reader did not read the acceptor's end yet
-    /// reads on to it in the background (at most the drain cap): the acceptor's end comes only
+    /// reads on to it in the background (at most the drain cap of its link, or of the
+    /// connection for a channel framed for none): the acceptor's end comes only
     /// after its application read this side's last frames (docs/design/transport.md "연결을
     /// 닫는 때").
     fn halves_dropped(self: &Arc<Self>) {
@@ -219,14 +222,11 @@ impl Stream {
     /// Reads and drops the peer's bytes until its end, an error or the drain cap.
     fn read_to_peer_end(&self) {
         let started = Instant::now();
+        let cap = *lock(&self.drain_cap);
         let mut sink = [0u8; 4096];
         let mut recv = lock(&self.recv);
         loop {
-            let Some(left) = self
-                .drain_cap
-                .checked_sub(started.elapsed())
-                .filter(|d| !d.is_zero())
-            else {
+            let Some(left) = cap.checked_sub(started.elapsed()).filter(|d| !d.is_zero()) else {
                 tracing::debug!("a dropped P2P stream's peer did not end within the drain cap");
                 return;
             };
@@ -341,7 +341,7 @@ pub(crate) fn channel(
         write_timeout: Mutex::new(None),
         conn: conn.clone(),
         side,
-        drain_cap,
+        drain_cap: Mutex::new(drain_cap),
         end: Mutex::new(EndState::default()),
         end_changed: Condvar::new(),
         slot: Mutex::new(Some(slot)),
@@ -361,6 +361,10 @@ pub(crate) fn channel(
     .with_finish_now({
         let shared = Arc::clone(&shared);
         Arc::new(move || shared.finish_now())
+    })
+    .with_drain_cap_setter({
+        let shared = Arc::clone(&shared);
+        Arc::new(move |cap| *lock(&shared.drain_cap) = cap)
     })
     .keep_alive(Arc::new(ChannelHold { stream: shared }))
 }

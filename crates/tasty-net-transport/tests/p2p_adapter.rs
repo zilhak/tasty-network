@@ -251,6 +251,8 @@ enum Mode {
     /// Writes its last frame and ends its side first, waits, and only then reads what the
     /// dialer sent; the frames go to the test.
     LastFrameFirst,
+    /// [`Mode::LastFrameFirst`] with a wait past the dialer's default drain cap.
+    LastFrameLate,
 }
 
 /// Two paired endpoints, a dialing transport on `a` and an accepting side on `b`.
@@ -450,7 +452,10 @@ fn serve(
             };
             match mode {
                 Mode::Echo => echo(reader, writer),
-                Mode::LastFrameFirst => last_frame_first(reader, writer, read_tx),
+                Mode::LastFrameFirst => {
+                    last_frame_first(reader, writer, read_tx, Duration::from_millis(300));
+                }
+                Mode::LastFrameLate => last_frame_first(reader, writer, read_tx, LATE_READ),
             }
         }
         Ok(Accepted::Bulk(bulk)) => echo(bulk.reader, bulk.writer),
@@ -469,10 +474,14 @@ fn echo(mut reader: ChannelReader, mut writer: ChannelWriter) {
     drop(writer.half_close());
 }
 
+/// How long [`Mode::LastFrameLate`] waits before it reads: past the default drain cap.
+const LATE_READ: Duration = Duration::from_secs(3);
+
 fn last_frame_first(
     mut reader: ChannelReader,
     mut writer: ChannelWriter,
     read_tx: &mpsc::Sender<(Vec<StreamFrame>, Option<ReadFailure>)>,
+    wait: Duration,
 ) {
     writer
         .write_frame(StreamTag::Detach, b"acceptor-last")
@@ -480,7 +489,7 @@ fn last_frame_first(
     writer.half_close().expect("half close");
     // The dialer has read the acceptor's last frame and ended its side by now; the acceptor's
     // EOF must still wait for this side to read the dialer's frames.
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(wait);
     let mut frames = Vec::new();
     let end = loop {
         match reader.read_frame() {
@@ -1381,11 +1390,73 @@ fn a_forced_close_of_the_last_link_closes_the_connection_with_its_handles_kept()
 /// late, reads every frame, also the ones still on their way when the halves were dropped.
 #[test]
 fn a_dialer_that_drops_its_halves_early_loses_no_last_frame() {
-    const FRAMES: usize = 4;
     // The acceptor's end waits for this side's at most its drain cap (docs/design/transport.md
     // "연결을 닫는 때"); a long one keeps that wait out of the way of the late reads, below the
-    // dialer's own wait (the default drain cap).
-    let pair = Pair::start_draining(64, Mode::LastFrameFirst, Duration::from_millis(1500));
+    // dialer's own wait (the drain cap of its link).
+    let mut pair = Pair::start_draining(64, Mode::LastFrameFirst, Duration::from_millis(1500));
+    pair.dial = pair.dial.clone().with_timeouts(LinkTimeouts {
+        drain_cap: Duration::from_secs(2),
+        ..timeouts()
+    });
+    drop_the_halves_before_the_late_reads(&pair);
+}
+
+/// Both sides frame the link with a drain cap past the default one, and the acceptor reads
+/// this side's frames late: past that default, within the drain cap. The dialer drops its
+/// halves before it read the acceptor's end; its last read waits the link's drain cap, so the
+/// connection stays until the acceptor read every frame and ended its side
+/// (docs/design/transport.md "연결을 닫는 때").
+#[test]
+fn a_late_read_within_the_links_drain_cap_loses_no_last_frame() {
+    const FRAMES: usize = 4;
+    let drain_cap = Duration::from_secs(5);
+    let past_default = tasty_net_transport::DEFAULT_DRAIN_CAP + Duration::from_millis(300);
+    assert!(past_default < LATE_READ && LATE_READ < drain_cap);
+    let mut pair = Pair::start_draining(90, Mode::LastFrameLate, drain_cap);
+    pair.dial = pair.dial.clone().with_timeouts(LinkTimeouts {
+        drain_cap,
+        ..timeouts()
+    });
+    let mut link = pair.link(None).expect("link");
+    let (mut reader, mut writer) = link.take_ordered().expect("halves");
+    // Small frames: the writes do not wait for the acceptor's reads.
+    let small = vec![7u8; 16 << 10];
+    for _ in 1..FRAMES {
+        writer
+            .write_frame(StreamTag::Data, &small)
+            .expect("a frame");
+    }
+    writer
+        .write_frame(StreamTag::Detach, b"dialer-last")
+        .expect("the dialer's last frame");
+    writer.half_close().expect("half close");
+    reader.finish();
+    let dropped = Instant::now();
+    drop((reader, writer, link));
+    std::thread::sleep(past_default.saturating_sub(dropped.elapsed()));
+    assert!(
+        pair.read.try_recv().is_err(),
+        "the acceptor read before the check: the check says nothing"
+    );
+    assert_eq!(
+        pair.connections().0,
+        1,
+        "the dialer closed the connection {past_default:?} after its drop, before the acceptor read"
+    );
+    let (frames, ended) = pair
+        .read
+        .recv_timeout(PATIENCE)
+        .expect("the acceptor's reads");
+    assert_eq!(frames.len(), FRAMES, "the acceptor read every frame");
+    assert_eq!(frames[FRAMES - 1].payload, b"dialer-last");
+    assert_eq!(ended, Some(ReadFailure::PeerClosed));
+    wait_until("the connection's close", || pair.connections() == (0, 0));
+}
+
+/// The dialer writes large frames and its last one, ends its side and drops the halves without
+/// reading on; the accepting side (in a last-frame-first mode) reads every frame.
+fn drop_the_halves_before_the_late_reads(pair: &Pair) {
+    const FRAMES: usize = 4;
     let mut link = pair.link(None).expect("link");
     let (mut reader, mut writer) = link.take_ordered().expect("halves");
     let big = vec![7u8; 1 << 20];

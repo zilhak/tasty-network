@@ -73,10 +73,16 @@ pub struct RawChannel {
     /// Ends the sending direction at once, where [`ChannelControl::shutdown_write`] first waits
     /// for the peer's end (a P2P stream on the side that accepted the connection).
     finish_now: Option<FinishNow>,
+    /// Gives the channel the drain cap of the link it is framed for (a P2P stream, whose last
+    /// read after its halves were dropped waits at most that long).
+    set_drain_cap: Option<SetDrainCap>,
 }
 
 /// Ends a channel's sending direction at once.
 type FinishNow = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
+
+/// Gives a channel the drain cap it is framed with.
+type SetDrainCap = Arc<dyn Fn(Duration) + Send + Sync>;
 
 impl fmt::Debug for RawChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,6 +112,7 @@ impl RawChannel {
             addrs: None,
             joined: None,
             finish_now: None,
+            set_drain_cap: None,
         }
     }
 
@@ -134,6 +141,12 @@ impl RawChannel {
         );
         channel.addrs = addrs.ok();
         Ok(channel)
+    }
+
+    /// Sets how the channel takes the drain cap it is framed with ([`RawChannel::framed`]).
+    pub(crate) fn with_drain_cap_setter(mut self, set: SetDrainCap) -> Self {
+        self.set_drain_cap = Some(set);
+        self
     }
 
     /// Sets how the sending direction ends at once ([`RawChannel::finish_at_once`]).
@@ -263,6 +276,9 @@ impl RawChannel {
             if now.checked_add(limit).is_none() {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, what));
             }
+        }
+        if let Some(set) = &self.set_drain_cap {
+            set(config.drain_cap);
         }
         let read_timeout = nonzero(config.read_timeout);
         self.control.set_read_timeout(Some(read_timeout))?;
