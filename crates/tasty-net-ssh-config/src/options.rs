@@ -1,6 +1,7 @@
-// This file is derived from OpenSSH, modified: a Rust port of parts of readconf.c, readconf.h, pathnames.h, log.c, digest-openssl.c
-// of OpenSSH portable 10.6p2 (commit d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The
-// notices of those files follow as written there; LICENSE-OpenSSH has the OpenSSH licence.
+// This file is derived from OpenSSH, modified: a Rust port of parts of readconf.c, readconf.h, pathnames.h, log.c, digest-openssl.c,
+// openbsd-compat/vis.c of OpenSSH portable 10.6p2 (commit
+// d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The notices of those files follow as written
+// there; LICENSE-OpenSSH has the OpenSSH licence.
 //
 // readconf.c:
 // /*
@@ -94,6 +95,36 @@
 //  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 //  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 //  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//  */
+//
+// openbsd-compat/vis.c:
+// /*-
+//  * Copyright (c) 1989, 1993
+//  *	The Regents of the University of California.  All rights reserved.
+//  *
+//  * Redistribution and use in source and binary forms, with or without
+//  * modification, are permitted provided that the following conditions
+//  * are met:
+//  * 1. Redistributions of source code must retain the above copyright
+//  *    notice, this list of conditions and the following disclaimer.
+//  * 2. Redistributions in binary form must reproduce the above copyright
+//  *    notice, this list of conditions and the following disclaimer in the
+//  *    documentation and/or other materials provided with the distribution.
+//  * 3. Neither the name of the University nor the names of its contributors
+//  *    may be used to endorse or promote products derived from this software
+//  *    without specific prior written permission.
+//  *
+//  * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+//  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//  * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+//  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+//  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+//  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+//  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+//  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+//  * SUCH DAMAGE.
 //  */
 //! The client options of OpenSSH `readconf.h` (`Options`), the multistate value tables of
 //! `readconf.c`, `fill_default_options` (`:2860`) and `dump_client_config` (`:3739`, the
@@ -971,8 +1002,8 @@ impl Options {
     }
 }
 
-/// The text `vis(buf, c, VIS_WHITE, 0)` gives for one byte. Written for this crate from the
-/// documented `vis(3)` output, not derived from `openbsd-compat/vis.c`.
+/// The text `vis(buf, c, VIS_WHITE, 0)` gives for one byte: `vis` of `openbsd-compat/vis.c`
+/// (`:61`–`:144`, `isvisible` `:46`) for the flags `dump_client_config` uses, in the same steps.
 fn vis_white(c: u8) -> String {
     const META: u8 = 0x80;
     const DEL: u8 = 0x7f;

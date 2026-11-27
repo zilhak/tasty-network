@@ -1,8 +1,38 @@
-//! Numbers with a binary unit for `RekeyLimit` (`1G`, `1.5M`, `512`).
-//!
-//! OpenSSH reads them with `scan_scaled` of `openbsd-compat/fmt_scaled.c`. This file is not
-//! derived from that code; it is written for this crate to accept the same strings with the
-//! same values, so it carries the crate license only. The behavior it reproduces: leading
+// This file is derived from OpenSSH, modified: a Rust port of scan_scaled of
+// openbsd-compat/fmt_scaled.c of OpenSSH portable 10.6p2 (commit
+// d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The notice of that file follows as written
+// there.
+//
+// openbsd-compat/fmt_scaled.c:
+// /*
+//  * Copyright (c) 2001, 2002, 2003 Ian F. Darwin.  All rights reserved.
+//  *
+//  * Redistribution and use in source and binary forms, with or without
+//  * modification, are permitted provided that the following conditions
+//  * are met:
+//  * 1. Redistributions of source code must retain the above copyright
+//  *    notice, this list of conditions and the following disclaimer.
+//  * 2. Redistributions in binary form must reproduce the above copyright
+//  *    notice, this list of conditions and the following disclaimer in the
+//  *    documentation and/or other materials provided with the distribution.
+//  * 3. The name of the author may not be used to endorse or promote products
+//  *    derived from this software without specific prior written permission.
+//  *
+//  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+//  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+//  * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+//  * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+//  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+//  * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+//  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+//  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+//  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+//  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+//! Numbers with a binary unit for `RekeyLimit` (`1G`, `1.5M`, `512`): `scan_scaled`
+//! (`openbsd-compat/fmt_scaled.c:75`–`:229`). It follows the original step by step (the
+//! `MAX_DIGITS` bound, the fraction digits it keeps, and the order of the multiplications by
+//! 1024 and the divisions by 10), so it keeps the notice of that file. The behavior: leading
 //! ASCII whitespace, at most one sign, decimal digits with an optional fraction, then an
 //! optional unit `B`, `K`, `M`, `G`, `T`, `P` or `E` (powers of 1024, either case) that must
 //! not be followed by a letter or digit. Without a unit the fraction is dropped.

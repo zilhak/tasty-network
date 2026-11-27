@@ -5,8 +5,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 # The crate's own code is under the workspace license terms through BSD-2-Clause; the files
-# derived from OpenSSH keep their notices (BSD-2-Clause, ISC, SSH-short), see LICENSE-OpenSSH.
-license = "BSD-2-Clause AND ISC AND SSH-short"
+# derived from OpenSSH keep their notices (BSD-2-Clause, BSD-3-Clause, ISC, SSH-short), see
+# LICENSE-OpenSSH.
+license = "BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short"
 repository.workspace = true
 publish = false
 
