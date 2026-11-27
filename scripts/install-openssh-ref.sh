@@ -21,8 +21,9 @@ PREFIX="${PREFIX:-$PWD/target/tools}"
 DEST="$PREFIX/openssh-10.6p2"
 TAG="[install-openssh-ref]"
 
+# 판 문자열. 실행되지 않는 파일(다른 러너 이미지에서 캐시한 빌드 등)이면 그 사실을 낸다.
 version_of() {
-    "$1" -V 2>&1 | head -n 1
+    "$1" -V 2>&1 | head -n 1 || echo "실행되지 않는다"
 }
 
 if [ -x "$DEST/bin/ssh" ] && [ -x "$DEST/bin/ssh-keygen" ]; then
