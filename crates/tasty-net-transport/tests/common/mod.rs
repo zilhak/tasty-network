@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use tasty_net_identity::{ConnectionToken, DeviceKey};
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelReader,
-    ChannelWriter, DialConfig, DomainAccept, DomainPolicy, DomainReject, LinkTimeouts,
-    MAX_HANDSHAKE_LINE, RawChannel, accept_handshake, read_first_line,
+    ChannelWriter, ConnectionTable, DialConfig, DomainAccept, DomainPolicy, DomainReject,
+    LinkTimeouts, MAX_HANDSHAKE_LINE, RawChannel, accept_handshake, read_first_line,
 };
 
 pub fn key(n: u8) -> DeviceKey {
@@ -88,11 +88,20 @@ impl Drop for EchoServer {
 
 /// Starts an acceptor with `token` on a loopback port.
 pub fn echo_server(token: ConnectionToken) -> EchoServer {
+    echo_server_reporting(token, None)
+}
+
+/// [`echo_server`] that reports its channels in `table`.
+pub fn echo_server_reporting(token: ConnectionToken, table: Option<ConnectionTable>) -> EchoServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let policy = Arc::new(EchoPolicy::default());
     let config = AcceptConfig::new(key(2), "acceptor-1", Some(token), policy.clone())
         .with_timeouts(timeouts());
+    let config = match table {
+        Some(table) => config.with_connections(table),
+        None => config,
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let served: Served = Arc::default();
     let accept = {

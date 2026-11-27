@@ -13,13 +13,14 @@ use tasty_net_frame::{ReadFailure, StreamTag};
 use tasty_net_identity::ConnectionToken;
 use tasty_net_transport::{
     AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelControl,
-    ConnectError, Connection, DialAuth, DomainAccept, DomainPolicy, DomainReject, Endpoint,
-    EndpointHandle, HandshakeError, Holder, LinkTimeouts, MAX_HANDSHAKE_LINE, P2pCloseReason,
-    RawChannel, RejectReason, Transport, TransportKind, accept_handshake, accept_p2p_handshake,
-    dial_handshake, read_first_line,
+    ConnectError, Connection, ConnectionInfo, ConnectionState, ConnectionTable, DialAuth,
+    Direction, DomainAccept, DomainPolicy, DomainReject, EdgeTransport, Endpoint, EndpointHandle,
+    HandshakeError, Holder, LinkTimeouts, MAX_HANDSHAKE_LINE, P2pCloseReason, Phase, RawChannel,
+    RejectReason, Side, Transport, TransportKind, Via, accept_handshake, accept_p2p_handshake,
+    dial_handshake, dial_request, read_first_line,
 };
 
-use common::{client, echo_server, key, timeouts, token};
+use common::{client, echo_server, echo_server_reporting, key, timeouts, token};
 
 /// Plain loopback TCP to one address, with the token the test hands it.
 struct Loopback {
@@ -92,6 +93,105 @@ fn a_loopback_link_echoes_and_opens_a_bulk_channel() {
         .expect("write");
     let frame = bulk.reader.read_frame().expect("bulk echo");
     assert_eq!(frame.payload, b"bulk");
+}
+
+fn wait_for(table: &ConnectionTable, what: &str, done: impl Fn(&[ConnectionInfo]) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let entries = table.connections();
+        if done(&entries) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}: {entries:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The accepting end makes one `ssh_inbound` entry per loopback TCP channel: the link's
+/// entry carries the link row with the dialer's link ID, and the bulk entry names the link's
+/// entry as its parent. (A refused channel is in tests/ssh.rs: a refusal here would run its
+/// linger next to the tracing capture of the P2P limit test.)
+#[test]
+fn accepted_loopback_channels_are_ssh_inbound_entries() {
+    let table = ConnectionTable::default();
+    let server = echo_server_reporting(token('a'), Some(table.clone()));
+    let transport = Loopback {
+        addr: server.addr,
+        token: token('a'),
+    };
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let bulk = link.open_bulk(None).expect("bulk");
+    wait_for(&table, "the link and the bulk entry", |e| {
+        e.len() == 2 && e.iter().all(|i| i.state == ConnectionState::Connected)
+    });
+    let entries = table.connections();
+    let (attach, bulk_entry) = (&entries[0], &entries[1]);
+    assert_eq!(attach.path.as_str(), "ssh_inbound");
+    assert_eq!(attach.local_side, Side::Acceptor);
+    assert_eq!(attach.via, Via::Loopback);
+    assert_eq!(attach.direction, Direction::Forward);
+    assert_eq!(attach.peer.device_id, Some(key(1).id()));
+    assert_eq!(attach.peer.instance_id.as_deref(), Some("dialer-1"));
+    assert_eq!(attach.rtt, None);
+    assert_eq!(attach.segments.len(), 1);
+    assert_eq!(attach.segments[0].name, "loopback");
+    assert_eq!(
+        attach.segments[0].local.as_deref(),
+        Some(server.addr.to_string().as_str())
+    );
+    let remote: SocketAddr = attach.segments[0]
+        .remote
+        .as_deref()
+        .expect("the peer address")
+        .parse()
+        .expect("an address");
+    assert!(
+        remote.ip().is_loopback() && remote != server.addr,
+        "{remote}"
+    );
+    assert_eq!(attach.links.len(), 1);
+    let row = &attach.links[0];
+    assert_eq!(
+        row.link_id,
+        link.link_id(),
+        "both ends agree on the link ID"
+    );
+    assert_eq!(row.holder, Holder::Dialer);
+    assert_eq!(row.local_side, Side::Acceptor);
+    assert_eq!(row.transport, EdgeTransport::SshForward);
+    let states: Vec<_> = attach.history.iter().map(|h| (h.state, h.phase)).collect();
+    assert_eq!(
+        states,
+        [
+            (ConnectionState::Connecting, Some(Phase::Handshake)),
+            (ConnectionState::Connected, None),
+        ]
+    );
+    assert_eq!(bulk_entry.parent, Some(attach.id));
+    assert_eq!(bulk_entry.bulk_channels, 1);
+    assert!(bulk_entry.links.is_empty());
+    assert_eq!(bulk_entry.direction, Direction::None);
+    assert!(attach.applied.iter().any(|s| s.key == "link.read_timeout"));
+
+    // A request channel is an entry of its own; it ends when the server drops it.
+    let conn = transport.connect(&(), &cancel).expect("connect");
+    drop(dial_request(conn, &client(), &cancel).expect("request"));
+    wait_for(&table, "the request entry", |e| {
+        e.len() == 3 && e[2].state == ConnectionState::Disconnected
+    });
+
+    // The link's end ends the entries of the link and of its bulk channel.
+    drop((bulk, link));
+    wait_for(&table, "the link and bulk entries to end", |e| {
+        e[..2]
+            .iter()
+            .all(|i| i.state == ConnectionState::Disconnected && i.links.is_empty())
+    });
 }
 
 #[test]

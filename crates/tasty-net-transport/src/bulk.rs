@@ -21,6 +21,8 @@ pub(crate) struct BulkParent {
     pub peer: PeerInfo,
     /// The QUIC connection of a P2P parent; `None` on the SSH path.
     pub scope: Option<u64>,
+    /// The parent's connection table entry.
+    pub entry: Option<crate::connection_table::ConnectionId>,
 }
 
 /// The credentials the accepting end issued, shared by every handshake of one acceptor.

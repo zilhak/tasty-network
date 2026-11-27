@@ -5,7 +5,7 @@ use std::any::Any;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use tasty_net_frame::{
 
 use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
 
+use crate::connection_table::EntryRef;
 use crate::end::{EndReason, LinkCloser};
 use crate::heartbeat::{Heartbeat, HeartbeatPolicy};
 use crate::lock::lock;
@@ -60,6 +61,11 @@ pub struct RawChannel {
     keep: Vec<Arc<dyn Any + Send + Sync>>,
     /// The absent-listener verdict of a channel through an SSH tunnel.
     verdict: Option<ListenerVerdict>,
+    /// The connection table entry of the physical connection the channel is on (the dialing
+    /// side's transports set it).
+    entry: Option<EntryRef>,
+    /// The local and the peer address of a TCP channel.
+    addrs: Option<(SocketAddr, SocketAddr)>,
 }
 
 impl fmt::Debug for RawChannel {
@@ -85,6 +91,8 @@ impl RawChannel {
             kind,
             keep: Vec::new(),
             verdict: None,
+            entry: None,
+            addrs: None,
         }
     }
 
@@ -101,13 +109,33 @@ impl RawChannel {
     /// confirmed cause.
     pub(crate) fn from_tcp_as(stream: TcpStream, kind: TransportKind) -> io::Result<Self> {
         stream.set_nodelay(true)?;
+        let addrs = stream
+            .local_addr()
+            .and_then(|local| Ok((local, stream.peer_addr()?)));
         let stream = Arc::new(stream);
-        Ok(Self::new(
+        let mut channel = Self::new(
             Box::new(SharedTcp(Arc::clone(&stream))),
             Box::new(SharedTcp(Arc::clone(&stream))),
             Arc::new(TcpControl { stream }),
             kind,
-        ))
+        );
+        channel.addrs = addrs.ok();
+        Ok(channel)
+    }
+
+    pub(crate) fn with_entry(mut self, entry: EntryRef) -> Self {
+        self.entry = Some(entry);
+        self
+    }
+
+    /// The connection table entry of the channel's physical connection.
+    pub(crate) fn entry(&self) -> Option<&EntryRef> {
+        self.entry.as_ref()
+    }
+
+    /// The local and the peer address of a TCP channel.
+    pub(crate) fn addrs(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.addrs
     }
 
     /// The control of this channel.

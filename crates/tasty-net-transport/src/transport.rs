@@ -12,7 +12,9 @@ use tasty_net_ssh::{PortDiscoveryError, TunnelError};
 
 use crate::cancel::{AttemptCancel, Cancelled};
 use crate::channel::RawChannel;
+use crate::connection_table::{ConnectionId, EntryRef};
 use crate::reject::TooOldEvidence;
+use crate::role::Holder;
 
 /// Which transport a channel came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,6 +47,19 @@ pub trait Transport: Send + Sync {
         cancel: &AttemptCancel,
     ) -> Result<Connection, ConnectError>;
 
+    /// [`Transport::connect`] with the connection table's view of the attempt: the entry it
+    /// reconnects, a display name and the direction the consumer chose. A transport without
+    /// a table ignores `options` (the default).
+    fn connect_with(
+        &self,
+        target: &Self::Target,
+        cancel: &AttemptCancel,
+        options: &ConnectOptions,
+    ) -> Result<Connection, ConnectError> {
+        let _unused = options;
+        self.connect(target, cancel)
+    }
+
     /// Opens one more channel to an endpoint this transport reached.
     fn connect_more(
         &self,
@@ -52,6 +67,51 @@ pub trait Transport: Send + Sync {
         cancel: &AttemptCancel,
     ) -> Result<RawChannel, ConnectError> {
         endpoint.connect_more(cancel)
+    }
+}
+
+/// How a new connection shows in the connection table
+/// ([`Transport::connect_with`]). The default is a plain new connection.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectOptions {
+    pub(crate) previous: Option<ConnectionId>,
+    pub(crate) name: Option<String>,
+    pub(crate) holder: Option<Holder>,
+    /// The redialer's entry, which the attempt fills instead of a new one.
+    pub(crate) pending: Option<EntryRef>,
+}
+
+impl ConnectOptions {
+    /// A plain new connection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The new connection reconnects the entry `previous`: its entry starts `reconnecting`
+    /// and names `previous`. For a consumer that connects again without the
+    /// [`Redialer`](crate::Redialer).
+    pub fn after(mut self, previous: ConnectionId) -> Self {
+        self.previous = Some(previous);
+        self
+    }
+
+    /// The display name of the peer.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// The direction the consumer's profile chose for the links it opens on this
+    /// connection (the entry's path; each link's own direction is in its `links` row).
+    pub fn with_holder(mut self, holder: Holder) -> Self {
+        self.holder = Some(holder);
+        self
+    }
+
+    /// The entry this connection reconnects, if any.
+    pub fn previous(&self) -> Option<ConnectionId> {
+        self.previous
+            .or_else(|| self.pending.as_ref().map(EntryRef::id))
     }
 }
 

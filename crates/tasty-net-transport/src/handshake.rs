@@ -19,6 +19,10 @@ use tasty_net_identity::{
 use crate::bulk::{BulkParent, BulkRegistry};
 use crate::cancel::{AttemptCancel, Registration};
 use crate::channel::{ChannelControl, RawChannel};
+use crate::connection_table::{
+    Cause, ConnectionPeer, ConnectionState, ConnectionTable, Counted, EntryRef, NewEntry, PathKind,
+    Phase, Segment, Via,
+};
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
 use crate::end::{EndReason, GuardSlot, LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
@@ -28,7 +32,7 @@ use crate::link_id::LinkId;
 use crate::reject::{HandshakeError, RejectReason, TooOldEvidence};
 use crate::request::{RequestClient, RequestServer};
 use crate::role::{Holder, Side};
-use crate::transport::{Connection, DialAuth};
+use crate::transport::{Connection, DialAuth, TransportKind};
 use crate::wire::{
     Ack, Greeting, MAX_HANDSHAKE_LINE, OpenIn, OpenOut, PROTO, Path, Purpose, Reply, Signer,
     Transcript, check_token, encode_proof, parse_fields, parse_open_line, parse_proof, parse_reply,
@@ -212,6 +216,7 @@ pub struct AcceptConfig {
     tofu: Option<Tofu>,
     bulk: BulkRegistry,
     limit: Limit,
+    connections: Option<ConnectionTable>,
 }
 
 impl fmt::Debug for AcceptConfig {
@@ -257,6 +262,7 @@ impl AcceptConfig {
                 active: Arc::new(AtomicUsize::new(0)),
                 max: DEFAULT_MAX_HANDSHAKES,
             },
+            connections: None,
         }
     }
 
@@ -307,6 +313,18 @@ impl AcceptConfig {
             max,
         };
         self
+    }
+
+    /// Reports every loopback TCP channel this end accepts on the SSH path in `table`: one
+    /// `ssh_inbound` entry per channel, from the handshake until the channel ends.
+    pub fn with_connections(mut self, table: ConnectionTable) -> Self {
+        self.connections = Some(table);
+        self
+    }
+
+    /// The table this end reports in.
+    pub fn connections(&self) -> Option<&ConnectionTable> {
+        self.connections.as_ref()
     }
 
     /// The bulk credentials this end issued.
@@ -806,6 +824,26 @@ pub fn dial_handshake(
     ext: Option<&str>,
     cancel: &AttemptCancel,
 ) -> Result<Link, HandshakeError> {
+    let entry = conn.channel.entry().cloned();
+    let link = dial_link(conn, config, holder, ext, cancel);
+    match (&link, &entry) {
+        (Ok(link), Some(entry)) => {
+            entry.link_up(&link.peer, link.link_id, &link.closer, &config.timeouts);
+            entry.note_end_of(&link.closer, link.link_id);
+        }
+        (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
+        (_, None) => {}
+    }
+    link
+}
+
+fn dial_link(
+    conn: Connection,
+    config: &DialConfig,
+    holder: Holder,
+    ext: Option<&str>,
+    cancel: &AttemptCancel,
+) -> Result<Link, HandshakeError> {
     let Connection {
         mut channel,
         endpoint,
@@ -858,6 +896,23 @@ pub fn dial_request(
     config: &DialConfig,
     cancel: &AttemptCancel,
 ) -> Result<RequestClient, HandshakeError> {
+    let entry = conn.channel.entry().cloned();
+    let client = dial_request_on(conn, config, cancel);
+    match (&client, &entry) {
+        (Ok((_, closer, peer)), Some(entry)) => {
+            entry.channel_up(Counted::Request, peer, closer, &config.timeouts);
+        }
+        (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
+        (_, None) => {}
+    }
+    client.map(|(client, _, _)| client)
+}
+
+fn dial_request_on(
+    conn: Connection,
+    config: &DialConfig,
+    cancel: &AttemptCancel,
+) -> Result<(RequestClient, LinkCloser, PeerInfo), HandshakeError> {
     let Connection {
         mut channel,
         endpoint,
@@ -877,8 +932,11 @@ pub fn dial_request(
     let framed = channel
         .framed(&config.timeouts.channel(config.heartbeat))
         .map_err(HandshakeError::Io)?;
-    RequestClient::start(framed.reader, framed.writer, framed.closer, dialed.peer)
-        .map_err(HandshakeError::Io)
+    let closer = framed.closer.clone();
+    let peer = dialed.peer.clone();
+    let client = RequestClient::start(framed.reader, framed.writer, framed.closer, dialed.peer)
+        .map_err(HandshakeError::Io)?;
+    Ok((client, closer, peer))
 }
 
 /// The dialing side of a bulk channel under `link` ([`Link::open_bulk`]).
@@ -922,9 +980,13 @@ pub(crate) fn dial_bulk(link: &Link, ext: Option<&str>) -> Result<BulkChannel, H
         .and_then(|line| io.write_line(&line))
         .and_then(|()| read_ack(&mut io));
     let ack = ack.map_err(|e| explain(&ch, e))?;
+    let entry = ch.entry().cloned();
     let framed = ch
         .framed(&config.timeouts.channel(config.heartbeat))
         .map_err(HandshakeError::Io)?;
+    if let Some(entry) = entry {
+        entry.channel_up(Counted::Bulk, &link.peer, &framed.closer, &config.timeouts);
+    }
     Ok(BulkChannel {
         reader: framed.reader,
         writer: framed.writer,
@@ -953,7 +1015,45 @@ pub fn accept_handshake(
     config: &AcceptConfig,
     cancel: &AttemptCancel,
 ) -> Result<Accepted, HandshakeError> {
-    let mut ch = channel.with_buffered(buffered);
+    let ch = channel.with_buffered(buffered);
+    let entry = inbound_entry(config, &ch);
+    let accepted = accept_ssh(ch, first_line, config, cancel, entry.clone());
+    if let (Err(error), Some(entry)) = (&accepted, &entry) {
+        entry.end(Cause::of_handshake(error));
+    }
+    accepted
+}
+
+/// The `ssh_inbound` entry of a loopback TCP channel, when the end reports in a table.
+fn inbound_entry(config: &AcceptConfig, ch: &RawChannel) -> Option<EntryRef> {
+    let table = config.connections.as_ref()?;
+    let (local, peer) = ch.addrs().filter(|_| ch.kind() == TransportKind::Tcp)?;
+    Some(table.open(NewEntry {
+        previous: None,
+        parent: None,
+        peer: ConnectionPeer::default(),
+        path: PathKind::SshInbound,
+        local_side: Side::Acceptor,
+        segments: vec![Segment {
+            name: "loopback",
+            local: Some(local.to_string()),
+            remote: Some(peer.to_string()),
+        }],
+        via: Via::Loopback,
+        state: ConnectionState::Connecting,
+        phase: Some(Phase::Handshake),
+        held: false,
+        path_fixed: true,
+    }))
+}
+
+fn accept_ssh(
+    mut ch: RawChannel,
+    first_line: &[u8],
+    config: &AcceptConfig,
+    cancel: &AttemptCancel,
+    entry: Option<EntryRef>,
+) -> Result<Accepted, HandshakeError> {
     let registration = cancel
         .register_channel(ch.control())
         .map_err(|_| HandshakeError::Cancelled)?;
@@ -970,6 +1070,7 @@ pub fn accept_handshake(
             deadline,
             _registration: registration,
             _permit: permit,
+            entry,
         },
     )
 }
@@ -981,6 +1082,8 @@ struct Started<'a> {
     deadline: Instant,
     _registration: Registration,
     _permit: Permit,
+    /// The channel's connection table entry (SSH path, with a table).
+    entry: Option<EntryRef>,
 }
 
 /// Takes a slot of the concurrent-handshake limit, or refuses the channel with `busy` at once.
@@ -1043,6 +1146,7 @@ pub fn accept_p2p_handshake(
             deadline,
             _registration: registration,
             _permit: permit,
+            entry: None,
         },
     )
 }
@@ -1111,6 +1215,16 @@ fn accept_on(
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
+        if let Some(entry) = &started.entry {
+            entry.update(|info| info.parent = parent.entry);
+            entry.channel_up(
+                Counted::Bulk,
+                &parent.peer,
+                &framed.closer,
+                &config.timeouts,
+            );
+            entry.end_with(&framed.closer);
+        }
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
             writer: framed.writer,
@@ -1179,6 +1293,10 @@ fn accept_on(
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
             .map_err(|e| option_failed(cancel, &*control, e))?;
+        if let Some(entry) = &started.entry {
+            entry.channel_up(Counted::Request, &peer, &framed.closer, &config.timeouts);
+            entry.end_with(&framed.closer);
+        }
         return Ok(Accepted::Request(RequestServer {
             reader: framed.reader,
             writer: framed.writer,
@@ -1234,6 +1352,7 @@ fn accept_on(
             grant: Arc::from(accept.grant.as_slice()),
             peer: peer.clone(),
             scope: p2p_scope,
+            entry: started.entry.as_ref().map(EntryRef::id),
         })
         .map_err(HandshakeError::Io)?;
     let written = (|| {
@@ -1274,6 +1393,11 @@ fn accept_on(
     let normal = closer.clone();
     framed.on_normal_end(Box::new(move || normal.end_normally()));
     let ordered_shared = framed.shared();
+    let link_id = LinkId::of_credential(&credential);
+    if let Some(entry) = &started.entry {
+        entry.link_up(&peer, link_id, &closer, &config.timeouts);
+        entry.end_with(&closer);
+    }
     Ok(Accepted::Link(Box::new(Link {
         ordered_shared,
         ordered: Some((framed.reader, framed.writer)),
@@ -1283,7 +1407,7 @@ fn accept_on(
         client_id: accept.client_id,
         ext: open.ext,
         bulk: None,
-        link_id: LinkId::of_credential(&credential),
+        link_id,
         _guard: accept.guard,
     })))
 }

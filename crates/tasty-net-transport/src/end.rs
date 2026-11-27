@@ -56,6 +56,10 @@ impl EndState {
     fn is_ending(&self) -> bool {
         self.0.load(Ordering::Acquire) & REASON != 0
     }
+
+    fn raised(&self) -> Option<EndReason> {
+        reason_of(self.0.load(Ordering::Acquire) & REASON)
+    }
 }
 
 type CloseHook = Box<dyn Fn() + Send + Sync>;
@@ -158,6 +162,11 @@ impl LinkCloser {
         hooks.push(hook);
     }
 
+    /// A handle that reads the end reason without keeping the closer alive.
+    pub(crate) fn watch(&self) -> CloserWatch {
+        CloserWatch(Arc::downgrade(&self.inner))
+    }
+
     /// Whether the link ended normally: it ended and no reason was raised.
     #[cfg(test)]
     pub(crate) fn ended_normally(&self) -> bool {
@@ -252,6 +261,18 @@ impl LinkCloser {
         for child in self.children() {
             shutdown_quietly(child.as_ref());
         }
+    }
+}
+
+/// Reads a closer's raised reason without keeping it alive (the connection table's end
+/// hooks hold it, and the closer holds the hooks).
+pub(crate) struct CloserWatch(Weak<CloserInner>);
+
+impl CloserWatch {
+    /// The highest reason raised, settled or not; `None` for a normal end or a closer that is
+    /// gone.
+    pub(crate) fn raised(&self) -> Option<EndReason> {
+        self.0.upgrade().and_then(|inner| inner.end.raised())
     }
 }
 

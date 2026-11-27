@@ -15,7 +15,7 @@
 //!
 //! | Item | Consumer |
 //! |------|----------|
-//! | [`Transport`] · [`Connection`] · [`Endpoint`] · [`EndpointHandle`] · [`DialAuth`] · [`ConnectError`] | consumers that open channels, and transport implementations |
+//! | [`Transport`] · [`ConnectOptions`] · [`Connection`] · [`Endpoint`] · [`EndpointHandle`] · [`DialAuth`] · [`ConnectError`] | consumers that open channels, and transport implementations |
 //! | [`Listener`] · [`AcceptError`] | the receiving side (a loopback [`std::net::TcpListener`] is one) |
 //! | [`RawChannel`] · [`ChannelControl`] · [`TransportKind`] | transport implementations, and the receiving side that wraps an accepted socket ([`RawChannel::from_tcp`]) |
 //! | [`ChannelReader`] · [`ChannelWriter`] · [`ReadError`] · [`Framed`] · [`Finish`] | the reading and writing threads of a channel |
@@ -30,6 +30,7 @@
 //! | [`RejectReason`] · [`HandshakeError`] · [`TooOldEvidence`] · [`P2pCloseReason`] | consumers that branch on why a handshake ended (`is_retryable`) |
 //! | [`Holder`] · [`Side`] · [`Roles`] · [`roles`] | consumers that act on the roles of a link |
 //! | [`Purpose`] · [`PROTO`] · [`STREAM_OPEN_METHOD`] · [`MAX_HANDSHAKE_LINE`] · [`LEGACY_PROTOCOL_ERROR`] · [`is_valid_capability`] · [`InvalidCapabilities`] | the wire constants |
+//! | [`ConnectionTable`] · [`ConnectionTableConfig`] · [`ConnectionInfo`] · [`ConnectionId`] · [`ConnectionEvent`] · [`ConnectionState`] · [`ConnectionPeer`] · [`PathKind`] · [`Direction`] · [`Phase`] · [`Cause`] · [`Segment`] · [`Via`] · [`HistoryEntry`] · [`LinkInfo`] · [`EdgeTransport`] · [`RedialProgress`] · [`settings`] | consumers that show which devices this one is connected with, over which path and addresses (docs/design/transport.md "연결 목록") |
 //! | [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels) |
 //! | [`memory_channel_pair`] · [`memory_transport`] · [`MemoryTransport`] · [`MemoryListener`] | tests that run channels without sockets |
 #![deny(unsafe_code)]
@@ -37,6 +38,7 @@
 mod bulk;
 mod cancel;
 mod channel;
+mod connection_table;
 mod domain;
 mod end;
 mod handshake;
@@ -49,6 +51,7 @@ mod memory;
 mod reject;
 mod request;
 mod role;
+pub mod settings;
 mod ssh;
 mod transport;
 mod wake;
@@ -59,6 +62,11 @@ pub use cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 pub use channel::{
     ChannelConfig, ChannelControl, ChannelReader, ChannelWriter, DEFAULT_DRAIN_CAP, Finish, Framed,
     RawChannel, ReadError,
+};
+pub use connection_table::{
+    Cause, ConnectionEvent, ConnectionId, ConnectionInfo, ConnectionPeer, ConnectionState,
+    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, HistoryEntry, LinkInfo,
+    PathKind, Phase, RedialProgress, Segment, Via,
 };
 pub use domain::{
     AttachRequest, BulkRequest, DomainAccept, DomainPolicy, DomainReject, domain_code,
@@ -80,8 +88,8 @@ pub use request::{
 pub use role::{Holder, Roles, Side, roles};
 pub use ssh::{LOCAL_CONNECT_TIMEOUT, SshTransport};
 pub use transport::{
-    AcceptError, ConnectError, Connection, DialAuth, Endpoint, EndpointHandle, Listener, Transport,
-    TransportKind,
+    AcceptError, ConnectError, ConnectOptions, Connection, DialAuth, Endpoint, EndpointHandle,
+    Listener, Transport, TransportKind,
 };
 pub use wire::{
     LEGACY_PROTOCOL_ERROR, MAX_HANDSHAKE_LINE, PROTO, Purpose, STREAM_OPEN_METHOD,

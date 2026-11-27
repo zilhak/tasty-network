@@ -17,11 +17,12 @@ use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, ConnectError, HandshakeError, Holder, RejectReason, SshTransport,
-    TooOldEvidence, Transport, TransportKind, dial_handshake,
+    AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionState, ConnectionTable,
+    Direction, EdgeTransport, HandshakeError, Holder, PathKind, Phase, RejectReason, Side,
+    SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake,
 };
 
-use common::{client, echo_server, token};
+use common::{client, echo_server, echo_server_reporting, token};
 
 const FAKE_ARGS_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_ARGS";
 const FORWARDER_TEST: &str = "fake_ssh_forwarder_entry";
@@ -486,4 +487,156 @@ fn cancelling_the_attempt_reaps_its_unpublished_tunnel() {
         transport.connect(&target(), &cancel),
         Err(ConnectError::Cancelled)
     ));
+}
+
+/// The side that starts the tunnel makes one entry per tunnel: the attach links, the bulk
+/// channels on it and a second connection that shares it are all in that one entry. A
+/// reconnection through a new tunnel is a new entry naming the old one. The far end makes an
+/// `ssh_inbound` entry per channel, with the same link ID and edge value.
+#[test]
+fn a_tunnel_is_one_entry_with_its_links_and_channels() {
+    let far = ConnectionTable::default();
+    let server = echo_server_reporting(token('a'), Some(far.clone()));
+    let fake = FakeSsh::new("entries");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let options = ConnectOptions::new().with_name("box");
+    let conn = transport
+        .connect_with(&target(), &cancel, &options)
+        .expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let bulk = link.open_bulk(None).expect("bulk");
+    // A second connection to the same record shares the tunnel and its entry.
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let second = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    assert_eq!(fake.tunnels_started(), 1);
+
+    let entries = table.connections();
+    assert_eq!(entries.len(), 1, "{entries:#?}");
+    let entry = &entries[0];
+    assert_eq!(entry.path, PathKind::SshForward);
+    assert_eq!(entry.direction, Direction::Forward);
+    assert_eq!(entry.local_side, Side::Dialer);
+    assert_eq!(entry.state, ConnectionState::Connected);
+    assert_eq!(entry.phase, None);
+    assert_eq!(entry.peer.name.as_deref(), Some("box"));
+    assert_eq!(entry.peer.instance_id.as_deref(), Some("acceptor-1"));
+    assert_eq!(entry.rtt, None);
+    assert_eq!(
+        entry.via,
+        Via::Ssh {
+            target: "fake-host".into(),
+            remote_port: Some(server.addr.port()),
+        }
+    );
+    let names: Vec<_> = entry.segments.iter().map(|s| s.name).collect();
+    assert_eq!(names, ["local_forward", "ssh", "remote_listener"]);
+    assert!(
+        entry.segments[0]
+            .local
+            .as_deref()
+            .is_some_and(|l| l.starts_with("127.0.0.1:")),
+        "{:?}",
+        entry.segments[0]
+    );
+    assert_eq!(entry.segments[1].remote.as_deref(), Some("fake-host"));
+    assert_eq!(
+        entry.segments[2].remote,
+        Some(format!("127.0.0.1:{}", server.addr.port()))
+    );
+    let link_ids: Vec<_> = entry.links.iter().map(|l| l.link_id).collect();
+    assert_eq!(link_ids, [link.link_id(), second.link_id()]);
+    assert!(
+        entry
+            .links
+            .iter()
+            .all(|l| l.transport == EdgeTransport::SshForward && l.local_side == Side::Dialer)
+    );
+    assert_eq!(entry.bulk_channels, 1);
+    let steps: Vec<_> = entry.history.iter().map(|h| (h.state, h.phase)).collect();
+    assert_eq!(
+        steps,
+        [
+            (ConnectionState::Connecting, Some(Phase::PortDiscovery)),
+            (ConnectionState::Connecting, Some(Phase::Tunnel)),
+            (ConnectionState::Connecting, Some(Phase::Handshake)),
+            (ConnectionState::Connected, None),
+        ]
+    );
+
+    // The far end saw three loopback channels: two links and the bulk channel.
+    wait_until("the far end's entries", || far.connections().len() == 3);
+    let far_entries = far.connections();
+    let far_links: Vec<_> = far_entries.iter().flat_map(|e| e.links.clone()).collect();
+    assert_eq!(far_links.len(), 2);
+    for (near, far) in entry.links.iter().zip(&far_links) {
+        assert_eq!(near.link_id, far.link_id);
+        assert_eq!(
+            near.transport, far.transport,
+            "both ends give one edge value"
+        );
+        assert_eq!(far.local_side, Side::Acceptor);
+    }
+    assert!(far_entries.iter().all(|e| e.path == PathKind::SshInbound));
+
+    // The tunnel ends with its last channel; a reconnection is a new entry naming it.
+    let first = entry.id;
+    drop((bulk, link, second));
+    wait_until("the entry to end", || {
+        table
+            .connection(first)
+            .is_some_and(|e| e.state == ConnectionState::Disconnected)
+    });
+    let ended = table.connection(first).expect("kept");
+    assert!(ended.last_cause.is_some(), "{ended:#?}");
+    let conn = transport
+        .connect_with(&target(), &cancel, &ConnectOptions::new().after(first))
+        .expect("reconnect");
+    let again = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let entries = table.connections();
+    assert_eq!(entries.len(), 2);
+    let next = &entries[1];
+    assert!(next.id > first);
+    assert_eq!(next.previous, Some(first));
+    assert!(!next.previous_dropped);
+    assert_eq!(next.state, ConnectionState::Connected);
+    assert_eq!(next.history[0].state, ConnectionState::Reconnecting);
+    assert_eq!(next.links[0].link_id, again.link_id());
+    assert_ne!(again.link_id(), link_ids[0], "a new link, a new ID");
+}
+
+/// A refused handshake ends both entries with its reason: the near one as the peer's
+/// refusal, the far one as this end's.
+#[test]
+fn a_refused_handshake_ends_both_entries_with_the_reason() {
+    let far = ConnectionTable::default();
+    let server = echo_server_reporting(token('a'), Some(far.clone()));
+    let fake = FakeSsh::new("refused-entry");
+    fake.publish_record(server.addr.port(), token('b'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    assert!(dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).is_err());
+    wait_until("the near entry to end", || {
+        table
+            .connections()
+            .first()
+            .is_some_and(|e| e.state == ConnectionState::Disconnected)
+    });
+    assert_eq!(
+        table.connections()[0].last_cause,
+        Some(Cause::Rejected(RejectReason::TokenInvalid))
+    );
+    wait_until("the far entry to end", || {
+        far.connections()
+            .first()
+            .is_some_and(|e| e.state == ConnectionState::Disconnected)
+    });
+    assert_eq!(
+        far.connections()[0].last_cause,
+        Some(Cause::Refused(RejectReason::TokenInvalid))
+    );
 }
