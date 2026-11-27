@@ -347,8 +347,10 @@ impl Scene {
 
     /// Stops the SSH server and checks that no process of the test is left. A failed query
     /// does not cut the check short: every tracked PID is still checked, and what may still
-    /// run is ended, before the test fails. The scene counts as finished only after that, so
-    /// a panic before it (in the SSH server's stop) leaves the cleanup to the drop.
+    /// run is ended and checked again, before the test fails. The scene counts as finished
+    /// only when that check found all of them gone, so a panic before it (in the SSH server's
+    /// stop), or a process still running or not checkable after it, leaves the cleanup to the
+    /// drop.
     fn finish(mut self) {
         let sshd_pids = self.sshd.take().expect("sshd").stop();
         self.tracked.extend(sshd_pids);
@@ -401,7 +403,9 @@ impl Scene {
                 end_errors.len()
             ));
         }
-        self.finished = true;
+        // Finished only when every one of them is known to be gone. Otherwise the failure below
+        // leaves the scene unfinished, and its drop ends the tracked processes again in order.
+        self.finished = after_end.left.is_empty() && after_end.errors.is_empty();
         assert!(
             errors.is_empty(),
             "checking the processes of the test failed: {errors:?} (ending them: \
