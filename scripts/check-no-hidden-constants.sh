@@ -28,7 +28,8 @@
 #              그 밖의 토큰 묶음(예: += 1)  그 토큰 순서가 나오는 자리 안의 리터럴
 # 쓰이지 않은 allow 줄도 위반이다. 문자열·주석·#[cfg(test)] 항목·tests/ 폴더는 보지 않는다.
 # #[cfg(test)]로 선언한 파일 모듈(mod NAME;, #[path = "…"] 포함)과 그 아래 모듈 파일도 시험
-# 코드라 보지 않는다.
+# 코드라 보지 않는다. 다만 제품 모듈 선언으로도 닿는 파일은 본다. 인라인 모듈(mod x { … }) 안의
+# mod NAME;은 그 인라인 모듈의 경로(…/x/NAME.rs)로 푼다.
 
 set -euo pipefail
 
@@ -477,45 +478,58 @@ def code_keys(text):
 
 
 def file_mods(text):
-    """파일 안의 mod NAME; 선언 목록: (이름, #[cfg(test)]가 붙었는지, #[path] 값 또는 None)."""
+    """파일 안의 mod NAME; 선언 목록: (이름, 시험인지, #[path] 값 또는 None, 둘러싼 인라인 모듈
+    이름들). #[cfg(test)]가 붙었거나 #[cfg(test)] 인라인 모듈(mod x { … }) 안에 있으면 시험이다."""
     toks = tokenize(text)
-    out, i, n = [], 0, len(toks)
+    out, stack, depth, i, n = [], [], 0, 0, len(toks)
     while i < n:
-        start, is_test, path = i, False, None
-        while i + 1 < n and toks[i][1] == "#" and toks[i + 1][1] == "[":
-            close = matching_close(toks, i + 1)
-            inner = toks[i + 2:close]
+        is_test, path, j = False, None, i
+        while j + 1 < n and toks[j][1] == "#" and toks[j + 1][1] == "[":
+            close = matching_close(toks, j + 1)
+            inner = toks[j + 2:close]
             words = [t[1] for t in inner]
             if words == ["cfg", "(", "test", ")"]:
                 is_test = True
             if len(inner) == 3 and words[:2] == ["path", "="] and inner[2][0] == "str":
                 path = inner[2][1][1:-1]
-            i = close + 1
-        if i < n and toks[i][1] == "pub":
-            i += 1
-            if i < n and toks[i][1] == "(":
-                i = matching_close(toks, i) + 1
-        if (i + 2 < n and toks[i][:2] == ("ident", "mod") and toks[i + 1][0] == "ident"
-                and toks[i + 2][1] == ";"):
-            out.append((toks[i + 1][1], is_test, path))
-            i += 3
-        elif i == start:
-            i += 1
+            j = close + 1
+        if j < n and toks[j][1] == "pub":
+            j += 1
+            if j < n and toks[j][1] == "(":
+                j = matching_close(toks, j) + 1
+        if (j + 2 < n and toks[j][:2] == ("ident", "mod") and toks[j + 1][0] == "ident"
+                and toks[j + 2][1] in (";", "{")):
+            name, test = toks[j + 1][1], is_test or any(t for _, t, _ in stack)
+            if toks[j + 2][1] == ";":
+                out.append((name, test, path, tuple(m for m, _, _ in stack)))
+            else:
+                depth += 1
+                stack.append((name, test, depth))
+            i = j + 3
+            continue
+        if toks[i][1] == "{":
+            depth += 1
+        elif toks[i][1] == "}":
+            if stack and stack[-1][2] == depth:
+                stack.pop()
+            depth -= 1
+        i += 1
     return out
 
 
-def mod_file(decl, name, path, known):
-    """decl 파일의 mod name; 이 가리키는 파일(known 안에 있을 때만). #[path]는 decl의 폴더 기준,
-    없으면 lib.rs·main.rs·mod.rs는 그 폴더, 다른 파일은 그 파일 이름의 폴더 아래 name.rs나
-    name/mod.rs다."""
+def mod_file(decl, name, path, inline, known):
+    """decl 파일의 mod name; 이 가리키는 파일(known 안에 있을 때만). 모듈 폴더는 lib.rs·main.rs·
+    mod.rs면 그 폴더, 다른 파일은 그 파일 이름의 폴더이고, 인라인 모듈 inline 안이면 그 아래
+    인라인 모듈 이름의 폴더다. #[path]는 인라인 모듈 밖이면 decl의 폴더, 안이면 모듈 폴더
+    기준이고, 없으면 모듈 폴더 아래 name.rs나 name/mod.rs다."""
     d = os.path.dirname(decl)
-    if path is not None:
-        c = os.path.normpath(os.path.join(d, path)).replace(os.sep, "/")
-        return c if c in known else None
     base = os.path.basename(decl)
-    if base not in ("lib.rs", "main.rs", "mod.rs"):
-        d = os.path.join(d, base[:-len(".rs")])
-    for c in (os.path.join(d, name + ".rs"), os.path.join(d, name, "mod.rs")):
+    mod_dir = d if base in ("lib.rs", "main.rs", "mod.rs") else os.path.join(d, base[:-len(".rs")])
+    mod_dir = os.path.join(mod_dir, *inline)
+    if path is not None:
+        c = os.path.normpath(os.path.join(mod_dir if inline else d, path)).replace(os.sep, "/")
+        return c if c in known else None
+    for c in (os.path.join(mod_dir, name + ".rs"), os.path.join(mod_dir, name, "mod.rs")):
         c = c.replace(os.sep, "/")
         if c in known:
             return c
@@ -523,23 +537,25 @@ def mod_file(decl, name, path, known):
 
 
 def test_module_files(read, files):
-    """#[cfg(test)]로 선언한 파일 모듈과, 그 파일들이 다시 선언한 모듈 파일."""
+    """시험 선언으로만 닿는 모듈 파일. 어느 선언도 가리키지 않는 파일(크레이트 뿌리 등)에서
+    시험 아닌 선언만 따라 닿는 파일은 제품이고, 그 밖에 선언이 가리키는 파일은 시험이다."""
     known = set(files)
-    tests, queue = set(), []
+    edges, targets = {}, set()
     for f in files:
-        for name, is_test, path in file_mods(read(f)):
-            m = mod_file(f, name, path, known) if is_test else None
-            if m and m not in tests:
-                tests.add(m)
-                queue.append(m)
+        edges[f] = []
+        for name, is_test, path, inline in file_mods(read(f)):
+            m = mod_file(f, name, path, inline, known)
+            if m:
+                edges[f].append((m, is_test))
+                targets.add(m)
+    product = {f for f in files if f not in targets}
+    queue = list(product)
     while queue:
-        f = queue.pop()
-        for name, _, path in file_mods(read(f)):
-            m = mod_file(f, name, path, known)
-            if m and m not in tests:
-                tests.add(m)
+        for m, is_test in edges[queue.pop()]:
+            if not is_test and m not in product:
+                product.add(m)
                 queue.append(m)
-    return tests
+    return {f for f in files if f not in product}
 
 
 def collect(read, list_text, root_files):
@@ -729,6 +745,16 @@ def self_test():
                              "src/real.rs"}, 2)
     case("시험 모듈 파일의 허용 줄은 대상 밖",
          "target\tsrc\nallow\tsrc/u.rs\t8\t시험\n", {"src/lib.rs", "src/u.rs"}, 2)
+    files["src/lib.rs"] = "#[cfg(test)]\nmod shared;\nmod shared;\n"
+    files["src/shared.rs"] = "fn f() -> u8 { 9 }\n"
+    case("제품과 시험이 함께 가리키는 모듈 파일은 본다", "target\tsrc\n",
+         {"src/lib.rs", "src/shared.rs"}, 1)
+    files["src/lib.rs"] = ("#[cfg(test)]\nmod suite {\n    mod real;\n}\nmod real;\n"
+                           "mod outer {\n    #[cfg(test)]\n    mod t;\n}\n")
+    files["src/suite/real.rs"] = "fn f() -> u8 { 5 }\n"
+    files["src/outer/t.rs"] = "fn f() -> u8 { 4 }\n"
+    case("인라인 시험 모듈 아래 같은 이름은 그 인라인 모듈의 경로로 푼다", "target\tsrc\n",
+         {"src/lib.rs", "src/real.rs", "src/suite/real.rs", "src/outer/t.rs"}, 1)
     files["src/suffix.rs"] = "fn f() -> (u8, u32) { (0xFFu8, 0x1f32) }\n"
     case("접미 붙은 16진 리터럴", "target\tsrc\nallow\tsrc/suffix.rs\t0xFF\t바이트 끝\n"
          "allow\tsrc/suffix.rs\t0x1f32\t16진의 f32는 숫자\n", {"src/suffix.rs"}, 0)
