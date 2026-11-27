@@ -188,6 +188,79 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Rename `from` to `to` unless something is at `to` (`EEXIST`). Linux and Android: the
+/// `renameat2` syscall with `RENAME_NOREPLACE`, called directly because bionic has its wrapper
+/// only from API level 30.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both pointers are NUL-terminated strings owned by `from` and `to`, which live
+    // until the call returns; the kernel only reads them. The arguments match the kernel
+    // signature renameat2(int, const char *, int, const char *, unsigned int).
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result.is_negative() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a failed [`rename_noreplace`] only means it is not offered here: `ENOSYS` (a kernel
+/// before 3.15) or `EINVAL` (a file system without `RENAME_NOREPLACE`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn no_replace_unsupported(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL))
+}
+
+/// Rename `from` to `to` unless something is at `to` (`EEXIST`). macOS and iOS: `renamex_np`
+/// with `RENAME_EXCL` (macOS 10.12, iOS 10).
+#[cfg(target_vendor = "apple")]
+pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let (from, to) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both pointers are NUL-terminated strings owned by `from` and `to`, which live
+    // until the call returns; renamex_np only reads them.
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result.is_negative() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a failed [`rename_noreplace`] only means it is not offered here: `ENOTSUP` (a file
+/// system without `RENAME_EXCL`) or `EINVAL` (the flag is not known).
+#[cfg(target_vendor = "apple")]
+pub(super) fn no_replace_unsupported(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL))
+}
+
+/// Other Unix systems have no rename that refuses to replace here; the caller links instead.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+pub(super) fn rename_noreplace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+pub(super) fn no_replace_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
 pub(super) fn is_delete_pending(_pinned: &File, _error: &io::Error) -> bool {
     false
 }

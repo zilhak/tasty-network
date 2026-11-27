@@ -1,7 +1,10 @@
 use std::fs;
 
 use super::*;
-use crate::{UnsafeReason, secret_file::fault};
+use crate::{
+    UnsafeReason,
+    secret_file::{self, fault},
+};
 
 /// The key file parser with the default limit.
 fn parse(bytes: &[u8]) -> Result<[u8; 32], CorruptKind> {
@@ -158,10 +161,17 @@ fn protection_failure_writes_no_secret() {
     DeviceKey::load_or_create(dir.path()).unwrap();
 }
 
+/// A complete key file of the seed `[7; 32]`, as another creator would have published it.
+const OTHER_KEY: &[u8] = b"tasty-net-device-key-v1\n\
+0707070707070707070707070707070707070707070707070707070707070707\n";
+
 #[test]
 fn a_temp_file_that_cannot_be_removed_is_reported() {
+    // The temporary name is left only when the publication lost to another creator (or was a
+    // hard link), so the injected competitor makes it stay.
     let dir = tempfile::tempdir().unwrap();
     let error = {
+        fault::publish_first(OTHER_KEY);
         let _fail = fault::fail_discard();
         DeviceKey::load_or_create(dir.path()).unwrap_err()
     };
@@ -171,12 +181,204 @@ fn a_temp_file_that_cannot_be_removed_is_reported() {
     else {
         panic!("{error:?}");
     };
-    assert!(cause.is_none(), "the key itself was published: {error:?}");
+    assert!(cause.is_none(), "the key itself is in place: {error:?}");
     assert!(leftover.exists());
     assert_eq!(temps_in(dir.path()).len(), 1);
     let key = DeviceKey::load_or_create(dir.path()).unwrap();
-    let seed = hex::encode(&key.to_seed());
+    assert_eq!(key.to_seed(), [7u8; 32]);
+    let own_seed = parse(&fs::read(leftover).unwrap()).unwrap();
+    let seed = hex::encode(&own_seed);
     assert!(!format!("{error} {error:?}").contains(&seed));
+}
+
+#[test]
+fn a_key_published_meanwhile_is_kept_and_read() {
+    let dir = tempfile::tempdir().unwrap();
+    fault::publish_first(OTHER_KEY);
+    let key = DeviceKey::load_or_create(dir.path()).unwrap();
+    assert_eq!(key.to_seed(), [7u8; 32], "the existing key wins");
+    assert_eq!(
+        fs::read(dir.path().join(DEVICE_KEY_FILE)).unwrap(),
+        OTHER_KEY
+    );
+    assert!(temps_in(dir.path()).is_empty());
+}
+
+#[test]
+fn publication_never_replaces_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    fs::write(&target, b"first").unwrap();
+    let temp = dir.path().join("temp");
+    fs::write(&temp, b"second").unwrap();
+    let error = secret_file::publish_new(&temp, &target).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error:?}");
+    assert_eq!(fs::read(&target).unwrap(), b"first");
+    assert_eq!(fs::read(&temp).unwrap(), b"second", "the new file stays");
+}
+
+#[test]
+fn readers_never_see_a_partial_key() {
+    let max_len = IdentitySettings::default().max_secret_bytes();
+    for _ in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_KEY_FILE);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let barrier = std::sync::Barrier::new(5);
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                barrier.wait();
+                let mut seen = None;
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    // Any file at the name is complete: never Corrupt, never another key.
+                    match read(&path, max_len).unwrap() {
+                        Some(key) if seen.is_none() => seen = Some(key.id()),
+                        Some(key) => assert_eq!(Some(key.id()), seen),
+                        None => {}
+                    }
+                    if finished {
+                        return seen;
+                    }
+                }
+            });
+            let creators: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        DeviceKey::load_or_create(dir.path()).unwrap().id()
+                    })
+                })
+                .collect();
+            let ids: Vec<DeviceId> = creators.into_iter().map(|h| h.join().unwrap()).collect();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            let seen = reader.join().unwrap();
+            assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+            assert_eq!(seen, Some(ids[0]));
+        });
+    }
+}
+
+/// Linux, Android, macOS and iOS publish with a rename that refuses to replace and need no hard
+/// link; the hard link is only the fallback where that rename is not offered.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+mod no_replace_rename {
+    use super::*;
+
+    /// The errors with which the rename says it is not offered here.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const UNSUPPORTED: [i32; 2] = [libc::ENOSYS, libc::EINVAL];
+    #[cfg(target_vendor = "apple")]
+    const UNSUPPORTED: [i32; 2] = [libc::ENOTSUP, libc::EINVAL];
+
+    fn assert_publish_error(error: &IdentityError) {
+        assert!(
+            matches!(
+                error,
+                IdentityError::Io {
+                    op: FileOp::Publish,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_is_created_where_hard_links_are_denied() {
+        // The Android app sandbox answers link() with EACCES (SELinux).
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let _deny = fault::fail_link(libc::EACCES);
+            DeviceKey::load_or_create(dir.path()).unwrap()
+        };
+        let text = fs::read_to_string(dir.path().join(DEVICE_KEY_FILE)).unwrap();
+        assert_eq!(
+            text,
+            format!("tasty-net-device-key-v1\n{}\n", hex::encode(&key.to_seed()))
+        );
+        assert!(temps_in(dir.path()).is_empty());
+        assert_eq!(
+            DeviceKey::load_or_create(dir.path()).unwrap().id(),
+            key.id()
+        );
+    }
+
+    #[test]
+    fn eight_threads_without_hard_links_get_one_id() {
+        for _ in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            let ids: Vec<DeviceId> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..8)
+                    .map(|_| {
+                        s.spawn(|| {
+                            let _deny = fault::fail_link(libc::EACCES);
+                            barrier.wait();
+                            DeviceKey::load_or_create(dir.path()).unwrap().id()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+            assert!(temps_in(dir.path()).is_empty());
+        }
+    }
+
+    #[test]
+    fn without_the_rename_the_key_is_hard_linked() {
+        for code in UNSUPPORTED {
+            let dir = tempfile::tempdir().unwrap();
+            let key = {
+                let _unsupported = fault::fail_rename(code);
+                DeviceKey::load_or_create(dir.path()).unwrap()
+            };
+            assert!(temps_in(dir.path()).is_empty(), "{code}");
+            assert_eq!(
+                DeviceKey::load_or_create(dir.path()).unwrap().id(),
+                key.id()
+            );
+        }
+    }
+
+    #[test]
+    fn the_hard_link_fallback_never_replaces_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"first").unwrap();
+        let temp = dir.path().join("temp");
+        fs::write(&temp, b"second").unwrap();
+        let _unsupported = fault::fail_rename(UNSUPPORTED[0]);
+        let error = secret_file::publish_new(&temp, &target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+    }
+
+    #[test]
+    fn without_the_rename_and_hard_links_publication_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = {
+            let _unsupported = fault::fail_rename(UNSUPPORTED[1]);
+            let _deny = fault::fail_link(libc::EACCES);
+            DeviceKey::load_or_create(dir.path()).unwrap_err()
+        };
+        assert_publish_error(&error);
+        assert!(!dir.path().join(DEVICE_KEY_FILE).exists());
+        assert!(temps_in(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn another_rename_error_is_returned_without_a_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = {
+            let _denied = fault::fail_rename(libc::EACCES);
+            DeviceKey::load_or_create(dir.path()).unwrap_err()
+        };
+        assert_publish_error(&error);
+        assert!(!dir.path().join(DEVICE_KEY_FILE).exists(), "no fallback");
+        assert!(temps_in(dir.path()).is_empty());
+    }
 }
 
 #[test]

@@ -6,7 +6,8 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use crate::{
     error::{CorruptKind, FileOp, IdentityError, RandomError},
-    hex, secret_file,
+    hex,
+    secret_file::{self, Published},
     settings::IdentitySettings,
 };
 
@@ -26,11 +27,13 @@ impl DeviceKey {
     /// Load the key from `dir/device_key`, or create it when the file does not exist.
     ///
     /// Every instance that passes the same directory gets the same key, also when several
-    /// processes or threads create it at the same time: the new key is published with
-    /// `hard_link`, which never replaces an existing file, and every caller then reads the file
-    /// that won. A file in the wrong format is [`IdentityError::Corrupt`] and is left as it is;
-    /// a file that is not private is [`IdentityError::UnsafeFile`]. A failure of the OS random
-    /// source is [`IdentityError::Random`].
+    /// processes or threads create it at the same time: the complete new key is published
+    /// under its name with a rename that refuses to replace, or a hard link where that rename
+    /// is not offered (docs/design/identity.md "동시 첫 생성"), so an existing file is never
+    /// replaced, and every caller then reads the file that won. A file in the wrong format is
+    /// [`IdentityError::Corrupt`] and is left as it is; a file that is not private is
+    /// [`IdentityError::UnsafeFile`]. A failure of the OS random source is
+    /// [`IdentityError::Random`].
     ///
     /// The settings are the defaults; [`DeviceKey::load_or_create_with`] takes them.
     pub fn load_or_create(dir: &Path) -> Result<Self, IdentityError> {
@@ -58,20 +61,17 @@ impl DeviceKey {
         );
         text.push(b'\n');
         let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?.path;
-        match std::fs::hard_link(&temp, &path) {
-            // AlreadyExists: another creator won; its file is complete because it was linked
+        match secret_file::publish_new(&temp, &path) {
+            // Renamed: the temporary name is gone, nothing is left to remove.
+            Ok(Published::Renamed) => {}
+            // AlreadyExists: another creator won; its file is complete because it was published
             // after sync_all.
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
                 let cause = IdentityError::io(FileOp::Publish, &path, e);
                 return Err(secret_file::fail_with_cleanup(&temp, cause));
             }
-            _ => {}
+            Ok(Published::Linked) | Err(_) => discard_temp(&temp)?,
         }
-        secret_file::discard(&temp).map_err(|cleanup| IdentityError::Leftover {
-            leftover: temp.clone(),
-            cause: None,
-            cleanup,
-        })?;
         read(&path, max_len)?.ok_or_else(|| {
             IdentityError::io(
                 FileOp::Read,
@@ -118,6 +118,16 @@ impl fmt::Debug for DeviceKey {
             .field("id", &self.id())
             .finish_non_exhaustive()
     }
+}
+
+/// Remove the temporary name left after a hard link or a lost race. A failure is
+/// [`IdentityError::Leftover`] without a cause: the key itself is in place.
+fn discard_temp(temp: &Path) -> Result<(), IdentityError> {
+    secret_file::discard(temp).map_err(|cleanup| IdentityError::Leftover {
+        leftover: temp.to_path_buf(),
+        cause: None,
+        cleanup,
+    })
 }
 
 fn read(path: &Path, max_len: usize) -> Result<Option<DeviceKey>, IdentityError> {

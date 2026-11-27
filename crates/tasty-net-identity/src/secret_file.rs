@@ -17,7 +17,10 @@ use crate::error::{FileOp, IdentityError, UnsafeReason};
 use crate::settings::IdentitySettings;
 
 #[cfg(unix)]
-#[allow(unsafe_code, reason = "reads the effective user ID from libc")]
+#[allow(
+    unsafe_code,
+    reason = "reads the effective user ID and renames without replacing through libc"
+)]
 mod unix;
 #[cfg(unix)]
 use unix as os;
@@ -191,6 +194,49 @@ fn protect(file: &File) -> io::Result<()> {
         return Err(io::Error::other("injected protection failure"));
     }
     os::protect(file)
+}
+
+/// How [`publish_new`] gave the file its new name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Published {
+    /// Renamed: the temporary name is gone.
+    Renamed,
+    /// Hard-linked: the temporary name still exists and is the caller's to remove.
+    Linked,
+}
+
+/// Give the complete file `temp` the new name `target` without ever replacing a file that is
+/// at `target` (docs/design/identity.md "동시 첫 생성"). A rename that refuses to replace is
+/// tried first (Linux and Android `renameat2` with `RENAME_NOREPLACE`, macOS and iOS
+/// `renamex_np` with `RENAME_EXCL`); where the OS or the file system does not offer it, a hard
+/// link, which never replaces either. `AlreadyExists` means a file is at `target`, and `temp`
+/// is then still there. Any other error is returned as it is.
+pub(crate) fn publish_new(temp: &Path, target: &Path) -> io::Result<Published> {
+    #[cfg(test)]
+    fault::publish_competitor(target);
+    match rename_noreplace(temp, target) {
+        Ok(()) => Ok(Published::Renamed),
+        Err(error) if os::no_replace_unsupported(&error) => {
+            hard_link(temp, target).map(|()| Published::Linked)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn rename_noreplace(temp: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(code) = fault::rename_error() {
+        return Err(io::Error::from_raw_os_error(code));
+    }
+    os::rename_noreplace(temp, target)
+}
+
+fn hard_link(temp: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(code) = fault::link_error() {
+        return Err(io::Error::from_raw_os_error(code));
+    }
+    std::fs::hard_link(temp, target)
 }
 
 /// Remove a file this crate wrote. A file that is already gone counts as removed.
@@ -371,6 +417,58 @@ pub(crate) mod fault {
         if FOREIGN_REPLACE.with(Cell::get) {
             let foreign = super::write_temp(dir, name, b"foreign\n").unwrap();
             std::fs::rename(&foreign.path, target).unwrap();
+        }
+    }
+
+    thread_local! {
+        static RENAME_ERROR: Cell<Option<i32>> = const { Cell::new(None) };
+        static LINK_ERROR: Cell<Option<i32>> = const { Cell::new(None) };
+        static COMPETITOR: Cell<Option<&'static [u8]>> = const { Cell::new(None) };
+    }
+
+    pub(crate) struct ErrorGuard(&'static LocalKey<Cell<Option<i32>>>);
+
+    impl Drop for ErrorGuard {
+        fn drop(&mut self) {
+            self.0.with(|f| f.set(None));
+        }
+    }
+
+    pub(crate) fn rename_error() -> Option<i32> {
+        RENAME_ERROR.with(Cell::get)
+    }
+
+    pub(crate) fn link_error() -> Option<i32> {
+        LINK_ERROR.with(Cell::get)
+    }
+
+    /// Make the rename that refuses to replace fail with the OS error `code` on this thread
+    /// while the guard lives.
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows always links"))]
+    pub(crate) fn fail_rename(code: i32) -> ErrorGuard {
+        RENAME_ERROR.with(|f| f.set(Some(code)));
+        ErrorGuard(&RENAME_ERROR)
+    }
+
+    /// Make hard links fail with the OS error `code` on this thread while the guard lives (the
+    /// Android app sandbox refuses them with `EACCES`).
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows always links"))]
+    pub(crate) fn fail_link(code: i32) -> ErrorGuard {
+        LINK_ERROR.with(|f| f.set(Some(code)));
+        ErrorGuard(&LINK_ERROR)
+    }
+
+    /// Make the next publication on this thread find a private file with `contents` already at
+    /// its target, as if another creator had published it just before.
+    pub(crate) fn publish_first(contents: &'static [u8]) {
+        COMPETITOR.with(|f| f.set(Some(contents)));
+    }
+
+    pub(super) fn publish_competitor(target: &std::path::Path) {
+        if let Some(contents) = COMPETITOR.with(Cell::take) {
+            let dir = target.parent().unwrap();
+            let other = super::write_temp(dir, target.file_name().unwrap(), contents).unwrap();
+            std::fs::rename(&other.path, target).unwrap();
         }
     }
 

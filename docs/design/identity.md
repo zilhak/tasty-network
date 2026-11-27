@@ -55,9 +55,9 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 같은 디렉터리에서 두 프로세스(또는 스레드)가 동시에 처음 키를 만들어도 모두 같은 키를 읽어야 한다.
 
 1. 권한을 건 임시 파일(같은 디렉터리, 고유 이름, `create_new`로 만들어 기존 파일·심볼릭 링크를 따라가지 않음)에 키를 쓰고 `sync_all`한다.
-2. `std::fs::hard_link(임시, device_key)`로 게시한다. 대상이 있으면 실패하므로 덮어쓰지 않는다. `rename`은 대상이 있으면 바꿔 버릴 수 있어 쓰지 않는다.
-3. 게시에 성공해도, `AlreadyExists`여도, 그 밖의 오류여도 임시 이름은 지운다. 지우지 못하면 `IdentityError::Leftover`다(게시에 성공했으면 `cause`가 없다). `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
-4. 파일 시스템이 하드 링크를 지원하지 않으면 오류를 돌려준다(조용히 다른 방식으로 바꾸지 않는다).
+2. 임시 파일을 `device_key` 이름으로 게시한다. 대상이 있으면 실패하고 덮어쓰지 않는 방법만 쓴다(아래 "게시 방법"). 대상을 바꿔 버리는 보통 `rename`은 쓰지 않는다.
+3. 게시가 이름을 옮겼으면 임시 이름은 이미 없다. 하드 링크로 게시했거나, `AlreadyExists`였거나, 그 밖의 오류면 임시 이름을 지운다. 지우지 못하면 `IdentityError::Leftover`다(키가 제자리에 있으면, 곧 하드 링크 게시나 `AlreadyExists`면 `cause`가 없다). `AlreadyExists`면 이미 있는 파일을 위 "파일 권한"의 읽기 검사와 함께 읽는다. 쓰기 도중 실패하면 임시 파일을 지우고 오류를 돌려준다.
+4. OS와 파일 시스템이 덮어쓰지 않는 이름 옮기기도 하드 링크도 지원하지 않으면 `IdentityError::Io`(`FileOp::Publish`)를 돌려준다. 보통 `rename`이나 확인 뒤 쓰기처럼 덜 안전한 방식으로 조용히 바꾸지 않는다.
 
 알려진 한계(Unix): umask가 소유자 권한 비트를 빼면(예: 0277·0377·0400) 이 크레이트가 새 디렉터리·잠금 파일을 만든 직후 0700·0600을 걸기 전의 짧은 틈이 생긴다. 그 틈에 같은 경로로 들어온 다른 호출은 권한 오류로 실패할 수 있다. 오류 종류는 어디서 막히느냐에 따라 다르다.
 
@@ -67,6 +67,31 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 - 탐색 권한이 없는 새 키 디렉터리에서 기존 키를 읽을 때(0400): 키 파일을 검사할 수 없으므로 `IdentityError::UnsafeFile`(`UnsafeReason::CheckFailed`).
 
 비밀이 새거나 권한이 넓어지지는 않고, 다시 호출하면 성공한다. 소유자 비트를 빼는 umask는 일반적인 설정이 아니다.
+
+### 게시 방법
+
+| OS | 먼저 쓰는 방법 | 그 방법이 없을 때 |
+|---|---|---|
+| Linux·Android | `renameat2(AT_FDCWD, 임시, AT_FDCWD, device_key, RENAME_NOREPLACE)`를 `libc::syscall(SYS_renameat2, …)`로 부른다. bionic의 `renameat2` 래퍼는 API 30부터라 minSdk 29에서 쓸 수 없다. 번호는 libc 크레이트의 `SYS_renameat2`(aarch64 276, x86_64 316) | `ENOSYS`(커널 3.15 전)나 `EINVAL`(그 플래그를 모르는 파일 시스템)이면 하드 링크. 그 밖의 오류는 그대로 `Publish` 오류 |
+| macOS·iOS | `renamex_np(임시, device_key, RENAME_EXCL)`(macOS 10.12·iOS 10부터. Rust가 지원하는 가장 낮은 판에 이미 있다) | `ENOTSUP`(그 플래그를 지원하지 않는 파일 시스템)이나 `EINVAL`이면 하드 링크. 그 밖의 오류는 그대로 |
+| Windows | 하드 링크(`std::fs::hard_link` = `CreateHardLinkW`). 이전과 같다 | 해당 없음 |
+| 그 밖의 Unix | 하드 링크 | 해당 없음 |
+
+- 하드 링크 대신 이름 옮기기를 먼저 쓰는 이유: Android 앱 문맥은 앱 데이터 폴더(`app_data_file`)의 `link`를 SELinux로 거절한다(`avc denied { link }`, API 37 기기에서 확인). 앱이 쓸 수 있는 내부 저장소는 모두 같은 종류라 폴더를 바꿔서는 풀리지 않는다.
+- Android 10(API 29)의 앱 seccomp 필터는 `renameat2`를 허용한다(AOSP bionic android10-release `libc/SECCOMP_WHITELIST_COMMON.TXT`). API 30부터는 bionic의 시스템 호출 목록에 들어 있다. 허용 목록에 없는 시스템 호출은 `SECCOMP_RET_TRAP`(SIGSYS)이므로 이 확인이 필요했다.
+- 하드 링크로 넘어가는 경우는 3.15 전 커널이나 `RENAME_NOREPLACE`를 모르는 파일 시스템(예: 일부 네트워크·FUSE 파일 시스템, 지원 전 판의 f2fs)이다. 하드 링크도 같은 계약(대상이 있으면 실패)을 지키므로 원자성은 낮아지지 않는다. 그런 Android 기기에서는 SELinux가 하드 링크도 막으므로 키 생성이 `Publish` 오류로 실패한다(조용히 다른 방식으로 바꾸지 않는다).
+- Linux 데스크톱도 Android와 같은 경로를 탄다. 그래서 Linux 시험이 Android의 게시 경로를 그대로 돈다.
+
+고른 근거가 된 비교(계약: 기존 키를 덮어쓰지 않음, 동시 생성이 같은 키를 얻음, 반쯤 쓴 파일이 안 보임, 기존 설치의 경로·형식을 그대로 읽음, 데스크톱 동작·원자성 그대로, Android minSdk 29와 iOS에서도 같은 계약):
+
+| 후보 | 원자성 | 덮어쓰기 | 반쯤 쓴 파일 | OS 지원 | unsafe | 판정 |
+|---|---|---|---|---|---|---|
+| 하드 링크(이전 방식) | 원자적 | 안 함(`EEXIST`) | 안 보임(`sync_all` 뒤 게시) | Android 앱 폴더에서 SELinux로 거절 | 없음 | Windows·그 밖의 Unix와 대체 경로로만 쓴다 |
+| `renameat2(RENAME_NOREPLACE)` syscall | 원자적 | 안 함(`EEXIST`) | 안 보임 | Linux 3.15+, Android 10의 seccomp 허용. 파일 시스템이 모르면 `EINVAL` | 시스템 호출 한 곳 | Linux·Android에 고름 |
+| `renamex_np(RENAME_EXCL)` | 원자적 | 안 함(`EEXIST`) | 안 보임 | macOS 10.12+·iOS 10+. 파일 시스템이 모르면 `ENOTSUP` | 함수 호출 한 곳 | macOS·iOS에 고름. iOS 앱 컨테이너가 하드 링크를 허용하는지에 기대지 않는다 |
+| Windows `MoveFileExW`(`MOVEFILE_REPLACE_EXISTING` 없이) | 같은 볼륨에서 원자적 | 안 함(`ERROR_ALREADY_EXISTS`) | 안 보임 | Windows | 있음(`std::fs::rename`은 바꾸는 플래그를 켜므로 직접 불러야 함) | 고르지 않음. 하드 링크가 Windows에서 막히지 않으므로 바꿀 이유가 없다 |
+| 잠금 파일 + 있는지 확인 + 보통 `rename` | 잠금을 잡는 쪽끼리만 | 잠금 없이 게시하는 이전 판과 겹치면 덮어쓸 수 있음 | 안 보임 | `File::lock` 필요 | 없음 | 고르지 않음. 덮어쓰지 않음을 OS가 보장하지 않는다 |
+| 최종 이름을 `O_CREAT\|O_EXCL`로 만들고 바로 씀 | 생성만 원자적 | 안 함 | 보임. 쓰다 죽으면 영구히 반쯤 쓴 파일 | 모두 | 없음 | 고르지 않음. 반쯤 쓴 파일이 `Corrupt`로 남고, 이전 판은 쓰는 중인 파일을 손상으로 읽는다 |
 
 ## 설정값
 

@@ -286,6 +286,16 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
     }
 }
 
+/// Windows keeps the hard link (`CreateHardLinkW`, which never replaces): the caller links
+/// instead.
+pub(super) fn rename_noreplace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub(super) fn no_replace_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+}
+
 /// An open denied with ERROR_ACCESS_DENIED or ERROR_DELETE_PENDING, while the pinned handle of
 /// the same file reports DeletePending.
 pub(super) fn is_delete_pending(pinned: &File, error: &io::Error) -> bool {
