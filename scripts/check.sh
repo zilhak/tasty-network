@@ -51,7 +51,8 @@ cmd_shell() { run bash scripts/check-shell-assets.sh; }
 # transport의 의존 그래프(모든 target, 일반·빌드·dev 의존)를 패키지마다 한 줄로 찍는다.
 # 자체 시험이 이 함수를 가짜로 바꿔 끼운다.
 transport_tree() {
-    run cargo tree --locked -p tasty-net-transport "$@" --target all -e normal,build,dev \
+    # 출력을 읽으므로 색은 늘 끈다(CARGO_TERM_COLOR=always여도 평문).
+    run cargo tree --locked --color never -p tasty-net-transport "$@" --target all -e normal,build,dev \
         --prefix none -f '{p}'
 }
 # 그 그래프에 tasty-net-ssh가 있으면 yes, 없으면 no를 찍는다. cargo tree가 실패하거나 출력에

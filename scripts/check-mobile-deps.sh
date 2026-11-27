@@ -70,12 +70,13 @@ check_feature_args() {
 
 # cargo tree 호출. 자체 시험이 이 함수를 가짜로 바꿔 끼운다. --manifest-path가 있으면 그 폴더에서
 # 돌린다. cargo는 지금 폴더에서 .cargo/config.toml을 찾고 rustup도 지금 폴더로 툴체인을 고르므로,
-# 앱 작업 공간 밖에서 부르면 앱의 소스 대체·patch 설정과 고정 툴체인이 빠진다.
+# 앱 작업 공간 밖에서 부르면 앱의 소스 대체·patch 설정과 고정 툴체인이 빠진다. 출력을 읽으므로 색은
+# 늘 끈다(CARGO_TERM_COLOR=always에서 Cargo는 접힘 표시 (*)에 ANSI 색 코드를 붙인다).
 cargo_tree() {
     if [[ -n "$MANIFEST" ]]; then
-        (cd "$MANIFEST_DIR" && cargo tree --locked --manifest-path "$MANIFEST" "$@")
+        (cd "$MANIFEST_DIR" && cargo tree --locked --color never --manifest-path "$MANIFEST" "$@")
     else
-        cargo tree --locked "$@"
+        cargo tree --locked --color never "$@"
     fi
 }
 
@@ -362,7 +363,7 @@ self_test() {
 # 인자 처리와 cargo를 부르는 자리의 자체 시험: PATH 앞에 둔 가짜 cargo로 이 스크립트를 따로 돌린다.
 # 가짜 cargo는 FAKE_CARGO_PWD가 있으면 지금 폴더가 그 폴더일 때만 뿌리 줄을 찍고, 아니면 101로 끝난다.
 cli_self_test() {
-    local tmp failed=0 c name want pwd_mode args got want_pwd cdpath
+    local tmp failed=0 c name want pwd_mode args got want_pwd cdpath color
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/mobile-deps-test.XXXXXX")
     mkdir -p "$tmp/bin" "$tmp/app" "$tmp/elsewhere/inner"
     : >"$tmp/app/Cargo.toml"
@@ -374,14 +375,23 @@ if [[ -n "${FAKE_CARGO_PWD:-}" && "$(pwd -P)" != "$FAKE_CARGO_PWD" ]]; then
     exit 101
 fi
 echo 'app v0.1.0 (/w/app)|default'
+# 실제 Cargo처럼 색을 끄지 않으면(CARGO_TERM_COLOR=always) 접힘 표시에 ANSI 색 코드를 붙인다.
+if [[ " $* " == *" --color never "* ]]; then
+    echo 'dep v1.0.0|std (*)'
+elif [[ "${CARGO_TERM_COLOR:-}" == always ]]; then
+    printf 'dep v1.0.0|std \033[33m\033[2m(*)\033[39m\033[22m\n'
+else
+    echo 'dep v1.0.0|std (*)'
+fi
 FAKE
     chmod +x "$tmp/bin/cargo"
     # 이름#기대 종료 코드#cargo의 폴더 확인(app·inner-cdpath·없음)#인자(공백으로 나눈다, @APP@은 앱 Cargo.toml)
     # (inner-cdpath는 부르는 폴더 아래 inner/에서 돌아야 하고 CDPATH=.을 준다. CDPATH는 ./·../로
-    # 시작하지 않는 상대 경로에만 쓰인다)
+    # 시작하지 않는 상대 경로에만 쓰인다. color는 CARGO_TERM_COLOR=always를 준다)
     local cases=(
         "다른 폴더에서 부른 --manifest-path는 그 폴더에서 cargo를 돌린다#0#app#--manifest-path @APP@ --app --target aarch64-linux-android -p app"
         "상대 경로 --manifest-path도 그 폴더에서 돈다#0#app#--manifest-path ../app/Cargo.toml --target aarch64-linux-android -p app"
+        "CARGO_TERM_COLOR=always에서도 평문 출력을 읽는다#0#color#--target aarch64-linux-android -p app"
         "CDPATH=.에서도 상대 경로 --manifest-path가 그 폴더에서 돈다#0#inner-cdpath#--manifest-path inner/Cargo.toml --target aarch64-linux-android -p app"
         "없는 --manifest-path#2##--manifest-path ../none/Cargo.toml --target aarch64-linux-android -p app"
         "모바일 target 네 개#0##--target aarch64-linux-android --target x86_64-linux-android --target aarch64-apple-ios --target aarch64-apple-ios-sim -p app"
@@ -399,7 +409,8 @@ FAKE
     for c in "${cases[@]}"; do
         IFS='#' read -r name want pwd_mode args <<<"$c"
         args=${args//@APP@/$tmp/app/Cargo.toml}
-        want_pwd="" cdpath=""
+        want_pwd="" cdpath="" color=""
+        [[ "$pwd_mode" == color ]] && color=always
         [[ "$pwd_mode" == app ]] && want_pwd=$(cd "$tmp/app" && pwd -P)
         if [[ "$pwd_mode" == inner-cdpath ]]; then
             want_pwd=$(cd "$tmp/elsewhere/inner" && pwd -P)
@@ -407,7 +418,7 @@ FAKE
         fi
         got=0
         # shellcheck disable=SC2086  # 인자는 공백으로 나눈다
-        (cd "$tmp/elsewhere" && PATH="$tmp/bin:$PATH" FAKE_CARGO_PWD="$want_pwd" CDPATH="$cdpath" bash "$SELF" $args) \
+        (cd "$tmp/elsewhere" && PATH="$tmp/bin:$PATH" FAKE_CARGO_PWD="$want_pwd" CDPATH="$cdpath" CARGO_TERM_COLOR="$color" bash "$SELF" $args) \
             >/dev/null 2>&1 || got=$?
         if [[ "$got" == "$want" ]]; then
             echo "$TAG 자체 시험 통과: $name" >&2
