@@ -12,6 +12,10 @@
 //!   every stdin line `send <text>` as a Data frame on the newest such link, and prints what
 //!   comes back.
 //!
+//! A bulk channel under an attach link is accepted and every frame on it comes back unchanged.
+//! A request channel answers `system.info` with this end's instance ID and refuses every
+//! other method.
+//!
 //! A Detach frame ends a link. The server ends when its stdin closes or reads `quit`, and then
 //! retires its record. The stdin line `table` prints the connection table (one `ssh_inbound`
 //! entry per accepted channel) in the lines of `tasty_net_demo::table`.
@@ -34,6 +38,10 @@
 //! | `server send-failed error=<text>` | a `send` line found no held link, or writing failed |
 //! | `server link-ended client=<n> end=<detach\|failure name>` | the link's reader ended |
 //! | `server released client=<n> live=<links>` | the link's registration was dropped |
+//! | `server bulk-accepted peer=<instance>` | a bulk channel under an attach link is up |
+//! | `server bulk-ended end=<failure name or detach>` | the bulk channel's reader ended |
+//! | `server request method=<method>` | a request channel answered a request |
+//! | `server request-ended` | a request channel ended |
 //! | `server table ...` · `server conn ...` · `server link ...` · `server table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `server refused reason=<wire reason>` | this end refused a handshake |
 //! | `server handshake-failed error=<text>` | a handshake failed without a refusal |
@@ -53,9 +61,10 @@ use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken, DeviceKey, RecordPublication};
 use tasty_net_transport::{
-    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkRequest, ChannelReader,
+    AcceptConfig, Accepted, AttachRequest, AttemptCancel, BulkChannel, BulkRequest, ChannelReader,
     ChannelWriter, ConnectionTable, DomainAccept, DomainPolicy, DomainReject, HandshakeError, Link,
-    MAX_HANDSHAKE_LINE, RawChannel, RoleProposal, Side, accept_handshake, read_first_line,
+    MAX_HANDSHAKE_LINE, PeerInfo, RawChannel, RequestHandler, RequestServer, RoleProposal, Side,
+    accept_handshake, read_first_line,
 };
 
 const USAGE: &str =
@@ -139,8 +148,32 @@ impl DomainPolicy for LivePolicy {
         })
     }
 
-    fn accept_bulk(&self, _request: &BulkRequest<'_>) -> Result<DomainAccept, DomainReject> {
-        Err(DomainReject::new("demo.no_bulk"))
+    fn accept_bulk(&self, request: &BulkRequest<'_>) -> Result<DomainAccept, DomainReject> {
+        emit(&format!(
+            "server bulk-accepted peer={}",
+            request.parent().instance_id()
+        ));
+        Ok(DomainAccept::default())
+    }
+}
+
+/// The request methods of the demo: `system.info` gives this end's instance ID.
+struct Requests {
+    instance_id: String,
+}
+
+impl RequestHandler for Requests {
+    fn handle(
+        &self,
+        _peer: &PeerInfo,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        emit(&format!("server request method={method}"));
+        match method {
+            "system.info" => Ok(serde_json::json!({ "instance_id": self.instance_id })),
+            _ => Err(serde_json::json!({ "code": "demo.unknown_method" })),
+        }
     }
 }
 
@@ -295,9 +328,8 @@ fn serve(stream: TcpStream, config: &AcceptConfig, instance_id: &str, held: &Hel
     };
     match accept_handshake(channel, &line, Vec::new(), config, &AttemptCancel::new()) {
         Ok(Accepted::Link(link)) => serve_link(*link, instance_id, held),
-        Ok(Accepted::Bulk(_) | Accepted::Request(_)) => {
-            emit("server handshake-failed error=only attach links are served");
-        }
+        Ok(Accepted::Bulk(bulk)) => serve_bulk(bulk),
+        Ok(Accepted::Request(server)) => serve_requests(server, instance_id),
         Err(HandshakeError::Refused(reason)) => {
             emit(&format!("server refused reason={}", reason.as_str()));
         }
@@ -419,4 +451,37 @@ fn echo(mut reader: ChannelReader, writer: &ChannelWriter) -> String {
             Err(error) => return failure_name(error.failure()).into(),
         }
     }
+}
+
+/// Writes every frame of a bulk channel back until its reader ends.
+fn serve_bulk(mut bulk: BulkChannel) {
+    let end = loop {
+        match bulk.reader.read_frame() {
+            Ok(frame) if frame.tag == StreamTag::Detach => {
+                bulk.reader.finish();
+                break "detach".to_string();
+            }
+            Ok(frame) => {
+                if let Err(error) = bulk.writer.write_frame(frame.tag, &frame.payload) {
+                    break format!("write_failed:{}", error.kind());
+                }
+            }
+            Err(error) => break failure_name(error.failure()).to_string(),
+        }
+    };
+    emit(&format!("server bulk-ended end={end}"));
+}
+
+/// Answers the requests of a request channel until it ends.
+fn serve_requests(server: RequestServer, instance_id: &str) {
+    let handler = Requests {
+        instance_id: instance_id.to_string(),
+    };
+    if let Err(error) = server.serve(&handler) {
+        emit(&format!(
+            "server request-failed error={}",
+            error_chain(&error)
+        ));
+    }
+    emit("server request-ended");
 }

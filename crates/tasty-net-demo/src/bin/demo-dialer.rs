@@ -21,6 +21,13 @@
 //! `--instance-id` replaces the instance ID (default `demo-dialer-<pid>`); a test gives the
 //! server's to check that a self attach is refused.
 //!
+//! `--channels` opens, on every link that comes up, a bulk channel under it and a request
+//! channel through the same tunnel, and calls `system.info` once on the request channel. Both
+//! stay open until the link ends. `--also-holder dialer|acceptor` opens a second attach link
+//! with that holder through the same tunnel once the first one is up, so one tunnel carries
+//! links of both directions; it is not opened again after a loss, and its events carry the
+//! `extra-` prefix.
+//!
 //! The link's channels hold the `-L` tunnel, and the tunnel's `ssh` child is ended when the
 //! last of them goes. On `quit` the stdin thread holds the writer while it detaches, so the
 //! dialer waits for that thread to finish (bounded by the write timeout and the drain cap)
@@ -37,6 +44,7 @@
 //!             [--ssh-port <port>] [--identity <file>] [--option Key=Value]...
 //!             [--ssh <program>] [--verify-host-keys] [--read-timeout-ms <ms>]
 //!             [--holder dialer|acceptor] [--instance-id <id>]
+//!             [--channels] [--also-holder dialer|acceptor]
 //! ```
 //!
 //! Events on stdout (one per line):
@@ -48,9 +56,14 @@
 //! | `dialer attempt n=<n>` | an attempt starts |
 //! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded |
 //! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
-//! | `dialer control <json>` | a Control frame arrived (the server's snapshot) |
-//! | `dialer echo <text>` | a Data frame arrived on a link this end holds |
-//! | `dialer served <text>` | a Data frame arrived on a link this end provides, and went back |
+//! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered |
+//! | `dialer channels-failed error=<text>` | `--channels`: opening them failed; the link stays |
+//! | `dialer extra-connected holder=<holder> link_id=<hex>` | `--also-holder`: the second link is up |
+//! | `dialer extra-failed error=<text>` | `--also-holder`: the second link did not come up |
+//! | `dialer extra-ended end=<name>` | `--also-holder`: the second link's reader ended |
+//! | `dialer control <json>` | a Control frame arrived (the server's snapshot); `dialer extra-control` on the second link |
+//! | `dialer echo <text>` | a Data frame arrived on a link this end holds; `dialer extra-echo` on the second link |
+//! | `dialer served <text>` | a Data frame arrived on a link this end provides, and went back; `dialer extra-served` on the second link |
 //! | `dialer send-failed error=<text>` | a `send` line found no link, or writing failed |
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
@@ -66,6 +79,7 @@ use std::io::BufRead;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tasty_net_demo::table::table_lines;
@@ -74,14 +88,16 @@ use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, ChannelReader, ChannelWriter, ConnectOptions, ConnectionId, ConnectionTable,
-    DialConfig, EndReason, HandshakeError, Holder, LinkCloser, LinkId, RedialError, Redialer,
-    RedialerConfig, Side, SshTransport, Transport, dial_handshake,
+    AttemptCancel, BulkChannel, ChannelReader, ChannelWriter, ConnectOptions, ConnectionId,
+    ConnectionTable, DialConfig, EndReason, HandshakeError, Holder, Link, LinkCloser, LinkId,
+    LinkTimeouts, RedialError, Redialer, RedialerConfig, RequestClient, Side, SshTransport,
+    Transport, dial_handshake, dial_request,
 };
 
 const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remote path> \
 [--ssh-port <port>] [--identity <file>] [--option Key=Value]... [--ssh <program>] \
-[--verify-host-keys] [--read-timeout-ms <ms>] [--holder dialer|acceptor] [--instance-id <id>]";
+[--verify-host-keys] [--read-timeout-ms <ms>] [--holder dialer|acceptor] [--instance-id <id>] \
+[--channels] [--also-holder dialer|acceptor]";
 
 /// Exit code when a refusal ends the dialer without another attempt.
 const EXIT_REJECTED: u8 = 3;
@@ -107,14 +123,19 @@ fn main() -> ExitCode {
 /// The test hook of the module text.
 const HOLD_WRITER_ENV: &str = "TASTY_NET_DEMO_HOLD_WRITER_MS";
 
+/// The writer and closer of a link that is up.
+type LinkSlot = Mutex<Option<(ChannelWriter, LinkCloser)>>;
+
 /// What the stdin thread and the connection loop share.
 #[derive(Default)]
 struct Shared {
     quit: AtomicBool,
     /// How long the stdin thread keeps the writer after its Detach ([`HOLD_WRITER_ENV`]).
     hold_writer: Duration,
-    /// The writer and closer of the link that is up.
-    link: Mutex<Option<(ChannelWriter, LinkCloser)>>,
+    /// The link that is up.
+    link: LinkSlot,
+    /// The second link of `--also-holder`.
+    extra: LinkSlot,
     /// The attempt in progress, or the redial waiting for its next one, so `quit` can cancel
     /// it.
     attempt: Mutex<Option<AttemptCancel>>,
@@ -141,10 +162,25 @@ struct Dial {
     transport: SshTransport,
     target: SshTarget,
     config: DialConfig,
+    timeouts: LinkTimeouts,
+    instance_id: String,
+}
+
+fn parse_holder(args: &Args, name: &str) -> Result<Option<Holder>, tasty_net_demo::UsageError> {
+    args.value(name)
+        .map(|text| {
+            Holder::parse(text).ok_or_else(|| {
+                tasty_net_demo::UsageError(format!("--{name} needs dialer or acceptor"))
+            })
+        })
+        .transpose()
 }
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let args = Args::parse(std::env::args_os().skip(1), &["verify-host-keys"])?;
+    let args = Args::parse(
+        std::env::args_os().skip(1),
+        &["verify-host-keys", "channels"],
+    )?;
     args.check_known(&[
         "destination",
         "record",
@@ -156,13 +192,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         "read-timeout-ms",
         "holder",
         "instance-id",
+        "channels",
+        "also-holder",
     ])?;
-    let holder = match args.value("holder") {
-        None => Holder::Dialer,
-        Some(text) => Holder::parse(text).ok_or_else(|| {
-            tasty_net_demo::UsageError("--holder needs dialer or acceptor".into())
-        })?,
-    };
+    let holder = parse_holder(&args, "holder")?.unwrap_or(Holder::Dialer);
+    let also = parse_holder(&args, "also-holder")?;
+    let open_channels = args.flag("channels");
     let target = SshTarget {
         destination: args.required("destination")?.to_string(),
         ssh_port: args
@@ -207,6 +242,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         transport,
         target,
         config: DialConfig::new(key, instance_id.clone()).with_timeouts(timeouts),
+        timeouts,
+        instance_id,
     };
 
     emit(&format!("dialer pid={}", std::process::id()));
@@ -334,21 +371,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let provides = roles.provider == Side::Dialer;
         // The provider sends the descriptor first (O2), before any stdin line can.
         if provides {
-            let descriptor = Snapshot {
-                instance_id: instance_id.clone(),
-                client_id: link.client_id().unwrap_or(0),
-            }
-            .to_json();
-            if let Err(error) = writer.write_frame(StreamTag::Control, descriptor.as_bytes()) {
-                emit(&format!("dialer send-failed error={error}"));
-            }
+            send_descriptor(&writer, &dial.instance_id, &link, "");
         }
         *lock(&shared.link) = Some((writer, link.closer()));
         if shared.quit.load(Ordering::SeqCst) {
-            detach(&shared, Duration::ZERO);
+            detach(&shared.link, Duration::ZERO);
         }
-        let end = read_link(reader, provides.then_some(&*shared));
+        let channels = open_channels.then(|| channels(&link, &dial)).flatten();
+        let extra = also.and_then(|holder| open_extra(&shared, &dial, holder));
+        let end = read_link(reader, provides.then_some(&shared.link), "");
         lock(&shared.link).take();
+        // Everything on the tunnel goes with the link, so a lost tunnel ends with it.
+        end_extra(&shared, extra);
+        drop(channels);
         drop(link);
         if shared.quit.load(Ordering::SeqCst) {
             break;
@@ -374,6 +409,126 @@ fn entry_of(table: &ConnectionTable, link: LinkId) -> Option<ConnectionId> {
         .into_iter()
         .find(|entry| entry.links.iter().any(|l| l.link_id == link))
         .map(|entry| entry.id)
+}
+
+/// Sends the descriptor of a link this end provides: a snapshot with this instance's ID.
+fn send_descriptor(writer: &ChannelWriter, instance_id: &str, link: &Link, prefix: &str) {
+    let descriptor = Snapshot {
+        instance_id: instance_id.to_string(),
+        client_id: link.client_id().unwrap_or(0),
+    }
+    .to_json();
+    if let Err(error) = writer.write_frame(StreamTag::Control, descriptor.as_bytes()) {
+        emit(&format!("dialer {prefix}send-failed error={error}"));
+    }
+}
+
+/// The bulk and request channels of `--channels`, held until the link ends.
+struct Channels {
+    _bulk: BulkChannel,
+    _requests: RequestClient,
+}
+
+/// Opens a bulk channel under `link` and a request channel through the same tunnel, and calls
+/// `system.info` once. Says why on stdout when one of them fails.
+fn channels(link: &Link, dial: &Dial) -> Option<Channels> {
+    let failed = |error: &dyn std::error::Error| {
+        emit(&format!(
+            "dialer channels-failed error={}",
+            error_chain(error)
+        ));
+    };
+    let bulk = link.open_bulk(None).map_err(|e| failed(&e)).ok()?;
+    let cancel = AttemptCancel::new();
+    let requests = dial
+        .transport
+        .connect(&dial.target, &cancel)
+        .map_err(HandshakeError::Connect)
+        .and_then(|conn| dial_request(conn, &dial.config, &cancel))
+        .map_err(|e| failed(&e))
+        .ok()?;
+    let answer = requests
+        .call(
+            "system.info",
+            serde_json::json!({}),
+            dial.timeouts.handshake_timeout,
+        )
+        .map_err(|e| failed(&e))
+        .ok()?;
+    emit(&format!(
+        "dialer channels-open instance={}",
+        answer
+            .get("instance_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-")
+    ));
+    Some(Channels {
+        _bulk: bulk,
+        _requests: requests,
+    })
+}
+
+/// Opens the second link of `--also-holder` through the same tunnel and reads it on its own
+/// thread until it ends. Says why on stdout when it does not come up.
+fn open_extra(shared: &Arc<Shared>, dial: &Dial, holder: Holder) -> Option<JoinHandle<()>> {
+    let cancel = AttemptCancel::new();
+    let result = dial
+        .transport
+        .connect(&dial.target, &cancel)
+        .map_err(HandshakeError::Connect)
+        .and_then(|conn| dial_handshake(conn, &dial.config, holder, None, &cancel));
+    let mut link = match result {
+        Ok(link) => link,
+        Err(error) => {
+            emit(&format!(
+                "dialer extra-failed error={}",
+                error_chain(&error)
+            ));
+            return None;
+        }
+    };
+    let (reader, writer) = link.take_ordered()?;
+    let provides = link.peer().roles()?.provider == Side::Dialer;
+    if provides {
+        send_descriptor(&writer, &dial.instance_id, &link, "extra-");
+    }
+    emit(&format!(
+        "dialer extra-connected holder={} link_id={}",
+        holder.as_str(),
+        link.link_id()
+    ));
+    *lock(&shared.extra) = Some((writer, link.closer()));
+    if shared.quit.load(Ordering::SeqCst) {
+        detach(&shared.extra, Duration::ZERO);
+    }
+    let shared = Arc::clone(shared);
+    let spawned = std::thread::Builder::new()
+        .name("extra".into())
+        .spawn(move || {
+            let end = read_link(reader, provides.then_some(&shared.extra), "extra-");
+            lock(&shared.extra).take();
+            drop(link);
+            emit(&format!("dialer extra-ended end={end}"));
+        });
+    match spawned {
+        Ok(thread) => Some(thread),
+        Err(error) => {
+            emit(&format!("dialer extra-failed error={error}"));
+            None
+        }
+    }
+}
+
+/// Ends the second link when it is still up and waits for its thread.
+fn end_extra(shared: &Shared, extra: Option<JoinHandle<()>>) {
+    if let Some((_, closer)) = lock(&shared.extra).take() {
+        closer.force_close(EndReason::Forced);
+    }
+    if let Some(thread) = extra
+        && thread.join().is_err()
+    {
+        emit("dialer extra-panicked");
+    }
 }
 
 /// Waits up to `limit` for the stdin thread to end. Says so on stdout when it does not.
@@ -415,23 +570,24 @@ fn side_name(side: Side) -> &'static str {
 }
 
 /// Prints every frame of the link until it ends. Returns the end's name. With `provider`
-/// (this end provides the workspace), every Data frame goes back through the link's writer.
-fn read_link(mut reader: ChannelReader, provider: Option<&Shared>) -> &'static str {
+/// (this end provides the workspace), every Data frame goes back through the writer in that
+/// slot. `prefix` goes before the event names (`extra-` for the second link).
+fn read_link(mut reader: ChannelReader, provider: Option<&LinkSlot>, prefix: &str) -> &'static str {
     loop {
         match reader.read_frame() {
             Ok(frame) => match frame.tag {
                 StreamTag::Data => {
                     let text = String::from_utf8_lossy(&frame.payload);
                     match provider {
-                        None => emit(&format!("dialer echo {text}")),
-                        Some(shared) => {
-                            let sent = lock(&shared.link).as_ref().map(|(writer, _)| {
+                        None => emit(&format!("dialer {prefix}echo {text}")),
+                        Some(slot) => {
+                            let sent = lock(slot).as_ref().map(|(writer, _)| {
                                 writer.write_frame(StreamTag::Data, &frame.payload)
                             });
                             match sent {
-                                Some(Ok(())) => emit(&format!("dialer served {text}")),
+                                Some(Ok(())) => emit(&format!("dialer {prefix}served {text}")),
                                 Some(Err(error)) => {
-                                    emit(&format!("dialer send-failed error={error}"));
+                                    emit(&format!("dialer {prefix}send-failed error={error}"));
                                 }
                                 // Detaching: the writer is gone.
                                 None => {}
@@ -441,7 +597,7 @@ fn read_link(mut reader: ChannelReader, provider: Option<&Shared>) -> &'static s
                 }
                 StreamTag::Control => {
                     emit(&format!(
-                        "dialer control {}",
+                        "dialer {prefix}control {}",
                         String::from_utf8_lossy(&frame.payload)
                     ));
                 }
@@ -492,14 +648,15 @@ fn read_stdin(shared: &Shared) {
     if let Some(cancel) = lock(&shared.attempt).as_ref() {
         cancel.cancel();
     }
-    detach(shared, shared.hold_writer);
+    detach(&shared.link, shared.hold_writer);
+    detach(&shared.extra, Duration::ZERO);
 }
 
-/// Sends Detach on the link that is up and ends its writer; the server answers by ending its
+/// Sends Detach on the link in `slot` and ends its writer; the server answers by ending its
 /// side, which ends the reader. When the drain cap runs out the link is closed both ways.
 /// The writer goes `hold` after that (the test hook).
-fn detach(shared: &Shared, hold: Duration) {
-    let taken = lock(&shared.link).take();
+fn detach(slot: &LinkSlot, hold: Duration) {
+    let taken = lock(slot).take();
     if let Some((mut writer, closer)) = taken {
         if writer.write_frame(StreamTag::Detach, &[]).is_err() {
             closer.force_close(EndReason::Forced);
