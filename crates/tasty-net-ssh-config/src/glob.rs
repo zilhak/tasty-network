@@ -594,8 +594,11 @@ mod tests {
     fn path_length_bounds() {
         const PART: usize = 100;
         const WIDE: usize = 200;
-        let root =
-            std::env::temp_dir().join(format!("tasty-ssh-config-glen-{}", std::process::id()));
+        // The canonical folder: a symbolic link on the way (macOS `/var`) would count in the
+        // length the kernel checks.
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("tasty-ssh-config-glen-{}", std::process::id()));
         // Folders deep enough that a name of more than `PART` bytes reaches the bound.
         let mut dir = root.clone();
         while PATH_MAX - NAME_ROOM - (dir.as_os_str().len() + 1) > WIDE {
