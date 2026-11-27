@@ -83,7 +83,7 @@
 | `RawChannel.verdict: Option<ListenerVerdict>`(`src/channel.rs:65`), `with_verdict`(`:186`), `listener_absent`(`:194`–`:199`) | `#[cfg(feature = "ssh")]`로 뺀다. 판정을 쓰는 곳은 SSH 채널뿐이다 |
 | `handshake.rs` `explain()`(`:611`–`:629`, 꺼진 빌드의 것은 `:631`–`:635`)의 `tasty_net_ssh::connection_closed_error` 호출 | 그 함수는 `io::Error::new(UnexpectedEof, …)` 하나다(`tasty-net-ssh/src/listener.rs:118`). `explain`의 SSH 판정 갈래만 cfg로 빼고, 꺼진 빌드에서는 받은 오류를 그대로 돌려준다. 닫힘 오류 자체는 handshake가 직접 만든다 |
 | 통합 시험 `tests/ssh.rs`(`:18`에서 `SpawnHook`·`SshLauncher` 사용) | 파일 첫 줄 `#![cfg(feature = "system-ssh")]` |
-| 통합 시험 `tests/connection_table.rs`(`:10`에서 `tasty_net_ssh` 사용) | SSH 항목을 만드는 도우미와 시험에 `#[cfg(feature = "system-ssh")]`. 이 파일의 시험 여섯은 모두 SSH 항목을 쓰고 메모리 전송 시험은 없으므로, 파일 첫머리의 `#![cfg(feature = "system-ssh")]` 하나로 둔다. 메모리 전송·루프백 시험(`tests/handshake.rs`·`loopback.rs`·`settings.rs`)은 남는다. `cargo test -p tasty-net-transport --no-default-features`가 SSH 없이 돈다 |
+| 통합 시험 `tests/connection_table.rs`(SSH 항목은 `mod ssh`가 만든다) | 시험마다 항목을 이 빌드에 있는 방법 모두로 만든다: 받은 루프백 채널의 handshake 중 dialer가 닫는 `ssh_inbound` 항목(SSH 없음, 늘)과, `system-ssh`에서 `ssh`를 띄우지 못하는 SSH 시도(`mod ssh`, `#[cfg(feature = "system-ssh")]`). ID 비재사용·끊긴 항목 상한·이벤트 lag·이력 상한은 두 방법 모두에서 같은 단언으로 돌고, 재연결 사슬(`previous`)·포트 발견 phase와 원인·역할 반전은 SSH 방법에서만 본다. `cargo test -p tasty-net-transport --no-default-features`가 SSH 없이 공통 시험을 돈다 |
 | SSH 전송만 부르는 내부 도우미: `RawChannel::with_entry`·`with_joined`·`wrap_control`(`src/channel.rs`), `Joined::new`·`abandoned`, `EntryRef::choose_path`·`phase`(`src/connection_table/mod.rs`) | `#[cfg(feature = "ssh")]`로 뺀다. 꺼진 빌드에서 부르는 곳이 없다(workspace의 `dead_code = "deny"`). 다른 전송이 쓰게 되면 그 작업이 cfg를 거둔다 |
 
 ### 공통 항목과 백엔드 전용 항목
