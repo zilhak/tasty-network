@@ -145,7 +145,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 - 대상의 `ConnectTimeout`은 OpenSSH의 시간 형식으로 읽는다. 숫자 뒤 단위 `s`·`m`·`h`·`d`·`w`(대소문자 무시)를 이어 붙일 수 있고(`1m30s`), 단위 없는 숫자는 초다. `none`은 OpenSSH가 정하지 않은 것으로 보므로(뒤에 오는 값이 정한다) 대상이 정하지 않은 것으로 다룬다. 다른 `ConnectTimeout`이 없으면 런처 값과 그 출처(`default`·`configured`)가 보인다. 읽지 못하는 값은 `applied_options`에 대상 문자열 그대로 `target`으로 보이고, 발견 분류는 런처 값을 쓴다. 0은 OpenSSH가 기한 없음으로 보므로 발견 분류도 걸린 시간으로 시간 초과를 정하지 않는다.
 - 나머지 키는 런처 하나에 하나다. 대상마다 다른 값이 필요하면 소비자가 대상마다 런처를 만든다.
 - 아래 표의 키 사이 관계(단계 상한이 `ConnectTimeout`보다 길다, 전체 예산이 단계 상한의 세 배보다 짧다)는 기본값을 고른 근거다. 다른 값을 설정하면 그 관계는 깨질 수 있다. 그래도 코드는 단계마다 `min(단계 상한, 남은 전체 예산)`으로 자르므로, 단계 상한이 `ConnectTimeout`보다 짧으면 ssh가 자기 기한에 닿기 전에 단계 상한이 자르고(`TimedOut`), 전체 예산이 길면 Auto의 세 단계가 각자 단계 상한까지 쓸 수 있다.
-- 간격 키가 기한·상한 키보다 커도 기한과 상한이 이긴다. 모든 대기는 남은 기한으로 자르고, 터널 준비 확인은 기한이 지난 뒤 새로 접속을 시도하지 않는다. `discovery.poll_min`이 `discovery.poll_max`보다 크면 `poll_max`에서 시작한다. `backoff.initial`이 `backoff.max_delay`보다 크면 처음 대기와 `reset` 뒤 대기도 `max_delay`다. 리스너 판정은 거절 줄이 온 시각을 기록해 `tunnel.verdict_grace`가 지난 뒤 온 줄은 세지 않는다. 키 사이의 관계로 설정을 거절하지는 않는다.
+- 간격 키가 기한·상한 키보다 커도 기한과 상한이 이긴다. 모든 대기는 남은 기한으로 자르고, 터널 준비 확인은 기한이 지난 뒤 새로 접속을 시도하지 않는다. `discovery.poll_min`이 `discovery.poll_max`보다 크면 `poll_max`에서 시작한다. `backoff.initial`이 `backoff.max_delay`보다 크면 처음 대기와 `reset` 뒤 대기도 `max_delay`다. 리스너 판정은 거절 줄의 수만 세고, 기한 안에 본 증가만 센다. 키 사이의 관계로 설정을 거절하지는 않는다.
 
 | 키 | 기본 | 범위 | 근거 |
 |---|---|---|---|
@@ -166,7 +166,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | `tunnel.stderr_drain_limit` | 500 ms | 0 ms ~ 10 s | 준비 전에 끝난 ssh의 마지막 stderr(인증 거절 등)를 오류보다 먼저 넘기려고 기다리는 시간. ssh가 끝나면 파이프가 닫히지만 파이프를 물려받은 다른 프로세스(ProxyCommand 등)가 열어 둘 수 있어 상한을 둔다 |
 | `tunnel.stderr_drain_poll` | 10 ms | 1 ms ~ 1 s | 그 대기 간격 |
 | `tunnel.stderr_max_line` | 1 KiB | 256 B ~ 64 KiB | 터널 stderr 한 줄을 판정할 때 남기는 길이. 판정할 줄(채널 연결 거절, `ForkAfterAuthentication` 거절)은 짧다. 잘린 줄로는 옵션 거절을 판정하지 않는다 |
-| `tunnel.verdict_grace` | 500 ms | 0 ms ~ 10 s | 채널이 응답 없이 끊긴 뒤 ssh의 거절 줄을 기다리는 시간. ssh는 거절 줄을 쓰고 로컬 연결을 닫지만, 호출자가 중계 스레드보다 먼저 실패를 볼 수 있다 |
+| `tunnel.verdict_grace` | 500 ms | 0 ms ~ 10 s | 채널이 응답 없이 끊긴 뒤 ssh의 거절 줄을 기다리는 시간. ssh는 거절 줄을 쓰고 로컬 연결을 닫지만, 호출자가 중계 스레드보다 먼저 실패를 볼 수 있다. 판정은 기한 안에 본 수의 증가만 센다. 마지막 잠은 남은 시간으로 잘리고, 기한 직후 한 번 보는 순간에 도착한 줄은 세지 않는다. 기록은 수 하나라 터널이 오래 살아도 크기가 같다 |
 | `tunnel.verdict_poll` | 20 ms | 1 ms ~ 1 s | 그 대기 간격 |
 | `backoff.initial` | 500 ms | 1 ms ~ 1 min | `Backoff`의 처음 대기이자 `reset`이 돌아가는 값 |
 | `backoff.multiplier` | 2 | 1 ~ 10 | 단계마다 대기에 곱하는 수 |

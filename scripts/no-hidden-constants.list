@@ -242,6 +242,7 @@ allow	crates/tasty-net-ssh/src/lib.rs	's' => 1	OpenSSH 시간 형식의 단위 s
 allow	crates/tasty-net-ssh/src/lib.rs	add(&mut digits, 1)	OpenSSH 시간 형식: 단위 없는 끝 숫자는 초
 allow	crates/tasty-net-ssh/src/lib.rs	i32::MAX	OpenSSH 시간 형식: convtime이 받는 최대 초(INT_MAX)
 allow	crates/tasty-net-ssh/src/lib.rs	=> Duration::MAX	OpenSSH: ConnectTimeout 0은 기한 없음이라 시간으로 분류하지 않는다
+allow	crates/tasty-net-ssh/src/listener.rs	connect_failures.fetch_add(1,	거절 줄 하나를 센다(수를 하나씩 올린다)
 allow	crates/tasty-net-ssh/src/listener.rs	[0u8; 4096]	파이프를 한 번에 읽는 버퍼(읽는 단위이지 상한이 아니다)
 allow	crates/tasty-net-ssh/src/listener.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
 allow	crates/tasty-net-ssh/src/listener.rs	baseline = 0	시험용 판정 핸들: 판정 전에 본 거절 줄은 없다

@@ -15,8 +15,8 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::settings::SshSettings;
@@ -64,34 +64,22 @@ pub(crate) fn is_fork_option_refusal(line: &str) -> bool {
 /// What the stderr relay of one tunnel marked.
 #[derive(Debug, Default)]
 pub(crate) struct StderrMarks {
-    /// When each channel connect failure line came, in order ([`is_channel_connect_failure`]).
-    /// A verdict needs the time, so a line that came after its grace does not count.
-    connect_failures: Mutex<Vec<Instant>>,
+    /// How many channel connect failure lines came ([`is_channel_connect_failure`]). A count,
+    /// so the marks of a tunnel keep the same size however long it lives.
+    connect_failures: AtomicU64,
     /// ssh refused `ForkAfterAuthentication` ([`is_fork_option_refusal`]).
     pub(crate) fork_option_refused: AtomicBool,
 }
 
 impl StderrMarks {
-    fn failure_times(&self) -> MutexGuard<'_, Vec<Instant>> {
-        // A list of times holds no invariant a panic could break.
-        self.connect_failures
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Records a channel connect failure line that came now.
+    /// Records a channel connect failure line.
     pub(crate) fn record_connect_failure(&self) {
-        self.failure_times().push(Instant::now());
+        self.connect_failures.fetch_add(1, Ordering::AcqRel);
     }
 
     /// How many channel connect failure lines came so far.
-    pub(crate) fn connect_failures(&self) -> usize {
-        self.failure_times().len()
-    }
-
-    /// When the failure line after the first `seen` lines came, if it came.
-    fn connect_failure_after(&self, seen: usize) -> Option<Instant> {
-        self.failure_times().get(seen).copied()
+    pub(crate) fn connect_failures(&self) -> u64 {
+        self.connect_failures.load(Ordering::Acquire)
     }
 }
 
@@ -230,7 +218,7 @@ pub(crate) fn relay_stderr(
 /// `baseline` and decides.
 fn judge_after_failure(
     marks: &StderrMarks,
-    baseline: usize,
+    baseline: u64,
     failure: &(dyn Error + 'static),
     timing: VerdictTiming,
 ) -> bool {
@@ -242,15 +230,19 @@ fn judge_after_failure(
     listener_absent(refused, dropped)
 }
 
-/// Whether a failure line after `baseline` came by `deadline`, looking every `poll` (cut to the
-/// time left). A line that came after `deadline` does not count, even when it is already there
-/// when this looks.
-fn refused_until(marks: &StderrMarks, baseline: usize, deadline: Instant, poll: Duration) -> bool {
+/// Whether a failure line after `baseline` was seen by `deadline`, looking every `poll` (cut to
+/// the time left). Only a count seen at a moment not after `deadline` counts: a line that comes
+/// right after the deadline, even before the last look, does not.
+fn refused_until(marks: &StderrMarks, baseline: u64, deadline: Instant, poll: Duration) -> bool {
     loop {
-        if let Some(at) = marks.connect_failure_after(baseline) {
-            return at <= deadline;
+        // The count first, then the time: a count read before a time not after the deadline was
+        // there by the deadline.
+        let seen = marks.connect_failures();
+        let now = Instant::now();
+        if now <= deadline && seen > baseline {
+            return true;
         }
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(now);
         if left.is_zero() {
             return false;
         }
@@ -271,7 +263,7 @@ pub struct ListenerVerdict {
     remote_port: u16,
     marks: Arc<StderrMarks>,
     /// Failure lines seen before this verdict was taken.
-    baseline: usize,
+    baseline: u64,
     timing: VerdictTiming,
 }
 
@@ -356,14 +348,14 @@ mod tests {
 
     fn judge_after_failure(
         marks: &StderrMarks,
-        baseline: usize,
+        baseline: u64,
         failure: &(dyn Error + 'static),
     ) -> bool {
         super::judge_after_failure(marks, baseline, failure, VerdictTiming::new(&defaults()))
     }
 
     /// Marks with `n` failure lines.
-    fn marks_with(n: usize) -> StderrMarks {
+    fn marks_with(n: u64) -> StderrMarks {
         let marks = StderrMarks::default();
         for _ in 0..n {
             marks.record_connect_failure();
@@ -603,19 +595,45 @@ mod tests {
         assert!(took < Duration::from_millis(600), "{took:?}");
     }
 
-    /// A line that came after the grace does not count, even when it is there when the verdict
-    /// looks; one that came in time does.
+    /// A line recorded after the deadline does not count, even when it is there at the first
+    /// look. The deadline is well in the past when the line comes, so this does not depend on
+    /// how fine the clock is.
     #[test]
-    fn a_line_after_the_grace_does_not_count() {
+    fn a_line_after_the_deadline_does_not_count() {
         let poll = Duration::from_millis(20);
-        let before = Instant::now();
-        let marks = marks_with(1);
-        assert!(!refused_until(&marks, 0, before, poll));
+        let marks = marks_with(0);
+        let deadline = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        marks.record_connect_failure();
+        assert!(!refused_until(&marks, 0, deadline, poll));
+        // The same line counts for a deadline still ahead, and for none that it was there before.
         assert!(refused_until(
             &marks,
             0,
             Instant::now() + Duration::from_millis(100),
             poll
         ));
+        assert!(!refused_until(
+            &marks,
+            1,
+            Instant::now() + Duration::from_millis(30),
+            poll
+        ));
+    }
+
+    /// A line that comes while the verdict waits counts.
+    #[test]
+    fn a_line_during_the_grace_counts() {
+        let marks = Arc::new(marks_with(0));
+        let relay = {
+            let marks = Arc::clone(&marks);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                marks.record_connect_failure();
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(refused_until(&marks, 0, deadline, Duration::from_millis(5)));
+        relay.join().expect("relay thread");
     }
 }
