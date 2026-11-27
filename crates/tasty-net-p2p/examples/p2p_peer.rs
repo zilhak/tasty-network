@@ -12,7 +12,8 @@
 //!
 //! `--timeout` bounds the whole run (default 60 s); until then the dialer asks again while the
 //! server does not know the peer yet. Each side prints one result line on stdout and exits
-//! with 0 on success.
+//! with 0 on success. The line names the path (the candidate kind that worked), the local and
+//! remote addresses and the server.
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -23,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_p2p::{
-    P2pCloseReason, P2pConfig, P2pConnectError, P2pConnection, P2pEndpoint, PairingList,
-    RendezvousServer,
+    P2pCloseReason, P2pConfig, P2pConnectError, P2pConnection, P2pConnectionInfo, P2pEndpoint,
+    PairingList, RendezvousServer,
 };
 
 const USAGE: &str = "usage: p2p_peer id --key-dir <dir>
@@ -110,6 +111,8 @@ fn listen(a: &Args, end: Instant) -> Result<String, String> {
         .accept_timeout(Some(left))
         .map_err(|e| format!("accept: {e}"))?;
     let left = end.saturating_duration_since(Instant::now());
+    // Read the information while the connection is up; the dialer closes it after the echo.
+    let info = conn.info();
     let mut s = conn
         .accept_bi(Some(left))
         .map_err(|e| format!("accept stream: {e}"))?;
@@ -124,7 +127,7 @@ fn listen(a: &Args, end: Instant) -> Result<String, String> {
         "echoed {} bytes from {} via {}",
         got.len(),
         conn.remote_device_id(),
-        describe(&conn)
+        describe(&conn, info)
     );
     ep.close();
     Ok(line)
@@ -169,18 +172,31 @@ fn dial(a: &Args, peer: DeviceId, end: Instant) -> Result<String, String> {
             back.len()
         ));
     }
-    let line = format!("echo ok with {peer} via {}", describe(&conn));
+    let line = format!("echo ok with {peer} via {}", describe(&conn, conn.info()));
     conn.close(P2pCloseReason::Closed);
     ep.close();
     Ok(line)
 }
 
-/// The candidate kind and address of a connection.
-fn describe(conn: &P2pConnection) -> String {
-    match conn.info().and_then(|i| i.remote_candidate) {
-        Some(c) => format!("{} {}", c.kind.name(), c.addr),
-        None => conn.remote_address().to_string(),
-    }
+/// The connection information worth a line: the path (the candidate kind that worked), the
+/// address pair and the server that introduced the two devices.
+fn describe(conn: &P2pConnection, info: Option<P2pConnectionInfo>) -> String {
+    let Some(i) = info else {
+        return format!("remote={}", conn.remote_address());
+    };
+    let path = i.remote_candidate.map_or("unknown", |c| c.kind.name());
+    let local = match (i.local_ip, i.local_bind) {
+        (Some(ip), _) => ip.to_string(),
+        (None, Some(bind)) => bind.to_string(),
+        (None, None) => "unknown".to_owned(),
+    };
+    let show = |a: Option<SocketAddr>| a.map_or_else(|| "unknown".to_owned(), |a| a.to_string());
+    format!(
+        "path={path} local={local} local_reflexive={} remote={} server={}",
+        show(i.local_reflexive),
+        show(i.remote_addr),
+        show(i.rendezvous.map(|r| r.addr)),
+    )
 }
 
 fn run() -> Result<String, String> {
