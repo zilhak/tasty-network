@@ -127,6 +127,17 @@ fn count_to(log: &[P2pEvent], to: AttemptPhase) -> usize {
         .count()
 }
 
+/// Registered, and the server has taken this device's NAT report. The device's status shows
+/// its judgement only after the report is queued on its coordination stream, and the server
+/// reads that stream in order, so the answer to a request sent after the status shows it (a
+/// device nobody registered: `PeerNotFound`) comes after the server took the report. Until
+/// then the server sees the device's mapping as `unknown` and picks `mode = all` for it.
+fn reported(d: &Device) {
+    registered(d);
+    let nobody = tasty_net_identity::DeviceKey::from_seed([250; 32]).id();
+    assert_eq!(error(d.ep.connect(nobody)), P2pConnectError::PeerNotFound);
+}
+
 fn two_nats(w: &World, sa: NatSpec, sb: NatSpec) -> (support::NatHandle, support::NatHandle) {
     (w.net.nat(1, sa), w.net.nat(2, sb))
 }
@@ -205,8 +216,8 @@ fn dependent_pair_tries_host_candidates_only() {
     let a = device(&n, 2, 1, &s, settings(&[]));
     let b = device(&n, 3, 2, &s, settings(&[]));
     pair(&a, &b);
-    registered(&a);
-    registered(&b);
+    reported(&a);
+    reported(&b);
     let (ca, cb) = connect(&a, &b);
     echo(&ca, &cb);
     let ia = ca.info().unwrap();
@@ -227,8 +238,8 @@ fn dependent_pair_without_host_path_is_unsupported() {
     let a = device(&n1, 2, 1, &s, settings(&[]));
     let b = device(&n2, 2, 2, &s, settings(&[]));
     pair(&a, &b);
-    registered(&a);
-    registered(&b);
+    reported(&a);
+    reported(&b);
     // No address passes the host rule, so the server refuses at once.
     assert_eq!(error(a.ep.connect(b.id())), P2pConnectError::NatUnsupported);
     assert_eq!(sent_to_ip(&a, n2.public_ip()), 0);
@@ -247,8 +258,8 @@ fn host_only_pair(attempts: u64) -> (World, TestServer, Device, Device) {
     let a = device(&n, 2, 1, &s, st());
     let b = device(&n, 3, 2, &s, st());
     pair(&a, &b);
-    registered(&a);
-    registered(&b);
+    reported(&a);
+    reported(&b);
     (w, s, a, b)
 }
 
