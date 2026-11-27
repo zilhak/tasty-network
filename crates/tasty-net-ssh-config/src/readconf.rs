@@ -480,8 +480,7 @@ enum CidrList {
     Valid(Option<String>),
     /// `Invalid network list`.
     Invalid,
-    /// Valid for one C library and invalid for another, or an entry depends on the
-    /// interfaces ([`misc::Reading::Scoped`]); the reason.
+    /// Valid for one C library and invalid for another; the reason.
     Unknown(String),
 }
 
@@ -511,21 +510,19 @@ fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
             None => return CidrList::Invalid,
         }
     }
-    // `Some(valid)` for one library, `None` when an entry depends on the interfaces and no
-    // entry is invalid.
-    let verdict = |libc: misc::Libc| -> Option<bool> {
-        let mut scoped = false;
-        for (_, mask, readings) in &entries {
+    // Whether one library takes every entry. A Darwin entry scoped by its second word is
+    // judged with the address `getaddrinfo` gives; the interface is only needed to write it.
+    let verdict = |libc: misc::Libc| -> bool {
+        entries.iter().all(|(_, mask, readings)| {
             match readings.iter().find(|(l, _)| *l == libc).map(|(_, r)| *r) {
-                Some(misc::Reading::Address(ip)) if cidr_fits(ip, *mask) => {}
-                Some(misc::Reading::Scoped) => scoped = true,
-                _ => return Some(false),
+                Some(misc::Reading::Address(ip)) => cidr_fits(ip, *mask),
+                Some(misc::Reading::Scoped(given)) => cidr_fits(std::net::IpAddr::V6(given), *mask),
+                _ => false,
             }
-        }
-        (!scoped).then_some(true)
+        })
     };
-    let verdicts: Vec<Option<bool>> = libcs.iter().map(|l| verdict(*l)).collect();
-    if verdicts.iter().all(|v| *v == Some(false)) {
+    let verdicts: Vec<bool> = libcs.iter().map(|l| verdict(*l)).collect();
+    if verdicts.iter().all(|v| !*v) {
         return CidrList::Invalid;
     }
     let why: Vec<String> = entries
@@ -533,7 +530,7 @@ fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
         .filter(|(_, _, r)| misc::settled(r).is_none())
         .map(|(addr, _, r)| misc::unsettled(addr, r))
         .collect();
-    if verdicts.iter().all(|v| *v == Some(true)) {
+    if verdicts.iter().all(|v| *v) {
         return CidrList::Valid((!why.is_empty()).then(|| why.join("; ")));
     }
     CidrList::Unknown(why.join("; "))
@@ -2415,9 +2412,15 @@ mod tests {
             ("127.1/33", ['I'; 4]),
             // Invalid for every library: the list is invalid.
             ("127.0/8,192.0.2.1/24", ['I'; 4]),
-            // Darwin takes the second word as the interface.
-            ("fe80:1::/16", ['I', 'I', '?', '?']),
-            ("fe80:1::/32", ['V', 'V', '?', '?']),
+            // Darwin takes the second word as the interface and clears it in the address
+            // it gives, which the list is judged with.
+            ("fe80:1::/16", ['I', 'I', 'V', '?']),
+            ("fe80:1::/32", ['V'; 4]),
+            ("fe80:1::/129", ['I'; 4]),
+            ("fe80:1::1/16", ['I'; 4]),
+            // A multicast address keeps its second word.
+            ("ff02:1::/16", ['I'; 4]),
+            ("ff02:1::/32", ['V'; 4]),
             ("fe80::/10", ['V'; 4]),
         ];
         let letter = |c: CidrList| match c {

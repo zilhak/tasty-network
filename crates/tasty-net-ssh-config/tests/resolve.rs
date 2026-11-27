@@ -1077,3 +1077,24 @@ fn a_unicast_prefix_based_multicast_host_is_kept_on_every_os() {
     assert!(r.refusal.is_none(), "{:?}", r.refusal);
     assert_eq!(r.host, "ff32:40:fe80::1234");
 }
+
+#[test]
+fn a_scoped_link_local_list_entry_is_judged_with_the_address_given() {
+    // Too long a mask, and host bits left after Darwin clears the second word: list errors
+    // on every OS, though the other criterion is false.
+    for list in ["fe80:1::/129", "fe80:1::1/16"] {
+        let r = resolve(
+            &format!("Match originalhost other localnetwork {list}\n"),
+            "example",
+        );
+        assert_eq!(
+            refusal_kind(&r),
+            Some(RefusalKind::ConfigError),
+            "{list}: {:?}",
+            r.refusal
+        );
+    }
+    // Valid for every library: the block does not apply and nothing is refused.
+    let r = resolve("Match host nomatch localnetwork fe80:1::/32\n", "example");
+    assert!(r.refusal.is_none(), "{:?}", r.refusal);
+}

@@ -698,8 +698,11 @@ pub(crate) enum Reading {
     /// Darwin: an IPv6 link-local address, or a node- or link-local multicast address, whose
     /// second word is not zero. Libinfo takes that word as the interface index without a `%`
     /// (`si_addrinfo_v6`), and `getnameinfo` writes the address with the name of that
-    /// interface or fails when there is none, so the result depends on the interfaces.
-    Scoped,
+    /// interface or fails when there is none, so the text depends on the interfaces. The
+    /// address is the one `getaddrinfo` gives: a link-local address with its second word
+    /// cleared, a multicast address as written. `addr_pton` judges a list entry with it
+    /// and needs no interface.
+    Scoped(Ipv6Addr),
 }
 
 impl Reading {
@@ -707,7 +710,7 @@ impl Reading {
         match self {
             Reading::Address(a) => numeric_text(a),
             Reading::Name => "not an address".to_string(),
-            Reading::Scoped => "an address scoped by its second word".to_string(),
+            Reading::Scoped(_) => "an address scoped by its second word".to_string(),
         }
     }
 }
@@ -729,7 +732,7 @@ pub(crate) fn readings(name: &str, family: Family) -> Vec<(Libc, Reading)> {
 /// or one depends on the interfaces.
 pub(crate) fn settled(readings: &[(Libc, Reading)]) -> Option<Option<IpAddr>> {
     let ((_, first), rest) = readings.split_first()?;
-    if *first == Reading::Scoped || rest.iter().any(|(_, r)| r != first) {
+    if matches!(first, Reading::Scoped(_)) || rest.iter().any(|(_, r)| r != first) {
         return None;
     }
     Some(match first {
@@ -781,14 +784,27 @@ const MC_FLAGS_UNICAST_BASED: u16 = 0x0030;
 /// The user-space macros of xnu `bsd/netinet6/in6.h` leave out of the link-local multicast
 /// test a unicast-prefix-based address (flags `0x30`, `ff32:40:fe80::1234`), whose second
 /// word is the prefix length; the node-local test has no flags condition.
-fn embeds_scope(a: Ipv6Addr) -> bool {
-    let [w0, w1, ..] = a.segments();
+///
+/// The address `getaddrinfo` gives for such an `a` ([`Reading::Scoped`]), or `None`.
+fn darwin_scoped(a: Ipv6Addr) -> Option<Ipv6Addr> {
+    let mut words = a.segments();
+    let [w0, w1, ..] = words;
+    if w1 == 0 {
+        return None;
+    }
+    if a.is_unicast_link_local() {
+        // `si_addrinfo_v6` clears the word it took as the interface.
+        if let Some(w) = words.get_mut(1) {
+            *w = 0;
+        }
+        return Some(Ipv6Addr::from(words));
+    }
     let scope = w0 & MC_SCOPE_MASK;
     let node_local = a.is_multicast() && scope == MC_SCOPE_NODE_LOCAL;
     let link_local = a.is_multicast()
         && w0 & MC_FLAGS_MASK != MC_FLAGS_UNICAST_BASED
         && scope == MC_SCOPE_LINK_LOCAL;
-    w1 != 0 && (a.is_unicast_link_local() || node_local || link_local)
+    (node_local || link_local).then_some(a)
 }
 
 /// How `libc` reads `name` ([`numeric_host`]).
@@ -811,8 +827,10 @@ pub(crate) fn numeric_host_of(libc: Libc, name: &str, family: Family) -> Reading
         return Reading::Name;
     };
     match family {
-        Family::Any | Family::Inet6 if libc == Libc::Darwin && embeds_scope(a) => Reading::Scoped,
-        Family::Any | Family::Inet6 => Reading::Address(IpAddr::V6(a)),
+        Family::Any | Family::Inet6 => match darwin_scoped(a) {
+            Some(given) if libc == Libc::Darwin => Reading::Scoped(given),
+            _ => Reading::Address(IpAddr::V6(a)),
+        },
         // Only glibc takes an IPv4-mapped IPv6 address for IPv4. Darwin returns `-1`
         // (`EAI_NONAME`), bionic reads only IPv4 for IPv4.
         Family::Inet if libc == Libc::Glibc => a

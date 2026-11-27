@@ -1266,7 +1266,7 @@ mod tests {
         match r {
             Reading::Address(a) => numeric_text(a),
             Reading::Name => "-".to_string(),
-            Reading::Scoped => "refused".to_string(),
+            Reading::Scoped(_) => "refused".to_string(),
         }
     }
 
