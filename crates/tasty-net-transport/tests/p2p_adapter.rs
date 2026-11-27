@@ -945,6 +945,41 @@ fn a_channel_asked_for_in_an_async_task_is_refused() {
     drop(link);
 }
 
+/// A connect whose channel on the shared connection fails for a reason other than the
+/// connection's end (here a call in an async task; a thread that cannot start is the same path)
+/// returns that error: it punches no new connection and starts no entry for one.
+#[test]
+fn a_failed_channel_on_a_live_shared_connection_is_the_connects_error() {
+    let pair = Pair::start(92, Mode::Echo);
+    let link = pair.link(None).expect("link");
+    // The dial retried while the peer was not registered may have left ended entries.
+    let entries = pair.table_a.connections().len();
+    assert_eq!(live(&pair.table_a).len(), 1);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let refused = runtime.block_on(async {
+        pair.transport
+            .connect_with(&pair.b.id(), &AttemptCancel::new(), &ConnectOptions::new())
+    });
+    assert!(
+        matches!(
+            &refused,
+            Err(ConnectError::P2p(tasty_net_p2p::P2pError::InAsyncContext))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        pair.table_a.connections().len(),
+        entries,
+        "a new entry was started: {:?}",
+        pair.table_a.connections()
+    );
+    assert_eq!(pair.connections().0, 1);
+    pair.connect(&AttemptCancel::new(), &ConnectOptions::new())
+        .expect("a channel on the shared connection outside the async task");
+    assert_eq!(pair.table_a.connections().len(), entries);
+    drop(link);
+}
+
 /// A listener asked for a channel in an async task hands out none and keeps the waiting one:
 /// the refusal of its connection check there is no end of the connection.
 #[test]

@@ -173,6 +173,28 @@ impl P2pTransport {
         Some(open_entry(table, Side::Dialer, options.previous, peer))
     }
 
+    /// A new channel on the shared connection to `peer`, if there is one. A shared connection
+    /// that closed meanwhile is passed over for a new one (`None`); any other failure of the
+    /// open (the attempt's cancel, a call in an async task, no thread for the open) is the
+    /// attempt's, as it is for [`EndpointHandle::connect_more`].
+    fn reuse(
+        &self,
+        peer: &DeviceId,
+        cancel: &AttemptCancel,
+    ) -> Result<Option<(RawChannel, Arc<ConnState>)>, ConnectError> {
+        let Some(state) = self.shared_conn(peer) else {
+            return Ok(None);
+        };
+        match open_channel(&state, cancel) {
+            Ok(channel) => Ok(Some((channel, state))),
+            Err(error) if passed_over(&state, cancel) => {
+                tracing::debug!(%error, "a shared P2P connection closed: a new one is punched");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Punches a new connection to `peer`, registered with `cancel` until it is shared.
     /// `entry` follows the attempt while it runs.
     fn new_conn(
@@ -341,6 +363,12 @@ fn connect_error(error: P2pError, cancel: &AttemptCancel) -> ConnectError {
     }
 }
 
+/// Whether a failed open on the shared connection `state` passes it over for a new one: the
+/// connection closed (or this end closes it), and the attempt goes on.
+fn passed_over(state: &ConnState, cancel: &AttemptCancel) -> bool {
+    !cancel.is_cancelled() && (!state.is_usable() || state.is_closed())
+}
+
 /// The error of a channel on a connection that closed.
 fn closed() -> ConnectError {
     ConnectError::Io(io::Error::new(
@@ -391,10 +419,7 @@ impl Transport for P2pTransport {
         if *target == self.endpoint.id() {
             return Err(ConnectError::SelfAttach);
         }
-        // A shared connection that closes meanwhile is passed over for a new one.
-        let reused = self
-            .shared_conn(target)
-            .and_then(|state| Some((open_channel(&state, cancel).ok()?, state)));
+        let reused = self.reuse(target, cancel)?;
         if cancel.is_cancelled() {
             return Err(ConnectError::Cancelled);
         }
@@ -421,22 +446,28 @@ impl Transport for P2pTransport {
                 let made =
                     self.new_conn(*target, cancel, entry.clone())
                         .and_then(|(state, owned)| {
-                            let opened = state
-                                .acquire()
-                                .ok_or_else(closed)
-                                .and_then(|hold| Ok((open_channel(&state, cancel)?, hold)));
-                            let error = match opened {
-                                Ok((channel, hold)) => {
-                                    return Ok((channel, state, owned, Some(hold)));
-                                }
-                                Err(error) => error,
+                            // The hold stays while the first stream's failure is read: its end
+                            // would close the connection here, and that close is no code of
+                            // the peer's.
+                            let hold = state.acquire();
+                            let error = match &hold {
+                                Some(_) => match open_channel(&state, cancel) {
+                                    Ok(channel) => return Ok((channel, state, owned, hold)),
+                                    Err(error) => error,
+                                },
+                                None => closed(),
                             };
                             // The peer closed the new connection with a code before its first
                             // stream (a refused pairing): the first channel is a closed one, so
                             // its handshake ends with that code (docs/design/handshake.md "흐름
-                            // (P2P 경로)").
-                            match state.conn.close_reason() {
-                                Some(reason) if !cancel.is_cancelled() => {
+                            // (P2P 경로)"). A close of this end (the attempt's cancel) is not.
+                            let peer_code = state
+                                .conn
+                                .close_reason()
+                                .filter(|_| !cancel.is_cancelled() && !state.closed_here());
+                            drop(hold);
+                            match peer_code {
+                                Some(reason) => {
                                     let channel =
                                         state.entered(stream::closed(&state.conn, reason));
                                     Ok((channel, state, owned, None))

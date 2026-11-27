@@ -190,6 +190,11 @@ impl ConnState {
         !channels.closing && !channels.ended && self.conn.close_reason().is_none()
     }
 
+    /// Whether this end closes or closed the connection.
+    pub(crate) fn closed_here(&self) -> bool {
+        lock(&self.channels).closing
+    }
+
     /// The connection's thread saw the connection end: wakes the drain timer, which then
     /// lets the connection go, and no later channel end starts one.
     fn mark_ended(&self) {
