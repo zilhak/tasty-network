@@ -213,6 +213,46 @@ fn a_random_source_failure_is_an_error_and_writes_nothing() {
     assert!(crate::ConnectionToken::issue().is_err());
 }
 
+/// Check that `seed` gives the device ID `id` and the signature `signature` of `message`, in
+/// both directions through the text forms.
+fn assert_vector(seed: &str, id: &str, message: &[u8], signature: &str) {
+    let key = DeviceKey::from_seed(hex::decode::<32>(seed.as_bytes()).unwrap());
+    assert_eq!(key.id().to_string(), id);
+    assert_eq!(key.id(), id.parse::<DeviceId>().unwrap());
+    assert_eq!(key.sign(message).to_string(), signature);
+    assert!(
+        id.parse::<DeviceId>()
+            .unwrap()
+            .verify(message, &signature.parse().unwrap())
+    );
+}
+
+/// The device ID and signature of a fixed seed. The expected values were taken from the
+/// iroh-base 1.5.0 implementation (develop 132a3d6), so a change of the ed25519 implementation
+/// that alters key files, device IDs or signatures fails here.
+#[test]
+fn a_fixed_seed_keeps_its_id_and_signature() {
+    assert_vector(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        b"tasty-net fixed vector",
+        "4780ca113a06f7f67815d44feda1eac6a036f4fce368744ec9e57d2b6d61f150\
+         1c9e883874f22c6a99aa53e9aa5db6bc9dd08e1f754cc0d4ca1b2de2f0c72601",
+    );
+}
+
+/// RFC 8032 section 7.1, TEST 1 (empty message).
+#[test]
+fn rfc8032_test_1() {
+    assert_vector(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        b"",
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155\
+         5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+    );
+}
+
 #[test]
 fn sign_and_verify() {
     let key = DeviceKey::generate().unwrap();
