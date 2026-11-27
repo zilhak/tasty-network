@@ -53,41 +53,78 @@ pub enum ServerMessage {
 
 /// Why a message could not be parsed or written.
 #[derive(Debug)]
-pub struct MessageError(serde_json::Error);
+pub struct MessageError(ErrorKind);
+
+#[derive(Debug)]
+enum ErrorKind {
+    Json(serde_json::Error),
+    /// The JSON parsed but breaks a rule of the message table.
+    Shape(&'static str),
+}
 
 impl fmt::Display for MessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "coordination message is malformed: {}", self.0)
+        match &self.0 {
+            ErrorKind::Json(e) => write!(f, "coordination message is malformed: {e}"),
+            ErrorKind::Shape(rule) => write!(f, "coordination message is malformed: {rule}"),
+        }
     }
 }
 
 impl std::error::Error for MessageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        match &self.0 {
+            ErrorKind::Json(e) => Some(e),
+            ErrorKind::Shape(_) => None,
+        }
     }
 }
 
+fn json(e: serde_json::Error) -> MessageError {
+    MessageError(ErrorKind::Json(e))
+}
+
+fn shape(rule: &'static str) -> MessageError {
+    MessageError(ErrorKind::Shape(rule))
+}
+
+/// A frame body is one JSON object. serde would also read an array as the tag and the fields
+/// in order; that is not a message.
+fn parse_object<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, MessageError> {
+    if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(shape("the top level is not a JSON object"));
+    }
+    serde_json::from_slice(body).map_err(json)
+}
+
 impl DeviceMessage {
-    /// Parse a frame body.
+    /// Parse a frame body. Besides the JSON shape, a `punch_result` must give a reason exactly
+    /// when it is not `ok`.
     pub fn parse(body: &[u8]) -> Result<Self, MessageError> {
-        serde_json::from_slice(body).map_err(MessageError)
+        let msg: DeviceMessage = parse_object(body)?;
+        if let DeviceMessage::PunchResult(r) = &msg
+            && r.ok == r.reason.is_some()
+        {
+            return Err(shape("punch_result has a reason exactly when ok is false"));
+        }
+        Ok(msg)
     }
 
     /// The frame body (JSON) of this message.
     pub fn to_json(&self) -> Result<Vec<u8>, MessageError> {
-        serde_json::to_vec(self).map_err(MessageError)
+        serde_json::to_vec(self).map_err(json)
     }
 }
 
 impl ServerMessage {
     /// Parse a frame body.
     pub fn parse(body: &[u8]) -> Result<Self, MessageError> {
-        serde_json::from_slice(body).map_err(MessageError)
+        parse_object(body)
     }
 
     /// The frame body (JSON) of this message.
     pub fn to_json(&self) -> Result<Vec<u8>, MessageError> {
-        serde_json::to_vec(self).map_err(MessageError)
+        serde_json::to_vec(self).map_err(json)
     }
 
     /// The `type` name of this message.
@@ -108,8 +145,7 @@ impl ServerMessage {
 pub struct Hello {
     /// The coordination protocol number ([`super::PROTO`]).
     pub proto: u32,
-    /// Host candidate addresses in the device's own priority order.
-    #[serde(default)]
+    /// Host candidate addresses in the device's own priority order (required, may be empty).
     pub host_candidates: Vec<String>,
 }
 
@@ -118,8 +154,8 @@ pub struct Hello {
 pub struct NatReport {
     /// The NAT mapping judgement.
     pub mapping: NatMapping,
-    /// For each server STUN address the device asked, the reflexive address it got.
-    #[serde(default)]
+    /// For each server STUN address the device asked, the reflexive address it got
+    /// (required, may be empty).
     pub stun_results: Vec<StunResult>,
     /// Changed host addresses. Absent keeps the addresses the server has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -469,7 +505,10 @@ mod tests {
     fn unknown_type_is_an_error_and_unknown_fields_are_dropped() {
         assert!(DeviceMessage::parse(br#"{"type":"relay","data":"x"}"#).is_err());
         assert!(DeviceMessage::parse(br#"{"proto":1}"#).is_err());
-        let m = DeviceMessage::parse(br#"{"type":"hello","proto":1,"payload":"abc"}"#).unwrap();
+        let m = DeviceMessage::parse(
+            br#"{"type":"hello","proto":1,"host_candidates":[],"payload":"abc"}"#,
+        )
+        .unwrap();
         assert_eq!(
             m,
             DeviceMessage::Hello(Hello {
@@ -516,6 +555,56 @@ mod tests {
         });
         let json = String::from_utf8(refused.to_json().unwrap()).unwrap();
         assert!(json.contains(r#""reason":"self""#), "{json}");
+    }
+
+    #[test]
+    fn only_objects_with_the_required_fields_are_messages() {
+        // An array reads as the tag and the fields in order to serde: not a message.
+        for body in [
+            &br#"["hello",1,[]]"#[..],
+            br#" ["punch_request",1,"00"]"#,
+            br#""hello""#,
+            b"1",
+        ] {
+            assert!(DeviceMessage::parse(body).is_err(), "{body:?}");
+        }
+        assert!(ServerMessage::parse(br#"["punch_cancel",1,"expired"]"#).is_err());
+        // Fields the table requires.
+        for body in [
+            &br#"{"type":"hello","proto":1}"#[..],
+            br#"{"type":"nat_report","mapping":"unknown"}"#,
+            br#"{"type":"punch_answer","punch_id":1}"#,
+            br#"{"type":"punch_result","punch_id":1}"#,
+        ] {
+            assert!(DeviceMessage::parse(body).is_err(), "{body:?}");
+        }
+        // nat_report.host_candidates may be left out: the server keeps what it has.
+        let m = DeviceMessage::parse(
+            br#" {"type":"nat_report","mapping":"unknown","stun_results":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m,
+            DeviceMessage::NatReport(NatReport {
+                host_candidates: None,
+                ..
+            })
+        ));
+        // A reason exactly when the punch failed.
+        for (body, ok) in [
+            (
+                &br#"{"type":"punch_result","punch_id":1,"ok":true,"reason":"limits_invalid"}"#[..],
+                false,
+            ),
+            (br#"{"type":"punch_result","punch_id":1,"ok":false}"#, false),
+            (br#"{"type":"punch_result","punch_id":1,"ok":true}"#, true),
+            (
+                br#"{"type":"punch_result","punch_id":1,"ok":false,"reason":"timeout"}"#,
+                true,
+            ),
+        ] {
+            assert_eq!(DeviceMessage::parse(body).is_ok(), ok, "{body:?}");
+        }
     }
 
     #[test]
