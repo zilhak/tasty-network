@@ -427,7 +427,7 @@ while True: time.sleep(0.1)'
     # 시작 로그 기다리기. 가짜 서버가 시작 줄을 먼저 찍고 나머지를 늦게 찍는다.
     local late='echo "INFO s: rendezvous server started public_key=k primary=x" >&2; sleep 0.5
 echo "INFO s: setting key=a value=1 source=configured" >&2; sleep 0.5
-echo "WARN s: bound to a wildcard address" >&2; sleep 30'
+echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
     start_late() { # wait_start_log <예상 rc> <기한> <글자...>
         local want=$1 limit=$2 rc=0 pid
         shift 2
@@ -435,9 +435,11 @@ echo "WARN s: bound to a wildcard address" >&2; sleep 30'
         bash -c "$late" 2>"$t/start.log" >/dev/null &
         pid=$!
         wait_start_log "$t/start.log" "$pid" "$limit" "$@" || rc=$?
+        # 마지막 sleep은 exec라 강제 종료하는 pid가 곧 sleep이다. 고아 자식이 남지 않는다.
+        sleep 0.3
         kill -s KILL "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
-        [[ "$rc" == "$want" ]]
+        [[ "$rc" == "$want" ]] && ! pgrep -fx 'sleep 30.25' >/dev/null
     }
     start_ends() { # 시작 줄만 찍고 끝나는 가짜: 2
         local rc=0 pid
