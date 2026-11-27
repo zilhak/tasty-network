@@ -191,39 +191,33 @@ fn a_b_edges(x: &Exploration) -> Vec<&Edge> {
 
 #[test]
 fn both_ends_report_one_edge() {
-    let mut net = Net::new();
-    net.link(1, R, A, End::plain(), End::plain());
-    // The two ends of A → B measured different RTTs and saw the link authenticated at
-    // slightly different times.
-    net.link(
-        2,
-        A,
-        B,
-        End {
-            rtt_ms: 9,
-            connected_at: 205,
-            workspace: None,
-            link_id: None,
-        },
-        End {
-            rtt_ms: 4,
-            connected_at: 200,
-            workspace: None,
-            link_id: None,
-        },
-    );
-    let x = net.explore_from_r();
-    let ab = a_b_edges(&x);
-    assert_eq!(ab.len(), 1, "{ab:?}");
-    let edge = ab[0];
-    assert_eq!(edge.link_id, link_id(2));
-    assert_eq!((edge.dialer, edge.acceptor), (id(A), id(B)));
-    assert_eq!(edge.holder, Side::Dialer);
-    assert_eq!(edge.transport, TransportKind::SshForward);
-    assert_eq!(edge.rtt_ms, Some(4));
-    assert_eq!(edge.connected_at, 200);
-    // R → A is one edge too, and nothing else.
-    assert_eq!(x.edges().len(), 2, "{:?}", x.edges());
+    // A's end of A → B measured the smaller RTT, B's end saw the link authenticated
+    // earlier: the merged edge takes each minimum from a different report.
+    let at_a = || End {
+        rtt_ms: 4,
+        connected_at: 205,
+        ..End::plain()
+    };
+    let at_b = || End {
+        rtt_ms: 9,
+        connected_at: 200,
+        ..End::plain()
+    };
+    // R next to A: A's report comes first; R next to B: B's report comes first.
+    for near in [A, B] {
+        let x = explore_near(near, at_a(), at_b());
+        let ab = a_b_edges(&x);
+        assert_eq!(ab.len(), 1, "R next to {near}: {ab:?}");
+        let edge = ab[0];
+        assert_eq!(edge.link_id, link_id(2));
+        assert_eq!((edge.dialer, edge.acceptor), (id(A), id(B)));
+        assert_eq!(edge.holder, Side::Dialer);
+        assert_eq!(edge.transport, TransportKind::SshForward);
+        assert_eq!(edge.rtt_ms, Some(4), "R next to {near}");
+        assert_eq!(edge.connected_at, 200, "R next to {near}");
+        // R → near is one edge too, and nothing else.
+        assert_eq!(x.edges().len(), 2, "{:?}", x.edges());
+    }
 }
 
 #[test]
