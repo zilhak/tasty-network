@@ -1,0 +1,5 @@
+# An IgnoreUnknown in a block that does not apply makes no exception.
+Host never
+    IgnoreUnknown NoSuch*
+Host *
+    NoSuchOption yes

@@ -1,0 +1,7 @@
+# An IgnoreUnknown read before ignores the names it matches, in any block.
+IgnoreUnknown NoSuch*
+Host never
+    NoSuchOption yes
+Host *
+    NoSuchThing 1
+    Port 2201

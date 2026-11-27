@@ -1,0 +1,4 @@
+# An IgnoreUnknown ignores only the names it matches.
+IgnoreUnknown NoSuch*
+Host *
+    OtherOption yes

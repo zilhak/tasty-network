@@ -1,0 +1,5 @@
+# A file an Include reads in a block that does not apply still fails on an unknown name.
+Host never
+    Include ${TASTY_FIXTURE_DIR}/inner.conf
+Host *
+    Port 2201

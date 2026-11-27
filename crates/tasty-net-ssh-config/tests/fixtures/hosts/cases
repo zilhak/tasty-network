@@ -24,3 +24,7 @@ Web
 -o AddressFamily=inet 2001:DB8::5
 -o AddressFamily=inet6 127.1
 -o AddressFamily=inet6 0x7F000001
+lax
+localish
+-o StrictHostKeyChecking=no web
+-o NoHostAuthenticationForLocalhost=yes web

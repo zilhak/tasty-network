@@ -1,0 +1,4 @@
+# An IgnoreUnknown after the line makes no exception.
+Host *
+    NoSuchOption yes
+IgnoreUnknown NoSuch*

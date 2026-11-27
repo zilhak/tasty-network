@@ -23,3 +23,8 @@ Host *
     ConnectionAttempts 2
 Host pct
     User u%hx
+# Values that turn host key checks off are shown as read.
+Host lax
+    StrictHostKeyChecking off
+Host localish
+    NoHostAuthenticationForLocalhost yes
