@@ -2,6 +2,9 @@
 # count, size or limit (docs/design/testing.md "설정값 시험", dependency_setters_are_covered).
 # Made with tests/data/extract_setters.py from rustdoc JSON (format 57) of these versions;
 # make it again when a version changes. Columns: crate, setter or field, name, parameter type.
+# quinn re-exports these quinn-proto types; its version is pinned here as well, so a new lock
+# with another quinn makes the test fail until the list is made again.
+version	quinn	0.11.12
 version	quinn-proto	0.11.19
 version	rustls	0.23.46
 quinn_proto	setter	AckFrequencyConfig::ack_eliciting_threshold	VarInt
