@@ -1474,6 +1474,28 @@ async fn settings_are_logged_at_start() {
 }
 
 #[tokio::test]
+async fn wildcard_binding_is_warned_at_start() {
+    let capture = Capture::default();
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let warned = |lines: &[String]| lines.iter().any(|l| l.contains("wildcard address"));
+    let _local = start(local_settings()).await;
+    assert!(!warned(&capture.0.lock().unwrap()));
+    let mut s = local_settings();
+    s.set(
+        "listen.primary",
+        Value::Address("0.0.0.0:0".parse().unwrap()),
+    )
+    .unwrap();
+    s.set(
+        "advertise.primary_ip",
+        Value::Ip("127.0.0.1".parse().unwrap()),
+    )
+    .unwrap();
+    let _wildcard = start(s).await;
+    assert!(warned(&capture.0.lock().unwrap()));
+}
+
+#[tokio::test]
 async fn start_refuses_inconsistent_settings() {
     let mut s = local_settings();
     s.set("keepalive_interval", ms(45_000)).unwrap();

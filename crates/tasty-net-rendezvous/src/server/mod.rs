@@ -489,6 +489,17 @@ impl Server {
         for e in &inner.entries {
             info!(key = e.key, value = %e.value, source = %e.source, "setting");
         }
+        let wildcard = std::iter::once(addrs.primary)
+            .chain(std::iter::once(addrs.alternate_port))
+            .chain(addrs.alternate_ip.into_iter().flat_map(|(a, b)| [a, b]))
+            .any(|a| a.ip().is_unspecified());
+        if wildcard {
+            warn!(
+                "a socket is bound to a wildcard address: on a host with several local IPs a STUN \
+                 answer may leave from another IP than the one asked, and the device drops it; \
+                 bind listen.* to a specific IP there"
+            );
+        }
 
         let mut tasks = Vec::new();
         let stun_only = std::iter::once(io.alternate_port.clone()).chain(
