@@ -774,6 +774,11 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
     let host = host.addrs;
     let (tx, rx) = mpsc::channel(p.max_queued_messages);
     let now = Instant::now();
+    let welcome = ServerMessage::Welcome(Welcome {
+        reflexive,
+        stun: advertised.clone(),
+        limits: inner.limits(),
+    });
     let registered = {
         let mut state = inner.state();
         let conn_id = state.new_conn_id();
@@ -789,9 +794,15 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
             nat: Default::default(),
             registered_at: now,
         };
-        state
+        let registered = state
             .register(p, &inner.counters, device, reg)
-            .map(|old| (conn_id, old))
+            .map(|old| (conn_id, old));
+        // The welcome is queued under the same lock as the registration: no message of
+        // another connection (a punch_offer) can come before it.
+        if registered.is_ok() && tx.try_send(welcome).is_err() {
+            debug!(device = %device, "welcome not queued");
+        }
+        registered
     };
     let conn_id = match registered {
         Ok((conn_id, old)) => {
@@ -810,18 +821,10 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
     drop(pending);
     info!(device = %device, "registered");
     debug!(device = %device, reflexive = %reflexive, stun = ?advertised, "registered addresses");
-    let welcome = ServerMessage::Welcome(Welcome {
-        reflexive,
-        stun: advertised,
-        limits: inner.limits(),
-    });
-    if tx.try_send(welcome).is_err() {
-        return;
-    }
     drop(tx);
 
     tokio::spawn(writer(conn.clone(), send, rx, p.max_message_bytes));
-    tokio::spawn(reader(inner.clone(), conn.clone(), device, recv));
+    tokio::spawn(reader(inner.clone(), conn.clone(), device, conn_id, recv));
     monitor(inner.clone(), conn, device, conn_id, reflexive).await;
 }
 
@@ -852,6 +855,7 @@ async fn reader(
     inner: Arc<Inner>,
     conn: quinn::Connection,
     device: DeviceId,
+    conn_id: u64,
     mut recv: quinn::RecvStream,
 ) {
     let p = &inner.params;
@@ -888,6 +892,16 @@ async fn reader(
         let now = Instant::now();
         let after = {
             let mut state = inner.state();
+            // A connection that a new registration of the same device replaced is being
+            // closed: what it still sends does not touch the new registration.
+            if state
+                .devices
+                .get(&device)
+                .is_none_or(|r| r.conn_id != conn_id)
+            {
+                debug!(device = %device, "message of a replaced connection dropped");
+                continue;
+            }
             match msg {
                 DeviceMessage::Hello(_) => After::Nothing,
                 DeviceMessage::NatReport(r) => {
