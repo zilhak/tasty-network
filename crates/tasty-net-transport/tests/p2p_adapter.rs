@@ -760,6 +760,22 @@ fn concurrent_attempts_to_one_peer_keep_their_own_entries() {
         .expect("the second attempt's end");
 }
 
+/// A cancel of the attempt before its first handshake succeeded closes the new connection it
+/// owns (docs/design/transport.md "연결 공유의 시작", close scope fourth row).
+#[test]
+fn a_cancel_before_the_first_handshake_closes_the_new_connection() {
+    let pair = Pair::start(56, Mode::Echo);
+    let cancel = AttemptCancel::new();
+    let conn = pair
+        .connect(&cancel, &ConnectOptions::new())
+        .expect("a channel");
+    assert_eq!(pair.connections().0, 1, "the new connection");
+    cancel.cancel();
+    wait_until("the connection's close", || pair.connections() == (0, 0));
+    assert_eq!(pair.transport.live_connections(), 0);
+    drop(conn);
+}
+
 /// The ACK among the Control frames the accepting side writes on `stream`.
 fn read_ack(stream: &mut tasty_net_p2p::P2pStream) -> Value {
     loop {
