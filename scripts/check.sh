@@ -35,6 +35,9 @@
 # Linux·macOS의 bash와 Windows의 Git Bash에서 돈다.
 # fmt·lint·test·check·all은 이 clone에서 .githooks가 돌지 않으면 stderr에 경고한다.
 set -euo pipefail
+# cd가 CDPATH로 폴더를 찾으면 다른 폴더로 갈 수 있고 그 경로를 stdout에 찍는다($(cd … && pwd)의 값은
+# 두 줄이 된다). 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 
 cd "$(dirname "$0")/.."
 

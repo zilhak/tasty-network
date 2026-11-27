@@ -16,6 +16,9 @@
 #     (scripts/lib/rust_scan.py). 문자열·주석 안의 글자도 보지 않는다.
 #   - use 선언은 나무로 펼쳐 가져온 경로마다 판정하고, use 밖에 적은 경로도 찾는다.
 set -euo pipefail
+# cd가 CDPATH로 폴더를 찾으면 다른 폴더로 갈 수 있고 그 경로를 stdout에 찍는다($(cd … && pwd)의 값은
+# 두 줄이 된다). 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 
 cd "$(dirname "$0")/.."
 

@@ -57,6 +57,9 @@
 #   CONTAINER_CHECK_STOP_SECONDS      docker stop이 SIGINT 뒤 기다리는 시간(초, 1–3600). 넘으면 SIGKILL하고 실패. 기본 15
 #   CONTAINER_CHECK_MESSAGE_BYTES     echo할 메시지 크기(바이트, 1–120000). 기본 98304
 set -uo pipefail
+# cd가 CDPATH로 폴더를 찾으면 다른 폴더로 갈 수 있고 그 경로를 stdout에 찍는다($(cd … && pwd)의 값은
+# 두 줄이 된다). 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 # 배열은 ${A[@]+"${A[@]}"}로 펼친다. bash 4.4 전(macOS의 3.2)은 set -u에서 빈 배열 "${A[@]}"를 오류로 본다.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

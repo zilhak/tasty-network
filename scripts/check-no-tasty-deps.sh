@@ -10,6 +10,9 @@
 # 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·metadata 실패·패키지 0개) 2.
 
 set -euo pipefail
+# cd가 CDPATH로 폴더를 찾으면 다른 폴더로 갈 수 있고 그 경로를 stdout에 찍는다($(cd … && pwd)의 값은
+# 두 줄이 된다). 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 
 cd "$(dirname "$0")/.."
 

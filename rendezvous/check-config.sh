@@ -28,6 +28,9 @@
 #   RENDEZVOUS_STOP_SECONDS        SIGINT 뒤 서버가 끝나기를 기다리는 시간. 넘으면 SIGKILL하고 실패. 기본 10
 #   RENDEZVOUS_CLEANUP_SECONDS     실패 경로 정리에서 SIGTERM 뒤 기다리는 시간. 넘으면 SIGKILL. 기본 5
 set -uo pipefail
+# cd가 CDPATH로 폴더를 찾으면 다른 폴더로 갈 수 있고 그 경로를 stdout에 찍는다($(cd … && pwd)의 값은
+# 두 줄이 된다). 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
