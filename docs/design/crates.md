@@ -48,7 +48,13 @@ ssh        ─> ssh-config   (embedded-ssh feature에서만)
 frame, ssh-config, identity ─> (없음)
 ```
 
-- 이 그림에 없는 의존은 만들지 않는다. 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
+시험 전용(dev) 의존은 위 그림과 따로 둔다. 일반 의존 방향은 위 그림 그대로다.
+
+```
+transport  ─dev─> rendezvous   (tests/p2p_adapter.rs가 프로세스 안 서버를 띄운다. tokio도 시험 전용)
+```
+
+- 이 그림에 없는 의존은 만들지 않는다(위 시험 전용 의존은 예외로 적어 둔 것만 둔다). 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
 - tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
 - feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다.
 - 위 규칙의 예외는 SSH 백엔드 feature 하나다. `tasty-net-ssh`의 `system-ssh`·`embedded-ssh`와 transport의 내부 feature `ssh`와 `system-ssh`·`embedded-ssh`이고, 두 단계로 들어간다. 계약(단계별 기본값, 꺼진 빌드에서 사라지는 API)은 [SSH 백엔드](ssh-backends.md#feature-계약)에 있다. 모바일 빌드가 다른 프로그램 실행 코드를 빼기 위해서다. `tasty-net-ssh-config`에는 feature가 없다.
