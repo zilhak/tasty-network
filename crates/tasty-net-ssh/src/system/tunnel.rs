@@ -873,7 +873,9 @@ mod tests {
                     );
                 cmd.spawn()
             });
-            let launcher = SshLauncher::new(old_ssh.path()).with_spawn_hook(hook);
+            let launcher = SshLauncher::new(old_ssh.path())
+                .with_spawn_hook(hook)
+                .with_settings(busy_host_settings());
             let remote = echo_server();
             let first = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote)
                 .expect("the second start works");
@@ -894,9 +896,37 @@ mod tests {
             drop((first, again));
         }
 
-        /// Runs `establish` once on `ssh` and returns the argvs it started and whether the
-        /// launcher still uses the option.
-        fn establish_recording(ssh: &Script) -> (Vec<Vec<String>>, bool) {
+        /// Settings for a test whose verdict needs an ssh stderr line read in time: the
+        /// `tunnel.stderr_drain_limit` an early exit waits for the fork option refusal, and the
+        /// `tunnel.verdict_grace` a listener verdict waits for a channel refusal, both 5 s
+        /// instead of 500 ms. Repeated runs with every CPU busy took up to 9 s for the tunnel
+        /// tests that take 0.9 s when idle, and the stderr relay fell behind the 500 ms defaults
+        /// there. Both waits end as soon as the line is read. A verdict that expects no refusal
+        /// waits the whole grace, so `an_empty_remote_port_is_judged_absent_for_that_channel_only`
+        /// takes about 5 s longer.
+        fn busy_host_settings() -> crate::SshSettings {
+            use crate::settings::Value;
+            let mut settings = crate::SshSettings::new();
+            settings
+                .set(
+                    "tunnel.stderr_drain_limit",
+                    Value::Duration(Duration::from_secs(5)),
+                )
+                .unwrap()
+                .set(
+                    "tunnel.verdict_grace",
+                    Value::Duration(Duration::from_secs(5)),
+                )
+                .unwrap();
+            settings
+        }
+
+        /// Runs `establish` once on `ssh` with `settings` and returns the argvs it started and
+        /// whether the launcher still uses the option.
+        fn establish_recording(
+            ssh: &Script,
+            settings: crate::SshSettings,
+        ) -> (Vec<Vec<String>>, bool) {
             let _ports = ports_to_myself();
             let argvs = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
             let seen = Arc::clone(&argvs);
@@ -910,7 +940,9 @@ mod tests {
                     );
                 cmd.spawn()
             });
-            let launcher = SshLauncher::new(ssh.path()).with_spawn_hook(hook);
+            let launcher = SshLauncher::new(ssh.path())
+                .with_spawn_hook(hook)
+                .with_settings(settings);
             let (held, remote) = reserve_local_port().expect("port");
             drop(held);
             let established =
@@ -932,7 +964,7 @@ mod tests {
                 "echo 'command-line: line 0: Bad configuration option: \
                  forkafterauthenticationextra' >&2\nexit 255\n",
             );
-            let (argvs, supported) = establish_recording(&ssh);
+            let (argvs, supported) = establish_recording(&ssh, crate::SshSettings::default());
             assert_eq!(argvs.len(), 1, "{argvs:?}");
             assert!(supported);
         }
@@ -946,7 +978,7 @@ mod tests {
                  echo 'command-line: line 0: Bad configuration option: forkafterauthentication' >&2\n\
                  exit 255;;\nesac\nexit 255\n",
             );
-            let (argvs, supported) = establish_recording(&ssh);
+            let (argvs, supported) = establish_recording(&ssh, busy_host_settings());
             assert_eq!(argvs.len(), 2, "{argvs:?}");
             assert!(supported);
         }
@@ -1102,7 +1134,7 @@ mod tests {
         fn an_empty_remote_port_is_judged_absent_for_that_channel_only() {
             let _ports = ports_to_myself();
             let fake = forwarder();
-            let launcher = SshLauncher::new(fake.path());
+            let launcher = SshLauncher::new(fake.path()).with_settings(busy_host_settings());
             let (held, remote) = reserve_local_port().expect("port");
             drop(held);
             let tunnel = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), remote)
