@@ -279,7 +279,12 @@ fn shown_notes() {
 
 #[test]
 fn undeterminable_match() {
-    for criterion in ["exec /bin/true", "localnetwork 192.0.2.0/24"] {
+    for criterion in [
+        "exec /bin/true",
+        "localnetwork 192.0.2.0/24",
+        "localnetwork ::/0",
+        "localnetwork 0.0.0.0/0",
+    ] {
         let r = resolve(&format!("Match {criterion}\n    Port 2222\n"), "web");
         assert_eq!(
             refusal_kind(&r),

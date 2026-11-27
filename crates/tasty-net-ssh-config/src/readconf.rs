@@ -462,8 +462,9 @@ fn valid_cidr_list(list: &str) -> bool {
             std::net::IpAddr::V4(a) => u128::from(u32::from(a)),
             std::net::IpAddr::V6(a) => u128::from(a),
         };
-        let host_bits = bits - len;
-        host_bits == 0 || value & ((1u128 << host_bits) - 1) == 0
+        // A zero length leaves every bit to the host part (a shift by 128 would overflow).
+        let host_mask = 1u128.checked_shl(bits - len).map_or(u128::MAX, |b| b - 1);
+        value & host_mask == 0
     })
 }
 
@@ -2158,6 +2159,11 @@ mod tests {
         assert!(!valid_cidr_list("192.0.2.0/33"));
         assert!(!valid_cidr_list("a,,b"));
         assert!(!valid_cidr_list("host.example"));
+        // A zero mask length: the whole address is the host part (addr.c:50-56).
+        assert!(valid_cidr_list("::/0"));
+        assert!(valid_cidr_list("0.0.0.0/0"));
+        assert!(!valid_cidr_list("1::/0"));
+        assert!(!valid_cidr_list("128.0.0.0/0"));
     }
 
     #[test]
