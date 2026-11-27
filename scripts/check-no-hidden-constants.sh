@@ -64,7 +64,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts", "lib"))
 from rust_scan import (  # noqa: E402  (scripts/lib/rust_scan.py)
-    item_end, matching_close, strip_cfg_test, test_module_files, tokenize,
+    ScanError, item_end, matching_close, strip_cfg_test, test_module_files, tokenize,
 )
 
 TAG = "[no-hidden-constants]"
@@ -341,7 +341,10 @@ def collect(read, list_text, root_files):
     checked = [f for f in files
                if f not in settings and "/tests/" not in f and f not in test_files]
     for f in checked:
-        v, n, u = judge_file(f, read(f), allows_by_file.get(f, []))
+        try:
+            v, n, u = judge_file(f, read(f), allows_by_file.get(f, []))
+        except ScanError as e:
+            raise ScanError(f"{f}: {e}") from None
         violations += v
         total_lits += n
         used |= u
@@ -498,6 +501,9 @@ def self_test():
                               "#[cfg(all(unix, not(test)))]\nfn b() -> u8 { 6 }\n")
     case("cfg(all(test, …))는 시험 코드, cfg(any(test, …))·cfg(all(…, not(test)))는 아니다",
          "target\tsrc\n", {"src/allcfg.rs"}, 2)
+    files["src/field.rs"] = ("struct S { #[cfg(test)] a: u8, b: [u8; 4] }\n"
+                             "enum E { #[cfg(test)] A = 1, B = 2 }\nfn f() -> u8 { 3 }\n")
+    case("항목이 아닌 자리(필드·변형)의 시험 cfg는 그 요소만 지운다", "target\tsrc\n", {"src/field.rs"}, 3)
     files["src/settings.rs"] = settings_mod + "/* entry(\"removed\", 1) */\n// fixed(\"gone\", \"x\", \"x\")\n"
     case("주석 안의 entry는 키가 아니다",
          "target\tsrc\nsettings\tsrc/settings.rs\ntable\tsrc/settings.rs\td.md\t표\n",
@@ -568,7 +574,7 @@ def root_files(t):
 
 try:
     violations, summary, count = collect(read, read(list_path), root_files)
-except (ListError, OSError) as e:
+except (ListError, ScanError, OSError) as e:
     print(f"{TAG} 판정 불가: {list_path}: {e}", file=sys.stderr)
     sys.exit(2)
 if count == 0:

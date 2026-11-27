@@ -5,6 +5,10 @@ scripts/check-no-hidden-constants.sh와 scripts/check-no-process-spawn.sh가 함
 import os
 import re
 
+
+class ScanError(Exception):
+    """소스를 판정할 수 없다(검사는 통과로 보지 않고 판정 불가로 끝낸다)."""
+
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 NUMBER = re.compile(
     r"0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+"
@@ -194,15 +198,104 @@ def is_test_cfg(words):
     return ["test"] in args
 
 
+# 시험 cfg 뒤에 오면 항목(또는 let 문장)으로 보고 item_end로 끝을 찾는 첫 토큰.
+ITEM_START = SEMI_ITEMS | BLOCK_ITEMS | {"extern", "unsafe", "async"}
+# 시험 cfg 뒤에 오면 블록으로 끝나는 식 문장으로 보는 첫 토큰.
+BLOCK_EXPR = {"if", "match", "while", "for", "loop"}
+CLOSERS = {")", "]", "}"}
+
+
+def _skip_attrs_and_vis(toks, j):
+    """j부터 속성(#[…])과 가시성(pub, pub(…))을 건너뛴 위치."""
+    n = len(toks)
+    while j + 1 < n and toks[j][1] == "#" and toks[j + 1][1] == "[":
+        j = matching_close(toks, j + 1) + 1
+    if j < n and toks[j][1] == "pub":
+        j += 1
+        if j < n and toks[j][1] == "(":
+            j = matching_close(toks, j) + 1
+    return j
+
+
+def _cfg_item_end(toks, start):
+    """시험 cfg 속성 바로 뒤(start)부터 지울 범위의 끝(포함). 항목·let은 item_end, 블록 식 문장과
+    블록·매크로 문장은 그 블록 끝, 그 밖(필드·변형·원소·식 문장)은 바깥 깊이의 쉼표(포함)나 ;(포함)
+    나 둘러싼 괄호의 닫힘 앞이다. 끝을 정할 수 없으면 ScanError."""
+    n = len(toks)
+    j = _skip_attrs_and_vis(toks, start)
+    if j >= n:
+        raise ScanError(f"{toks[-1][2]}행: 시험 cfg 뒤에 항목이 없다")
+    first = toks[j][1] if toks[j][0] in ("ident", "punct") else None
+    if first in ITEM_START:
+        end = item_end(toks, j)
+        # 둘러싼 괄호를 넘지 않는다(깊이가 음수가 되기 전에 멈춘다).
+        depth = 0
+        for k in range(j, end + 1):
+            t = toks[k][1] if toks[k][0] == "punct" else None
+            if t in ("(", "[", "{"):
+                depth += 1
+            elif t in CLOSERS:
+                depth -= 1
+                if depth < 0:
+                    raise ScanError(f"{toks[k][2]}행: 시험 cfg 항목의 끝을 찾지 못했다")
+        return end
+    if first == "{":
+        return matching_close(toks, j)
+    if first in BLOCK_EXPR:
+        k = j
+        while k < n and toks[k][1] != "{":
+            if toks[k][1] in ("(", "["):
+                k = matching_close(toks, k)
+            k += 1
+        if k >= n:
+            raise ScanError(f"{toks[j][2]}행: 시험 cfg {first} 문장의 블록을 찾지 못했다")
+        end = matching_close(toks, k)
+        while first == "if" and end + 1 < n and toks[end + 1][1] == "else":
+            k = end + 2
+            while k < n and toks[k][1] != "{":
+                k += 1
+            if k >= n:
+                raise ScanError(f"{toks[j][2]}행: 시험 cfg if 문장의 else 블록을 찾지 못했다")
+            end = matching_close(toks, k)
+        return end
+    if (toks[j][0] == "ident" and j + 2 < n and toks[j + 1][1] == "!"
+            and toks[j + 2][1] == "{"):
+        return matching_close(toks, j + 2)
+    depth, angle = 0, 0
+    for k in range(j, n):
+        kind, t, line = toks[k]
+        if kind != "punct":
+            continue
+        if t in ("(", "[", "{"):
+            depth += 1
+        elif t in CLOSERS:
+            if depth == 0:
+                if angle:
+                    raise ScanError(f"{line}행: 시험 cfg가 붙은 요소의 끝을 찾지 못했다(꺾쇠가 닫히지 않음)")
+                return k - 1
+            depth -= 1
+        elif depth == 0 and t == "<":
+            angle += 1
+        elif depth == 0 and t in (">", ">>"):
+            angle = max(0, angle - len(t))
+        elif depth == 0 and t == "=>":
+            raise ScanError(f"{line}행: 시험 cfg가 붙은 match 갈래의 끝을 정하지 않는다")
+        elif depth == 0 and t == ";":
+            return k
+        elif depth == 0 and t == "," and angle == 0:
+            return k
+    raise ScanError(f"{toks[j][2]}행: 시험 cfg가 붙은 요소의 끝을 찾지 못했다")
+
+
 def strip_cfg_test(toks):
-    """시험 cfg(is_test_cfg)가 붙은 항목을 뺀 토큰 목록."""
+    """시험 cfg(is_test_cfg)가 붙은 항목·요소를 뺀 토큰 목록. 끝을 정할 수 없으면 ScanError."""
     out, i = [], 0
     while i < len(toks):
         if (toks[i][1] == "#" and i + 1 < len(toks) and toks[i + 1][1] == "["):
             close = matching_close(toks, i + 1)
             inner = [t[1] for t in toks[i + 2:close]]
             if is_test_cfg(inner):
-                i = item_end(toks, close + 1) + 1
+                i = _cfg_item_end(toks, close + 1) + 1
                 continue
         out.append(toks[i])
         i += 1

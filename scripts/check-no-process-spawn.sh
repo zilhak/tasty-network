@@ -42,7 +42,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts", "lib"))
 from rust_scan import (  # noqa: E402  (scripts/lib/rust_scan.py)
-    KEYWORDS, matching_close, strip_cfg_test, test_module_files, tokenize,
+    KEYWORDS, ScanError, matching_close, strip_cfg_test, test_module_files, tokenize,
 )
 
 TAG = "[no-process-spawn]"
@@ -61,10 +61,6 @@ STD_PROCESS_OK = {"id", "exit", "abort", "ExitCode"}
 # use 밖에 적은 경로에서 찾는 금지 이름.
 STD_PROCESS_BAD = {"Command", "Child", "Stdio", "ChildStdin", "ChildStdout", "ChildStderr",
                    "ExitStatus"}
-
-
-class ScanError(Exception):
-    pass
 
 
 def forbidden_paths(path):
@@ -363,6 +359,13 @@ def self_test():
         ("match guard if ::std::process::Command", "fn f(x: u8) { match x { _ if ::std::process::Command::new(\"x\").status().is_ok() => {} _ => {} } }\n"),
         ("while ::tokio::process::Command", "fn f() { while ::tokio::process::Command::new(\"y\").spawn().is_err() {} }\n"),
         ("else 블록 안의 ::std::process::Command", "fn f(b: bool) -> ::std::process::Output { if b { todo!() } else { ::std::process::Command::new(\"x\").output().unwrap() } }\n"),
+        ("시험 cfg 필드 뒤의 금지 경로", "struct S { #[cfg(test)] a: u8, b: u16 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg enum 변형 뒤의 금지 경로", "enum E { #[cfg(test)] A, B }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 배열 원소 뒤의 금지 경로", "fn h() -> Vec<u8> { vec![#[cfg(test)] 1, 2] }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("cfg(all(test, unix)) 마지막 필드 뒤의 금지 경로", "struct S { b: u8, #[cfg(all(test, unix))] a: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("제네릭 타입 필드(HashMap<u8, u16>) 뒤의 금지 경로", "struct S { #[cfg(test)] a: HashMap<u8, u16>, b: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg if 문장 뒤 같은 블록의 금지 경로", "fn f(x: bool) { #[cfg(test)] if x { a(); } else { b(); } std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 매크로 문장 m! { } 뒤의 금지 경로", "fn f() { #[cfg(test)] m! { 1 } std::process::Command::new(\"x\"); }\n"),
     ]
     good = [
         ("use std::process::{id, exit};", "use std::process::{id, exit};\n"),
@@ -383,6 +386,12 @@ def self_test():
         ("a::std::process::Command(다른 크레이트 안의 std 모듈)", "fn f() { other::std::process::Command::new(\"x\"); }\n"),
         ("정밀 캡처 impl Copy + use<'a>는 import가 아니다",
          "fn f<'a>(x: &'a u8) -> impl Copy + use<'a> { *x }\nfn g<T>() -> impl Sized + use<T> {}\n"),
+        ("시험 cfg 필드의 금지 타입만 지운다", "struct S { #[cfg(test)] c: std::process::Child, b: u8 }\n"),
+        ("시험 cfg 블록 문장 안의 금지 경로", "fn f() { #[cfg(test)] { std::process::Command::new(\"x\"); } }\n"),
+    ]
+    unreadable = [
+        ("시험 cfg match 갈래는 끝을 정하지 않고 판정 불가", "fn f(x: u8) { match x { #[cfg(test)] 1 => a(), _ => b() } }\n"),
+        ("시험 cfg 원소의 끝을 못 찾으면(a < b, c) 판정 불가", "fn f() { let _ = [#[cfg(test)] a < b, c]; }\n"),
     ]
     cases = []
     for title, src in bad:
@@ -399,6 +408,13 @@ def self_test():
         except ScanError as e:
             got, hits = "읽기 오류", [str(e)]
         cases.append((title, got, "통과", hits))
+    for title, src in unreadable:
+        try:
+            hits, _ = judge_source(src)
+            got = "실패" if hits else "통과"
+        except ScanError as e:
+            got, hits = "읽기 오류", [str(e)]
+        cases.append((title, got, "읽기 오류", hits))
 
     # 크레이트 단위: src/system/ 예외와 그 feature 속성, 시험 모듈 파일, src/bin.
     guarded = "#[cfg(feature = \"system-ssh\")]\nmod system;\n#[cfg(test)]\nmod tests;\n"
