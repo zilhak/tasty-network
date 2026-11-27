@@ -14,7 +14,7 @@ Host *
     DynamicForward 1080
     ChannelTimeout session=5m global=1h
     ObscureKeystrokeTiming interval:30
-    CanonicalDomains example.com example.net
+    CanonicalDomains Example.COM. example.net
     CanonicalizeMaxDots 2
     UserKnownHostsFile ~/.ssh/known_hosts_%h ~/.ssh/known_hosts2
     GlobalKnownHostsFile none

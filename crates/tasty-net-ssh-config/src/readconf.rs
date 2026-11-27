@@ -1699,10 +1699,12 @@ impl<'a> Reader<'a> {
                             "keyword {keyword} \"none\" argument must appear alone."
                         ));
                     }
-                    if let Err(e) = valid_domain(&arg, true) {
-                        return bad(e);
+                    // `valid_domain(arg, 1, ...)` lower-cases the value in place and drops one
+                    // trailing `.`.
+                    match valid_domain(&arg, true) {
+                        Ok(domain) => strs.push(domain),
+                        Err(e) => return bad(e),
                     }
-                    strs.push(arg);
                 }
                 if strs.is_empty() {
                     return Err(LineErr::Fatal(fatal(
