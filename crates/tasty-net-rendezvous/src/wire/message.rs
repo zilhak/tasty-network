@@ -90,12 +90,69 @@ fn shape(rule: &'static str) -> MessageError {
 }
 
 /// A frame body is one JSON object. serde would also read an array as the tag and the fields
-/// in order; that is not a message.
+/// in order; that is not a message. No object in it, at any depth, has a key twice: a
+/// `serde_json::Value` keeps only the last value of a repeated key, so the check reads the
+/// body itself first.
 fn parse_object<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, MessageError> {
     if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
         return Err(shape("the top level is not a JSON object"));
     }
+    serde_json::from_slice::<NoRepeatedKeys>(body).map_err(json)?;
     serde_json::from_slice(body).map_err(json)
+}
+
+/// Reads any JSON value and fails on an object that has a key twice.
+struct NoRepeatedKeys;
+
+impl<'de> Deserialize<'de> for NoRepeatedKeys {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(NoRepeatedKeysVisitor)
+    }
+}
+
+struct NoRepeatedKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NoRepeatedKeysVisitor {
+    type Value = NoRepeatedKeys;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<NoRepeatedKeys>()?.is_some() {}
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut keys = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(A::Error::custom("an object has a key twice"));
+            }
+            map.next_value::<NoRepeatedKeys>()?;
+        }
+        Ok(NoRepeatedKeys)
+    }
 }
 
 /// A list whose entries are JSON objects. serde would also read an array entry as the fields
@@ -584,6 +641,12 @@ mod tests {
         assert!(json.contains(entry), "{json}");
         let as_array = json.replace(entry, r#"["[2001:db8::1]:3478","reported_reflexive"]"#);
         assert!(ServerMessage::parse(as_array.as_bytes()).is_err());
+        // A candidate entry with a key twice.
+        let twice = json.replace(
+            entry,
+            r#"{"addr":"[2001:db8::1]:3478","kind":"reported_reflexive","kind":"host"}"#,
+        );
+        assert!(ServerMessage::parse(twice.as_bytes()).is_err());
 
         let refused = ServerMessage::PunchRefused(PunchRefused {
             request_id: 1,
@@ -605,6 +668,15 @@ mod tests {
             assert!(DeviceMessage::parse(body).is_err(), "{body:?}");
         }
         assert!(ServerMessage::parse(br#"["punch_cancel",1,"expired"]"#).is_err());
+        // A key twice, at the top or in a list entry, is malformed: the last value does not
+        // win.
+        for body in [
+            &br#"{"type":"hello","proto":2,"host_candidates":[],"proto":1}"#[..],
+            br#"{"type":"hello","type":"hello","proto":1,"host_candidates":[]}"#,
+            br#"{"type":"nat_report","mapping":"unknown","stun_results":[{"server":"192.0.2.1:3478","reflexive":null,"server":"192.0.2.2:3478"}]}"#,
+        ] {
+            assert!(DeviceMessage::parse(body).is_err(), "{body:?}");
+        }
         // List entries are objects too, and a nullable field the table requires has its key.
         for (body, ok) in [
             (
