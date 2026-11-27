@@ -1721,6 +1721,71 @@ mod tests {
         );
     }
 
+    /// The endpoint's end drops the acceptor's attempt while it punches, and its probes end
+    /// with it: no STUN probe goes out after that and no transaction ID waits. The shutdown
+    /// signal alone ends the attempt here, so the runtime still runs and a detached probe task
+    /// would go on sending until its window ends.
+    #[test]
+    fn the_end_of_the_endpoint_stops_the_probes_of_a_punching_acceptor() {
+        use tasty_net_rendezvous::wire::candidate::CandidateKind;
+        use tasty_net_rendezvous::wire::message::Candidate;
+        let io = Arc::new(crate::probe::tests_support::CountingSink::default());
+        let peer = DeviceKey::from_seed([35; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in_with(34, peer, &[], io.clone());
+        let stun_sent = || io.stun_sent.load(std::sync::atomic::Ordering::SeqCst);
+        {
+            let _enter = core.handle.enter();
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchOffer(PunchOffer {
+                    punch_id: 15,
+                    from: peer,
+                }),
+            );
+        }
+        let DeviceMessage::PunchAnswer(answer) = next_sent(&mut rx) else {
+            panic!("punch_answer first");
+        };
+        assert!(answer.accept);
+        // A window long enough to punch through the whole test.
+        let mut go = punch_go(15, None, peer);
+        go.window_ms = 4_000;
+        go.candidates = vec![Candidate {
+            addr: "203.0.113.9:40000".parse().unwrap(),
+            kind: CandidateKind::ServerReflexive,
+        }];
+        {
+            let _enter = core.handle.enter();
+            crate::server::dispatch(&core, generation, ServerMessage::PunchGo(go));
+        }
+        let until = Instant::now() + Duration::from_secs(10);
+        while !(ep
+            .connections()
+            .iter()
+            .any(|c| c.state == AttemptPhase::Punching)
+            && stun_sent() > 0
+            && core.router.waiting() > 0)
+        {
+            assert!(Instant::now() < until, "punching: {:?}", ep.connections());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        core.shutdown.send_replace(true);
+        // The attempt sees the signal at once; a probe in flight may still finish its send.
+        std::thread::sleep(Duration::from_millis(100));
+        let after = stun_sent();
+        // Six probe intervals (punch.probe_interval 50 ms).
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(stun_sent(), after, "probes sent after the end");
+        assert_eq!(core.router.waiting(), 0, "transaction IDs left");
+        ep.close();
+    }
+
     /// A punch the acceptor took from one registration belongs to it: after the endpoint
     /// registers again, a cancel with the same punch number from the new server does not end
     /// it, and its result is not sent to the new server (docs/design/p2p.md "조정 연결을

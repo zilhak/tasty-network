@@ -152,6 +152,23 @@ impl Fail {
     }
 }
 
+/// A task an attempt spawned that ends with the attempt: dropping the guard aborts it, so an
+/// attempt future dropped by a cancel or by the endpoint's end takes the task along instead of
+/// leaving it detached.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDrop<T> {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Removes a punch's server channel, probe session and accept session when the punch ends,
 /// also when its future is dropped (cancel).
 struct Cleanup {
@@ -399,13 +416,14 @@ async fn dial_attempts(
         t.update(|r| r.retry_at = Some(retry_at.into_std()));
         t.to(AttemptPhase::RetryWait, cause);
         // The judgement belongs to the registration current now; without one there is none.
+        // It ends with the attempt: a cancel or the endpoint's end drops it with this wait.
         let judge = core
             .generation()
-            .map(|g| tokio::spawn(crate::server::rejudge(core.clone(), g)));
+            .map(|g| AbortOnDrop(tokio::spawn(crate::server::rejudge(core.clone(), g))));
         let waited = tokio::time::timeout_at(end, async {
             tokio::time::sleep_until(retry_at).await;
-            if let Some(judge) = judge {
-                let _judged = judge.await.is_ok();
+            if let Some(mut judge) = judge {
+                let _judged = (&mut judge.0).await.is_ok();
             }
         });
         if waited.await.is_err() {
@@ -759,12 +777,13 @@ async fn accept_punch(core: Arc<Core>, generation: u64, punch_id: u64, from: Dev
         r.window_end_at = Some(window_end.into_std());
     });
     t.to(AttemptPhase::Punching, Cause::named("start_elapsed"));
+    // The probes end with this future, also when the endpoint's end drops it in `accept`.
     let probes = {
         let (router, io, session) = (core.router.clone(), core.io.clone(), session.clone());
         let interval = p.probe_interval;
-        tokio::spawn(async move {
+        AbortOnDrop(tokio::spawn(async move {
             probe::run(&router, &io, &session, interval, window_end, false).await
-        })
+        }))
     };
     let mut pending = usize::MIN;
     loop {
