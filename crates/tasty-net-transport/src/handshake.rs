@@ -24,6 +24,7 @@ use crate::end::{EndReason, GuardSlot, LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
 use crate::hex::random_32;
 use crate::link::{BulkChannel, BulkDial, Link, LinkTimeouts, PeerInfo, deadline_after};
+use crate::link_id::LinkId;
 use crate::reject::{HandshakeError, RejectReason, TooOldEvidence};
 use crate::request::{RequestClient, RequestServer};
 use crate::role::{Holder, Side};
@@ -840,6 +841,7 @@ pub fn dial_handshake(
         peer: dialed.peer,
         client_id: dialed.ack.client_id,
         ext: dialed.ack.ext,
+        link_id: LinkId::of_credential(&credential),
         bulk: Some(BulkDial {
             endpoint,
             credential,
@@ -1281,6 +1283,7 @@ fn accept_on(
         client_id: accept.client_id,
         ext: open.ext,
         bulk: None,
+        link_id: LinkId::of_credential(&credential),
         _guard: accept.guard,
     })))
 }

@@ -23,6 +23,7 @@
 //! | [`LinkCloser`] · [`EndReason`] | whoever ends a link (forced close, the single settle point) |
 //! | [`AttemptCancel`] · [`Cancellable`] · [`Registration`] · [`Cancelled`] | cancelling one connection attempt from another thread |
 //! | [`dial_handshake`] · [`dial_request`] · [`DialConfig`] · [`Link`] · [`BulkChannel`] · [`PeerInfo`] | the dialing end |
+//! | [`LinkId`] | consumers that tell attach links apart or match both ends of one (topology) |
 //! | [`read_first_line`] · [`FirstLineError`] · [`accept_handshake`] · [`accept_p2p_handshake`] · [`AcceptConfig`] · [`Accepted`] · [`RoleProposal`] · [`BulkRegistry`] · [`DEFAULT_MAX_HANDSHAKES`] | the accepting end |
 //! | [`DomainPolicy`] · [`AttachRequest`] · [`BulkRequest`] · [`DomainAccept`] · [`DomainReject`] · [`domain_code`] | the consumer's domain check (occupation and registration happen in it) |
 //! | [`RequestClient`] · [`RequestServer`] · [`RequestHandler`] · [`RequestError`] · [`ServeError`] · [`RESPONSE_TOO_LARGE`] | request channels (port-based lookup, creation, status) |
@@ -42,6 +43,7 @@ mod handshake;
 mod heartbeat;
 mod hex;
 mod link;
+mod link_id;
 mod lock;
 mod memory;
 mod reject;
@@ -69,6 +71,7 @@ pub use handshake::{
 };
 pub use heartbeat::HeartbeatPolicy;
 pub use link::{BulkChannel, Link, LinkTimeouts, PeerInfo};
+pub use link_id::LinkId;
 pub use memory::{MemoryListener, MemoryTransport, memory_channel_pair, memory_transport};
 pub use reject::{HandshakeError, P2pCloseReason, RejectReason, TooOldEvidence};
 pub use request::{

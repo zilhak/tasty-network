@@ -238,6 +238,49 @@ fn a_right_token_gives_a_forward_link_and_one_domain_call() {
     );
 }
 
+/// Both ends of one attach link compute the same link ID from the bulk credential, and
+/// another link between the same two ends gets another ID.
+#[test]
+fn both_ends_of_a_link_compute_the_same_link_id() {
+    let s = server(Some(token('a')));
+    let (transport, listener) = pair(Some(token('a')));
+    let acceptor = accept_many(listener, s.config.clone(), 2);
+    let dial = || {
+        let conn = transport
+            .connect(&(), &AttemptCancel::new())
+            .expect("connect");
+        dial_handshake(
+            conn,
+            &client(1, "dialer-1"),
+            Holder::Dialer,
+            None,
+            &AttemptCancel::new(),
+        )
+        .expect("dial")
+    };
+    let first = dial();
+    let second = dial();
+    let mut accepted = acceptor.join().expect("acceptor").into_iter().map(link_of);
+    let (first_accepted, second_accepted) = (
+        accepted.next().expect("first"),
+        accepted.next().expect("second"),
+    );
+    assert_eq!(first.link_id(), first_accepted.link_id());
+    assert_eq!(second.link_id(), second_accepted.link_id());
+    assert_ne!(
+        first.link_id(),
+        second.link_id(),
+        "another link, another ID"
+    );
+    let hex = first.link_id().to_string();
+    assert_eq!(hex.len(), 32);
+    assert!(
+        hex.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        "lowercase hex: {hex}"
+    );
+}
+
 #[test]
 fn a_missing_and_a_wrong_token_are_refused_with_different_reasons_before_the_domain() {
     for (dialer_token, want) in [

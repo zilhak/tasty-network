@@ -14,6 +14,7 @@ use crate::channel::{
 use crate::end::{EndReason, GuardSlot, LinkCloser};
 use crate::handshake::{DialConfig, dial_bulk};
 use crate::heartbeat::HeartbeatPolicy;
+use crate::link_id::LinkId;
 use crate::reject::{HandshakeError, P2pCloseReason};
 use crate::role::{Holder, Roles, Side, roles};
 use crate::transport::{DialAuth, Endpoint, TransportKind};
@@ -159,6 +160,8 @@ pub struct Link {
     pub(crate) client_id: Option<u32>,
     pub(crate) ext: Option<String>,
     pub(crate) bulk: Option<BulkDial>,
+    /// The ID both ends compute from the bulk credential.
+    pub(crate) link_id: LinkId,
     pub(crate) _guard: Option<Box<dyn Any + Send>>,
     /// The ordered channel's shared state, so dropping the link stops and joins its
     /// heartbeat even while the consumer still holds the taken writer.
@@ -168,6 +171,7 @@ pub struct Link {
 impl fmt::Debug for Link {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Link")
+            .field("link_id", &self.link_id)
             .field("peer", &self.peer)
             .field("client_id", &self.client_id)
             .field("ordered_taken", &self.ordered.is_none())
@@ -191,6 +195,11 @@ impl Link {
     /// The peer.
     pub fn peer(&self) -> &PeerInfo {
         &self.peer
+    }
+
+    /// The link ID, the same on both ends (docs/design/handshake.md "bulk 자격").
+    pub fn link_id(&self) -> LinkId {
+        self.link_id
     }
 
     /// The closer of the link.
@@ -319,6 +328,7 @@ mod tests {
             client_id: None,
             ext: None,
             bulk: None,
+            link_id: LinkId::of_credential(&[0; 32]),
             _guard: None,
         };
         let (mut reader, mut writer) = link.take_ordered().expect("ordered");
@@ -375,6 +385,7 @@ mod tests {
             client_id: None,
             ext: None,
             bulk: None,
+            link_id: LinkId::of_credential(&[0; 32]),
             _guard: None,
             ordered_shared: Arc::clone(&shared),
         };
@@ -413,6 +424,7 @@ mod tests {
             client_id: None,
             ext: None,
             bulk: None,
+            link_id: LinkId::of_credential(&[0; 32]),
             _guard: None,
         };
         let (reader, writer) = link.take_ordered().expect("ordered");
