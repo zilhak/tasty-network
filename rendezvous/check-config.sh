@@ -163,6 +163,15 @@ check_defaults_match() {
     return "$fail"
 }
 
+# cargo build --message-format=json 출력 $1에서 target 이름 $2의 실행 파일 경로를 낸다.
+executable_of() {
+    grep -F '"reason":"compiler-artifact"' <<<"$1" \
+        | grep -F "\"name\":\"$2\"" \
+        | grep -o '"executable":"[^"]*"' \
+        | sed 's/^"executable":"//; s/"$//' \
+        | tail -n 1
+}
+
 # 주소 $1(IP:포트 또는 [IPv6]:포트)의 포트.
 port_of() { echo "${1##*:}"; }
 
@@ -284,6 +293,14 @@ access = everyone'
     expect fail "check_defaults_match: 풀어 쓴 값이 기본과 다르다" check_defaults_match "$plain" "${opened/3479 (configured)/3480 (configured)}" "$t/b.toml"
     expect fail "check_defaults_match: 풀었는데 출처가 default" check_defaults_match "$plain" "${opened/0.0.0.0:3478 (configured)/0.0.0.0:3478 (default)}" "$t/b.toml"
 
+    local cargo_json='{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"tasty_net_rendezvous"},"executable":null}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"tasty-rendezvous"},"executable":"/t/debug/tasty-rendezvous"}
+{"reason":"compiler-artifact","target":{"kind":["example"],"name":"stun_probe"},"executable":"/t/debug/examples/stun_probe"}
+{"reason":"build-finished","success":true}'
+    expect ok "executable_of: 실행 파일" test "$(executable_of "$cargo_json" tasty-rendezvous)" == /t/debug/tasty-rendezvous
+    expect ok "executable_of: 예제" test "$(executable_of "$cargo_json" stun_probe)" == /t/debug/examples/stun_probe
+    expect ok "executable_of: 없는 이름은 빈 값" test -z "$(executable_of "$cargo_json" p2p_peer)"
+
     expect ok "port_of: IPv4" test "$(port_of 0.0.0.0:3478)" == 3478
     expect ok "port_of: IPv6" test "$(port_of '[::]:3479')" == 3479
     expect ok "probe_ip: IPv4 wildcard는 루프백" test "$(probe_ip 0.0.0.0:3478)" == 127.0.0.1
@@ -330,12 +347,16 @@ build() {
         PROBE=$STUN_PROBE
         return
     fi
+    local json
     log "빌드: cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe"
-    (cd "$ROOT" && cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe) \
+    json=$(cd "$ROOT" && cargo build --locked --message-format=json -p tasty-net-rendezvous \
+        --bin tasty-rendezvous --example stun_probe) \
         || { log "빌드 실패"; echo "rendezvous-check result=fail step=build"; exit 2; }
-    local target=${CARGO_TARGET_DIR:-$ROOT/target}
-    BIN=$target/debug/tasty-rendezvous
-    PROBE=$target/debug/examples/stun_probe
+    # 실행 파일 경로는 cargo 출력의 executable 값에서 얻는다(target 폴더 위치를 짐작하지 않는다).
+    BIN=$(executable_of "$json" tasty-rendezvous)
+    PROBE=$(executable_of "$json" stun_probe)
+    [[ -x "$BIN" && -x "$PROBE" ]] \
+        || { log "빌드 출력에서 실행 파일을 찾지 못했다: BIN=$BIN PROBE=$PROBE"; echo "rendezvous-check result=fail step=build"; exit 2; }
 }
 
 settings_of() { "$BIN" settings --config "$1" 2>&1; }
