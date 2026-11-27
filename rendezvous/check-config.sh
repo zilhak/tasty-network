@@ -452,9 +452,10 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
         local want=$1 limit=$2 rc=0 pid reader left=0
         shift 2
         : >"$t/start.log"
-        rm -f "${t:?}/out.fifo"
-        mkfifo "$t/out.fifo" 2>/dev/null
+        # 이전 FIFO를 지우지 못했거나 새 FIFO를 만들지 못하면 바로 실패다(남은 FIFO로 확인을 대신하지 않는다).
         # FIFO가 없으면(만들지 못하는 파일시스템) 리다이렉션이 일반 파일을 만들어 고아 확인이 빠지므로 실패다.
+        rm -f "${t:?}/out.fifo" || return 1
+        mkfifo "$t/out.fifo" 2>/dev/null || return 1
         [[ -p "$t/out.fifo" ]] || return 1
         # 가짜의 표준 출력을 FIFO로 받는다. 출력을 쥔 프로세스가 모두 끝나야 읽는 쪽이 끝난다.
         cat "$t/out.fifo" >/dev/null &
