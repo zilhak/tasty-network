@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use support::process::{
     ChildList, Children, Proc, Transcript, children_of, describe, is_running, log, terminate,
-    wait_all_gone,
+    try_terminate, wait_all_gone,
 };
 use support::sshd::SshServer;
 use support::{TempDir, ssh_path};
@@ -357,18 +357,54 @@ impl Scene {
                 format!("; failed checks: {errors:?}")
             }
         ));
-        for (_, pid) in &left {
-            terminate(*pid);
+        // What still ran, or could not be checked, is asked to end and checked again.
+        let mut to_end = left.clone();
+        to_end.extend(
+            errors
+                .iter()
+                .map(|(pid, _)| ("unchecked".to_string(), *pid)),
+        );
+        let mut end_errors = Vec::new();
+        for (what, pid) in &to_end {
+            // A process that went between the check and the end command is not a failure.
+            if let Err(e) = try_terminate(*pid)
+                && is_running(*pid).unwrap_or(true)
+            {
+                end_errors.push(format!("{what}: {e}"));
+            }
         }
-        for (pid, _) in &errors {
-            terminate(*pid);
+        let after_end = if to_end.is_empty() {
+            GoneCheck {
+                left: Vec::new(),
+                errors: Vec::new(),
+            }
+        } else {
+            check_all_gone(&to_end, Duration::from_secs(10))
+        };
+        if !to_end.is_empty() {
+            log(&format!(
+                "after ending {} of them: {} still run, {} checks failed, {} end commands failed",
+                to_end.len(),
+                after_end.left.len(),
+                after_end.errors.len(),
+                end_errors.len()
+            ));
         }
         self.finished = true;
         assert!(
             errors.is_empty(),
-            "checking the processes of the test failed: {errors:?}"
+            "checking the processes of the test failed: {errors:?} (ending them: \
+             {end_errors:?}; still running after that: {:?}; checks failed after that: {:?})",
+            after_end.left,
+            after_end.errors
         );
-        assert!(left.is_empty(), "processes left after the test: {left:?}");
+        assert!(
+            left.is_empty(),
+            "processes left after the test: {left:?} (ending them: {end_errors:?}; \
+             still running after that: {:?}; checks failed after that: {:?})",
+            after_end.left,
+            after_end.errors
+        );
         if let Some(dir) = self.dir.take() {
             dir.remove();
         }

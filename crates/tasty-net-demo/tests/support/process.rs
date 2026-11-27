@@ -263,6 +263,14 @@ impl Drop for Proc {
 
 /// Ends a process the test did not create: SIGTERM on Unix, `taskkill /F` on Windows.
 pub fn terminate(pid: u32) {
+    if let Err(e) = try_terminate(pid) {
+        log(&e);
+    }
+}
+
+/// [`terminate`], returning a failed end command (one that did not start, or exited with an
+/// error, as for a process that is already gone) as an error.
+pub fn try_terminate(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     let status = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
@@ -273,8 +281,8 @@ pub fn terminate(pid: u32) {
         .stdout(Stdio::null())
         .status();
     match status {
-        Ok(s) if s.success() => {}
-        other => log(&format!("ending pid {pid} failed: {other:?}")),
+        Ok(s) if s.success() => Ok(()),
+        other => Err(format!("ending pid {pid} failed: {other:?}")),
     }
 }
 
