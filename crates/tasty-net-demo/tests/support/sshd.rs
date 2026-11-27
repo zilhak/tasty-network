@@ -278,22 +278,27 @@ impl SshServer {
                 let pid = child.pid();
                 pids.push(("sshd".to_string(), pid));
                 // The clients have ended; their sessions should follow on their own.
+                // Every listing's sessions are kept first (the first and the last, and those
+                // a listing returned with its error); only then is it judged whether to go on.
                 let deadline = Instant::now() + Duration::from_secs(15);
-                let mut sessions = child.sessions();
-                while sessions.error.is_none()
-                    && !sessions.found.is_empty()
-                    && Instant::now() < deadline
-                {
+                let mut sessions;
+                loop {
+                    sessions = child.sessions();
                     for p in &sessions.found {
                         if !pids.iter().any(|(_, q)| q == p) {
                             pids.push(("sshd session".to_string(), *p));
                         }
                     }
+                    if sessions.error.is_some()
+                        || sessions.found.is_empty()
+                        || Instant::now() >= deadline
+                    {
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(200));
-                    sessions = child.sessions();
                 }
                 // Ends what is left either way, before a failure below is reported, with every
-                // session an earlier round saw.
+                // session a listing saw.
                 let seen: Vec<u32> = pids
                     .iter()
                     .filter(|(what, _)| what == "sshd session")
