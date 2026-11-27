@@ -65,7 +65,7 @@ frame, ssh-config, identity ─> (없음)
   2. identity의 외부 의존(serde_json, getrandom, subtle, libc, windows-sys, ed25519 구현)에는 네트워크·런타임이 없다. 연결 토큰과 TOFU 판정은 P2P가 쓰지 않지만 의존을 더하지 않는다.
   3. frame은 쓰지 않는다. P2P 스트림은 바이트 스트림이고 프레임은 transport가 그 위에 얹는다. 조정 메시지의 길이 접두는 rendezvous의 형식 모듈이 따로 정한다(4바이트 길이 + JSON, frame의 tag 구조가 필요 없다).
 - rendezvous → p2p 방향이 아니라 p2p → rendezvous인 근거: p2p의 시험과 예제가 서버를 프로세스 안에서 띄워야 하고, 메시지 형식은 한 곳에 있어야 한다. 서버가 p2p에 의존하면 p2p 시험이 서버를 쓰기 위해 순환(dev 의존)이 생긴다.
-- transport는 p2p를 어댑터로 쓴다. `P2pCloseReason`과 QUIC 종료 코드 표의 정의는 p2p로 옮기고 transport는 다시 내보낸다(지금 develop의 transport 코드에 있는 정의를 옮기는 일은 후속 작업이다).
+- transport는 p2p를 어댑터로 쓴다. `P2pCloseReason`과 QUIC 종료 코드 표의 정의는 p2p에 있고 transport는 다시 내보낸다.
 - 확인: 정적 검사 `p2p-isolation`(`scripts/check.sh p2p-isolation`, `cargo metadata`에서 두 크레이트의 workspace 안 의존이 위 범위 밖이면 실패)이 [동작 수준 기준](done-criteria.md) D8이다.
 
 ## 외부 의존 원칙
@@ -123,7 +123,7 @@ frame, ssh-config, identity ─> (없음)
 | P2P 단위 시험(STUN 코덱, NAT 판별, 프로브 순서, 상태 기계 전이, 설정값 조회) | `tasty-net-p2p`의 `src/` 안 `mod tests` |
 | 프로세스 안 서버와 모의 NAT로 도는 펀칭·연결 시험, 크레이트 안 두 프로세스 시험 | `tasty-net-p2p`의 `tests/`. 서버는 `tasty-net-rendezvous` 라이브러리로 띄운다 |
 | 서버 시험(등록, 접근 정책, 상한, 만료, 밀어내기, 중계 없음) | `tasty-net-rendezvous`의 `tests/` |
-| P2P 어댑터 위 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달, 양방향 마지막 프레임 전달) | `tasty-net-transport`의 `tests/`(p2p가 정식 의존이다) |
+| P2P 어댑터 위 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달, 양방향 마지막 프레임 전달) | `tasty-net-transport`의 `tests/`(p2p가 정식 의존이다). 서버는 `tasty-net-rendezvous` 라이브러리로 띄우고, 이를 위해 transport에 시험 전용 dev 의존 `tasty-net-rendezvous`·`tokio`가 있다(둘 다 p2p를 거쳐 이미 정식 의존 그래프에 있다) |
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
 | rendezvous 서버 설정 검사와 STUN 응답 확인 | `rendezvous/check-config.sh`(CI workflow `rendezvous.yml`). STUN 질의는 `tasty-net-rendezvous`의 `examples/stun_probe.rs`가 이 크레이트의 STUN 코덱으로 보낸다 |

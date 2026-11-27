@@ -280,7 +280,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 
 ### 항목의 단위와 ID
 
-- 물리 연결 하나 = 항목 하나 = 안정 ID 하나다. 물리 연결은 SSH를 띄운 쪽에서는 SSH 터널 하나(공유 키 하나, 위 "터널 수명과 재연결"), SSH 받는 쪽에서는 루프백으로 받은 TCP 연결 하나, P2P에서는 QUIC 연결 하나(P2P 쪽 연결 번호 `P2pConnectionInfo.id`와 한 짝)다. 그 위의 링크·채널은 항목 안의 `links`로 담는다. 한 터널 위 attach 링크 여럿, bulk·요청 채널은 모두 그 터널 항목 하나 안에 있다.
+- 물리 연결 하나 = 항목 하나 = 안정 ID 하나다. 물리 연결은 SSH를 띄운 쪽에서는 SSH 터널 하나(공유 키 하나, 위 "터널 수명과 재연결"), SSH 받는 쪽에서는 루프백으로 받은 TCP 연결 하나, P2P에서는 QUIC 연결 하나(P2P 쪽 연결 번호 `P2pConnectionInfo.id`와 한 짝이고, 항목의 `p2p_id`가 그 번호다)다. P2P 받는 쪽도 QUIC 연결 하나가 항목 하나이고, 그 위 채널(attach·bulk·요청)은 모두 그 항목 안에 있다(bulk 채널 항목의 `parent`는 SSH 받는 쪽에만 생긴다). 그 위의 링크·채널은 항목 안의 `links`로 담는다. 한 터널 위 attach 링크 여럿, bulk·요청 채널은 모두 그 터널 항목 하나 안에 있다.
 - 받는 쪽 SSH는 TCP 연결마다 항목이 생긴다. 상대의 터널 하나 위에서 채널 셋(attach·bulk·요청)을 열면 받는 쪽에는 항목 셋이 생긴다. 받는 쪽은 그 셋이 한 터널인지 알 수 없기 때문이다. bulk 채널 항목은 handshake가 부모 링크를 확인한 뒤 `parent`에 부모 항목 ID를 싣는다.
 - ID(`ConnectionId`)는 `ConnectionTable` 안에서 단조 증가하는 번호다. 항목이 살아 있는 동안 바뀌지 않고, 지운 항목의 번호를 다시 쓰지 않는다.
 - 재연결은 새 물리 연결이므로 새 항목이다. 옛 항목은 `disconnected`로 끝나고(끝난 원인이 `last_cause`에 남는다), 새 항목은 `previous`에 옛 항목 ID를 싣고 `reconnecting` 상태로 시작한다. 그래서 주소쌍이 바뀌어도(원격 포트 재발견, 새 펀칭으로 얻은 새 주소) 이전·새 주소쌍이 각 항목에 그대로 남는다. 성립하면 `connected`다. 같은 물리 연결 안에서 일어나는 주소 변화(P2P의 관측된 원격 주소 변화)는 항목을 바꾸지 않고 `history`에만 남는다.
@@ -296,13 +296,13 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 | `local_side` | 이 기기가 물리 연결을 열었는지 받았는지(`dialer` · `acceptor`) | `dialer` | `acceptor` | P2P `side` |
 | `segments` | 주소 구간 목록. 구간마다 `{name, local, remote}` | `local_forward`: 로컬 포워딩 종단(`127.0.0.1:<포트>`) ↔ 그 포트에 연 채널들(지금 열린 채널의 로컬 소켓 주소를 `FORWARDED_SEPARATOR`로 이은 목록. 채널이 열리고 닫힐 때 바뀐다). `ssh`: 프로필의 SSH 대상(`<호스트>:<포트>`, 프로필 값 그대로. 실제 IP는 `ssh`가 정하고 이 레포는 모른다). `remote_listener`: 원격 쪽 루프백 리스너 포트(발견한 값) | `loopback`: 루프백 listener 주소 ↔ 루프백 상대 주소(sshd 쪽 포트). 이 쪽은 SSH 구간을 볼 수 없다 | `udp`: `local_bind`·`local_ip`(모르면 `unknown`)·`local_reflexive`(서버가 알린 이 기기의 반사 주소) ↔ `remote_addr`(관측된 원격 주소 변화 뒤에는 새 주소). 구간의 `local` 쪽이 이 세 값을 담는다. A(QUIC 클라이언트)는 `local_ip`가 늘 `unknown`이라 `local_bind`의 포트와 `local_reflexive`로 로컬 쪽을 보인다 |
 | `via` | 소개·경유 | `ssh{target, remote_port}` | `loopback` | `rendezvous{server_addr, server_key}`와 성공 후보 종류, 양쪽 `NatMapping`. SSH 항목에는 rendezvous가 없다 |
-| `state` | `connecting` · `connected` · `reconnecting` · `disconnected` | 터널 준비·handshake 중 / 링크 성립 / 재연결로 만든 항목의 성립 전 / 끝 | handshake 중 / 성립 / (받는 쪽은 재연결하지 않는다) / 끝 | P2P의 `Requesting`·`Offered`·`Scheduled`·`Punching`·`Handshaking`·`RetryWait`(재연결 항목이면 `reconnecting`) / `Connected` / `Closed` |
+| `state` | `connecting` · `connected` · `reconnecting` · `disconnected` | 터널 준비·handshake 중 / 링크 성립 / 재연결로 만든 항목의 성립 전 / 끝 | handshake 중 / 성립 / (받는 쪽은 재연결하지 않는다) / 끝 | P2P의 `Requesting`·`Offered`·`Scheduled`·`Punching`·`Handshaking`·`RetryWait`(재연결 항목이면 `reconnecting`) / `Connected` / `Closed`. QUIC 연결이 선 뒤 첫 채널의 handshake v2 동안은 SSH와 같이 `connecting`(`phase` = `handshake`)이고, 링크나 채널이 서면 `connected`다 |
 | `phase` | 세부 단계 | 터널 준비, 포트 발견, handshake | handshake | P2P 상태 기계의 상태 이름과 값 |
-| `last_cause` | 마지막 전이 원인 | 터널 종료, 원격 리스너 없음, 거절 사유, heartbeat 만료 등 | 거절 사유, 상대 닫음 등 | P2P 전이 원인(종료 코드 포함) |
+| `last_cause` | 마지막 전이 원인 | 터널 종료, 원격 리스너 없음, 거절 사유, heartbeat 만료 등 | 거절 사유, 상대 닫음 등 | P2P 전이 원인(종료 코드 포함). 연결이 서기 전 전이는 P2P의 원인 이름 그대로(`Cause::P2p`). 연결의 끝은 상대(또는 `tasty-net-p2p`)가 닫았으면 그 종료 코드(`p2p_closed`), 종료 코드 없이 끝났으면(idle timeout) `lost`, 이 쪽이 닫았으면 마지막 링크의 끝 원인이다 |
 | `history` | 전이와 주소 변화 이력 | 상태 전이 | 상태 전이 | 상태 전이, `remote_address_observed_change`(관측된 원격 주소 변화, [P2P](p2p.md#주소-바뀜-quic-경로-이동)) |
 | `links` | 그 위의 링크·채널 | attach 링크(링크마다 `link_id`([handshake v2](handshake.md#bulk-자격)), holder, 연 시각, 그 링크에 적용된 `link.*` 값 `applied`), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
 | `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
-| `applied` | 이 연결에 적용된 설정값. 항목마다 `{key, value, source}`. 재연결 시도 번호와 다음 시도까지 남은 시간은 `redial` 필드에 있다 | 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`). 한 터널 위 링크·채널은 시간 값이 서로 다를 수 있어, 항목의 `link.*`는 항목을 처음 `connected`로 만든 채널의 값이고 링크마다의 값은 `links`의 `applied`에 있다 | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로 |
+| `applied` | 이 연결에 적용된 설정값. 항목마다 `{key, value, source}`. 재연결 시도 번호와 다음 시도까지 남은 시간은 `redial` 필드에 있다 | 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`). 한 터널 위 링크·채널은 시간 값이 서로 다를 수 있어, 항목의 `link.*`는 항목을 처음 `connected`로 만든 채널의 값이고 링크마다의 값은 `links`의 `applied`에 있다 | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로. `applied`에는 그 위 링크의 `link.*` 값도 함께 있고, `attempt`는 항목의 `attempt` 필드다 |
 
 - 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 `link_id`로 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
 

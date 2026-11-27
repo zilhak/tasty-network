@@ -154,7 +154,7 @@ dialer 쪽도 2번 메시지를 받은 뒤 서명 → 자기 자신 → TOFU 순
 | 그 밖 | — | `Unknown(u64)` | 아니오 |
 
 - 2와 3은 iroh 설계의 `direct_path_timeout`·`direct_path_lost`였다. 중계 경로가 없어 직접 경로를 기다리거나 잃는 사유가 없으므로 없앤다. 번호는 다시 쓰지 않는다. 받으면 `Unknown(2)`·`Unknown(3)`이다.
-- `P2pCloseReason`과 이 표는 `tasty-net-p2p`가 정의한다. 숫자 코드가 P2P 크레이트의 와이어 값이고, 의존 방향이 transport → p2p이기 때문이다([크레이트 구성](crates.md#p2p-크레이트-격리)). transport는 그 enum을 다시 내보내 `HandshakeError`와 `Link`에 싣는다. 지금 develop에서는 transport에 정의가 있고, 옮기는 일은 후속 작업이다.
+- `P2pCloseReason`과 이 표는 `tasty-net-p2p`가 정의한다. 숫자 코드가 P2P 크레이트의 와이어 값이고, 의존 방향이 transport → p2p이기 때문이다([크레이트 구성](crates.md#p2p-크레이트-격리)). transport는 그 enum을 다시 내보내 `HandshakeError`와 `Link`에 싣는다. 정의는 `tasty-net-p2p`의 `close` 모듈에 있고, `tasty_net_transport::P2pCloseReason`은 그 다시 내보내기다.
 - handshake 중에 받으면 `HandshakeError::Closed(P2pCloseReason)`이다.
 - 링크가 선 뒤에 받으면 읽기·쓰기는 `ReadFailure::PeerClosed`로 끝나고, 사유는 `Link::close_reason() -> Option<P2pCloseReason>`으로 읽는다. 이 쪽이 닫았으면 이 쪽이 보낸 사유가 들어 있다.
 - 상대가 종료 프레임(CONNECTION_CLOSE)을 받은 경우에만 같은 사유를 얻는다. 받지 못하면 QUIC idle timeout으로 끝나고 `ReadFailure::HeartbeatTimeout`, `close_reason()`은 `None`이다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.2, quinn `Connection::close` 설명).
