@@ -463,6 +463,7 @@ fn serve(
                 Mode::LastFrameFirst => {
                     last_frame_first(reader, writer, read_tx, || {
                         std::thread::sleep(Duration::from_millis(300));
+                        true
                     });
                 }
                 Mode::LastFrameLate => {
@@ -490,24 +491,39 @@ fn echo(mut reader: ChannelReader, mut writer: ChannelWriter) {
 /// that does not depend on when each started its clock.
 #[derive(Default)]
 struct Release {
-    open: Mutex<bool>,
+    state: Mutex<ReleaseState>,
     opened: Condvar,
+}
+
+#[derive(Default)]
+struct ReleaseState {
+    open: bool,
+    /// The waiting side stopped waiting before the release opened.
+    gave_up: bool,
 }
 
 impl Release {
     fn open(&self) {
-        *self.open.lock().expect("release") = true;
+        self.state.lock().expect("release").open = true;
         self.opened.notify_all();
     }
 
-    /// Waits until the release is open, up to [`PATIENCE`].
-    fn wait(&self) {
-        let open = self.open.lock().expect("release");
-        drop(
-            self.opened
-                .wait_timeout_while(open, PATIENCE, |open| !*open)
-                .expect("release"),
-        );
+    /// Waits until the release is open, up to [`PATIENCE`]: whether it opened. A wait that
+    /// runs out is recorded ([`Release::gave_up`]).
+    #[must_use]
+    fn wait(&self) -> bool {
+        let state = self.state.lock().expect("release");
+        let (mut state, _) = self
+            .opened
+            .wait_timeout_while(state, PATIENCE, |state| !state.open)
+            .expect("release");
+        state.gave_up = !state.open;
+        state.open
+    }
+
+    /// Whether the waiting side stopped waiting before the release opened.
+    fn gave_up(&self) -> bool {
+        self.state.lock().expect("release").gave_up
     }
 }
 
@@ -515,15 +531,18 @@ fn last_frame_first(
     mut reader: ChannelReader,
     mut writer: ChannelWriter,
     read_tx: &mpsc::Sender<(Vec<StreamFrame>, Option<ReadFailure>)>,
-    wait: impl FnOnce(),
+    wait: impl FnOnce() -> bool,
 ) {
     writer
         .write_frame(StreamTag::Detach, b"acceptor-last")
         .expect("the acceptor's last frame");
     writer.half_close().expect("half close");
     // The dialer has read the acceptor's last frame and ended its side by now; the acceptor's
-    // EOF must still wait for this side to read the dialer's frames.
-    wait();
+    // EOF must still wait for this side to read the dialer's frames. Without the go-ahead it
+    // reads nothing and sends no reads: the test fails on its wait for them.
+    if !wait() {
+        return;
+    }
     let mut frames = Vec::new();
     let end = loop {
         match reader.read_frame() {
@@ -1505,6 +1524,10 @@ fn a_late_read_within_the_links_drain_cap_loses_no_last_frame() {
     let dropped = Instant::now();
     drop((reader, writer, link));
     std::thread::sleep(past_default.saturating_sub(dropped.elapsed()));
+    assert!(
+        !pair.late_read.gave_up(),
+        "the acceptor stopped waiting for its release within {PATIENCE:?}: the check says nothing"
+    );
     assert_eq!(
         pair.connections().0,
         1,
