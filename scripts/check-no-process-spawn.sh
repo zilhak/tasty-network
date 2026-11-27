@@ -63,6 +63,12 @@ STD_PROCESS_BAD = {"Command", "Child", "Stdio", "ChildStdin", "ChildStdout", "Ch
                    "ExitStatus"}
 
 
+# 이 크레이트 안을 가리키는 경로의 첫 조각. crate::std::…·self::std::…·super::std::…·$crate::std::…의
+# std는 이 크레이트 안의 항목이다. 그 항목이 표준 라이브러리를 가리키게 하는 방법(use std;·use std as x;·
+# extern crate std;)은 그 선언에서 실패하고, 이 크레이트의 모듈이면 그 파일을 따로 본다.
+LOCAL_ROOTS = {"crate", "self", "super", "Self"}
+
+
 def forbidden_paths(path):
     """path(조각 목록)에 견줄 금지 경로들. std::os::<os>::process는 그 path의 <os> 자리로 채운다."""
     out = [["std", "process"], ["tokio", "process"]]
@@ -185,16 +191,18 @@ def path_hits(toks, spans):
         if i in skip or toks[i][0] != "ident":
             continue
         if (i > 1 and toks[i - 1][1] == "::"
-                and ((toks[i - 2][0] == "ident" and toks[i - 2][1] not in KEYWORDS)
+                and ((toks[i - 2][0] == "ident"
+                      and (toks[i - 2][1] not in KEYWORDS or toks[i - 2][1] in LOCAL_ROOTS))
                      or toks[i - 2][1] == ">")):
-            # 경로 한가운데(a::std::…, <T>::std::…)는 그 경로의 첫 조각에서 본다. 앞에 ::만 있거나
-            # 그 앞이 키워드면(::std::…, return ::std::…, &mut ::std::…) 루트 경로라 여기서 본다.
+            # 경로 한가운데(a::std::…, <T>::std::…, crate::std::…)는 그 경로의 첫 조각에서 본다. 앞에
+            # ::만 있거나 그 앞이 키워드면(::std::…, return ::std::…, &mut ::std::…) 루트 경로라 여기서 본다.
             continue
         t, line = toks[i][1], toks[i][2]
-        if t == "extern" and i + 4 < n and toks[i + 1][1] == "crate" \
-                and toks[i + 2][1] in ("std", "tokio") and toks[i + 3][1] == "as":
-            hits.append((line, f"extern crate {toks[i + 2][1]} as {toks[i + 4][1]}",
-                         "크레이트 별칭 선언"))
+        if t == "extern" and i + 2 < n and toks[i + 1][1] == "crate" \
+                and toks[i + 2][1] in ("std", "tokio"):
+            alias = toks[i + 4][1] if i + 4 < n and toks[i + 3][1] == "as" else None
+            hits.append((line, f"extern crate {toks[i + 2][1]}" + (f" as {alias}" if alias else ""),
+                         "크레이트 별칭 선언" if alias else "크레이트를 모듈 안 이름으로 들임"))
             continue
         w = words(i, 3)
         if w and w[:2] == ["std", "process"] and w[2] in STD_PROCESS_BAD:
@@ -383,6 +391,9 @@ def self_test():
         ("use std::process::Output;", "use std::process::Output;\n"),
         ("extern crate std as s;", "extern crate std as s;\n"),
         ("extern crate tokio as t;", "extern crate tokio as t;\n"),
+        ("별칭 없는 extern crate std;(self::std가 표준 라이브러리가 된다)",
+         "extern crate std;\nfn f() { self::std::process::Command::new(\"x\"); }\n"),
+        ("별칭 없는 pub extern crate tokio;", "pub extern crate tokio;\n"),
         ("use std as s;", "use std as s;\n"),
         ("use ::std as s;", "use ::std as s;\n"),
         ("use std::{self as s};", "use std::{self as s};\n"),
@@ -450,6 +461,11 @@ def self_test():
         ("raw 바이트 문자열 br#\"…\"# 안의 따옴표와 std::process::Command",
          "const S: &[u8] = br#\"a \" std::process::Command\"#;\n"),
         ("a::std::process::Command(다른 크레이트 안의 std 모듈)", "fn f() { other::std::process::Command::new(\"x\"); }\n"),
+        ("crate::std::process::Command(이 크레이트의 std 모듈)", "fn f() { crate::std::process::Command::new(\"x\"); }\n"),
+        ("self::std::process::Command(이 모듈 아래 std 모듈)", "fn f() { self::std::process::Command::new(\"x\"); }\n"),
+        ("super::tokio::process::Command(윗 모듈의 tokio 모듈)", "fn f() { super::tokio::process::Command::new(\"x\"); }\n"),
+        ("$crate::std::process::Command(매크로가 정의된 크레이트의 std 모듈)",
+         "macro_rules! m { () => { $crate::std::process::Command::new(\"x\") }; }\n"),
         ("정밀 캡처 impl Copy + use<'a>는 import가 아니다",
          "fn f<'a>(x: &'a u8) -> impl Copy + use<'a> { *x }\nfn g<T>() -> impl Sized + use<T> {}\n"),
         ("시험 cfg 필드의 금지 타입만 지운다", "struct S { #[cfg(test)] c: std::process::Child, b: u8 }\n"),
