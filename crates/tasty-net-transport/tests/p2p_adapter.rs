@@ -7,7 +7,7 @@
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -251,7 +251,7 @@ enum Mode {
     /// Writes its last frame and ends its side first, waits, and only then reads what the
     /// dialer sent; the frames go to the test.
     LastFrameFirst,
-    /// [`Mode::LastFrameFirst`] with a wait past the dialer's default drain cap.
+    /// [`Mode::LastFrameFirst`] that waits for the test's release (`Pair::late_read`) instead.
     LastFrameLate,
 }
 
@@ -268,6 +268,8 @@ struct Pair {
     table_b: ConnectionTable,
     /// The frames the accepting side read in [`Mode::LastFrameFirst`], and how its read ended.
     read: mpsc::Receiver<(Vec<StreamFrame>, Option<ReadFailure>)>,
+    /// What [`Mode::LastFrameLate`] waits for before it reads.
+    late_read: Arc<Release>,
     stop: Arc<AtomicBool>,
     accepting: Option<JoinHandle<()>>,
     served: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -328,9 +330,11 @@ impl Pair {
         let stop = Arc::new(AtomicBool::new(false));
         let served: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
         let (read_tx, read) = mpsc::channel();
+        let late_read = Arc::new(Release::default());
         let accepting = {
             let stop = Arc::clone(&stop);
             let served = Arc::clone(&served);
+            let late_read = Arc::clone(&late_read);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     let Ok(inbound) = listener.accept_timeout(Some(Duration::from_millis(100)))
@@ -338,8 +342,10 @@ impl Pair {
                         continue;
                     };
                     let read_tx = read_tx.clone();
+                    let late_read = Arc::clone(&late_read);
                     let thread = std::thread::spawn(move || {
-                        serve(inbound.handshake(&AttemptCancel::new()), mode, &read_tx);
+                        let accepted = inbound.handshake(&AttemptCancel::new());
+                        serve(accepted, mode, &read_tx, &late_read);
                     });
                     served.lock().expect("served").push(thread);
                 }
@@ -355,6 +361,7 @@ impl Pair {
             table_a,
             table_b,
             read,
+            late_read,
             stop,
             accepting: Some(accepting),
             served,
@@ -444,6 +451,7 @@ fn serve(
     accepted: Result<Accepted, HandshakeError>,
     mode: Mode,
     read_tx: &mpsc::Sender<(Vec<StreamFrame>, Option<ReadFailure>)>,
+    late_read: &Release,
 ) {
     match accepted {
         Ok(Accepted::Link(mut link)) => {
@@ -453,9 +461,13 @@ fn serve(
             match mode {
                 Mode::Echo => echo(reader, writer),
                 Mode::LastFrameFirst => {
-                    last_frame_first(reader, writer, read_tx, Duration::from_millis(300));
+                    last_frame_first(reader, writer, read_tx, || {
+                        std::thread::sleep(Duration::from_millis(300));
+                    });
                 }
-                Mode::LastFrameLate => last_frame_first(reader, writer, read_tx, LATE_READ),
+                Mode::LastFrameLate => {
+                    last_frame_first(reader, writer, read_tx, || late_read.wait());
+                }
             }
         }
         Ok(Accepted::Bulk(bulk)) => echo(bulk.reader, bulk.writer),
@@ -474,14 +486,36 @@ fn echo(mut reader: ChannelReader, mut writer: ChannelWriter) {
     drop(writer.half_close());
 }
 
-/// How long [`Mode::LastFrameLate`] waits before it reads: past the default drain cap.
-const LATE_READ: Duration = Duration::from_secs(3);
+/// A release one side opens and the other waits for: an order of events between two threads
+/// that does not depend on when each started its clock.
+#[derive(Default)]
+struct Release {
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Release {
+    fn open(&self) {
+        *self.open.lock().expect("release") = true;
+        self.opened.notify_all();
+    }
+
+    /// Waits until the release is open, up to [`PATIENCE`].
+    fn wait(&self) {
+        let open = self.open.lock().expect("release");
+        drop(
+            self.opened
+                .wait_timeout_while(open, PATIENCE, |open| !*open)
+                .expect("release"),
+        );
+    }
+}
 
 fn last_frame_first(
     mut reader: ChannelReader,
     mut writer: ChannelWriter,
     read_tx: &mpsc::Sender<(Vec<StreamFrame>, Option<ReadFailure>)>,
-    wait: Duration,
+    wait: impl FnOnce(),
 ) {
     writer
         .write_frame(StreamTag::Detach, b"acceptor-last")
@@ -489,7 +523,7 @@ fn last_frame_first(
     writer.half_close().expect("half close");
     // The dialer has read the acceptor's last frame and ended its side by now; the acceptor's
     // EOF must still wait for this side to read the dialer's frames.
-    std::thread::sleep(wait);
+    wait();
     let mut frames = Vec::new();
     let end = loop {
         match reader.read_frame() {
@@ -1440,13 +1474,15 @@ fn a_dialer_that_drops_its_halves_early_loses_no_last_frame() {
 /// this side's frames late: past that default, within the drain cap. The dialer drops its
 /// halves before it read the acceptor's end; its last read waits the link's drain cap, so the
 /// connection stays until the acceptor read every frame and ended its side
-/// (docs/design/transport.md "연결을 닫는 때").
+/// (docs/design/transport.md "연결을 닫는 때"). The acceptor reads only once the dialer has
+/// checked the connection past the default drain cap from its own drop: the two sides keep no
+/// common clock.
 #[test]
 fn a_late_read_within_the_links_drain_cap_loses_no_last_frame() {
     const FRAMES: usize = 4;
-    let drain_cap = Duration::from_secs(5);
+    let drain_cap = Duration::from_secs(10);
     let past_default = tasty_net_transport::DEFAULT_DRAIN_CAP + Duration::from_millis(300);
-    assert!(past_default < LATE_READ && LATE_READ < drain_cap);
+    assert!(past_default < drain_cap);
     let mut pair = Pair::start_draining(90, Mode::LastFrameLate, drain_cap);
     pair.dial = pair.dial.clone().with_timeouts(LinkTimeouts {
         drain_cap,
@@ -1469,15 +1505,12 @@ fn a_late_read_within_the_links_drain_cap_loses_no_last_frame() {
     let dropped = Instant::now();
     drop((reader, writer, link));
     std::thread::sleep(past_default.saturating_sub(dropped.elapsed()));
-    assert!(
-        pair.read.try_recv().is_err(),
-        "the acceptor read before the check: the check says nothing"
-    );
     assert_eq!(
         pair.connections().0,
         1,
         "the dialer closed the connection {past_default:?} after its drop, before the acceptor read"
     );
+    pair.late_read.open();
     let (frames, ended) = pair
         .read
         .recv_timeout(PATIENCE)
