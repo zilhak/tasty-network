@@ -357,8 +357,8 @@ CI 잡 둘이 있다(`.github/workflows/ci.yml`). 잡 설정과 NDK 판의 근�
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
 | `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 director 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
-| hotfix 태그의 판정 순서 | 후속 작업(모바일 cross check). hotfix는 버전 커밋과 태그를 한 번에 push하므로 태그 조건([버전·호환](versioning.md#태그와-브랜치))을 볼 CI가 태그 전에 없다. 태그 없이 `main`을 먼저 push해 CI를 볼지, 다른 ref에서 판정할지 |
-| tasty 전환 뒤 태그의 모바일 조건 | 후속 작업(모바일 cross check). tasty 전환 태그 뒤의 태그에도 모바일 cross check 통과를 요구할지 |
+| hotfix 태그의 판정 순서 | 결정됨(director 2946). hotfix를 포함한 모든 태그는 버전 커밋을 먼저 push하고 그 커밋의 CI(모바일 cross check 포함)가 모두 success인 것을 본 뒤에 태그를 push한다. 버전 커밋과 태그를 한 번에 push하지 않는다. hotfix는 태그 없이 `main`에 push한 버전 커밋의 CI로 판정한다([버전·호환](versioning.md#태그와-브랜치)) |
+| tasty 전환 뒤 태그의 모바일 조건 | 결정됨(director 2946, 위 행). 그 순서가 모든 태그에 적용되므로 tasty 전환 태그 뒤의 태그도 그 커밋의 모바일 cross check가 success여야 한다 |
 | FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, attach 링크 쪽에도 상대 `caps` 조회를 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
 | Kotlin 패키지 이름의 값 | 후속 작업(바인딩 크레이트). #12: `uniffi.toml`의 `package_name` 값, rlib 링크 시험에서 두 네임스페이스의 Kotlin이 모두 `tasty_mobile_core`를 싣는지 볼지 |
 | 지역망 판정 콜백과 두 오류의 FFI 모양 | 후속 작업(바인딩 크레이트, 내장 SSH 백엔드). #14: 콜백 이름과 인자, 두 변형의 필드, 콜백 안에서 앱이 권한을 요청할 때의 대기 상한, 실행 중 심벌을 찾을 라이브러리와 방법 |

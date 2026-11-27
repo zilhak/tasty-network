@@ -12,7 +12,8 @@
 - 태그 형식은 `v<semver>`(예: `v0.1.0`)이고 `main`의 버전 커밋에만 붙인다.
 - tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29, [모바일](mobile.md#모바일-cross-check))가 통과한 커밋에만 붙인다. tasty-android 앱은 따로 태그를 받지 않고 같은 태그의 `rev`를 쓰기 때문이다(director 2865로 받은 android 요구 R2 #10).
 - `embedded-ssh`가 기본 feature에 든(내장 폴백을 켠) 릴리스의 태그는 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 커밋에만 붙인다(director 2931).
-- 태그 조건(위 두 줄)의 판정 커밋은 태그를 붙일 버전 커밋이다. [동작 수준 기준](done-criteria.md#판정-규칙)의 "S는 `develop`의 커밋"은 tasty 전환 판단에만 쓴다. 일반 릴리스는 `release`에 push한 그 버전 커밋의 CI로 판정한다. hotfix는 버전 커밋과 태그를 한 번에 push하므로 태그 전에 그 커밋의 CI가 없다. 이 경우의 순서는 [후속 작업](mobile.md#후속-작업과-미정)이 정한다.
+- 태그 조건(위 두 줄)의 판정 커밋은 태그를 붙일 버전 커밋이다. [동작 수준 기준](done-criteria.md#판정-규칙)의 "S는 `develop`의 커밋"은 tasty 전환 판단에만 쓴다. 일반 릴리스는 `release`에 push한 그 버전 커밋의 CI로, hotfix는 태그 없이 `main`에 push한 그 버전 커밋의 CI로 판정한다.
+- 태그 push 순서(hotfix를 포함한 모든 태그, director 2946): 버전 커밋을 먼저 push하고, 그 커밋의 CI(모바일 cross check 포함)가 모두 success인 것을 본 뒤에 태그를 push한다. 버전 커밋과 태그를 한 번에 push하지 않는다. tasty 전환 태그 뒤의 태그도 같으므로 모든 태그가 모바일 cross check를 통과한 커밋에 붙는다.
 
 ## tasty가 쓰는 방식
 

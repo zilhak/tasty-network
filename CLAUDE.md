@@ -37,6 +37,7 @@
 
 - 모든 크레이트가 workspace 버전 하나를 쓰고 crates.io에 올리지 않는다(`publish = false`).
 - 태그는 `v<semver>`이고 `main`의 버전 커밋에만 붙인다.
+- 태그는 버전 커밋과 한 번에 push하지 않는다. 버전 커밋을 먼저 push하고 그 커밋의 CI(모바일 cross check 포함)가 모두 success인 것을 본 뒤에 태그를 push한다(hotfix도 같다).
 - 규칙의 정본은 [버전·호환](docs/design/versioning.md)이다.
 
 ## Git 규칙
