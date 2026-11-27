@@ -104,6 +104,8 @@ cargo tree --locked --target <t> -p <크레이트> <그 조합의 feature 인자
 - 실패 조건: `tokio` 줄의 feature에 `process`가 있다, `russh-config` 줄이 있다, `tasty-net-ssh` 줄의 feature에 `system-ssh`가 있다.
 - russh 0.65.4의 일반 의존 tokio feature는 `io-util`·`sync`·`time`과 비 wasm `io-util`·`rt-multi-thread`·`time`·`net`이고 `process`는 dev 의존에만 있다. russh-sftp 4.0.0은 `io-util`·`rt`·`sync`·`time`·`macros`다. 그래서 지금 판에서는 이 검사가 통과해야 한다.
 - 빌드 성공만으로 판정하지 않는 근거: std의 `std::process`는 Android·iOS target에서도 컴파일된다(위 표의 ssh 행이 지금 통과한다).
+- 앱의 최종 의존 그래프(android 요구 #15): 같은 기준을 앱 작업 공간에서도 돌릴 수 있게 이 절을 공개 기준으로 둔다. 대상 target은 `aarch64-linux-android`·`x86_64-linux-android`이고, 명령은 앱 작업 공간에서 앱 cdylib 크레이트를 `-p`로 준 같은 `cargo tree`다(앱의 배포 빌드 feature 인자를 붙인다). 실패 조건 가운데 `russh-config` 줄과 `tasty-net-ssh`의 `system-ssh`는 그대로다. `tokio`의 `process`는 앱 자신이 켤 수 있으므로(다른 프로그램 실행 금지는 앱 코드에 적용되지 않는다, 아래 "바인딩 층") 그 줄만으로 실패로 보지 않는다. `cargo tree --locked --target <t> -e features -i tokio`(feature를 켠 쪽을 거꾸로 보인다)에서 `process`를 켠 경로에 `tasty-net-*` 크레이트가 있을 때만 실패다.
+- 이 검사를 하는 스크립트는 모바일 cross check 작업이 만들고, 앱 작업 공간의 `Cargo.toml` 경로와 크레이트 이름을 인자로 받아 이 레포 밖에서도 같은 조건으로 돈다. 인자 모양은 그 작업이 정한다.
 
 ## 모바일의 SSH
 
@@ -111,6 +113,17 @@ cargo tree --locked --target <t> -p <크레이트> <그 조합의 feature 인자
 - 사용자의 SSH 파일은 앱 저장소의 `ssh/` 폴더에 둔다. 바인딩 층이 그 경로를 `embedded.ssh_dir`로 넣는다(tasty 설정으로 덮어쓸 수 있다, [내장 백엔드가 읽는 파일](ssh-backends.md#내장-백엔드가-읽는-파일)).
 - 모바일에는 보통 ssh-agent가 없다. 키 passphrase·비밀번호·호스트 키 확인은 앱이 구현한 `SshPrompt`가 묻는다(아래 "바인딩 층").
 - exec와 SFTP는 내장 백엔드의 같은 세션 위 채널이다([터널·exec·SFTP](ssh-backends.md#터널execsftp)).
+
+### 직접 LAN 연결 (Android 지역망 권한)
+
+Android 17(API 37)부터 SDK 37 이상을 대상으로 하는 앱은 지역망 주소로 TCP 연결을 맺을 때 런타임 권한 `ACCESS_LOCAL_NETWORK`이 필요하다. 제한은 네트워크 스택에서 걸리므로 Rust 소켓에도 적용되고, `.local` 이름 풀이에도 권한이 필요하다. 권한이 없으면 TCP는 보통 시간 초과로 끝난다([Android 지역망 권한](https://developer.android.com/privacy-and-security/local-network-permission), 2026-11-27 확인). android 요구 #14를 받는 자리다.
+
+- 경계: 권한 확인·요청·설정 화면 안내는 앱(Kotlin) 몫이다. 이 레포는 판정 결과를 받는 콜백과 두 오류 갈래만 둔다(아래 "경계" 표).
+- 판정: 내장 백엔드가 첫 SSH 홉(`ProxyJump`가 있으면 첫 점프 호스트)의 소켓을 열기 전에 한다. 뒤의 홉은 첫 홉의 SSH 안으로 가므로 기기의 소켓이 닿는 곳은 첫 홉뿐이다. 유효 이름이 `.local`로 끝나면 이름 풀이 전에, 아니면 풀이한 주소가 지역망 주소일 때 앱의 지역망 판정 콜백을 부른다. 콜백은 그 홉의 이름과 (있으면) 주소를 받고 허용·거절을 돌려준다. 지역망 주소 범위는 후속 작업이 정한다.
+- (a) 콜백이 거절하면 소켓을 열지 않고 `LocalNetworkDenied`로 끝난다. 재시도하지 않는다.
+- (b) 허용했는데 소켓 연결이 실패하면, 그 소켓을 가진 내장 백엔드가 닫기 전에 NDK `android_getnetworkblockedreason(sockfd)`(`android/multinetwork.h`, 그 소켓에 기록된 차단 사유를 돌려주고 지운다)를 부른다. `ANDROID_NETWORK_BLOCKED_REASON_LNP`이면 `LocalNetworkBlocked`로, 아니면 원래 연결 오류로 끝난다([NDK 네트워킹 참조](https://developer.android.com/ndk/reference/group/networking)). FFI 오류로 바뀐 뒤에는 그 FD가 없으므로 앱이 나중에 읽을 수 없다.
+- API 29 빌드를 유지하는 호출 경계: NDK 참조 문서에는 이 함수가 어느 API 레벨부터 있는지 적혀 있지 않다(같은 쪽의 다른 함수에는 적혀 있다, 2026-11-27 확인). 그래서 빌드 때 링크하지 않고 실행 중에 심벌을 찾아 있을 때만 부른다. 없으면 (b)를 판정하지 않고 원래 연결 오류다. 대상 수준은 위 "대상 target"의 29 그대로다. 이 OS 호출을 둘 크레이트는 판단을 올렸다([SSH 백엔드 후속 작업](ssh-backends.md#후속-작업과-미정)).
+- FFI: 두 사유는 FFI 오류 enum의 서로 다른 변형이다. 콜백은 아래 "API 원칙"의 연결 처리 안 콜백이다.
 
 ## 앱 수명
 
@@ -225,7 +238,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 | `crates/tasty-net-ffi`: proc-macro 정의(`uniffi::setup_scaffolding!`, `#[uniffi::export]`, `#[derive(uniffi::Record, uniffi::Enum, uniffi::Error, uniffi::Object)]`). UDL 파일은 두지 않는다 | `uniffi-bindgen generate` 실행과 생성된 Kotlin·Swift 소스(생성물을 앱 레포에 커밋할지는 앱 레포가 정한다) |
 | `uniffi` 정확한 판 고정과 기록, `uniffi.toml`(Kotlin 패키지 이름, Swift 모듈 이름) | 그 판의 생성기를 쓰는 Gradle 작업(라이브러리 모드, 앱 cdylib의 `.so`를 입력으로), 앱 쪽 UniFFI 크레이트를 같은 판으로 맞추기 |
 | FFI 레코드·오류 enum·객체와 코어 타입 사이 변환, Rust 쪽 FFI 시험 | Rust 라이브러리 빌드(cargo-ndk 등, target별 `.so`), AAR·APK 묶기, 앱 서명 |
-| `crate-type = ["lib", "cdylib", "staticlib"]`. `lib`는 앱의 cdylib에 rlib으로 링크되는 정식 경로다(아래 "rlib 링크 계약"). `cdylib`·`staticlib`은 이 레포의 생성 검사와 앱 없이 쓰는 경우용 | 앱 cdylib(`tasty-mobile-core`)이 `tasty-net-ffi`에 의존하고 링크하는 일, 앱 수명 이벤트를 `TastyNet::app_event`로 넘기는 코드, `SshPrompt`·`PeerKeyStore` 구현, 포그라운드 서비스 |
+| `crate-type = ["lib", "cdylib", "staticlib"]`. `lib`는 앱의 cdylib에 rlib으로 링크되는 정식 경로다(아래 "rlib 링크 계약"). `cdylib`·`staticlib`은 이 레포의 생성 검사와 앱 없이 쓰는 경우용 | 앱 cdylib(`tasty-mobile-core`)이 `tasty-net-ffi`에 의존하고 링크하는 일, 앱 수명 이벤트를 `TastyNet::app_event`로 넘기는 코드, `SshPrompt`·`PeerKeyStore`·지역망 판정 콜백 구현(권한 확인·요청), 포그라운드 서비스 |
 | 모바일 cross check의 ffi 행, `no-process-spawn`, 생성 검사(호스트 라이브러리를 빌드해 Kotlin·Swift를 임시 폴더에 생성하고 성공만 본다) | 앱 저장소의 키 디렉터리와 `ssh/` 폴더 경로를 `TastyNet` 생성 인자로 주는 일 |
 | 바인딩 API 문서(생성되는 문서 주석) | 앱의 라이선스 고지(OpenSSH, MPL-2.0 UniFFI 런타임) |
 
@@ -242,6 +255,8 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 - 다른 크레이트는 UniFFI에 의존하지 않는다. FFI용 타입은 이 크레이트가 따로 정의하고 코어 타입에서 옮긴다(코어 크레이트의 공개 API가 FFI 제약을 따르지 않게 한다).
 - unsafe: [크레이트 구성](crates.md#unsafe-규칙)의 `deny(unsafe_code)` 분류다.
 - UniFFI 판: 2026-11-27 crates.io 최신 안정판은 0.33.0(2026-11-25 게시), 그 앞은 0.32.2(2026-09-23). 라이선스 MPL-2.0(`deny.toml` 허용). 바인딩 크레이트 작업이 그때의 최신 안정판을 `=` 판으로 고정하고, 그 판을 앱 레포에 알린다(두 레포 공통, director 2865). 판을 올릴 때도 이 레포가 먼저 올리고 알린다. 0.33.0의 `uniffi-bindgen`은 라이브러리 모드가 기본이고 `--library` 플래그는 남아 있지만 deprecated다. 생성 명령은 고정한 판의 문서로 다시 확인한다.
+- Kotlin 패키지 이름(android 요구 #12): UniFFI 0.33.0의 Kotlin 생성기는 `uniffi.toml`의 `[bindings.kotlin] package_name`이 없으면 `uniffi.<네임스페이스>`를 쓴다(`uniffi_bindgen` 0.33.0 `src/bindings/kotlin/mod.rs:94`–`:96`). 그래서 이 크레이트는 기본이면 `uniffi.tasty_net`이다. 라이브러리 모드도 크레이트마다 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/bindgen_paths.rs:141`–`:144`) `tasty-net-ffi`의 이름은 이 레포의 `uniffi.toml`이 정하고, 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.<크레이트>]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:96`–`:121`). 값은 바인딩 크레이트 작업이 정한다.
+- 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(`src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:314`–`:322`). 두면 `tasty-net-ffi`의 Kotlin만 다른 라이브러리를 싣는다.
 
 ### rlib 링크 계약
 
@@ -256,9 +271,10 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 
 - 동기 API: 코어 API가 동기이므로 FFI 함수도 동기로 내보낸다. 막히는 호출(연결, 읽기, exec 대기, SFTP 읽기·쓰기)은 앱이 UI 스레드가 아닌 스레드에서 부른다. 생성된 문서 주석에 적는다. UniFFI의 async 내보내기는 쓰지 않는다(코어에 async API가 생기면 다시 본다).
 - 이벤트 전달: 끌어오기 방식이다. `EventStream::next(timeout) -> Option<Event>`(막히는 호출)를 앱이 자기 스레드에서 돌린다. 코어의 `events()` 큐와 `Lagged{dropped}` 규칙을 그대로 쓴다. 라이브러리 스레드에서 앱 코드를 부르는 콜백은 두지 않는다(앱 런타임 스레드 규칙과 재진입 문제를 피한다).
-- 콜백이 필요한 두 곳: 둘 다 연결을 연 앱 스레드가 막혀 있는 동안 그 연결 처리 안에서만 불린다. 라이브러리 스레드가 앞의 호출과 무관하게 앱 코드를 부르는 일은 없다.
+- 콜백이 필요한 세 곳: 모두 연결을 연 앱 스레드가 막혀 있는 동안 그 연결 처리 안에서만 불린다. 라이브러리 스레드가 앞의 호출과 무관하게 앱 코드를 부르는 일은 없다.
   - 연결 도중 사용자 답이 필요한 `SshPrompt`(passphrase, 비밀번호, keyboard-interactive, `StrictHostKeyChecking ask`)는 UniFFI의 callback interface로 받는다. 앱은 UI 스레드로 넘겨 답을 받는다. 답을 기다리는 시간은 `embedded.prompt_timeout`이다([SSH 설정값](ssh-backends.md#설정값)).
   - 상대 기기 키 신뢰 저장소 `PeerKeyStore`(아래 "android 요구의 자리" #7b).
+  - 지역망 판정(위 [직접 LAN 연결](#직접-lan-연결-android-지역망-권한), #14).
 - 오류 변환: 코어 오류 enum마다 같은 변형을 가진 FFI 오류 enum(`#[derive(uniffi::Error)]`)으로 옮긴다. 변형 이름이 앱의 i18n 키 분기에 쓰이고, 메시지는 코어의 영어 `Display`다([크레이트 구성](crates.md#오류-규칙)). 문자열 비교로 분기하는 일이 없게 한다. `is_retryable()`은 FFI 메서드로 함께 낸다. 코어 enum이 `#[non_exhaustive]`라서 FFI enum에는 `Other { message }` 변형을 하나 둔다.
 
 ### 바인딩 API (요구를 받을 자리)
@@ -292,6 +308,10 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 9 | 앱 폴더의 기기 키 | `TastyNet::new`가 키 디렉터리를 받아 `DeviceKey::load_or_create`로 만든다. 비밀키는 FFI로 내지 않고 기기 ID만 낸다. `File::lock`이 Android에서 잠그는지는 연결 레코드 경로의 문제라 따로 확인하고 결과만 기록한다 |
 | 10 | Android용 태그 | 앱이 소비하는 기준은 tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)다. 앱은 따로 태그를 받지 않고 그 태그의 rev를 쓴다. 그 태그는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29)가 통과한 커밋에만 붙인다. 정본은 [버전·호환](versioning.md#태그와-브랜치)의 태그 규칙이다. 태그를 붙인 사실을 앱 쪽에 알리는 경로는 이 설계 밖이다 |
 | 11 | 내장 백엔드의 PowerShell·cmd 포트 발견 | Rust 쪽 시험이 맡는다. FFI에는 더할 것이 없다 |
+| 12 | 라이브러리 모드의 Kotlin 패키지 이름 | 위 "크레이트". 이 레포의 `uniffi.toml`이 정하고 앱은 덮어쓸 필요가 없다. `cdylib_name`은 두지 않는다 |
+| 13 | 메모리 키와 `IdentityFile`·`IdentitiesOnly`, 세션 재사용 키 | Rust 쪽이다([SSH 백엔드의 android 요구](ssh-backends.md#android-요구의-자리) #2). FFI에는 더할 것이 없다 |
+| 14 | 직접 LAN 연결 판정과 두 차단 사유 | 위 [직접 LAN 연결](#직접-lan-연결-android-지역망-권한). 앱이 구현하는 지역망 판정 콜백 하나와 FFI 오류 변형 둘(`LocalNetworkDenied`·`LocalNetworkBlocked`) |
+| 15 | 의존 쪽 검사를 앱의 최종 그래프에서 | 위 [의존 쪽 검사](#의존-쪽-검사)의 앱 그래프 기준 |
 
 ## 모바일 cross check
 
@@ -339,6 +359,9 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 앱 쪽 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
 | tasty 전환 뒤 태그의 모바일 조건 | 후속 작업(모바일 cross check). tasty 전환 태그 뒤의 태그에도 모바일 cross check 통과를 요구할지 |
 | FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, 상대 `caps` 조회를 링크와 요청 클라이언트에 함께 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
+| Kotlin 패키지 이름의 값 | 후속 작업(바인딩 크레이트). #12: `uniffi.toml`의 `package_name` 값, rlib 링크 시험에서 두 네임스페이스의 Kotlin이 모두 `tasty_mobile_core`를 싣는지 볼지 |
+| 지역망 판정 콜백과 두 오류의 FFI 모양 | 후속 작업(바인딩 크레이트, 내장 SSH 백엔드). #14: 콜백 이름과 인자, 두 변형의 필드, 콜백 안에서 앱이 권한을 요청할 때의 대기 상한, 실행 중 심벌을 찾을 라이브러리와 방법 |
+| 앱 그래프의 의존 쪽 검사 스크립트 | 후속 작업(모바일 cross check). #15: 인자 모양(`Cargo.toml` 경로·크레이트·target·feature), `tokio` `process`를 켠 경로 판정의 출력, 앱 레포 CI에서 부르는 방법 |
 | FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
