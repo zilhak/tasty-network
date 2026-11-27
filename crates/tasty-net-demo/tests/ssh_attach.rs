@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use support::process::{
-    ChildList, Proc, Transcript, children_of, describe, is_running, log, terminate, wait_all_gone,
+    ChildList, Children, Proc, Transcript, children_of, describe, is_running, log, terminate,
+    wait_all_gone,
 };
 use support::sshd::SshServer;
 use support::{TempDir, ssh_path};
@@ -236,13 +237,12 @@ impl Scene {
 
     /// Tracks the running children of the dialer `pid` (its ssh children).
     fn track_dialer_children(&mut self, pid: u32) {
-        match children_of(pid) {
-            Ok(children) => {
-                for child in children {
-                    self.track("ssh child", child);
-                }
-            }
-            Err(e) => log(&format!("listing the children of demo-dialer {pid}: {e}")),
+        let Children { pids, error } = children_of(pid);
+        for child in pids {
+            self.track("ssh child", child);
+        }
+        if let Some(e) = error {
+            log(&format!("listing the children of demo-dialer {pid}: {e}"));
         }
     }
 
@@ -276,10 +276,13 @@ impl Scene {
     /// Ends the dialer with `quit` and checks a clean exit.
     fn quit_dialer(&mut self, mut dialer: Proc) {
         self.track_ssh_children();
-        let children = children_of(dialer.pid())
-            .unwrap_or_else(|e| panic!("listing the children of the dialer: {e}"));
-        for child in children {
+        let Children { pids, error } = children_of(dialer.pid());
+        for child in pids {
             self.track("ssh child", child);
+        }
+        // After tracking what was found, so the drop ends it.
+        if let Some(e) = error {
+            panic!("listing the children of the dialer: {e}");
         }
         dialer.send_line("quit");
         let status = dialer.wait_exit(LOCAL_STEP);

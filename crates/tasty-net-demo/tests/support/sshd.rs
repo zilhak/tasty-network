@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::process::{children_of, describe, log, terminate, wait_all_gone};
+use super::process::{Children, children_of, describe, is_running, log, terminate, wait_all_gone};
 use super::russh_server::RusshServer;
 use super::{TempDir, ssh_option_path, ssh_path};
 
@@ -66,32 +66,49 @@ impl Reaped {
         let mut error = None;
         let mut parents = vec![self.pid()];
         while let Some(parent) = parents.pop() {
-            match children_of(parent) {
-                Ok(children) => {
-                    for child in children {
-                        if !found.contains(&child) {
-                            found.push(child);
-                            parents.push(child);
-                        }
-                    }
+            let Children {
+                pids,
+                error: failed,
+            } = children_of(parent);
+            for child in pids {
+                if !found.contains(&child) {
+                    found.push(child);
+                    parents.push(child);
                 }
-                Err(e) => {
-                    error.get_or_insert(e);
-                }
+            }
+            if let Some(e) = failed {
+                error.get_or_insert(e);
             }
         }
         Sessions { found, error }
     }
 
-    /// Ends every session process the listing found, then kills and reaps the listener, then
-    /// waits until those sessions are gone. Returns the sessions it had to end; a listing
-    /// error comes out after all of that. Calling it again does nothing.
-    fn end(&mut self) -> Result<Vec<u32>, String> {
+    /// Ends every session process the listing found, and those of `seen` (sessions an earlier
+    /// listing found) that still run, then kills and reaps the listener, then waits until
+    /// those sessions are gone. Returns the sessions it had to end; a listing error comes out
+    /// after all of that. Calling it again does nothing.
+    fn end(&mut self, seen: &[u32]) -> Result<Vec<u32>, String> {
         if self.ended {
             return Ok(Vec::new());
         }
         self.ended = true;
-        let Sessions { found, error } = self.sessions();
+        let Sessions {
+            mut found,
+            mut error,
+        } = self.sessions();
+        for pid in seen {
+            if found.contains(pid) {
+                continue;
+            }
+            match is_running(*pid) {
+                Ok(false) => {}
+                Ok(true) => found.push(*pid),
+                Err(e) => {
+                    found.push(*pid);
+                    error.get_or_insert(e);
+                }
+            }
+        }
         for pid in &found {
             terminate(*pid);
         }
@@ -126,7 +143,7 @@ struct Sessions {
 
 impl Drop for Reaped {
     fn drop(&mut self) {
-        if let Err(error) = self.end() {
+        if let Err(error) = self.end(&[]) {
             log(&format!("ending sshd {}: {error}", self.pid()));
         }
     }
@@ -275,8 +292,14 @@ impl SshServer {
                     std::thread::sleep(Duration::from_millis(200));
                     sessions = child.sessions();
                 }
-                // Ends what is left either way, before a failure below is reported.
-                let ended = child.end();
+                // Ends what is left either way, before a failure below is reported, with every
+                // session an earlier round saw.
+                let seen: Vec<u32> = pids
+                    .iter()
+                    .filter(|(what, _)| what == "sshd session")
+                    .map(|(_, p)| *p)
+                    .collect();
+                let ended = child.end(&seen);
                 if let Some(e) = sessions.error {
                     panic!("listing the sessions of sshd {pid}: {e} (ending sshd: {ended:?})");
                 }
@@ -596,7 +619,7 @@ fn start_russh() -> Result<SshServer, String> {
 /// text for the failure reason, or nothing.
 fn stop_quietly(server: SshServer) -> String {
     match server.running {
-        Running::OpenSsh { mut child, .. } => match child.end() {
+        Running::OpenSsh { mut child, .. } => match child.end(&[]) {
             Ok(found) if found.is_empty() => String::new(),
             Ok(found) => {
                 log(&format!(

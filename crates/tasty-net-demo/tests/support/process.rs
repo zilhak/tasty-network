@@ -225,9 +225,10 @@ impl Proc {
     pub fn kill(&mut self) {
         if self.status.is_none() {
             if let Some(list) = &self.children {
-                match children_of(self.pid()) {
-                    Ok(pids) => list.add(pids),
-                    Err(e) => log(&format!("listing the children of {}: {e}", self.name)),
+                let Children { pids, error } = children_of(self.pid());
+                list.add(pids);
+                if let Some(e) = error {
+                    log(&format!("listing the children of {}: {e}", self.name));
                 }
             }
             let _killed = self.child.kill().is_ok();
@@ -342,17 +343,26 @@ pub fn is_running(pid: u32) -> Result<bool, String> {
     }
 }
 
-/// The PIDs of the running children of `pid`. A query that fails is an error; `pgrep`'s
-/// "no match" (exit 1) is an empty list, and its exit 2 or more an error.
-pub fn children_of(pid: u32) -> Result<Vec<u32>, String> {
+/// What [`children_of`] found: the children it saw, and the error of a query that failed on
+/// the way. The PIDs found before (or apart from) the error stay in it.
+pub struct Children {
+    pub pids: Vec<u32>,
+    pub error: Option<String>,
+}
+
+/// The running children of `pid`. A query that fails is an error; `pgrep`'s "no match"
+/// (exit 1) is an empty list, and its exit 2 or more an error. When the state of one child
+/// cannot be read, the child stays in the list (it may run) with the error, and the others
+/// are still checked.
+pub fn children_of(pid: u32) -> Children {
     #[cfg(unix)]
-    let (_, stdout) = {
+    let listed = {
         let mut pgrep = Command::new("pgrep");
         pgrep.args(["-P", &pid.to_string()]);
-        query(pgrep, &[0, 1], no_stderr)?
+        query(pgrep, &[0, 1], no_stderr)
     };
     #[cfg(windows)]
-    let (_, stdout) = {
+    let listed = {
         // `$ErrorActionPreference = 'Stop'` turns a failed query into exit 1, so the exit
         // code alone tells success. stderr is not read: Windows PowerShell can write progress
         // records there (a module's first load) on a query that worked, and
@@ -367,18 +377,36 @@ pub fn children_of(pid: u32) -> Result<Vec<u32>, String> {
                  (Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"
             ),
         ]);
-        query(ps, &[0], |_| true)?
+        query(ps, &[0], |_| true)
     };
-    let mut children = Vec::new();
+    let mut found = Children {
+        pids: Vec::new(),
+        error: None,
+    };
+    let stdout = match listed {
+        Ok((_, stdout)) => stdout,
+        Err(e) => {
+            found.error = Some(e);
+            return found;
+        }
+    };
     for word in stdout.split_whitespace() {
-        let child: u32 = word
-            .parse()
-            .map_err(|_| format!("unexpected child PID {word:?} of {pid}"))?;
-        if is_running(child)? {
-            children.push(child);
+        let Ok(child) = word.parse::<u32>() else {
+            found
+                .error
+                .get_or_insert_with(|| format!("unexpected child PID {word:?} of {pid}"));
+            continue;
+        };
+        match is_running(child) {
+            Ok(true) => found.pids.push(child),
+            Ok(false) => {}
+            Err(e) => {
+                found.pids.push(child);
+                found.error.get_or_insert(e);
+            }
         }
     }
-    Ok(children)
+    found
 }
 
 /// One line about `pid` for a failure log: its PID, parent PID, state and command line, or
