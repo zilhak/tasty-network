@@ -29,20 +29,18 @@ use crate::settings::{P2pParams, Source, Value};
 use crate::socket::ProbeSession;
 
 /// The bound of one connection attempt with the server's values (docs/design/p2p.md "재시도와
-/// 포기"): per punch attempt `punch.request_timeout + start_delay_max + window + handshake`,
-/// between attempts `max(punch.retry_delay, nat.stun_rto × nat.stun_attempts)`.
+/// 포기", [`P2pParams::attempt_bound`]).
 pub(crate) fn attempt_bound(p: &P2pParams, l: &Limits) -> Duration {
-    let per = p
-        .request_timeout
-        .saturating_add(Duration::from_millis(l.start_delay_max_ms))
-        .saturating_add(Duration::from_millis(l.punch_window_ms))
-        .saturating_add(Duration::from_millis(l.quic_handshake_ms));
-    let between = p
-        .retry_delay
-        .max(p.stun_rto.saturating_mul(p.stun_attempts));
-    per.saturating_mul(p.punch_attempts)
-        .saturating_add(between.saturating_mul(p.punch_attempts.saturating_sub(1)))
+    p.attempt_bound(
+        Duration::from_millis(l.start_delay_max_ms),
+        Duration::from_millis(l.punch_window_ms),
+        Duration::from_millis(l.quic_handshake_ms),
+    )
 }
+
+/// The key of a registration whose limits make the attempt bound too long to be a deadline
+/// (docs/design/p2p.md "재시도와 포기").
+pub(crate) const ATTEMPT_BOUND_KEY: &str = "attempt_bound";
 
 /// The setting of `punch_go` that does not fit (docs/design/rendezvous.md "한계값 검사" 2).
 ///
@@ -343,12 +341,24 @@ async fn dial_attempts(
                 "rendezvous_lost",
             ));
         };
-        // The bound shown is the bound kept: past it the attempt ends where it is.
-        let end = *deadline.get_or_insert_with(|| {
-            let end = Instant::now() + attempt_bound(p, &limits);
-            t.update(|r| r.bound_at = Some(end.into_std()));
-            end
-        });
+        // The bound shown is the bound kept: past it the attempt ends where it is. The
+        // settings and the registration's limits were checked to fit; a clock near the end of
+        // its range still ends the attempt instead of panicking.
+        let end = match deadline {
+            Some(end) => end,
+            None => {
+                let Some(end) = Instant::now().checked_add(attempt_bound(p, &limits)) else {
+                    return Err(Fail::new(
+                        P2pConnectError::ServerLimitsInvalid {
+                            key: ATTEMPT_BOUND_KEY,
+                        },
+                        "server_limits_invalid",
+                    ));
+                };
+                t.update(|r| r.bound_at = Some(end.into_std()));
+                *deadline.insert(end)
+            }
+        };
         t.update(|r| r.info.local_reflexive = reflexive);
         let once = tokio::time::timeout_at(end, punch_once(core, t, peer, &limits, local_nat, n));
         let outcome = match once.await {

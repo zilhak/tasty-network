@@ -396,6 +396,62 @@ fn server_limits_mismatch_is_reported() {
     assert!(lb.attempt_path().is_empty());
 }
 
+/// A device whose attempt bound fits with the largest window and handshake it accepts, at the
+/// edge of 2^32 - 1 s, binds; the server's start delay of 1 s pushes the bound with the
+/// server's values past it, which is a `server_limits_mismatch` on `attempt_bound`, and a
+/// connect ends with `ServerLimitsInvalid` instead of a deadline that does not fit.
+#[test]
+fn an_attempt_bound_past_the_clock_range_with_server_values_is_a_mismatch() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    // The server's defaults: start delay 1 s, window 5 s, handshake 5 s.
+    let edge = u64::from(u32::MAX);
+    let a = device(
+        &n1,
+        2,
+        1,
+        &s,
+        settings(&[
+            ("punch.attempts", Value::Count(1)),
+            ("punch.window_max", Value::Duration(Duration::from_secs(5))),
+            (
+                "quic.handshake_timeout_max",
+                Value::Duration(Duration::from_secs(5)),
+            ),
+            (
+                "punch.request_timeout",
+                Value::Duration(Duration::from_secs(edge - 10)),
+            ),
+        ]),
+    );
+    assert!(wait_until(LONG, || {
+        a.ep.status().state == EndpointPhase::Registered
+    }));
+    assert_eq!(a.ep.status().limits_mismatch, Some("attempt_bound"));
+    let mut log = Log::default();
+    let e = log
+        .wait(&a.ep, LONG, |e| matches!(e, P2pEvent::Transition { cause, .. } if cause.name == "server_limits_mismatch"))
+        .expect("event");
+    let P2pEvent::Transition { cause, .. } = e else {
+        unreachable!()
+    };
+    match cause.detail {
+        Some(CauseDetail::Limits { key, .. }) => assert_eq!(key, "attempt_bound"),
+        other => panic!("{other:?}"),
+    }
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    pair(&a, &b);
+    registered(&b);
+    let e = a.ep.connect(b.id()).err().unwrap();
+    assert_eq!(
+        e.connect_error(),
+        Some(&P2pConnectError::ServerLimitsInvalid {
+            key: "attempt_bound"
+        })
+    );
+}
+
 /// Keepalive and idle settings short enough for the tests.
 fn short_timers() -> Vec<(&'static str, Value)> {
     vec![

@@ -181,6 +181,7 @@ A                         서버                          B
 - 서버 재연결: 서버 연결이 끊기면 지수 backoff로 다시 붙는다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 그래서 대기는 `max_delay`(기본 60 s)를 넘지 않는다. 대기 뒤의 접속·등록 시간(`rendezvous.connect_timeout`, `hello_timeout`)은 이 대기와 따로 걸린다. 연결이 `reset_after`(60 s) 넘게 유지되면 n을 1로 되돌린다. 횟수 상한 `max_attempts` 기본은 0(켜져 있는 동안 계속)이다. 상한을 주면 그 횟수 뒤 `Stopped{cause: reconnect_exhausted}`로 멈춘다. P2P를 끄면 재연결을 멈춘다. `superseded`, `access_denied`, `unsupported_proto`, ALPN 불일치, 서버 키 불일치면 다시 붙지 않고 `Stopped`로 알린다(소비자가 사용자에게 보인다, [rendezvous](rendezvous.md#메시지-표)).
 - 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 창이나 handshake 기한으로 실패하면 반사 주소 재확인(흐름 3)을 바로 시작하고, `punch.retry_delay`(기본 1 s)와 재확인 중 늦게 끝나는 쪽을 기다린 뒤 새 `punch_request`로 다시 한다. 이때 B는 옛 세션의 받기 기한 안에 있을 수 있지만, 같은 A의 새 요청이므로 서버가 옛 세션을 끝내고(B에게 `punch_cancel{superseded}`) 새 세션을 만든다([rendezvous](rendezvous.md#메시지-표) "한 쌍에 세션 하나"). 그래서 재시도는 `busy`로 막히지 않는다. 모두 실패하면 마지막 시도의 `mode`로 오류를 정한다: `all`이면 `P2pConnectError::PunchFailed`, `host_only`면 `NatUnsupported`(두 기기 모두 `dependent`라 호스트 경로 밖에는 길이 없다는 뜻).
 - 연결 시도 하나의 전체 상한: 시도마다 `punch.request_timeout` + 서버 `start_delay_max` + `window_ms` + `handshake_ms`, 시도 사이마다 `max(punch.retry_delay, nat.stun_rto × nat.stun_attempts)`. 기본값이면 2 × (3 + 1 + 5 + 5) s + 1.5 s = 29.5 s다. 재시도가 옛 세션을 바꾸므로 B 쪽 옛 세션의 남은 기한은 이 합에 들어가지 않는다. 서버 값은 `welcome.limits`로 알고 계산해 연결 정보에 보인다. `punch_go`의 창과 handshake 기한이 `welcome.limits`보다 길면 그 시도를 `limits_invalid`로 끝내고(흐름 3), 이 상한이 지나면 시도는 그때의 단계에서 끝난다.
+- 전체 상한의 범위: 상한은 시각(지금 + 상한)이 되어야 하므로, 다른 시간 설정처럼 2^32 − 1 s 이하이고 현재 시각에 더해 시계 범위 안이어야 한다. 키 하나하나가 범위 안이어도 합이 넘을 수 있다(예: `nat.stun_rto` 2 s, `nat.stun_attempts`·`punch.attempts` 2^32 − 1). `bind`는 서버가 알릴 수 있는 가장 긴 창과 handshake(`punch.window_max`·`quic.handshake_timeout_max`)와 시작 지연 0으로 상한을 계산해, 넘으면 설정 관계 오류(`SettingsError::Relation`, 관계에 드는 키 `punch.request_timeout`·`punch.window_max`·`quic.handshake_timeout_max`·`punch.attempts`·`punch.retry_delay`·`nat.stun_rto`·`nat.stun_attempts`와 값)로 거절한다. 서버 값이 끼는 상한은 등록 때 `welcome.limits`(`start_delay_max_ms`·`punch_window_ms`·`quic_handshake_ms`)로 다시 계산하고, 넘으면 키 `attempt_bound`의 `server_limits_mismatch`이고 그 서버로의 연결 시도는 `ServerLimitsInvalid{key: "attempt_bound"}`로 끝난다. 시도의 기한은 검사한 덧셈으로 만든다(넘으면 같은 오류로 끝나고 패닉하지 않는다).
 - 바로 끝내는 경우(재시도 없음): `nat_unsupported`, `declined`, `self`, P2P 꺼짐, 상대 키 불일치, ALPN 불일치, 서버 한계값 불일치(이쪽이든 상대든).
 - 서버에 아직 붙지 못한 상태의 연결 시도는 `RendezvousUnavailable`로 바로 끝난다. 다음 시도를 언제 할지는 연결 목록의 재연결 도우미나 소비자가 정한다([전송 추상화](transport.md#연결-목록)).
 
@@ -279,7 +280,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 
 모든 타이머·재시도 횟수·간격·타임아웃·keepalive 주기·상한은 설정값이다(사용자 결정 2026-11-27, 원문 "타이머, 재시도횟수 이런것은 전부 설정가능 및 보기 가능값이어야하지").
 
-- 바꾸기: `P2pConfig.settings`(`P2pSettings`)로 준다. 주지 않은 항목은 기본값이다. 값의 범위 검사(예: `idle_timeout > keepalive_interval`)는 `bind`가 하고 어긋나면 오류로 돌려준다.
+- 바꾸기: `P2pConfig.settings`(`P2pSettings`)로 준다. 주지 않은 항목은 기본값이다. 값의 범위 검사(예: `idle_timeout > keepalive_interval`, 연결 시도 전체 상한의 범위([재시도와 포기](#재시도와-포기)))는 `bind`가 하고 어긋나면 오류로 돌려준다.
 - 보기: `P2pEndpoint::settings()`가 항목마다 `{key, value, source}`를 돌려준다. `source`는 `default`(이 표의 기본), `configured`(설정으로 줌), `os_default`(OS가 정한 값을 읽어 보임), `fixed`(아래 "고정값"), `server`(rendezvous 서버가 정해 알린 값. 연결 정보의 `applied`에만 나온다) 중 하나다. 서버가 정한 값이 서버 안에서 기본인지 운영자가 준 값인지는 서버의 `settings()`와 시작 로그에서 본다(기기는 그 구분을 받지 않는다). 연결마다 그 연결에 적용된 값과 진행 값(지금 몇 번째 시도인지, 다음 시도까지 남은 시간)은 [연결 정보](#연결-정보)에 있다.
 - 네 가지를 구분한다.
   1. 설정 가능한 동작값: 아래 두 표(이 레포가 정하는 값, 의존성이 노출하는 값). 모두 설정·조회된다.
@@ -314,7 +315,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `punch.window_max` | 30 s | 서버가 주는 창(`punch_go.window_ms`, 서버 기본 5 s)의 상한 검사. 잘못된 서버 설정이 연결 시도를 몇 분씩 붙잡지 않게 |
 | `quic.handshake_timeout_max` | 30 s | 서버가 주는 handshake 기한(`handshake_ms`, 서버 기본 5 s)의 상한 검사 |
 | `punch.max_candidates` | 8 | 서버 반사 1 + 보고 반사 3(서버 기본 `max_reported_reflexive`) + 호스트 4(서버 기본 `max_host_candidates`). 서버 값과의 관계는 `welcome.limits`로 검사한다([rendezvous](rendezvous.md#후보-주소-규칙)). 프로브 한 바퀴 400 ms. peer reflexive를 더해도 넘지 않는다. `bind`는 1 이상 64 이하만 받는다 |
-| `punch.attempts` | 2 | 일시 손실로 한 번 실패한 경우만 덮는다. 펀칭 실패는 연결 실패라는 결정에 맞춰 짧게 둔다 |
+| `punch.attempts` | 2 | 일시 손실로 한 번 실패한 경우만 덮는다. 펀칭 실패는 연결 실패라는 결정에 맞춰 짧게 둔다. 이 값으로 곱한 연결 시도 전체 상한은 2^32 − 1 s 이하여야 한다([재시도와 포기](#재시도와-포기)) |
 | `punch.retry_delay` | 1 s | 반사 주소를 다시 확인할 시간 |
 | `quic.keepalive_interval` | 15 s | 위 "연결 유지" |
 | `quic.idle_timeout` | 45 s | 위 "연결 유지" |

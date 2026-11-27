@@ -428,6 +428,8 @@ pub(crate) fn limits_mismatch(core: &Core, l: &Limits) -> Option<&'static str> {
         Some("punch.max_candidates")
     } else if l.max_message_bytes > p.max_message_bytes {
         Some("rendezvous.max_message_bytes")
+    } else if !crate::settings::bound_fits(crate::attempt::attempt_bound(p, l)) {
+        Some(crate::attempt::ATTEMPT_BOUND_KEY)
     } else {
         None
     }
@@ -453,6 +455,13 @@ fn limits_detail(core: &Core, key: &'static str, l: &Limits) -> CauseDetail {
             format!(
                 "max_reported_reflexive {} max_host_candidates {}",
                 l.max_reported_reflexive, l.max_host_candidates
+            ),
+        ),
+        crate::attempt::ATTEMPT_BOUND_KEY => (
+            format!("{:?}", crate::attempt::attempt_bound(p, l)),
+            format!(
+                "start_delay_max_ms {} punch_window_ms {} quic_handshake_ms {}",
+                l.start_delay_max_ms, l.punch_window_ms, l.quic_handshake_ms
             ),
         ),
         _ => (

@@ -639,6 +639,36 @@ pub struct P2pParams {
     pub rendezvous_quic: QuicParams,
 }
 
+impl P2pParams {
+    /// The bound of one connection attempt (docs/design/p2p.md "재시도와 포기") with the server's
+    /// start delay, window and handshake: per punch attempt `punch.request_timeout + start
+    /// delay + window + handshake`, between attempts `max(punch.retry_delay, nat.stun_rto ×
+    /// nat.stun_attempts)`. A sum past the range of `Duration` stays at its largest value.
+    pub(crate) fn attempt_bound(
+        &self,
+        start_delay: Duration,
+        window: Duration,
+        handshake: Duration,
+    ) -> Duration {
+        let per = self
+            .request_timeout
+            .saturating_add(start_delay)
+            .saturating_add(window)
+            .saturating_add(handshake);
+        let between = self
+            .retry_delay
+            .max(self.stun_rto.saturating_mul(self.stun_attempts));
+        per.saturating_mul(self.punch_attempts)
+            .saturating_add(between.saturating_mul(self.punch_attempts.saturating_sub(1)))
+    }
+}
+
+/// Whether an attempt bound can be a deadline: at most [`MAX_DURATION`], like every time
+/// setting, and in range when added to the current time.
+pub(crate) fn bound_fits(bound: Duration) -> bool {
+    bound <= MAX_DURATION && std::time::Instant::now().checked_add(bound).is_some()
+}
+
 /// The server reconnect backoff (`rendezvous.reconnect.*`, docs/design/p2p.md "재시도와 포기").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Backoff {
@@ -907,7 +937,7 @@ impl Resolver<'_> {
         let mut rendezvous_quic = quic.clone();
         rendezvous_quic.keepalive_interval = rendezvous_keepalive;
         rendezvous_quic.idle_timeout = rendezvous_idle;
-        Ok(P2pParams {
+        let params = P2pParams {
             connect_timeout: self.nonzero("rendezvous.connect_timeout")?,
             hello_timeout: self.nonzero("rendezvous.hello_timeout")?,
             max_message_bytes: u32::try_from(max_message_bytes).expect("checked against 1 MiB"),
@@ -935,7 +965,29 @@ impl Resolver<'_> {
             send_buffer: buffer("socket.send_buffer")?,
             quic,
             rendezvous_quic,
-        })
+        };
+        // The bound with the largest window and handshake a server may announce. The server's
+        // start delay is checked against what is left at registration.
+        self.relation(
+            bound_fits(params.attempt_bound(
+                Duration::ZERO,
+                params.window_max,
+                params.handshake_timeout_max,
+            )),
+            "the attempt bound (punch.request_timeout + punch.window_max + \
+             quic.handshake_timeout_max) × punch.attempts + max(punch.retry_delay, nat.stun_rto × \
+             nat.stun_attempts) × (punch.attempts − 1) <= 2^32 - 1 s",
+            &[
+                "punch.request_timeout",
+                "punch.window_max",
+                "quic.handshake_timeout_max",
+                "punch.attempts",
+                "punch.retry_delay",
+                "nat.stun_rto",
+                "nat.stun_attempts",
+            ],
+        )?;
+        Ok(params)
     }
 
     fn quic(
@@ -1269,6 +1321,45 @@ mod tests {
             relation.resolve(),
             Err(SettingsError::Relation { .. })
         ));
+    }
+
+    /// Keys each in range whose attempt bound is no deadline (it saturates `Duration`) are
+    /// refused by `resolve` and `bind` as a relation that names the keys; the defaults fit.
+    #[test]
+    fn an_attempt_bound_past_the_clock_range_is_refused() {
+        assert!(P2pSettings::new().resolve().is_ok());
+        let mut s = P2pSettings::new();
+        s.set("nat.stun_rto", Value::Duration(Duration::from_secs(2)));
+        s.set("nat.stun_attempts", Value::Count(u64::from(u32::MAX)));
+        s.set("punch.attempts", Value::Count(u64::from(u32::MAX)));
+        let keys = |e: &SettingsError| match e {
+            SettingsError::Relation { values, .. } => {
+                values.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        };
+        let refused = s.resolve().expect_err("refused");
+        let named = keys(&refused);
+        for key in [
+            "punch.request_timeout",
+            "punch.window_max",
+            "quic.handshake_timeout_max",
+            "punch.attempts",
+            "punch.retry_delay",
+            "nat.stun_rto",
+            "nat.stun_attempts",
+        ] {
+            assert!(named.contains(&key), "{key} in {named:?}");
+        }
+        let pairing = std::sync::Arc::new(crate::pairing::PairingList::new());
+        let mut config =
+            crate::P2pConfig::new(tasty_net_identity::DeviceKey::from_seed([3; 32]), pairing);
+        config.enabled = true;
+        config.settings = s;
+        match crate::P2pEndpoint::bind(config) {
+            Err(crate::P2pError::Settings(e)) => assert_eq!(keys(&e), named),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
     }
 
     /// The value of `name` in a `Debug` string of a struct, without `Some(…)` and `VarInt(…)`.
