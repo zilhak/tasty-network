@@ -372,7 +372,7 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
 - `sources`는 적힌 값마다 그 출처를 순서대로 싣는다. 대상(`[user@]host`, `ssh://user@host:port`)이 정한 사용자·포트의 출처는 `destination`이다. `host_key_checking`은 이 크레이트가 하는 확인 모드(확인을 끄는 값을 건너뛴 첫 값)이고, `host_key_checking_origin`이 그 값의 줄이다(없으면 `default`). `StrictHostKeyChecking`의 첫 출처(`source_of`)는 건너뛴 값일 수 있다.
 - `ResolveContext`는 명령행에 해당하는 값(위 순서 1~8), 로컬 사용자, 홈, `ssh/` 폴더, 로컬 uid·호스트 이름, `${}`에 쓰는 환경 값, 원격 명령을 갖는다. `final` 두 번째 읽기는 `resolve`가 OpenSSH처럼 안에서 한다(`ssh.c:1246`–`:1265`).
 - `Include`는 `resolve`가 읽는다. OpenSSH는 `Include` 인자의 `%` 토큰과 `${}`를 대상마다 펼치고(`readconf.c:2086`의 `expand_match_exec_or_include_path`), 그 줄에 닿은 블록의 적용 여부에 따라 `NEVERMATCH`로 읽으므로 대상 없이 미리 펼칠 수 없다.
-- 파일 읽기: `load`는 맨 위 파일을 열고, 같은 핸들의 메타데이터로 권한(모드)을 본 뒤 통과한 파일만 그 자리에서 끝까지 읽어 내용을 저장한다(FIFO·파이프도 읽는다). 모드로 거부된 파일은 읽지 않고, 그 거부는 `resolve`의 `Refusal`로 낸다. 소유자 판정은 로컬 uid를 받는 `resolve`가 하므로, 다른 사용자가 소유한 파일은 `load`가 읽지만 그 내용은 쓰지 않는다. `Include` 파일은 `resolve`가 같은 순서(열기 → 판정 → 통과하면 읽기)로 읽는다.
+- 파일 읽기: `load`는 맨 위 파일을 열고, 같은 핸들의 메타데이터로 권한(모드)을 본 뒤 통과한 파일만 그 자리에서 끝까지 읽어 내용을 저장한다(FIFO·파이프도 읽는다). 모드로 거부된 파일은 읽지 않고, 그 거부는 `resolve`의 `Refusal`로 낸다. 소유자는 로컬 uid를 받는 `resolve`가 `load`가 저장한 같은 핸들의 메타데이터로 판정한다. 그래서 모드는 통과하고 소유자만 다른 사용자 기본 파일은 `load`가 읽고 `resolve`가 `Refusal`로 거부한다(내용은 쓰지 않는다). 그 파일이 FIFO면 `load`는 쓰는 쪽이 닫을 때까지 기다린다. 기준판은 `fstat` 직후 소유자와 모드를 함께 보고 줄을 읽기 전에 거부한다(`readconf.c:2644`–`:2664`). `load`에서 소유자까지 볼지는 [후속 작업과 미정](#후속-작업과-미정)의 "설정 파일 소유자의 판정 시점"이다. `Include` 파일은 `resolve`가 같은 순서(열기 → 판정 → 통과하면 읽기)로 읽는다.
 - `Refusal`이 있으면 내장 백엔드는 네트워크에 나가기 전에 `SshBackendError::ConfigRefused`로 끝낸다.
 
 ### 라이선스
@@ -683,6 +683,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
 | IPv6 scope의 정규화 | 175500 질문. 기준판은 `getaddrinfo`·`getnameinfo`가 scope를 OS 인터페이스 표로 풀어 `hostname`을 바꾼다(`fe80::1%0001`→`fe80::1%lo`, 16진 소문자화). 이식 크레이트는 인터페이스 표를 읽지 않아 scope가 붙은 주소를 적힌 그대로 둔다. 인터페이스 표를 읽을지, 그 값이 `%h`·호스트 키 조회 이름에 쓰이는 차이를 둘지 |
 | 숫자 주소의 OS별 규칙 | 175500 질문. 이식 크레이트는 모든 OS에서 Linux glibc의 숫자 주소 규칙을 따른다. 기준판은 실행 OS의 libc를 쓰므로 macOS·Android에서는 `AddressFamily inet`의 IPv4 매핑 IPv6(`::ffff:192.0.2.1`)를 IPv4로 바꾸지 않는다. 실행 OS의 규칙을 따를지(따르면 `numeric_host`를 OS별로 가르고 대조 사례를 OS별로 둔다) |
+| 설정 파일 소유자의 판정 시점 | 175500 질문. `load`는 로컬 uid를 입력으로 받지 않아 사용자 기본 파일의 모드만 보고 읽으며, 소유자는 `resolve`가 판정한다([결과 API](#결과-api)의 "파일 읽기"). `ConfigInputs`에 로컬 uid를 받아 `load`에서 소유자까지 판정할지(기준판처럼 다른 사용자 소유 파일을 읽지 않는다) |
 | 비교 시험의 기준 클라이언트 빌드 | 원격 빌드 머신에서 확인했다. `scripts/install-openssh-ref.sh`가 기준 커밋을 빌드하고 `ssh -G` 대조가 돈다([비교 시험의 기준 클라이언트](#비교-시험의-기준-클라이언트)의 빌드 도구) |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |
