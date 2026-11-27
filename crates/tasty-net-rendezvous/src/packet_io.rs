@@ -276,12 +276,16 @@ pub fn send_error_is_too_large(e: &io::Error) -> bool {
     too_large.is_some() && e.raw_os_error() == too_large
 }
 
-/// Keep the port of `socket` to it alone; call it before `bind`. On Windows this sets
+/// Keep what `socket` binds to it alone; call it before `bind`. On Windows this sets
 /// `SO_EXCLUSIVEADDRUSE`: without it, a socket bound to the same port with default options can
 /// bind while `socket` holds the port, and a datagram to that port may go to either. With it,
-/// every later bind to the port fails while `socket` is open, in both address families of a
-/// dual-stack socket. On other systems a socket bound without `SO_REUSEADDR`·`SO_REUSEPORT`
-/// already keeps its port, and this does nothing.
+/// the reach depends on the address `socket` binds. Bound to the wildcard address, every later
+/// bind to the port fails while `socket` is open, to the wildcard or to a specific address,
+/// and in both address families of a dual-stack socket. Bound to a specific address, only
+/// that address is kept: a later bind of another socket to the wildcard address on the same
+/// port can still succeed. The P2P endpoint binds the wildcard address (`[::]` or `0.0.0.0`),
+/// so its whole port is kept. On other systems a socket bound without
+/// `SO_REUSEADDR`·`SO_REUSEPORT` already keeps what it binds, and this does nothing.
 pub fn set_exclusive_address_use(socket: &socket2::Socket) -> io::Result<()> {
     #[cfg(windows)]
     {
