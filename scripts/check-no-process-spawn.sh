@@ -276,9 +276,21 @@ def system_mod_guarded(text):
 
 
 def path_attr_lines(toks):
-    """제품 코드의 #[path = …] 속성 줄 목록."""
-    return [toks[i][2] for i in range(len(toks) - 2)
-            if toks[i][1] == "#" and toks[i + 1][1] == "[" and toks[i + 2][:2] == ("ident", "path")]
+    """제품 코드에서 모듈 파일을 고르는 속성의 줄 목록: #[path = …]와, 안 어디에든 path = 가 있는
+    #[cfg_attr(…)](겹친 cfg_attr 포함). cfg_attr의 조건이 켜지는지는 따지지 않는다."""
+    out = []
+    for i in range(len(toks) - 2):
+        if toks[i][1] != "#" or toks[i + 1][1] != "[":
+            continue
+        head = toks[i + 2][:2]
+        if head == ("ident", "path"):
+            out.append(toks[i][2])
+        elif head == ("ident", "cfg_attr"):
+            close = matching_close(toks, i + 1)
+            if any(toks[k][:2] == ("ident", "path") and toks[k + 1][1] == "="
+                   for k in range(i + 3, close)):
+                out.append(toks[i][2])
+    return out
 
 
 def crate_files(crate, listing):
@@ -317,7 +329,7 @@ def collect(read, listing, exists):
             # 판정이 실제로 컴파일되는 파일과 맞는지 말할 수 없다.
             lines = path_attr_lines(strip_cfg_test(tokenize(read(f))))
             if lines:
-                raise ScanError(f"{f}:{lines[0]}: #[path] 모듈 선언은 판정하지 않는다")
+                raise ScanError(f"{f}:{lines[0]}: #[path]·#[cfg_attr(…, path = …)] 모듈 선언은 판정하지 않는다")
             try:
                 hits, uses = judge_source(read(f))
             except ScanError as e:
@@ -523,6 +535,17 @@ def self_test():
     other_path = dict(tree)
     other_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[path = \"../../tasty-net-ssh/src/system/spawn.rs\"]\nmod s;\n"
     crate_case("다른 금지 크레이트의 #[path] 모듈 선언", other_path, "읽기 오류")
+    cond = dict(tree)
+    cond["crates/tasty-net-ssh/src/lib.rs"] = guarded + "#[cfg_attr(all(), path = \"system/spawn.rs\")]\nmod spawn;\n"
+    crate_case("cfg_attr(…, path = …)로 src/system/ 파일을 들이는 입력", cond, "읽기 오류")
+    cond_not = dict(tree)
+    cond_not["crates/tasty-net-ssh/src/lib.rs"] = (guarded + "#[cfg_attr(not(feature = \"system-ssh\"), "
+                                                   "path = \"system/spawn.rs\")]\nmod extra;\n")
+    crate_case("cfg_attr(not(feature), path = …)로 src/system/ 파일을 들이는 입력", cond_not, "읽기 오류")
+    nested = dict(tree)
+    nested["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg_attr(unix, cfg_attr(all(), path = \"s.rs\"))]\nmod s;\n"
+    nested["crates/tasty-net-rendezvous/src/s.rs"] = "\n"
+    crate_case("겹친 cfg_attr 안의 path(다른 금지 크레이트)", nested, "읽기 오류")
     test_path = dict(tree)
     test_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\n"
     test_path["crates/tasty-net-rendezvous/src/t.rs"] = "use std::process::Command;\n"
