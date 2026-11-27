@@ -27,7 +27,8 @@ use crate::packet_io::{
     DemuxCounters, DemuxSocket, PacketIo, StunSink, UdpPacketIo, receive_error_is_fatal,
 };
 use crate::settings::{
-    Absent, ServerParams, ServerSettings, SettingEntry, SettingsError, Value, advertise_fits,
+    Absent, ServerParams, ServerSettings, SettingEntry, SettingsError, Source, Value,
+    advertise_fits,
 };
 use crate::tls::{self, TlsError, TlsOptions};
 use crate::wire::demux::{PacketClass, classify};
@@ -39,6 +40,9 @@ use crate::wire::stun::{ServerStunAction, server_answer};
 use crate::wire::{ALPN_RENDEZVOUS, CloseCode, PROTO};
 
 use state::{After, Counters, RegisterRefusal, Registration, State, filter_host, stored_host};
+
+/// The query line that tells whether QUIC MTU discovery runs on the primary socket.
+pub const MTU_DISCOVERY: &str = "quic.mtu_discovery";
 
 /// What a server is started with.
 #[derive(Clone)]
@@ -434,7 +438,15 @@ impl Server {
         let server_config = crate::quic::server_config(&params.quic, crypto);
         let endpoint_config = crate::quic::endpoint_config(&params.quic);
 
-        let entries = config.settings.entries();
+        let mut entries = config.settings.entries();
+        // quinn runs MTU discovery only on a socket that does not fragment; packet I/O that
+        // does not know says it may fragment.
+        let mtu_discovery = !io.primary.may_fragment();
+        entries.push(SettingEntry {
+            key: MTU_DISCOVERY,
+            value: Value::Switch(mtu_discovery),
+            source: Source::Computed,
+        });
         let demux_counters = Arc::<DemuxCounters>::default();
         let inner = Arc::new(Inner {
             params,
@@ -491,7 +503,8 @@ impl Server {
     }
 
     /// Every setting with its value and source (`default`, `configured`, `fixed`), then the
-    /// computed values (source `computed`, such as `punch_session_ttl`).
+    /// computed values (source `computed`): `punch_session_ttl` and [`MTU_DISCOVERY`], on when
+    /// the primary socket does not fragment.
     pub fn settings(&self) -> Vec<SettingEntry> {
         self.inner.entries.clone()
     }

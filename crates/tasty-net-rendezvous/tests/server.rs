@@ -10,7 +10,7 @@ use quinn::crypto::rustls::QuicClientConfig;
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_rendezvous::access::Allowlist;
 use tasty_net_rendezvous::packet_io::{PacketIo, UdpPacketIo};
-use tasty_net_rendezvous::server::{Server, ServerConfig, ServerIo, StartError};
+use tasty_net_rendezvous::server::{MTU_DISCOVERY, Server, ServerConfig, ServerIo, StartError};
 use tasty_net_rendezvous::settings::{ServerSettings, Source, Value};
 use tasty_net_rendezvous::tls::{self, TlsOptions};
 use tasty_net_rendezvous::wire::candidate::CandidateKind;
@@ -1239,6 +1239,46 @@ async fn stun_port_errors_do_not_hold_the_executor() {
     tokio::time::timeout(DEADLINE, server.shutdown())
         .await
         .expect("shutdown ends in time");
+}
+
+#[tokio::test]
+async fn mtu_discovery_follows_the_socket() {
+    let mtu = |server: &Server| {
+        server
+            .settings()
+            .into_iter()
+            .find(|e| e.key == MTU_DISCOVERY)
+            .expect("the MTU discovery line")
+    };
+    // The real socket asks the OS not to fragment where it can; then discovery runs.
+    let server = start(local_settings()).await;
+    let probe = UdpPacketIo::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .unwrap();
+    let line = mtu(&server);
+    assert_eq!(line.value, Value::Switch(!probe.may_fragment()));
+    assert_eq!(line.source, Source::Computed);
+    if cfg!(target_os = "linux") {
+        assert_eq!(line.value, Value::Switch(true));
+    }
+    // Injected packet I/O that does not know is shown as off.
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let mut config = ServerConfig::new(key(100));
+    config.settings = local_settings();
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(FailOnce {
+                io: UdpPacketIo::bind(local).await.unwrap(),
+                error: Mutex::new(None),
+            }),
+            alternate_port: Arc::new(UdpPacketIo::bind(local).await.unwrap()),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    assert_eq!(mtu(&server).value, Value::Switch(false));
 }
 
 #[tokio::test]

@@ -11,8 +11,8 @@ use std::fmt;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use quinn::udp::{RecvMeta, Transmit};
@@ -37,21 +37,83 @@ pub trait PacketIo: Send + Sync + fmt::Debug + 'static {
 
     /// The bound address.
     fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Whether datagrams sent may be fragmented on the way. quinn runs MTU discovery only when
+    /// this is false. The default is true: packet I/O that does not know (a mock, for
+    /// example) does not take part in MTU discovery.
+    fn may_fragment(&self) -> bool {
+        true
+    }
 }
 
-/// [`PacketIo`] over a tokio UDP socket.
-#[derive(Debug)]
-pub struct UdpPacketIo(tokio::net::UdpSocket);
+/// [`PacketIo`] over a tokio UDP socket, received and set up through quinn's UDP layer
+/// (`quinn::udp::UdpSocketState`): the socket asks the OS not to fragment where it can (then
+/// [`PacketIo::may_fragment`] is false and quinn runs MTU discovery), and datagrams the OS
+/// coalesces on receive (GRO) are handed out one by one.
+pub struct UdpPacketIo {
+    socket: tokio::net::UdpSocket,
+    state: quinn::udp::UdpSocketState,
+    held: Mutex<Held>,
+}
+
+/// The datagrams of one receive not handed out yet.
+struct Held {
+    buf: Vec<u8>,
+    from: SocketAddr,
+    /// Bytes received.
+    len: usize,
+    /// The size of each datagram but the last.
+    stride: usize,
+    /// Bytes handed out.
+    pos: usize,
+}
+
+/// The most the OS coalesces into one receive, 64 KiB.
+const COALESCED_MAX: usize = 1 << 16;
+
+impl fmt::Debug for UdpPacketIo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UdpPacketIo")
+            .field("socket", &self.socket)
+            .field("may_fragment", &self.state.may_fragment())
+            .finish_non_exhaustive()
+    }
+}
 
 impl UdpPacketIo {
     /// Bind a UDP socket.
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        tokio::net::UdpSocket::bind(addr).await.map(UdpPacketIo)
+        Self::new(tokio::net::UdpSocket::bind(addr).await?)
     }
 
-    /// Wrap a bound socket.
-    pub fn new(socket: tokio::net::UdpSocket) -> Self {
-        UdpPacketIo(socket)
+    /// Wrap a bound socket. This sets the socket options of quinn's UDP layer on it.
+    pub fn new(socket: tokio::net::UdpSocket) -> io::Result<Self> {
+        let state = quinn::udp::UdpSocketState::new((&socket).into())?;
+        Ok(UdpPacketIo {
+            socket,
+            state,
+            held: Mutex::new(Held {
+                buf: vec![0; COALESCED_MAX],
+                from: SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, u16::MIN)),
+                len: usize::MIN,
+                stride: usize::MIN,
+                pos: usize::MIN,
+            }),
+        })
+    }
+}
+
+impl Held {
+    /// The next held datagram into `buf`, if any.
+    fn next(&mut self, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
+        if self.pos >= self.len {
+            return None;
+        }
+        let size = self.stride.min(self.len - self.pos);
+        let n = size.min(buf.len());
+        buf[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += size;
+        Some((n, self.from))
     }
 }
 
@@ -61,24 +123,57 @@ impl PacketIo for UdpPacketIo {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
-        let mut read = tokio::io::ReadBuf::new(buf);
-        match self.0.poll_recv_from(cx, &mut read) {
-            Poll::Ready(Ok(from)) => Poll::Ready(Ok((read.filled().len(), from))),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(got) = held.next(buf) {
+            return Poll::Ready(Ok(got));
+        }
+        loop {
+            match self.socket.poll_recv_ready(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+            let held = &mut *held;
+            let got = self.socket.try_io(tokio::io::Interest::READABLE, || {
+                let mut meta = [RecvMeta::default()];
+                let mut bufs = [IoSliceMut::new(&mut held.buf)];
+                self.state
+                    .recv((&self.socket).into(), &mut bufs, &mut meta)
+                    .map(|_| meta[0])
+            });
+            match got {
+                Ok(meta) => {
+                    held.from = meta.addr;
+                    held.len = meta.len;
+                    // Without coalescing the stride is the length.
+                    held.stride = match meta.stride {
+                        usize::MIN => meta.len,
+                        stride => stride,
+                    };
+                    held.pos = usize::MIN;
+                    let got = held.next(buf).unwrap_or((usize::MIN, meta.addr));
+                    return Poll::Ready(Ok(got));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Poll::Ready(Err(e)),
+            }
         }
     }
 
     fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.0.poll_send_ready(cx)
+        self.socket.poll_send_ready(cx)
     }
 
     fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<()> {
-        self.0.try_send_to(buf, dest).map(|_| ())
+        self.socket.try_send_to(buf, dest).map(|_| ())
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.0.local_addr()
+        self.socket.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.state.may_fragment()
     }
 }
 
@@ -228,5 +323,9 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.io.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.io.may_fragment()
     }
 }

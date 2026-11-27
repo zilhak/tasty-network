@@ -54,6 +54,9 @@ allow	crates/tasty-net-rendezvous/src/quic.rs	const QUIC_VERSION_1 = 0x0000_0001
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	fetch_add(1,	세기: 패킷 하나
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(0)	quinn AsyncUdpSocket::poll_recv: 받을 자리가 없으면 채운 버퍼 0개
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(1)	quinn AsyncUdpSocket::poll_recv: 한 번에 데이터그램 하나를 채운다
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	const COALESCED_MAX = 1 16	OS가 받기 한 번에 합치는 최대 64 KiB(Linux GRO·Windows URO 상한, 설정 아님)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	vec![0;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	meta[0]	받기 한 번의 결과 하나(첨자)
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	+= 1	세기: 출처별 STUN 수
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_sub(1,	세기: 등록 전 연결 하나가 빠짐
