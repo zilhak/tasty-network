@@ -18,11 +18,15 @@
 | D8 | P2P 크레이트 격리·단독 실행 | CI 단계 `p2p-isolation`(`scripts/check.sh p2p-isolation`)과 `cargo test -p tasty-net-p2p --locked`·`cargo test -p tasty-net-rendezvous --locked` 단독 실행 (세 OS) | 두 크레이트의 workspace 안 의존이 identity(와 p2p → rendezvous)뿐이고, 각 크레이트가 단독으로 시험을 통과함([크레이트 구성](crates.md#p2p-크레이트-격리)) | D1 실행의 단계 결론과 단독 실행 잡 로그 |
 | D9 | 연결 목록 | [CI와 시험 환경](testing.md#연결-목록-시험)의 `connection_table_reports_ssh_forward`, `connection_table_reports_ssh_role_reversed`, `connection_table_reports_p2p`, `both_ends_produce_matching_local_links`, `mixed_holders_on_one_tunnel`(demo), `both_ends_report_one_edge`, `parallel_attaches_to_one_workspace_stay_apart`, `ends_with_different_exposure_merge_into_one`(topology), `history_is_capped`, `closed_entries_are_capped`, `event_queue_reports_lag`, `ids_are_stable_and_never_reused`, `redialer_follows_settings` (세 OS) | 연결 목록이 세 경로 각각에서 기기·경로·방향·주소 구간·서버·상태·전이 원인을 맞게 보고하고, 재연결은 새 ID가 옛 ID를 가리키며, 한 링크는 양 끝이 같은 `link_id`로 보고해 엣지 하나임([전송 추상화](transport.md#연결-목록)) | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
 | D10 | 설정값 노출 | `settings_list_matches_query`(p2p, rendezvous, transport 연결 목록, identity, topology, ssh), `defaults_match_design_tables`(같은 범위), `dependency_defaults_match_source`·`dependency_setters_are_covered`·`dependency_settings_are_applied`·`connection_reports_applied_settings`(p2p), `ssh_connection_reports_applied_sources`(transport), `applied_options_show_which_value_wins`(ssh), CI 단계 `no-hidden-constants`와 그 검사 자체의 시험(`scripts/check.sh no-hidden-constants`) | 설정 항목 전체와 조회 결과가 같고 출처가 맞으며, 코드 기본값의 단일 원천이 설계 표와 같고, 고정판의 공개 setter가 모두 표에 있고, 의존성 설정과 고정값이 실제로 들어가며, 연결별 출처(`server` 포함)가 맞고, 허용 목록 밖의 숨은 리터럴이 없음([CI와 시험 환경](testing.md#설정값-시험)). 대상은 P2P·rendezvous 크레이트, transport 연결 목록 값, identity·topology·ssh 크레이트이고, 나머지 기존 크레이트의 상수는 규칙을 맞추는 후속 작업 때 더한다 | D1 실행의 잡 로그와 단계 결론 |
+| D11 | 모바일 target 빌드 검사 | D1과 같은 CI 실행의 `mobile-android`(ubuntu-latest + NDK)·`mobile-ios`(macos-latest) 잡에서 검사 단계 `mobile-check`와 정적 검사 단계 `no-process-spawn`. 두 잡은 아직 없다(후속 작업이 만든다, [모바일](mobile.md#모바일-cross-check)) | `aarch64-linux-android`·`x86_64-linux-android`·`aarch64-apple-ios`·`aarch64-apple-ios-sim`에서 [모바일](mobile.md#모바일-cross-check) 표의 크레이트·feature 조합 `cargo check --locked`가 성공하고, 모바일에서 컴파일되는 자리에 다른 프로그램 실행 코드가 없음. `tasty-net-ffi`가 있으면 Kotlin·Swift 생성 성공 | D1과 같은 CI 실행의 실행 ID, 잡별·단계별 결론 |
+
+D11은 director 2931로 넣었다. 잡이 생기기 전에는 D11이 미실행이므로 미충족이다(아래 판정 규칙 3).
 
 기준에 넣지 않은 것과 이유:
 
 - 토폴로지: 지금 tasty에 없는 새 기능이고 전송 API에 영향을 주지 않는다. 단위 시험은 D1에 포함되어 돈다.
 - 다른 망 사이의 펀칭 실험: [P2P](p2p.md#동작-수준-기준과의-관계)에 근거를 적었다. 아래 P1로 둔다.
+- 내장 SSH 백엔드 attach 시험: tasty 전환은 데스크톱 동작을 시스템 ssh 백엔드로 옮기는 일이라 내장 백엔드와 무관하게 시작할 수 있다(director 2931). 아래 "모바일 공개 전 기준" E1로 둔다.
 
 ## 판정 규칙
 
@@ -48,6 +52,7 @@
 | D8 | | | | |
 | D9 | | | | |
 | D10 | | | | |
+| D11 | | | | |
 
 ## P2P를 사용자에게 내놓기 전 기준
 
@@ -56,3 +61,15 @@
 | # | 항목 | 증거 형태 |
 |---|---|---|
 | P1 | hub rendezvous 배포 때 다른 망 사이 펀칭 실험으로 서버 설정 `punch_window`·`quic_handshake_timeout`과 기기 설정 `punch.probe_interval`의 기본값을 확정하고 반영. 망 조합별 성공률을 기록 | [P2P](p2p.md#결과-실험-뒤-채운다) 표, 반영 커밋 sha |
+
+## 모바일 공개 전 기준
+
+이 절은 tasty 전환 시작 판단에 쓰지 않는다. tasty-android 앱이 내장 SSH 백엔드로 원격에 붙는 기능을 사용자에게 내놓기 전의 조건이다(director 2931). 판정 규칙은 위와 같다(한 sha, `ok` 줄, 미실행은 미충족).
+
+| # | 항목 | 판정 대상 | 확인하는 것(요약) | 증거 형태 |
+|---|---|---|---|---|
+| E1 | 내장 SSH 백엔드 attach | `crates/tasty-net-demo/tests/ssh_attach.rs`·`ssh_reverse_attach.rs`의 D2·D3 흐름을 내장 백엔드로 도는 시험(이름 끝 `_embedded`, [SSH 백엔드 시험 목록](ssh-backends.md#시험-목록) "내장 백엔드 attach"), 같은 목록의 "폴백 선택", "`ssh -G` 대조"(`tasty-net-ssh-config` `tests/matches_openssh.rs`), "`ssh-keygen -F` 대조"(`tests/known_hosts_matches_openssh.rs`), "호스트 키" 시험 (세 OS). 시험은 후속 작업(OpenSSH 해석 이식, 내장 SSH 백엔드)이 만들고, 시험 함수 이름은 그때 이 행에 적는다 | D2·D3의 연결·끊기·재연결·거절 흐름이 OpenSSH 클라이언트 없이 내장 백엔드로 같게 돌고, 백엔드 선택과 설정·known_hosts 해석이 기준 클라이언트와 맞음 | D1 실행의 잡 로그에서 시험마다 `ok` 줄 |
+
+## 내장 폴백 활성 기준
+
+E1이 충족되기 전에는 `ssh.backend = auto`가 내장 백엔드로 떨어지는 폴백을 켠 릴리스를 내지 않는다(director 2931). 폴백을 켠다는 것은 `embedded-ssh`가 기본 feature에 드는 것이다([SSH 백엔드 feature 계약](ssh-backends.md#2단계-내장-백엔드-이식-크레이트-뒤)). 그 전의 tasty 전환 태그에서는 기본 빌드가 `system-ssh`만이므로 `auto`가 OpenSSH를 찾지 못하면 지금처럼 시스템 ssh 없음 오류로 끝난다([선택 규칙](ssh-backends.md#선택-규칙)).

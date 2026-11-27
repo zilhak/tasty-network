@@ -11,6 +11,7 @@
 - 브랜치는 git-flow(`develop`·`release`·`main`)이고 tasty의 `docs/dev-guide/branching.md`와 같다. 이 레포의 차이는 레포 기반 작업이 `docs/dev-guide/branching.md`에 적는다.
 - 태그 형식은 `v<semver>`(예: `v0.1.0`)이고 `main`의 버전 커밋에만 붙인다.
 - tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29, [모바일](mobile.md#모바일-cross-check))가 통과한 커밋에만 붙인다. tasty-android 앱은 따로 태그를 받지 않고 같은 태그의 `rev`를 쓰기 때문이다(director 2865로 받은 android 요구 R2 #10).
+- `embedded-ssh`가 기본 feature에 든(내장 폴백을 켠) 릴리스의 태그는 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 커밋에만 붙인다(director 2931).
 
 ## tasty가 쓰는 방식
 

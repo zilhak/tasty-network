@@ -13,6 +13,7 @@
 | 2026-11-27 | 추가 결정 4의 기술 판단(director): russh 보안 패치를 따라가고 CI에 cargo-audit를 둔다. `@cert-authority` 줄은 1단계에서 믿지 않는다. ppk처럼 OpenSSH가 읽지 못하는 키 형식은 읽지 않는다. 모바일은 앱 저장소의 `ssh/` 폴더를 `~/.ssh`로 본다. 암호 백엔드는 ring이다. `ssh-key =0.7.0-rc.12` 고정을 위험으로 적는다 | 아래 각 절 |
 | 2026-11-27 | director 2852: tasty-android는 원격 파일을 SFTP로, Git 정보를 원격 git 명령(exec 채널)으로 가져온다 | [터널·exec·SFTP](#터널execsftp) |
 | 2026-11-27 | director 2881: 이식 크레이트 라이선스는 `BSD-2-Clause AND ISC AND SSH-short`. 거부는 무시하면 보안이 약해지는 지시어에만, 제공하지 않는 인증 방법을 켜는 지시어는 표시하고 다음 인증으로 진행 | [라이선스](#라이선스), [지시어 분류](#지시어-분류) |
+| 2026-11-27 | director 2931: 2881 분류 기준의 둘째 종류(다른 호스트·경로로 연결되는 값) 확장, `ChannelTimeout` 지원, 확인 끄기 값의 표시를 승인. 내장 SSH attach 시험은 동작 수준 기준과 따로 둔다 | [지시어 분류](#지시어-분류), [선택 규칙](#선택-규칙), [동작 수준 기준](done-criteria.md#모바일-공개-전-기준) |
 
 ## 백엔드
 
@@ -49,6 +50,7 @@
 | `tasty-net-transport` | `embedded-ssh` | 켬 | `["ssh", "tasty-net-ssh/embedded-ssh"]` |
 
 - 기본값은 두 크레이트 모두 `["system-ssh", "embedded-ssh"]`이다. 데스크톱 소비자(tasty)는 기본 그대로 쓰고, OpenSSH가 없는 데스크톱에서도 폴백이 된다.
+- `embedded-ssh`가 기본값에 드는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 커밋부터다(director 2931). 그 전 2단계 커밋의 기본값은 `["system-ssh"]`이고, 내장 백엔드는 그 feature를 켜는 소비자(모바일 조합)만 쓴다.
 - 모바일 조합은 `--no-default-features --features embedded-ssh`다. 이 단계에서 cross check에 ssh와 transport의 내장 조합 두 행이 더해진다.
 - `tasty-net-ssh-config`는 feature가 없다. `std::process`를 쓰지 않는다.
 - 이 단계가 내장 백엔드 작업과 같은 커밋 묶음에서 들어간다. 그 전에 `embedded-ssh`라는 이름의 빈 feature를 만들지 않는다. 빈 feature를 두면 `--no-default-features --features embedded-ssh`가 백엔드 없는 ssh 크레이트가 되어 `compile_error!` 계약과 어긋난다.
@@ -125,6 +127,7 @@
   3. 시스템 백엔드는 발견한 절대 경로로 실행한다. 그래서 선택이 본 파일과 실행한 파일이 같다(Windows `Command`가 실행 파일 폴더·System32를 먼저 보는 규칙을 타지 않는다).
   4. 찾은 파일이 OpenSSH인지는 가리지 않는다. 같은 이름의 다른 클라이언트가 먼저 있으면 그것이 시스템 백엔드가 되고, 그 클라이언트가 옵션을 거절하면 시스템 백엔드의 오류로 끝난다. 알려진 한계다.
 - 고르는 때: 연결 시도마다 한 번 고르고, 그 시도의 포트 발견과 터널은 같은 선택을 쓴다(발견은 시스템, 터널은 내장처럼 갈리지 않는다). 다음 시도는 다시 고르므로 실행 중에 OpenSSH를 설치하거나 지운 것이 반영된다. 이미 연 터널·세션은 처음 고른 백엔드로 끝까지 간다.
+- `auto`의 내장 폴백(위 표 첫 행)이 기본 빌드에 들어오는 것은 [내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)을 채운 뒤다(아래 2단계 feature의 기본값). 그 전의 tasty 전환 태그는 기본 빌드가 `system-ssh`만이라, `auto`가 OpenSSH를 찾지 못하면 지금처럼 `NotFound`(시스템 ssh 없음)로 끝난다.
 - 시스템 백엔드가 실패해도 내장으로 넘어가지 않는다. 폴백은 "찾지 못함"일 때만이다. 인증 실패나 호스트 키 거절을 다른 구현으로 다시 시도하면 사용자가 정한 동작과 다른 결과가 날 수 있다.
 
 ## 연결 정보

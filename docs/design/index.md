@@ -64,4 +64,4 @@
 | 판단필요: 서버 신뢰 방식 | hub rendezvous 배포 때 결정(Q1). 지금 설계는 서버 공개키 고정(raw public key)이다. 대안은 도메인 인증서(WebPKI)다. 키 고정은 공용 인증 기관에 기대지 않고 기기 사이와 같은 코드를 쓰지만, 서버 키를 바꾸면 tasty 설정의 공개키도 바꿔야 한다. 추천: 키 고정. 키 교체 절차(새 키를 미리 설정에 더해 두는 두 키 허용)는 hub rendezvous 배포 때 정한다([rendezvous](rendezvous.md#기기-인증)) | hub, tasty |
 | 토폴로지 원격 응답에 실을 workspace 메타데이터 범위(이름·ID) | 미정 | tasty 제품 결정 |
 | 페어링 메시지를 나르는 경로와 승인 화면 | 미정 | tasty 제품 결정 |
-| 판단필요: D11(모바일 target 빌드 검사)과 내장 SSH 백엔드 attach 시험을 동작 수준 기준에 넣을지 | 판단을 올림(2026-11-27). [동작 수준 기준](done-criteria.md)은 정해진 뒤 고친다([모바일](mobile.md#d-기준과의-관계)) | director |
+| D11(모바일 target 빌드 검사)과 내장 SSH 백엔드 attach 시험을 동작 수준 기준에 넣을지 | 결정됨(director 2931): D11은 넣는다. 내장 SSH attach는 [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준)으로 따로 두고, 그 기준 전에는 내장 폴백을 켠 릴리스를 내지 않는다([내장 폴백 활성 기준](done-criteria.md#내장-폴백-활성-기준)). D11의 CI 잡은 후속 작업(모바일 cross check)이 만든다([모바일](mobile.md#d-기준과의-관계)) | director |

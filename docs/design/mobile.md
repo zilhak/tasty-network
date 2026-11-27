@@ -254,7 +254,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 - 순서: ffi는 내장 백엔드 작업(2단계 feature) 뒤에 만든다. 그 전에 SSH 없는 ffi를 먼저 내지 않는다. 바인딩의 SSH 모양이 나중에 바뀌지 않게 하기 위해서다.
 - 다른 크레이트는 UniFFI에 의존하지 않는다. FFI용 타입은 이 크레이트가 따로 정의하고 코어 타입에서 옮긴다(코어 크레이트의 공개 API가 FFI 제약을 따르지 않게 한다).
 - unsafe: [크레이트 구성](crates.md#unsafe-규칙)의 `deny(unsafe_code)` 분류다.
-- UniFFI 판: 2026-11-27 crates.io 최신 안정판은 0.33.0(2026-11-25 게시), 그 앞은 0.32.2(2026-09-23). 라이선스 MPL-2.0(`deny.toml` 허용). 바인딩 크레이트 작업이 그때의 최신 안정판을 `=` 판으로 고정하고, 그 판을 앱 레포에 알린다(두 레포 공통, director 2865). 판을 올릴 때도 이 레포가 먼저 올리고 알린다. 0.33.0의 `uniffi-bindgen`은 라이브러리 모드가 기본이고 `--library` 플래그는 남아 있지만 deprecated다. 생성 명령은 고정한 판의 문서로 다시 확인한다.
+- UniFFI 판: 2026-11-27 crates.io 최신 안정판은 0.33.0(2026-11-25 게시), 그 앞은 0.32.2(2026-09-23). 라이선스 MPL-2.0(`deny.toml` 허용). 바인딩 크레이트 작업이 그때의 최신 안정판을 `=` 판으로 고정하고, 그 판을 앱 레포에 알린다(두 레포 공통, director 2865). 판을 올릴 때도 이 레포가 먼저 올리고 알린다. 0.33.0의 `uniffi-bindgen`은 라이브러리 모드가 기본이고 `--library` 플래그는 남아 있지만 deprecated다. 생성 명령은 고정한 판의 문서로 다시 확인한다. 앱과 같은 판을 쓴다. 앱은 지금 0.32다. 판을 고정할 때 director에게 알린다(판 고정은 바인딩 크레이트 작업, director 2931).
 - Kotlin 패키지 이름(android 요구 #12): UniFFI 0.33.0의 Kotlin 생성기는 `uniffi.toml`의 `[bindings.kotlin] package_name`이 없으면 `uniffi.<네임스페이스>`를 쓴다(`uniffi_bindgen` 0.33.0 `src/bindings/kotlin/mod.rs:94`–`:96`). 그래서 이 크레이트는 기본이면 `uniffi.tasty_net`이다. 라이브러리 모드도 크레이트마다 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/bindgen_paths.rs:141`–`:144`) `tasty-net-ffi`의 이름은 이 레포의 `uniffi.toml`이 정하고, 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.<크레이트>]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:96`–`:121`). 값은 바인딩 크레이트 작업이 정한다.
 - 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(`src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:314`–`:322`). 두면 `tasty-net-ffi`의 Kotlin만 다른 라이브러리를 싣는다.
 
@@ -342,9 +342,9 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 
 ## D 기준과의 관계
 
-[동작 수준 기준](done-criteria.md)은 이 문서가 고치지 않는다. D11(모바일 target 빌드 검사)과 내장 백엔드 attach 시험을 기준에 넣을지는 판단을 따로 올렸다(director가 정한다). 정해지면 그 문서와 이 절을 같은 커밋에서 고친다.
+결정됨(director 2931): D11(모바일 target 빌드 검사)을 [동작 수준 기준](done-criteria.md)에 넣는다. 내장 백엔드 attach 시험은 tasty 전환 기준에 넣지 않고 [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준)으로 따로 둔다. D11을 판정할 `mobile-android`·`mobile-ios` 잡은 아직 없다. 모바일 cross check 작업이 만든다.
 
-- 태그 규칙([버전·호환](versioning.md#태그와-브랜치))이 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, D11을 기준에 넣든 넣지 않든 모바일 cross check CI(모바일 cross check 작업)가 tasty 전환 태그보다 먼저 있어야 한다.
+- 태그 규칙([버전·호환](versioning.md#태그와-브랜치))도 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, 모바일 cross check CI(모바일 cross check 작업)가 tasty 전환 태그보다 먼저 있어야 한다.
 - 내장 백엔드 조합이 D11에 들려면 이식 크레이트(`tasty-net-ssh-config`)와 내장 백엔드 작업이 먼저 develop에 있어야 한다. 그 전의 D11은 위 cross check 표의 "모바일 cross check 작업부터" 행만 본다.
 
 ## 후속 작업과 미정
