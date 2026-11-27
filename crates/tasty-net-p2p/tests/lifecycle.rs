@@ -164,6 +164,59 @@ fn reconnect_delay_never_exceeds_max_delay() {
     }
 }
 
+/// Register `key` on `server` from `port` as a plain coordination client: `hello`, then the
+/// server's `welcome`. Another process with the same key does the same.
+fn register_raw(
+    w: &World,
+    port: Arc<support::Port>,
+    key: &tasty_net_identity::DeviceKey,
+    server: RendezvousServer,
+) -> (quinn::Connection, quinn::SendStream, quinn::RecvStream) {
+    use tasty_net_rendezvous::wire::frame::{encode_frame, read_frame};
+    use tasty_net_rendezvous::wire::message::{DeviceMessage, Hello};
+    let ep = raw_endpoint(&w.rt, port, None);
+    let tls = tls::client_config(
+        key,
+        server.public_key,
+        tasty_net_rendezvous::wire::ALPN_RENDEZVOUS,
+        TlsOptions {
+            max_fragment_size: None,
+        },
+    )
+    .unwrap();
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let config = quinn::ClientConfig::new(Arc::new(crypto));
+    w.rt.block_on(async move {
+        let conn = ep
+            .connect_with(config, server.addr, tls::SERVER_NAME)
+            .unwrap()
+            .await
+            .expect("coordination connection");
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let hello = DeviceMessage::Hello(Hello {
+            proto: tasty_net_rendezvous::wire::PROTO,
+            host_candidates: Vec::new(),
+        });
+        let frame = encode_frame(&hello.to_json().unwrap(), 1 << 16).unwrap();
+        send.write_all(&frame).await.unwrap();
+        let welcome = read_frame(&mut recv, 1 << 16, Duration::from_secs(10))
+            .await
+            .unwrap()
+            .expect("welcome");
+        assert!(
+            matches!(
+                ServerMessage::parse(&welcome),
+                Ok(ServerMessage::Welcome(_))
+            ),
+            "{}",
+            String::from_utf8_lossy(&welcome)
+        );
+        (conn, send, recv)
+    })
+}
+
+/// The same key registers from elsewhere (as another process would): the server supersedes
+/// the endpoint, which stops. One process cannot open a second endpoint for the key.
 #[test]
 fn superseded_endpoint_stops() {
     let w = World::new();
@@ -171,11 +224,11 @@ fn superseded_endpoint_stops() {
     let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
     let first = device(&n1, 2, 1, &s, settings(&[]));
     registered(&first);
-    // The same key registers from elsewhere.
-    let second = device(&n2, 2, 1, &s, settings(&[]));
-    registered(&second);
+    let elsewhere = n2.socket(2);
+    let same_key = support::device_key(&first.port, 1);
+    assert_eq!(same_key.id(), first.id());
+    let _second = register_raw(&w, elsewhere, &same_key, s.info);
     stopped_with(&first, StopCause::Superseded);
-    assert_eq!(second.ep.status().state, EndpointPhase::Registered);
 }
 
 #[test]
@@ -964,4 +1017,80 @@ fn connection_calls_after_close_end_at_once() {
         Arc::strong_count(&port_a)
     );
     b.ep.close();
+}
+
+/// One device key has one endpoint that is on in a process, with or without a key directory;
+/// the key is free again at `Off` (docs/design/p2p.md "endpoint와 런타임").
+#[test]
+fn one_key_has_one_endpoint_in_a_process() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    let first = device(&n1, 2, 1, &s, settings(&[]));
+    let pairing = Arc::new(tasty_net_p2p::PairingList::new());
+    let config = |key: tasty_net_identity::DeviceKey| {
+        let mut c = tasty_net_p2p::P2pConfig::new(key, pairing.clone());
+        c.enabled = true;
+        c.server = Some(s.info);
+        c.packet_io = Some(Arc::new(support::MockIo(n2.socket(3))));
+        c
+    };
+    let same = support::device_key(&first.port, 1);
+    let r = tasty_net_p2p::P2pEndpoint::bind(config(same.clone()));
+    assert!(
+        matches!(r, Err(tasty_net_p2p::P2pError::EndpointInUse)),
+        "{r:?}"
+    );
+    // An endpoint that is off holds nothing.
+    let mut off = config(same.clone());
+    off.enabled = false;
+    assert!(tasty_net_p2p::P2pEndpoint::bind(off).is_ok());
+    first.ep.close();
+    let again = tasty_net_p2p::P2pEndpoint::bind(config(same)).expect("free after Off");
+    again.close();
+}
+
+/// A second `bind` on the same key directory is `EndpointInUse`: through the process list for
+/// the same key, and through the directory's lock file for another key (as another process
+/// with that directory would meet it).
+#[test]
+fn a_second_bind_on_the_same_key_directory_is_in_use() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let dir = std::env::temp_dir().join(format!(
+        "tasty-net-p2p-key-dir-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pairing = Arc::new(tasty_net_p2p::PairingList::new());
+    let config = |key: tasty_net_identity::DeviceKey, host: u8| {
+        let port = n.socket(host);
+        let mut c = tasty_net_p2p::P2pConfig::new(key, pairing.clone());
+        c.enabled = true;
+        c.server = Some(s.info);
+        c.key_dir = Some(dir.clone());
+        c.packet_io = Some(Arc::new(support::MockIo(port)));
+        c
+    };
+    let port = n.socket(2);
+    let (k1, k2) = (support::device_key(&port, 1), support::device_key(&port, 2));
+    let first = tasty_net_p2p::P2pEndpoint::bind(config(k1.clone(), 3)).expect("first");
+    let same_key = tasty_net_p2p::P2pEndpoint::bind(config(k1.clone(), 4));
+    assert!(
+        matches!(same_key, Err(tasty_net_p2p::P2pError::EndpointInUse)),
+        "{same_key:?}"
+    );
+    let same_dir = tasty_net_p2p::P2pEndpoint::bind(config(k2.clone(), 5));
+    assert!(
+        matches!(same_dir, Err(tasty_net_p2p::P2pError::EndpointInUse)),
+        "{same_dir:?}"
+    );
+    first.close();
+    let after = tasty_net_p2p::P2pEndpoint::bind(config(k2, 6)).expect("the lock is free at Off");
+    after.close();
+    drop(after);
+    let _removed = std::fs::remove_file(dir.join("p2p.lock"));
+    let _removed = std::fs::remove_dir(&dir);
 }

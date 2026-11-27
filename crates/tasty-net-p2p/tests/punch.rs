@@ -482,10 +482,14 @@ fn unpaired_quic_is_closed_with_not_paired() {
     let s = w.server(1, server_settings());
     let (n1, n2) = two_nats(&w, NatSpec::eim(), NatSpec::eim());
     let a = device(&n1, 2, 1, &s, settings(&[]));
-    let mut config = P2pConfig::new(key(2), Arc::new(OnceThenNot::default()));
+    let port = n2.socket(2);
+    let mut config = P2pConfig::new(
+        support::device_key(&port, 2),
+        Arc::new(OnceThenNot::default()),
+    );
     config.enabled = true;
     config.server = Some(s.info);
-    config.packet_io = Some(Arc::new(MockIo(n2.socket(2))));
+    config.packet_io = Some(Arc::new(MockIo(port)));
     let b = P2pEndpoint::bind(config).unwrap();
     a.pairing.add(b.id());
     registered(&a);

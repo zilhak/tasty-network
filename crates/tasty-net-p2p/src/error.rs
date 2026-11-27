@@ -184,7 +184,8 @@ pub enum P2pError {
     Settings(SettingsError),
     /// P2P is on but no rendezvous server is given.
     NoServer,
-    /// Another P2P endpoint holds the key directory's lock.
+    /// Another P2P endpoint that is on uses this device key: in this process, or in another
+    /// one through the key directory's lock.
     EndpointInUse,
     /// The blocking API was called inside an async task. Call it from a blocking thread (for
     /// example `spawn_blocking`).
@@ -217,7 +218,7 @@ impl fmt::Display for P2pError {
             P2pError::Settings(e) => write!(f, "P2P settings are invalid: {e}"),
             P2pError::NoServer => write!(f, "P2P is on but no rendezvous server is set"),
             P2pError::EndpointInUse => {
-                write!(f, "another P2P endpoint uses this device key directory")
+                write!(f, "another P2P endpoint uses this device key")
             }
             P2pError::InAsyncContext => {
                 write!(f, "the blocking P2P API was called inside an async task")

@@ -373,6 +373,9 @@ struct Intercept {
 
 #[derive(Default)]
 struct NetInner {
+    /// This network's number in the process: device keys differ between networks
+    /// ([`device_key`]).
+    id: u64,
     ports: Mutex<HashMap<SocketAddr, Arc<Port>>>,
     nats: Mutex<Vec<Arc<Nat>>>,
     /// Sockets that take what is sent to an address before anything else.
@@ -456,12 +459,16 @@ impl NetInner {
 }
 
 /// The mock network.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Net(Arc<NetInner>);
 
 impl Net {
     pub fn new() -> Self {
-        Net::default()
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Net(Arc::new(NetInner {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            ..NetInner::default()
+        }))
     }
 
     fn port(&self, addr: SocketAddr, nat: Option<Arc<Nat>>) -> Arc<Port> {
@@ -574,9 +581,18 @@ pub fn block_all() -> Rule {
     Arc::new(|_, _| Verdict::Drop)
 }
 
-/// A device key from a seed.
+/// A key from a seed: for servers and for device IDs no endpoint of the test uses.
 pub fn key(n: u8) -> DeviceKey {
     DeviceKey::from_seed([n; 32])
+}
+
+/// The key of device `seed` on the network of `port`. One process has one endpoint that is on
+/// per device key, and the tests of a binary run at once, so each test network has its own
+/// device keys.
+pub fn device_key(port: &Port, seed: u8) -> DeviceKey {
+    let mut bytes = [seed; 32];
+    bytes[24..].copy_from_slice(&port.net.id.to_be_bytes());
+    DeviceKey::from_seed(bytes)
 }
 
 /// A running rendezvous server on the public side.
@@ -713,7 +729,7 @@ pub fn device_with(
     enabled: bool,
 ) -> Device {
     let pairing = Arc::new(PairingList::new());
-    let mut config = P2pConfig::new(key(seed), pairing.clone());
+    let mut config = P2pConfig::new(device_key(&port, seed), pairing.clone());
     config.enabled = enabled;
     config.server = Some(server);
     config.settings = s;

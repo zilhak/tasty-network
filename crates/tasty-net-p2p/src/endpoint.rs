@@ -44,7 +44,8 @@ pub struct P2pConfig {
     /// The device key.
     pub device_key: DeviceKey,
     /// The directory the device key is stored in. When given, `bind` holds its lock file so
-    /// that one key has one P2P endpoint ([`P2pError::EndpointInUse`]).
+    /// that one key has one P2P endpoint across processes ([`P2pError::EndpointInUse`]). In one
+    /// process one key has one P2P endpoint that is on also without it.
     pub key_dir: Option<PathBuf>,
     /// The one rendezvous server. Required when `enabled`.
     pub server: Option<RendezvousServer>,
@@ -185,6 +186,8 @@ pub(crate) struct Core {
     calls: Mutex<Calls>,
     /// A blocking call left the runtime.
     call_left: tokio::sync::Notify,
+    /// The device key's single endpoint, given up at `Off`.
+    key_hold: Mutex<Option<KeyHold>>,
 }
 
 #[derive(Debug, Default)]
@@ -356,13 +359,12 @@ struct Inner {
     on: Option<Arc<Life>>,
 }
 
-/// The life of an endpoint that is on: the runtime's owner and the key directory's lock. The
+/// The life of an endpoint that is on: the runtime's owner. The
 /// endpoint's clones, its connections and their streams hold it; the endpoint shuts down when
 /// the last of them is dropped, or at [`P2pEndpoint::close`].
 pub(crate) struct Life {
     pub(crate) core: Arc<Core>,
     owner: Mutex<Option<Owner>>,
-    _lock: Option<File>,
 }
 
 impl Life {
@@ -402,6 +404,35 @@ fn route_ip(server: SocketAddr) -> Option<IpAddr> {
     s.local_addr().ok().map(|a| a.ip())
 }
 
+/// The device IDs of this process's endpoints that are on.
+static ACTIVE_KEYS: Mutex<std::collections::BTreeSet<DeviceId>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// One device key's single endpoint: its place among this process's endpoints that are on and,
+/// with a key directory, that directory's lock for other processes. Given up at `Off`.
+struct KeyHold {
+    id: DeviceId,
+    _file: Option<File>,
+}
+
+impl KeyHold {
+    fn take(id: DeviceId, dir: Option<&std::path::Path>) -> Result<Self, P2pError> {
+        if !lock(&ACTIVE_KEYS).insert(id) {
+            return Err(P2pError::EndpointInUse);
+        }
+        // From here on the hold gives the ID back when dropped, also on a lock failure.
+        let mut hold = KeyHold { id, _file: None };
+        hold._file = dir.map(lock_key_dir).transpose()?;
+        Ok(hold)
+    }
+}
+
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        lock(&ACTIVE_KEYS).remove(&self.id);
+    }
+}
+
 fn lock_key_dir(dir: &std::path::Path) -> Result<File, P2pError> {
     let file = OpenOptions::new()
         .create(true)
@@ -433,7 +464,7 @@ impl P2pEndpoint {
             });
         }
         let server = config.server.ok_or(P2pError::NoServer)?;
-        let lock_file = config.key_dir.as_deref().map(lock_key_dir).transpose()?;
+        let key_hold = KeyHold::take(id, config.key_dir.as_deref())?;
         let owner =
             Owner::start(params.worker_threads, params.shutdown_timeout).map_err(P2pError::Io)?;
         let handle = owner.handle().clone();
@@ -515,6 +546,7 @@ impl P2pEndpoint {
             shutdown: watch::channel(false).0,
             calls: Mutex::default(),
             call_left: tokio::sync::Notify::new(),
+            key_hold: Mutex::new(Some(key_hold)),
         });
         lock(&core.reg).phase = Some(EndpointPhase::Off);
         handle.spawn(crate::server::run(core.clone()));
@@ -526,7 +558,6 @@ impl P2pEndpoint {
                 on: Some(Arc::new(Life {
                     core,
                     owner: Mutex::new(Some(owner)),
-                    _lock: lock_file,
                 })),
             }),
         })
@@ -707,7 +738,8 @@ impl P2pEndpoint {
 
 /// The shutdown the owner thread runs before it ends the runtime: refuse new blocking calls
 /// and wake the ones in the runtime, close QUIC with `closed`, then give up the QUIC endpoint,
-/// the connections nobody took and the socket (`Off`: no socket), and report `Off`.
+/// the connections nobody took, the socket (`Off`: no socket) and the device key's hold, and
+/// report `Off`.
 fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
     Box::new(move |handle: &Handle| {
         handle.block_on(async move {
@@ -737,6 +769,7 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
                 while queued.try_recv().is_ok() {}
             }
             let _released = core.gate.release();
+            drop(lock(&core.key_hold).take());
             core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
         });
     })
