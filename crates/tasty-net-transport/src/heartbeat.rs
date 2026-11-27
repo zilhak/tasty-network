@@ -170,23 +170,74 @@ mod tests {
         drop(a);
     }
 
-    /// Waits until `from + pause` by checking the clock and yielding, not by a timed sleep: a
-    /// sleep may wake much later than asked (on the macOS CI runner a 20 ms `thread::sleep`
-    /// took about 150 ms), which leaves the writer quiet for longer than the heartbeat
-    /// interval.
+    /// Waits until `from + pause` by checking the clock and yielding, not by a timed sleep.
+    /// The macOS CI runner left the writer of this test quiet for 86 to 178 ms where it
+    /// meant one write every 20 ms. Its log keeps only the largest of the measured gaps, so
+    /// it does not tell which gap grew; a 20 ms `thread::sleep` that wakes late is the most
+    /// likely cause, and pacing by the clock does not depend on when a timed wait wakes.
     fn pace(from: Instant, pause: Duration) {
         while from.elapsed() < pause {
             std::thread::yield_now();
         }
     }
 
+    /// How long the channel's last write stayed unchanged while the peer read, as upper
+    /// bounds of three kinds of gaps, and the writes that ended while it read.
+    #[derive(Debug, Clone, Copy)]
+    struct Gaps {
+        /// From before `framed` (which sets the last write) to the end of the first write.
+        first: Duration,
+        /// The longest from the start of one write to the end of the next.
+        middle: Duration,
+        /// From the start of the last write to when the reading ended.
+        last: Duration,
+        writes: usize,
+    }
+
+    impl Gaps {
+        fn longest(&self) -> Duration {
+            self.first.max(self.middle).max(self.last)
+        }
+
+        /// The gaps of the writes `(start, end)`, counting only the time until `read_end`:
+        /// a write that ended after it does not end a gap, and the last gap ends at
+        /// `min(left, read_end)` (`left` is when the writer left its loop).
+        fn of(
+            framed_from: Instant,
+            writes: &[(Instant, Instant)],
+            left: Instant,
+            read_end: Instant,
+        ) -> Self {
+            let done: Vec<&(Instant, Instant)> =
+                writes.iter().filter(|(_, end)| *end <= read_end).collect();
+            let until = left.min(read_end);
+            let (Some((_, first_end)), Some((last_start, _))) = (done.first(), done.last()) else {
+                let first = until.saturating_duration_since(framed_from);
+                return Self {
+                    first,
+                    middle: Duration::ZERO,
+                    last: Duration::ZERO,
+                    writes: 0,
+                };
+            };
+            let middle = done
+                .windows(2)
+                .map(|pair| pair[1].1.saturating_duration_since(pair[0].0))
+                .max()
+                .unwrap_or(Duration::ZERO);
+            Self {
+                first: first_end.saturating_duration_since(framed_from),
+                middle,
+                last: until.saturating_duration_since(*last_start),
+                writes: done.len(),
+            }
+        }
+    }
+
     /// Writes Data every 20 ms on a channel with a 100 ms heartbeat interval while the peer
-    /// reads for 450 ms. Returns the tags it read, an upper bound of the longest time the
-    /// channel's last write stayed unchanged while the peer read (from before `framed`, which
-    /// sets it, to the end of the first write, from the start of each write to the end of the
-    /// next, and from the start of the last write to when the reading had ended) and the
-    /// number of writes.
-    fn busy_run(policy: HeartbeatPolicy) -> (Vec<StreamTag>, Duration, usize) {
+    /// reads for 450 ms. Returns the tags it read and the gaps of the writes during the
+    /// reading.
+    fn busy_run(policy: HeartbeatPolicy) -> (Vec<StreamTag>, Gaps) {
         let (a, mut b) = memory_channel_pair();
         let before_framed = Instant::now();
         // 600 ms read timeout -> 100 ms interval.
@@ -197,60 +248,63 @@ mod tests {
         let done = Arc::clone(&read_done);
         let writer = a.writer;
         let busy = std::thread::spawn(move || {
-            let mut started = before_framed;
-            let mut quiet = Duration::ZERO;
-            let mut writes = 0;
+            let mut writes = Vec::new();
             while !done.load(Ordering::SeqCst) {
                 let start = Instant::now();
                 writer.write_frame(StreamTag::Data, b"x").expect("write");
-                writes += 1;
-                quiet = quiet.max(started.elapsed());
-                started = start;
+                writes.push((start, Instant::now()));
                 pace(start, Duration::from_millis(20));
             }
-            quiet = quiet.max(started.elapsed());
-            (writer, quiet, writes)
+            (writer, writes, Instant::now())
         });
         let tags = raw_tags_until(&mut b, Instant::now() + Duration::from_millis(450));
+        let read_end = Instant::now();
         read_done.store(true, Ordering::SeqCst);
-        let (writer, quiet, writes) = busy.join().expect("writer");
+        let (writer, writes, left) = busy.join().expect("writer");
         drop(writer);
-        (tags, quiet, writes)
+        (tags, Gaps::of(before_framed, &writes, left, read_end))
     }
 
-    /// "While frames flow" is judged by the writes' real times: a run where the scheduler kept
-    /// the writer quiet for half the interval or more is not one, and runs again. A WhenIdle
-    /// Ping after a quiet interval is correct (CI once saw only four writes in 450 ms and a
-    /// Ping among them), so such a run proves nothing either way.
-    #[test]
-    fn when_idle_sends_no_ping_while_frames_flow_but_periodic_does() {
+    /// The tags of a run of `policy` in which frames flowed: every gap of the writes stayed
+    /// under half the heartbeat interval. A run where the scheduler kept the writer quiet
+    /// longer is not one and runs again, up to ten times.
+    fn flowing_run(policy: HeartbeatPolicy) -> Vec<StreamTag> {
         const FLOWING: Duration = Duration::from_millis(50);
         const RUNS: usize = 10;
         let mut quiet_runs = Vec::new();
-        let flowing = (0..RUNS).find_map(|_| {
-            let (tags, quiet, writes) = busy_run(HeartbeatPolicy::WhenIdle);
-            if quiet < FLOWING {
-                Some(tags)
-            } else {
-                quiet_runs.push((quiet, writes));
-                None
+        for _ in 0..RUNS {
+            let (tags, gaps) = busy_run(policy);
+            if gaps.longest() < FLOWING {
+                return tags;
             }
-        });
-        let Some(tags) = flowing else {
-            panic!(
-                "the writer never wrote without a {FLOWING:?} gap in {RUNS} runs (longest gap, writes): {quiet_runs:?}"
-            );
-        };
+            quiet_runs.push((gaps.middle, gaps.first, gaps.last, gaps.writes));
+        }
+        panic!(
+            "{policy:?}: the writer never wrote without a {FLOWING:?} gap in {RUNS} runs \
+             (longest middle gap, first gap, last gap, writes): {quiet_runs:?}"
+        );
+    }
+
+    /// "While frames flow" is judged by the writes' real times, for both policies. A WhenIdle
+    /// Ping after a quiet interval is correct (CI once saw only four writes in 450 ms and a
+    /// Ping among them), so such a run proves nothing either way; a Periodic Ping in such a
+    /// run could also be an idle Ping.
+    #[test]
+    fn when_idle_sends_no_ping_while_frames_flow_but_periodic_does() {
+        let tags = flowing_run(HeartbeatPolicy::WhenIdle);
         let pings = tags.iter().filter(|t| **t == StreamTag::Ping).count();
         assert_eq!(
             pings, 0,
             "WhenIdle sent a Ping while frames flowed: {tags:?}"
         );
 
-        // Periodic pings whatever the writes do.
-        let (tags, _, _) = busy_run(HeartbeatPolicy::Periodic);
+        // Periodic pings while frames flow too.
+        let tags = flowing_run(HeartbeatPolicy::Periodic);
         let pings = tags.iter().filter(|t| **t == StreamTag::Ping).count();
-        assert!(pings > 0, "Periodic: {tags:?}");
+        assert!(
+            pings > 0,
+            "Periodic sent no Ping while frames flowed: {tags:?}"
+        );
     }
 
     #[test]
