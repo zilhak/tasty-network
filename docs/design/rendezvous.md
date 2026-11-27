@@ -201,7 +201,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `max_reported_reflexive` | 3 | 보조 STUN 주소 수(보조 포트, 두 번째 IP의 두 포트) |
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |
 | `max_queued_messages` | 64 | 연결마다 서버가 보낼 메시지를 쌓아 두는 수(1–2^20). 정상 기기에는 펀칭 몇 개의 메시지만 쌓인다. 넘치면 기기가 받지 않는 것이므로 그 연결을 `busy`로 닫고 등록을 지운다. 상한이 없으면 수신 창을 열지 않는 기기 하나가 서버 메모리를 끝없이 쓴다 |
-| `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
+| `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번). 세는 창은 1초(키의 단위)이고 설정 키가 아니다. `max_stun_sources`도 같은 창으로 센다 |
 | `max_stun_sources` | 65536 | 한 창(1초)에 세는 출발 주소의 수. 항목 하나가 수십 바이트라 몇 MiB 안이다. 넘으면 새 출발 주소의 요청은 답하지 않고 센다(`Server::status()`·주기 로그의 `stun_sources_full`). 창이 바뀌면 계수표를 새로 만들어 메모리를 돌려준다 |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
 | `quic.max_bidi_streams` | 2 | 기기가 여는 조정 스트림 하나와, 둘째 스트림을 받아 `malformed`로 닫을 자리 하나. 1이면 둘째 스트림이 열리지 못하고 기기 쪽에서 막혀 서버가 규칙 위반을 볼 수 없다(quinn `max_concurrent_bidi_streams`) |
