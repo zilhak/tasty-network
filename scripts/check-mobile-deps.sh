@@ -9,7 +9,8 @@
 #       -p <크레이트> [-- <feature 인자…>]
 #   check-mobile-deps.sh --self-test
 #
-#   --manifest-path   검사할 Cargo 작업 공간(또는 패키지)의 Cargo.toml. 없으면 지금 폴더의 작업 공간
+#   --manifest-path   검사할 Cargo 작업 공간(또는 패키지)의 Cargo.toml. 없으면 지금 폴더의 작업 공간.
+#                     cargo는 그 Cargo.toml의 폴더에서 돈다(그 폴더의 .cargo/config.toml·툴체인 고정을 따른다)
 #   --app             앱 그래프 기준. tokio의 process는 그 feature를 켠 경로에 tasty-net-* 크레이트가
 #                     있을 때만 실패다(앱 자신은 켜도 된다). 없으면 이 레포 기준: tokio의 process는 실패
 #   --target          모바일 target. 여러 번 줄 수 있다
@@ -23,22 +24,26 @@
 set -euo pipefail
 
 TAG="[mobile-deps]"
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 
 usage() {
-    sed -n '7,18p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '7,19p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
 MANIFEST=""
+MANIFEST_DIR=""
 APP=0
 PKG=""
 TARGETS=()
 FEATS=()
 
-# cargo tree 호출. 자체 시험이 이 함수를 가짜로 바꿔 끼운다.
+# cargo tree 호출. 자체 시험이 이 함수를 가짜로 바꿔 끼운다. --manifest-path가 있으면 그 폴더에서
+# 돌린다. cargo는 지금 폴더에서 .cargo/config.toml을 찾고 rustup도 지금 폴더로 툴체인을 고르므로,
+# 앱 작업 공간 밖에서 부르면 앱의 소스 대체·patch 설정과 고정 툴체인이 빠진다.
 cargo_tree() {
     if [[ -n "$MANIFEST" ]]; then
-        cargo tree --locked --manifest-path "$MANIFEST" "$@"
+        (cd "$MANIFEST_DIR" && cargo tree --locked --manifest-path "$MANIFEST" "$@")
     else
         cargo tree --locked "$@"
     fi
@@ -240,6 +245,49 @@ self_test() {
             failed=1
         fi
     done
+    cli_self_test || failed=1
+    return "$failed"
+}
+
+# 인자 처리와 cargo를 부르는 자리의 자체 시험: PATH 앞에 둔 가짜 cargo로 이 스크립트를 따로 돌린다.
+# 가짜 cargo는 FAKE_CARGO_PWD가 있으면 지금 폴더가 그 폴더일 때만 뿌리 줄을 찍고, 아니면 101로 끝난다.
+cli_self_test() {
+    local tmp failed=0 c name want pwd_mode args got want_pwd
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/mobile-deps-test.XXXXXX")
+    mkdir -p "$tmp/bin" "$tmp/app" "$tmp/elsewhere"
+    : >"$tmp/app/Cargo.toml"
+    cat >"$tmp/bin/cargo" <<'FAKE'
+#!/usr/bin/env bash
+if [[ -n "${FAKE_CARGO_PWD:-}" && "$(pwd -P)" != "$FAKE_CARGO_PWD" ]]; then
+    echo "fake cargo: 지금 폴더 $(pwd -P), 기대 $FAKE_CARGO_PWD" >&2
+    exit 101
+fi
+echo 'app v0.1.0 (/w/app)|default'
+FAKE
+    chmod +x "$tmp/bin/cargo"
+    # 이름#기대 종료 코드#cargo의 폴더 확인(app·없음)#인자(공백으로 나눈다, @APP@은 앱 Cargo.toml)
+    local cases=(
+        "다른 폴더에서 부른 --manifest-path는 그 폴더에서 cargo를 돌린다#0#app#--manifest-path @APP@ --app --target aarch64-linux-android -p app"
+        "상대 경로 --manifest-path도 그 폴더에서 돈다#0#app#--manifest-path ../app/Cargo.toml --target aarch64-linux-android -p app"
+        "없는 --manifest-path#2##--manifest-path ../none/Cargo.toml --target aarch64-linux-android -p app"
+    )
+    for c in "${cases[@]}"; do
+        IFS='#' read -r name want pwd_mode args <<<"$c"
+        args=${args//@APP@/$tmp/app/Cargo.toml}
+        want_pwd=""
+        [[ "$pwd_mode" == app ]] && want_pwd=$(cd "$tmp/app" && pwd -P)
+        got=0
+        # shellcheck disable=SC2086  # 인자는 공백으로 나눈다
+        (cd "$tmp/elsewhere" && PATH="$tmp/bin:$PATH" FAKE_CARGO_PWD="$want_pwd" bash "$SELF" $args) \
+            >/dev/null 2>&1 || got=$?
+        if [[ "$got" == "$want" ]]; then
+            echo "$TAG 자체 시험 통과: $name" >&2
+        else
+            echo "$TAG 자체 시험 실패: $name (기대 $want, 결과 $got)" >&2
+            failed=1
+        fi
+    done
+    rm -rf "${tmp:?}"
     return "$failed"
 }
 
@@ -279,9 +327,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$PKG" && ${#TARGETS[@]} -gt 0 ]] || usage
-if [[ -n "$MANIFEST" && ! -f "$MANIFEST" ]]; then
-    echo "$TAG 판정 불가: Cargo.toml이 없다: $MANIFEST" >&2
-    exit 2
+if [[ -n "$MANIFEST" ]]; then
+    if [[ ! -f "$MANIFEST" ]]; then
+        echo "$TAG 판정 불가: Cargo.toml이 없다: $MANIFEST" >&2
+        exit 2
+    fi
+    MANIFEST_DIR=$(cd "$(dirname "$MANIFEST")" && pwd -P)
+    MANIFEST="$MANIFEST_DIR/$(basename "$MANIFEST")"
 fi
 
 worst=0
