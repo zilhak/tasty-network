@@ -181,7 +181,7 @@ mobile_android_env() {
     esac
     bin="$ndk/toolchains/llvm/prebuilt/$host/bin"
     if [[ ! -e "$bin/$t$MOBILE_ANDROID_API-clang$ext" || ! -e "$bin/llvm-ar" && ! -e "$bin/llvm-ar.exe" ]]; then
-        echo "mobile-check: NDK($ndk)에 $t$MOBILE_ANDROID_API-clang$ext·llvm-ar가 없다" >&2
+        echo "mobile-check: NDK($ndk)에 $t$MOBILE_ANDROID_API-clang${ext}·llvm-ar가 없다" >&2
         return 1
     fi
     var=${t//-/_}
@@ -391,7 +391,7 @@ warn_hooks() {
     fi
     want=$(cd "$top/.githooks" 2>/dev/null && pwd -P) || want=""
     if [[ "$got" != "$want" ]]; then
-        echo "경고: git 훅을 이 트리의 .githooks가 아니라 $got에서 읽는다. bash scripts/dev-setup.sh를 실행한다." >&2
+        echo "경고: git 훅을 이 트리의 .githooks가 아니라 ${got}에서 읽는다. bash scripts/dev-setup.sh를 실행한다." >&2
     fi
     return 0
 }

@@ -49,11 +49,11 @@ ndk_ok() {
     local dir=$1 got
     got=$(revision_of "$dir")
     if [ "$got" != "$NDK_REVISION" ]; then
-        say "$dir의 판이 '${got:-source.properties 없음}'이다(기대 $NDK_REVISION)."
+        say "${dir}의 판이 '${got:-source.properties 없음}'이다(기대 $NDK_REVISION)."
         return 1
     fi
     if [ ! -f "$dir/$CLANG_REL" ] || [ ! -x "$dir/$CLANG_REL" ]; then
-        say "$dir에 실행 파일 $CLANG_REL이 없다."
+        say "${dir}에 실행 파일 ${CLANG_REL}이 없다."
         return 1
     fi
 }
@@ -77,7 +77,7 @@ install_main() {
             echo "$dest"
             return 0
         fi
-        say "$dest가 이미 있지만 고정 판의 NDK가 아니다. 그 자리는 그대로 두고 멈춘다. 다른 PREFIX를 준다."
+        say "${dest}가 이미 있지만 고정 판의 NDK가 아니다. 그 자리는 그대로 두고 멈춘다. 다른 PREFIX를 준다."
         return 2
     fi
 
@@ -121,23 +121,23 @@ install_main() {
     # 그때까지는 실패하면 cleanup이 만든 목적지를 지워도 된다. source.properties를 옮기는 순간부터는
     # 지우지 않는다.
     if ! mkdir -- "$dest" 2>/dev/null; then
-        say "$dest를 만들지 못했다(그 사이 같은 자리에 무언가 생겼거나 만들 수 없다). 그 자리는 그대로 두고 멈춘다."
+        say "${dest}를 만들지 못했다(그 사이 같은 자리에 무언가 생겼거나 만들 수 없다). 그 자리는 그대로 두고 멈춘다."
         return 2
     fi
     CLAIMED_DEST=$dest
     for e in "$tmp/x/$NAME"/* "$tmp/x/$NAME"/.[!.]* "$tmp/x/$NAME"/..?*; do
         [ -e "$e" ] || [ -L "$e" ] || continue
         [ "$e" = "$tmp/x/$NAME/source.properties" ] && continue
-        mv -- "$e" "$dest/" || { say "$dest로 옮기지 못했다."; return 2; }
+        mv -- "$e" "$dest/" || { say "${dest}로 옮기지 못했다."; return 2; }
     done
     if [ -e "$dest/$NAME" ] || [ -e "$dest/source.properties" ] \
         || [ ! -f "$dest/$CLANG_REL" ] || [ ! -x "$dest/$CLANG_REL" ]; then
-        say "옮긴 뒤 $dest가 고정 판의 NDK가 아니다."
+        say "옮긴 뒤 ${dest}가 고정 판의 NDK가 아니다."
         return 2
     fi
     CLAIMED_DEST=""
     if ! mv -- "$tmp/x/$NAME/source.properties" "$dest/source.properties"; then
-        say "$dest로 source.properties를 옮기지 못했다."
+        say "${dest}로 source.properties를 옮기지 못했다."
         # 이동이 실패로 보여도 그 파일이 목적지에 있으면 다른 실행이 이미 받았을 수 있어 그대로 둔다.
         if [ ! -e "$dest/source.properties" ] && [ ! -L "$dest/source.properties" ]; then
             rm -rf -- "${dest:?}"
@@ -145,7 +145,7 @@ install_main() {
         return 2
     fi
     if ! ndk_ok "$dest"; then
-        say "옮긴 뒤 $dest가 고정 판의 NDK가 아니다. 다른 실행이 이미 받았을 수 있어 그 자리는 그대로 둔다."
+        say "옮긴 뒤 ${dest}가 고정 판의 NDK가 아니다. 다른 실행이 이미 받았을 수 있어 그 자리는 그대로 둔다."
         return 2
     fi
     say "설치했다: $dest (Pkg.Revision $NDK_REVISION)"

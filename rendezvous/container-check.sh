@@ -375,14 +375,14 @@ owned() {
 remove_owned() {
     local kind=$1 name=$2
     if ! owned "$kind" "$name"; then
-        log "정리: $kind $name은 이 실행의 라벨이 없어 지우지 않는다"
+        log "정리: $kind ${name}은 이 실행의 라벨이 없어 지우지 않는다"
         return 1
     fi
     case "$kind" in
         container) docker rm -f "$name" >/dev/null 2>&1 ;;
         volume) docker volume rm "$name" >/dev/null 2>&1 ;;
         image) docker image rm "$name" >/dev/null 2>&1 ;;
-    esac || { log "정리: $kind $name을 지우지 못했다"; return 1; }
+    esac || { log "정리: $kind ${name}을 지우지 못했다"; return 1; }
 }
 
 # 프로세스 $1이 없다(bash는 끝난 자식을 바로 거두므로 끝난 자식도 없는 것으로 보인다).
@@ -555,16 +555,16 @@ main_check() {
 
     STEP=build
     for tool in docker cargo python3 ip git; do
-        command -v "$tool" >/dev/null 2>&1 || unsure "$tool이 PATH에 없다"
+        command -v "$tool" >/dev/null 2>&1 || unsure "${tool}이 PATH에 없다"
     done
     MESSAGE_BYTES=$(decimal_in "$MESSAGE_BYTES" 1 "$MESSAGE_BYTES_MAX") \
-        || unsure "CONTAINER_CHECK_MESSAGE_BYTES는 1–$MESSAGE_BYTES_MAX의 십진수다: ${CONTAINER_CHECK_MESSAGE_BYTES:-}"
+        || unsure "CONTAINER_CHECK_MESSAGE_BYTES는 1–${MESSAGE_BYTES_MAX}의 십진수다: ${CONTAINER_CHECK_MESSAGE_BYTES:-}"
     START_SECONDS=$(decimal_in "$START_SECONDS" 1 "$SECONDS_MAX") \
-        || unsure "CONTAINER_CHECK_START_SECONDS는 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_START_SECONDS:-}"
+        || unsure "CONTAINER_CHECK_START_SECONDS는 1–${SECONDS_MAX}의 십진수다: ${CONTAINER_CHECK_START_SECONDS:-}"
     PEER_TIMEOUT=$(decimal_in "$PEER_TIMEOUT" 1 "$SECONDS_MAX") \
-        || unsure "CONTAINER_CHECK_PEER_TIMEOUT은 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_PEER_TIMEOUT:-}"
+        || unsure "CONTAINER_CHECK_PEER_TIMEOUT은 1–${SECONDS_MAX}의 십진수다: ${CONTAINER_CHECK_PEER_TIMEOUT:-}"
     STOP_SECONDS=$(decimal_in "$STOP_SECONDS" 1 "$SECONDS_MAX") \
-        || unsure "CONTAINER_CHECK_STOP_SECONDS는 1–$SECONDS_MAX의 십진수다: ${CONTAINER_CHECK_STOP_SECONDS:-}"
+        || unsure "CONTAINER_CHECK_STOP_SECONDS는 1–${SECONDS_MAX}의 십진수다: ${CONTAINER_CHECK_STOP_SECONDS:-}"
     PEER_WAIT_SECONDS=$((PEER_TIMEOUT + PEER_WAIT_EXTRA))
     TMP=$(mktemp -d) || unsure "임시 폴더를 만들지 못했다"
     TOKEN=$(new_token)

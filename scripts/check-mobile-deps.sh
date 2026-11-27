@@ -230,20 +230,20 @@ check_target() {
         inv_rc=0
         inv=$(inverted_tokio "$t" "$v") || inv_rc=$?
         if [[ $inv_rc -ne 0 ]]; then
-            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 cargo tree가 실패했다(target $t, 종료 코드 $inv_rc)" >&2
+            echo "$TAG 판정 불가: tokio@${v}를 거꾸로 본 cargo tree가 실패했다(target $t, 종료 코드 $inv_rc)" >&2
             return 2
         fi
         if ! inv=$(judge_inverted "$v" <<<"$inv") || ! grep -qx 'end' <<<"$inv"; then
-            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무의 판정이 실패했다(target $t)" >&2
+            echo "$TAG 판정 불가: tokio@${v}를 거꾸로 본 나무의 판정이 실패했다(target $t)" >&2
             return 2
         fi
         if ! unknown=$(pick_lines '^unknown \|^no-process-node$' "$inv") || [[ -n "$unknown" ]]; then
             printf '  %s\n' "$unknown" >&2
-            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무에 tokio feature \"process\"가 없거나 모양을 모르는 줄이 있다(target $t)" >&2
+            echo "$TAG 판정 불가: tokio@${v}를 거꾸로 본 나무에 tokio feature \"process\"가 없거나 모양을 모르는 줄이 있다(target $t)" >&2
             return 2
         fi
         if ! more=$(pick_lines '^위반: ' "$inv"); then
-            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무 판정의 출력을 읽지 못했다(target $t)" >&2
+            echo "$TAG 판정 불가: tokio@${v}를 거꾸로 본 나무 판정의 출력을 읽지 못했다(target $t)" >&2
             return 2
         fi
         viol+=$'\n'$more
@@ -253,10 +253,10 @@ check_target() {
     [[ $APP -eq 1 ]] && mode="앱 기준, process를 켠 tokio ${vers:-없음}"
     if [[ -n "$viol" ]]; then
         printf '  %s\n' "$viol" >&2
-        echo "$TAG 위반 — $what ($mode, 패키지 $count개)" >&2
+        echo "$TAG 위반 — $what ($mode, 패키지 ${count}개)" >&2
         return 1
     fi
-    echo "$TAG 통과 — $what ($mode, 패키지 $count개)" >&2
+    echo "$TAG 통과 — $what ($mode, 패키지 ${count}개)" >&2
     return 0
 }
 
