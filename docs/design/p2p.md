@@ -46,7 +46,7 @@
   | 192–255 | QUIC 긴 헤더(Initial·Handshake 등, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §17.2). quinn에 넘긴다 |
   | 4–63, 128–191 | 버린다(버린 수를 센다) |
 
-- QUIC bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다(quinn `EndpointConfig::grease_quic_bit(false)`, 기본은 켬). RFC 9443 §1도 다른 프로토콜과 나눠 쓰는 포트에서는 `grease_quic_bit`를 보내지 말라고 한다. 켜 두면 QUIC의 첫 바이트가 위 범위 밖으로 내려와 버려지거나 STUN과 섞인다.
+- QUIC bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다(quinn `EndpointConfig::grease_quic_bit(false)`, 기본은 켬). RFC 9443 §1도 다른 프로토콜과 나눠 쓰는 포트에서는 `grease_quic_bit`를 보내지 말라고 한다. 켜 두면 고정 비트(0x40)가 0인 QUIC 패킷이 온다. 짧은 헤더는 첫 바이트가 0–63, 긴 헤더(Initial·Handshake·Retry 등에도 적용될 수 있다, RFC 9287 §3.1)는 128–191이 되어, 두 범위 모두 위 분류에서 QUIC으로 가지 않고 버려지거나(4–63, 128–191) STUN과 섞인다(0–3).
 - 분류는 단위 시험 `demux_classifies_first_byte`(경계값 0·3·4·63·64·127·128·191·192·255)가 고정한다. 서버의 주 포트도 같은 분류 코드를 쓴다.
 - 소켓은 `[::]:0` 이중 스택으로 연다. OS가 이중 스택을 받지 않으면 IPv4 `0.0.0.0:0`으로 연다. 반사 주소는 서버에 닿은 주소족 하나에서만 얻는다. 전역 IPv6 주소는 사설 후보와 같이 호스트 후보로 보낸다(NAT 없이 닿을 수 있다). IPv6 경로가 실제로 쓰이는지는 펀칭 실험에서 본다.
 - 소켓 수신·송신 버퍼 크기는 설정값이다(`socket.recv_buffer`·`socket.send_buffer`, 기본은 OS 값이고 조회에 실제 값과 출처 `os_default`가 보인다).
@@ -72,7 +72,7 @@
 - 필터링 성질(RFC 4787 §5)은 판별하지 않는다. RFC 5780의 CHANGE-REQUEST가 필요하고, 판별 결과가 시도 여부를 바꾸지 않기 때문이다. 시도해 보고 결과로 판정한다.
 - 판별은 서버에 등록한 직후와 `reflexive_changed`를 받을 때 다시 한다. 결과와 대상별 응답(`stun_results`)을 `nat_report`로 서버에 알린다. 서버는 다른 반사 주소를 `reported_reflexive` 후보로, `mapping`을 상대에게 줄 `peer_nat`으로 저장한다.
 - 시도 규칙(서버가 펀칭 요청을 받을 때 정한다):
-  - 두 기기가 모두 `dependent`면 반사 주소 후보로는 시도하지 않는다. 양쪽 모두 목적지마다 바깥 포트가 바뀌면 교환한 공인 매핑으로 펀칭이 서지 않기 때문이다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3. 포트 예측(§3.5)은 하지 않는다). 대신 호스트 후보(사설 IPv4, 전역 IPv6)로만 시도한다(`mode = host_only`). 같은 망 안의 두 기기나 NAT 없는 IPv6 경로는 이것으로 닿는다. 어느 한쪽에도 호스트 후보가 없으면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. `host_only` 시도가 실패해도 `NatUnsupported`다.
+  - 두 기기가 모두 `dependent`면 반사 주소 후보로는 시도하지 않는다. 주소 의존·주소와 포트 의존 매핑은 같은 내부 주소·포트에서 같은 목적지로 보내는 패킷에만 매핑을 다시 쓴다([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1). 그래서 서버에서 관측한 매핑이 다른 목적지인 상대에게 보낼 때 그대로 쓰인다는 보장이 없고, 양쪽이 모두 그러면 교환한 반사 주소로는 펀칭이 서지 않는다([RFC 5128](https://www.rfc-editor.org/rfc/rfc5128) §3.3. 포트 예측(§3.5)은 하지 않는다). 대신 호스트 후보(사설 IPv4, 전역 IPv6)로만 시도한다(`mode = host_only`). 같은 망 안의 두 기기나 NAT 없는 IPv6 경로는 이것으로 닿는다. 어느 한쪽에도 호스트 후보가 없으면 시도하지 않고 바로 `NatUnsupported`로 끝낸다. `host_only` 시도가 실패해도 `NatUnsupported`다.
   - 그 밖(한쪽만 `dependent`, `independent_port_only`, `unknown`)은 모든 후보로 시도한다(`mode = all`). `dependent` 쪽이 상대의 반사 주소로 보낸 프로브가 상대 NAT의 필터를 통과하면, 상대는 처음 보는 주소(peer reflexive, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.3.1.3)에서 온 프로브로 경로를 얻는다.
   - 어느 경우든 중계로 넘어가지 않는다. 시도가 실패하면 연결 실패다.
 
@@ -103,7 +103,7 @@ A                         서버                          B
 3. 통지와 시각 맞춤: 수락되면 서버가 두 기기에게 동시에 `punch_go`를 보낸다. 실린 것은 [rendezvous](rendezvous.md#메시지-표)의 표에 있다: 상대 기기 ID, 후보와 종류, 상대 `NatMapping`, 이쪽이 보낼 토큰과 상대가 보낼 토큰(서버가 만든 16바이트 난수 두 개), 역할(A는 `controlling`, B는 `controlled`), `mode`, `start_after_ms`, `window_ms`, `handshake_ms`. 두 기기의 시계는 맞추지 않는다. 서버는 자기 쪽 QUIC 연결의 RTT 추정(quinn `Connection::rtt`)으로 `start_after_ms = max(rtt_A, rtt_B)/2 + start_delay_margin − rtt_자기/2`(서버 설정, 상한 `start_delay_max`)를 계산해, 두 기기가 서버 기준으로 거의 같은 때 보내기 시작하게 한다. 두 기기 모두 받은 `punch_go`의 값을 `welcome.limits`와 자기 상한으로 다시 검사하고, 어긋나면 프로브를 보내지 않고 `punch_result{ok: false, reason: limits_invalid}`를 보낸다.
 4. 후보 주소: 서버가 본 반사 주소(`server_reflexive`), 상대가 판별에서 보고한 다른 반사 주소(`reported_reflexive`), 상대가 알린 호스트 주소(`host`: 사설 IPv4, 전역 IPv6, 소켓 포트)다. `host_only`면 호스트 주소만 온다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 허용 주소·포트, 종류별 우선순위, 상한(기본 1 + 3 + 4 = 8 ≤ `punch.max_candidates` 8)은 서버와 기기가 같은 규칙을 쓴다([rendezvous](rendezvous.md#후보-주소-규칙)). 기기는 받은 후보의 주소도 그 규칙으로 다시 거른다. 후보 수가 기기 상한을 넘은 `punch_go`는 서버의 규칙 위반이므로 잘라 쓰지 않고 `limits_invalid`로 끝낸다(흐름 3).
 5. 동시 송신: 시작 시각부터 양쪽이 상대 후보마다 STUN Binding Request를 보낸다. `punch.probe_interval`(기본 50 ms)마다 후보 하나씩 돌아가며 보낸다. 후보가 상한인 8개면 한 후보에 400 ms마다 한 번이다. 요청에는 이쪽 토큰을 속성 `TASTY-PUNCH`로 싣는다([rendezvous](rendezvous.md#펀칭-프로브)). 프로브를 받은 쪽은 토큰이 상대 토큰(`token_peer`)과 같으면 XOR-MAPPED-ADDRESS와 자기 토큰을 실은 Binding Success Response를 그 프로브가 온 주소로 돌려준다.
-6. peer reflexive: `mode = all`일 때 후보에 없던 주소에서 맞는 토큰의 프로브가 오면 그 주소를 `peer_reflexive` 후보로 더하고 그 주소에도 프로브를 보낸다. `mode = host_only`에서는 더하지 않는다. 호스트 후보가 아닌 주소에서 온 프로브에는 응답하지 않고 버린 수를 센다(양쪽이 `dependent`라 그 주소는 다음 패킷에서 바뀌므로 경로가 되지 않는다). 더한 뒤에도 후보 수는 `punch.max_candidates`를 넘지 않는다. 다 찼으면 그 주소는 응답만 하고 후보에 넣지 않으며 버린 수를 센다.
+6. peer reflexive: `mode = all`일 때 후보에 없던 주소에서 맞는 토큰의 프로브가 오면 그 주소를 `peer_reflexive` 후보로 더하고 그 주소에도 프로브를 보낸다. `mode = host_only`에서는 더하지 않는다. 호스트 후보가 아닌 주소에서 온 프로브에는 응답하지 않고 버린 수를 센다(양쪽이 `dependent`면 서버에서 관측한 매핑이 상대 쪽 목적지에 재사용된다는 보장이 없어, 반사 계열 주소로는 양방향 경로가 선다고 기대할 수 없다. RFC 4787 §4.1, 위 "시도 규칙"). 더한 뒤에도 후보 수는 `punch.max_candidates`를 넘지 않는다. 다 찼으면 그 주소는 응답만 하고 후보에 넣지 않으며 버린 수를 센다.
 7. 성공 판정: 이쪽이 보낸 요청에 대한 응답이 (a) 그 요청의 transaction ID를 담고, (b) 그 요청을 보낸 후보 주소에서 왔고, (c) 상대 토큰을 담았을 때만 그 주소 쌍이 양방향으로 통한다고 본다([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.3, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.2.5.3과 같은 뜻). 셋 중 하나라도 어긋난 STUN 패킷은 버린다.
 8. QUIC으로 넘어가는 때: A(`controlling`)는 처음 성공한 주소로 바로 quinn `connect`를 건다. 다른 후보의 프로브는 멈추고, 그 주소로 온 프로브에는 계속 응답한다. QUIC 연결은 언제나 A가 연다([전송 추상화](transport.md#p2p의-닫기-범위)의 "스트림은 연결을 연 쪽만 연다"와 맞는다). B(`controlled`)는 성공을 먼저 보거나 A의 응답을 못 받았더라도 QUIC을 걸지 않는다. B의 성공 여부는 B가 QUIC을 받을지에 쓰지 않는다. A의 응답이 잃어 A가 성공을 못 보면 A는 다른 후보나 같은 후보로 프로브를 계속 보내고, 창이 끝나면 실패다.
 9. B가 QUIC을 받는 조건(펀칭 세션에 묶기): 두 단계로 고른다. TLS 전에는 Initial의 원격 주소만 안다. 그 주소가 활성 펀칭 세션 하나 이상에서 맞는 토큰의 프로브를 받은 주소(`host_only`면 호스트 후보 주소만)이면 Initial을 받는다. 맞는 세션이 하나도 없으면 TLS 전에 거절한다(quinn `Incoming::refuse`. 상대는 QUIC 전송 오류 `CONNECTION_REFUSED`를 받는다, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §20.1). 서버의 한 쌍 한 세션 규칙은 기기 ID 쌍에 대한 것이라, 다른 상대들과의 세션 여럿이 같은 원격 주소에 맞을 수 있다. handshake가 끝나면 그 주소에 맞는 세션 가운데 상대(`punch_go.peer`)가 TLS가 확인한 기기 ID와 같은 세션을 고른다. 그런 세션이 없으면 종료 코드 `session_mismatch`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 고른 세션은 끝내고 연결을 그 세션의 서버·후보 정보와 묶어 [연결 정보](#연결-정보)에 남긴다.
@@ -164,7 +164,7 @@ A                         서버                          B
 
 - 주기 15 s의 근거: NAT의 UDP 매핑 만료 시간에 대해 [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.3 REQ-5는 2분 미만으로 만료하지 말라고(권장 5분 이상) 하고, NAT마다 쓰는 값의 차이가 크다고 적는다. [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1.2는 "experience shows that sending packets every 30 seconds is necessary to prevent the majority of middleboxes from losing state for UDP flows"라고 한다. ICE는 keepalive 기본을 15 s로 둔다([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §11, 15 s 미만 금지). 30 s보다 짧은 ICE 값을 그대로 빌린다.
 - idle timeout 45 s는 keepalive의 세 배다. keepalive PING은 확인 응답을 요구하는 패킷이라 잃으면 손실 복구(PTO)로 다시 보낸다. 그래서 보통은 PING 두 번을 잃어도 연결이 남지만, 실제 여유는 손실 양상과 PTO에 달렸고 보장은 아니다.
-- `quic.idle_timeout`은 설정값이고, 연결이 실제로 끝나는 시각은 [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1의 규칙으로 정해진다. 협상값은 양쪽 값 중 작은 쪽이고, 한쪽이 0(끔)이면 다른 쪽 값이다. 타이머 길이는 협상값과 현재 PTO의 세 배 중 큰 쪽이다. 타이머는 상대 패킷을 받을 때와, 마지막 수신 뒤 처음 보내는 ack-eliciting 패킷 때 다시 시작한다(quinn-proto `reset_idle_timeout`). 그래서 두 끝의 종료 시각은 서로 다를 수 있고, 설정값 45 s가 양쪽의 종료 시각인 것은 아니다. 시험은 종료 원인이 `idle_timeout`인지와 상한 시간(마지막 수신 + max(협상값, 3 × PTO) + 여유) 안에 끝나는지만 본다.
+- `quic.idle_timeout`은 설정값이고, 연결이 실제로 끝나는 시각은 [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §10.1의 규칙으로 정해진다. 협상값은 양쪽 값 중 작은 쪽이고, 한쪽이 0(끔)이면 다른 쪽 값이다. 타이머 길이는 협상값과 현재 PTO의 세 배 중 큰 쪽이다. 타이머는 상대 패킷을 받을 때와, 마지막 수신 뒤 처음 보내는 ack-eliciting 패킷 때 다시 시작한다(quinn-proto `reset_idle_timeout`). 그래서 두 끝의 종료 시각은 서로 다를 수 있고, 설정값 45 s가 양쪽의 종료 시각인 것은 아니다. 시험은 종료 원인이 `idle_timeout`인지와 상한 시간 안에 끝나는지만 본다. 상한은 마지막 타이머 재시작 시각(마지막 유효 수신, 또는 그 뒤 첫 ack-eliciting 송신 중 늦은 쪽) + 유효 idle timeout(그때의 max(협상값, 3 × PTO)) + 여유다.
 - EIM NAT에서는 서버 연결의 keepalive가 같은 매핑을 살리지만, 상대 주소에 대한 필터 상태는 상대와 주고받는 패킷만 살린다. 그래서 펀칭된 경로에도 따로 keepalive를 둔다.
 - 링크의 heartbeat와의 관계: attach 링크는 프레임 heartbeat(`HEARTBEAT_INTERVAL` 5 s, `read_timeout` 기본 30 s, [전송 추상화](transport.md#heartbeat와-읽기-시간-제한))를 그대로 쓴다. 링크가 살아 있는 동안은 heartbeat가 먼저 끊김을 본다(기본값에서 30 s < 45 s. 설정을 바꿔 이 순서가 뒤집혀도 동작은 맞고, 끊김을 먼저 보는 쪽만 바뀐다). QUIC keepalive는 링크가 없거나 조용한 연결(요청 채널만 있는 연결, 다음 채널을 기다리는 연결)의 매핑을 살린다. QUIC idle timeout으로 끝난 연결의 읽기는 `TimedOut`으로 분류된다([전송 추상화](transport.md#읽기-실패-분류)).
 
@@ -346,6 +346,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `quic.datagram_receive_buffer_size` | `TransportConfig::datagram_receive_buffer_size` | 끔(`None`, quinn 기본은 1 250 000 B) | QUIC datagram을 쓰지 않는다 |
 | `quic.datagram_send_buffer_size` | `TransportConfig::datagram_send_buffer_size` | 1 MiB | quinn 기본. datagram이 꺼져 있어 적용 안 됨 |
 | `quic.cubic.initial_window` | `CubicConfig::initial_window`(`congestion_controller_factory`로 넣는다) | 12 000 B | quinn 기본(14 720을 1200 B의 2~10배로 자름, [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002) §7.2). 혼잡 제어 알고리즘은 CUBIC으로 고정한다(아래 "고정값") |
+| `quic.cid_lifetime` | `HashedConnectionIdGenerator::set_lifetime`(`EndpointConfig::cid_generator`로 넣는다) | 없음(`None`, quinn 기본. 연결 ID를 수명으로 바꾸지 않는다) | quinn 기본 |
 | `quic.max_udp_payload_size` | `EndpointConfig::max_udp_payload_size` | 1472 B | quinn 기본(이더넷 MTU − IP·UDP 머리) |
 | `quic.min_reset_interval` | `EndpointConfig::min_reset_interval` | 20 ms | quinn 기본. stateless reset 송신 간격 하한 |
 | `quic.retry_token_lifetime` | `ServerConfig::retry_token_lifetime` | 15 s | quinn 기본 |
@@ -364,7 +365,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 
 | 키 | 고정값 | 이유 |
 |---|---|---|
-| `quic.grease_quic_bit` | 끔(`EndpointConfig::grease_quic_bit(false)`, quinn 기본 켬) | 켜면 상대가 QUIC 고정 비트를 0으로 보낼 수 있어 첫 바이트가 0–63에 들어온다. 첫 바이트 분류가 그 패킷을 STUN이나 버림으로 본다([RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §1, 위 "소켓 하나와 패킷 나누기") |
+| `quic.grease_quic_bit` | 끔(`EndpointConfig::grease_quic_bit(false)`, quinn 기본 켬) | 켜면 상대가 QUIC 고정 비트를 0으로 보낼 수 있어 짧은 헤더는 첫 바이트가 0–63, 긴 헤더는 128–191이 된다. 첫 바이트 분류가 두 범위 모두 QUIC으로 보내지 않는다([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287) §3.1, [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §1·§3, 위 "소켓 하나와 패킷 나누기") |
 | `quic.supported_versions` | QUIC v1 하나 | 첫 바이트 분류와 와이어 형식이 v1 기준이다 |
 | `quic.preferred_address` | 없음 | 서버가 다른 주소로 옮기라고 하면 펀칭한 경로를 벗어난다 |
 | `quic.congestion_controller` | CUBIC | 알고리즘 선택은 동작값이 아니라 구현 선택이다. 바꾸면 위 `quic.cubic.*`의 뜻이 바뀐다 |
@@ -477,7 +478,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 
 - 채널 대응(순서 채널 = `purpose = attach`로 연 양방향 스트림, bulk = 같은 연결의 추가 양방향 스트림, 요청 채널 = `purpose = request` 스트림)과 P2P의 닫기 범위는 QUIC 일반의 성질이라 iroh 설계의 내용을 그대로 쓴다([전송 추상화](transport.md#순서-계약과-채널), [전송 추상화](transport.md#p2p의-닫기-범위)).
 - `P2pCloseReason`은 이 크레이트가 정의한다(QUIC 종료 코드가 이 크레이트의 와이어 값이기 때문이다). transport는 그것을 다시 내보내 `HandshakeError::Closed`와 `Link::close_reason()`에 쓴다([handshake v2](handshake.md#quic-종료-코드)).
-- 스트림 수 상한: 연결마다 양방향 스트림 동시 `quic.max_bidi_streams`(기본 64), 단방향 0개([설정값](#설정값)).
+- 스트림 수 상한: 연결마다 양방향 스트림 동시 `quic.max_bidi_streams`(기본 64), 단방향 동시 `quic.max_uni_streams`(기본 0, 설정 가능)([설정값](#설정값)).
 
 ## 페어링
 
