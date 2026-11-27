@@ -90,9 +90,22 @@ async fn connect_with_alpn(
     key: &DeviceKey,
     alpn: &[u8],
 ) -> Result<(quinn::Endpoint, quinn::Connection), quinn::ConnectionError> {
+    connect_with(server, key, alpn, None).await
+}
+
+async fn connect_with(
+    server: &Server,
+    key: &DeviceKey,
+    alpn: &[u8],
+    transport: Option<quinn::TransportConfig>,
+) -> Result<(quinn::Endpoint, quinn::Connection), quinn::ConnectionError> {
     let endpoint = client_endpoint();
     let crypto = tls::client_config(key, server.public_key(), alpn, TlsOptions::default()).unwrap();
-    let config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+    let mut config =
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+    if let Some(t) = transport {
+        config.transport_config(Arc::new(t));
+    }
     let conn = tokio::time::timeout(
         DEADLINE,
         endpoint
@@ -114,7 +127,15 @@ struct Device {
 
 impl Device {
     async fn open(server: &Server, key: &DeviceKey) -> Device {
-        let (endpoint, conn) = connect_with_alpn(server, key, ALPN_RENDEZVOUS)
+        Device::open_with(server, key, None).await
+    }
+
+    async fn open_with(
+        server: &Server,
+        key: &DeviceKey,
+        transport: Option<quinn::TransportConfig>,
+    ) -> Device {
+        let (endpoint, conn) = connect_with(server, key, ALPN_RENDEZVOUS, transport)
             .await
             .expect("handshake");
         let (send, recv) = conn.open_bi().await.unwrap();
@@ -535,6 +556,62 @@ async fn superseded_registration_is_closed() {
         ServerMessage::PunchRefused(r) => assert_eq!(r.reason, RefuseReason::SelfPeer),
         other => panic!("{other:?}"),
     }
+}
+
+/// `cond` becomes true within the deadline.
+async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+    let until = tokio::time::Instant::now() + DEADLINE;
+    while !cond() {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "{what} within the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn device_that_does_not_read_is_closed() {
+    let mut s = local_settings();
+    s.set("max_queued_messages", Value::Count(8)).unwrap();
+    let server = start(s).await;
+    // A device whose receive window holds about 1 KiB and that never reads.
+    let mut t = quinn::TransportConfig::default();
+    t.stream_receive_window(quinn::VarInt::from_u32(1024));
+    t.receive_window(quinn::VarInt::from_u32(1024));
+    let mut d = Device::open_with(&server, &key(1), Some(t)).await;
+    d.send(&DeviceMessage::Hello(Hello {
+        proto: PROTO,
+        host_candidates: Vec::new(),
+    }))
+    .await;
+    let me = d.id;
+    let flood = async {
+        for request_id in 0..10_000 {
+            let msg = DeviceMessage::PunchRequest(PunchRequest {
+                request_id,
+                peer: me,
+            });
+            if write_frame(&mut d.send, &msg.to_json().unwrap(), LIMIT)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(DEADLINE, flood)
+        .await
+        .expect("the flood ends");
+    assert_eq!(closed_with(&d.conn).await, code(CloseCode::Busy));
+    eventually("the registration is removed", || {
+        server.status().registrations == 0
+    })
+    .await;
+    assert_eq!(server.status().queue_full, 1);
+    // The slot is free again.
+    let (_d, _) = Device::register(&server, &key(2), &[]).await;
+    assert_eq!(server.status().registrations, 1);
 }
 
 async fn refused(d: &mut Device) -> RefuseReason {

@@ -272,6 +272,7 @@ pub static DEFAULTS: &[Setting] = &[
     entry("max_host_candidates", Kind::Count, Value::Count(4)),
     entry("max_reported_reflexive", Kind::Count, Value::Count(3)),
     entry("max_message_bytes", Kind::Bytes, Value::Bytes(16 * KIB)),
+    entry("max_queued_messages", Kind::Count, Value::Count(64)),
     entry("stun_per_source_per_second", Kind::Count, Value::Count(50)),
     entry("status_log_interval", Kind::Duration, secs(60)),
     entry("quic.max_bidi_streams", Kind::Count, Value::Count(2)),
@@ -757,6 +758,8 @@ pub struct ServerParams {
     pub max_reported_reflexive: usize,
     /// `max_message_bytes`.
     pub max_message_bytes: u32,
+    /// `max_queued_messages`.
+    pub max_queued_messages: usize,
     /// `stun_per_source_per_second`.
     pub stun_per_source_per_second: u64,
     /// `status_log_interval`.
@@ -865,6 +868,10 @@ const ONE_SECOND: Duration = Duration::from_secs(1);
 const MAX_DURATION: Duration = Duration::from_secs(u32::MAX as u64);
 /// The most streams a QUIC peer may allow, 2^60 (RFC 9000 §4.6).
 const MAX_STREAMS: u64 = 1 << 60;
+/// A send queue holds at least the `welcome`.
+const MIN_QUEUED_MESSAGES: u64 = 1;
+/// The longest send queue, far under the channel's limit on every platform.
+const MAX_QUEUED_MESSAGES: u64 = 1 << 20;
 /// The coordination stream needs one bidirectional stream.
 const MIN_BIDI_STREAMS: u64 = 1;
 
@@ -1138,6 +1145,13 @@ impl Resolver<'_> {
             max_host_candidates: self.fits("max_host_candidates")?,
             max_reported_reflexive: self.fits("max_reported_reflexive")?,
             max_message_bytes: u32::try_from(max_message_bytes).expect("checked against 1 MiB"),
+            max_queued_messages: usize::try_from(self.range(
+                "max_queued_messages",
+                MIN_QUEUED_MESSAGES,
+                MAX_QUEUED_MESSAGES,
+                "1 to 2^20",
+            )?)
+            .expect("checked against 2^20"),
             stun_per_source_per_second: self.number("stun_per_source_per_second"),
             status_log_interval: self.nonzero("status_log_interval")?,
             punch_request_window: ONE_MINUTE,

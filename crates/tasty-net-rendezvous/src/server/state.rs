@@ -6,16 +6,19 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tasty_net_identity::DeviceId;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
 use crate::settings::ServerParams;
+use crate::wire::CloseCode;
 use crate::wire::candidate::{
     CandidateKind, CandidateLimits, candidate_allowed, parse_address, select_candidates,
 };
@@ -55,7 +58,10 @@ fn add(c: &AtomicU64, n: usize) {
 pub(crate) struct Registration {
     pub conn_id: u64,
     pub conn: quinn::Connection,
-    pub tx: UnboundedSender<ServerMessage>,
+    /// The send queue of the connection, `max_queued_messages` long.
+    pub tx: Sender<ServerMessage>,
+    /// Counts connections closed because their send queue was full.
+    pub queue_full: Arc<AtomicU64>,
     pub reflexive: SocketAddr,
     /// The STUN addresses this device was told in `welcome.stun`.
     pub advertised: Vec<SocketAddr>,
@@ -114,10 +120,26 @@ pub(crate) enum RegisterRefusal {
     Busy,
 }
 
-fn send(reg: &Registration, msg: ServerMessage) {
-    // A closed writer means the connection is ending; its registration is removed then.
-    if reg.tx.send(msg).is_err() {
-        debug!("writer of a closing connection dropped a message");
+/// Queue `msg` for `reg`. A full queue means the device does not read what the server sends:
+/// its connection is closed as `busy` and the registration is removed when the connection ends.
+pub(crate) fn send(reg: &Registration, msg: ServerMessage) {
+    match reg.tx.try_send(msg) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            if reg.conn.close_reason().is_none() {
+                bump(&reg.queue_full);
+                info!(
+                    code = CloseCode::Busy.name(),
+                    "send queue full, connection closed"
+                );
+            }
+            reg.conn
+                .close(CloseCode::Busy.var_int(), CloseCode::Busy.reason());
+        }
+        // A closed writer means the connection is ending; its registration is removed then.
+        Err(TrySendError::Closed(_)) => {
+            debug!("writer of a closing connection dropped a message");
+        }
     }
 }
 

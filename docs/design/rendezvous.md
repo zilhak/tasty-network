@@ -122,7 +122,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | 2 | `superseded` | 같은 기기 ID가 새로 등록함 | 멈춤 |
 | 3 | `unsupported_proto` | 같은 ALPN에서 `hello.proto`를 서버가 모름 | 멈춤 |
 | 4 | `malformed` | 형식 오류, 상한 초과, 프레임 기한 초과, 둘째 스트림 | backoff로 재연결 |
-| 5 | `busy` | `max_devices` 초과 | backoff로 재연결 |
+| 5 | `busy` | `max_devices` 초과, 송신 큐(`max_queued_messages`)가 가득 참 | backoff로 재연결 |
 | 6 | `hello_timeout` | `hello`가 시간 안에 오지 않음 | backoff로 재연결 |
 | (TLS) | ALPN 불일치 | 서버가 `tasty-rendezvous/<n>`을 모름. QUIC/TLS handshake가 `no_application_protocol` alert로 끝나 앱 종료 코드까지 가지 않는다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) §8.1) | 멈춤(원인 `alpn_mismatch`) |
 | (TLS) | 서버 키 불일치 | 서버 raw public key가 설정한 공개키와 다름 | 멈춤(원인 `server_key_mismatch`) |
@@ -187,6 +187,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `max_host_candidates` | 4 | 사설 IPv4 하나둘과 전역 IPv6 고정·임시 주소면 보통의 기기를 덮는다. 기기 기본 `punch.max_candidates`(8)에서 서버 반사 1과 보고 반사 3을 뺀 값이다([후보 주소 규칙](#후보-주소-규칙)의 관계) |
 | `max_reported_reflexive` | 3 | 보조 STUN 주소 수(보조 포트, 두 번째 IP의 두 포트) |
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |
+| `max_queued_messages` | 64 | 연결마다 서버가 보낼 메시지를 쌓아 두는 수(1–2^20). 정상 기기에는 펀칭 몇 개의 메시지만 쌓인다. 넘치면 기기가 받지 않는 것이므로 그 연결을 `busy`로 닫고 등록을 지운다. 상한이 없으면 수신 창을 열지 않는 기기 하나가 서버 메모리를 끝없이 쓴다 |
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
 | `quic.max_bidi_streams` | 2 | 기기가 여는 조정 스트림 하나와, 둘째 스트림을 받아 `malformed`로 닫을 자리 하나. 1이면 둘째 스트림이 열리지 못하고 기기 쪽에서 막혀 서버가 규칙 위반을 볼 수 없다(quinn `max_concurrent_bidi_streams`) |

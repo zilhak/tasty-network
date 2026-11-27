@@ -158,6 +158,8 @@ pub struct ServerStatus {
     pub superseded: u64,
     /// Connections the access policy refused.
     pub access_denied: u64,
+    /// Connections closed as `busy` because their send queue (`max_queued_messages`) was full.
+    pub queue_full: u64,
 }
 
 struct Inner {
@@ -169,6 +171,7 @@ struct Inner {
     counters: Counters,
     stun_window: Mutex<StunWindow>,
     demux: Arc<DemuxCounters>,
+    queue_full: Arc<std::sync::atomic::AtomicU64>,
     addrs: ServerAddrs,
 }
 
@@ -206,6 +209,7 @@ impl Inner {
             registrations_total: get(&c.registrations_total),
             superseded: get(&c.superseded),
             access_denied: get(&c.access_denied),
+            queue_full: get(&self.queue_full),
         }
     }
 
@@ -408,6 +412,7 @@ impl Server {
                 counts: HashMap::new(),
             }),
             demux: demux_counters.clone(),
+            queue_full: Arc::default(),
             addrs,
         });
         let socket = DemuxSocket::with_counters(io.primary.clone(), inner.clone(), demux_counters);
@@ -571,6 +576,7 @@ async fn status_loop(inner: Arc<Inner>) {
             stun_rate_limited = s.stun_rate_limited,
             stun_dropped = s.stun_dropped,
             packets_dropped = s.packets_dropped,
+            queue_full = s.queue_full,
             "status"
         );
     }
@@ -679,7 +685,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
         u64::try_from(dropped).unwrap_or(u64::MAX),
         Ordering::Relaxed,
     );
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(p.max_queued_messages);
     let now = Instant::now();
     let registered = {
         let mut state = inner.state();
@@ -688,6 +694,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
             conn_id,
             conn: conn.clone(),
             tx: tx.clone(),
+            queue_full: inner.queue_full.clone(),
             reflexive,
             advertised: advertised.clone(),
             reported_reflexive: Vec::new(),
@@ -721,7 +728,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
         stun: advertised,
         limits: inner.limits(),
     });
-    if tx.send(welcome).is_err() {
+    if tx.try_send(welcome).is_err() {
         return;
     }
     drop(tx);
@@ -735,7 +742,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
 async fn writer(
     conn: quinn::Connection,
     mut send: quinn::SendStream,
-    mut rx: mpsc::UnboundedReceiver<ServerMessage>,
+    mut rx: mpsc::Receiver<ServerMessage>,
     limit: u32,
 ) {
     while let Some(msg) = rx.recv().await {
@@ -845,9 +852,7 @@ async fn monitor(
                         reg.reflexive = now;
                         info!(device = %device, "reflexive address changed");
                         debug!(device = %device, reflexive = %now, "new reflexive address");
-                        if reg.tx.send(ServerMessage::ReflexiveChanged(ReflexiveChanged { reflexive: now })).is_err() {
-                            debug!(device = %device, "writer gone");
-                        }
+                        state::send(reg, ServerMessage::ReflexiveChanged(ReflexiveChanged { reflexive: now }));
                     }
                 }
             }
