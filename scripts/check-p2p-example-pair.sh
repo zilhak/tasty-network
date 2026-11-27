@@ -54,10 +54,32 @@ wait_ended() {
     done
 }
 
+# cargo build --message-format=json 출력에서 대상 이름 $1, 종류 $2의 executable 경로를 꺼낸다.
+# Windows 경로의 역슬래시는 Git Bash가 받는 슬래시로 바꾼다.
+executable() {
+    "$PY" -c '
+import json, sys
+name, kind = sys.argv[1], sys.argv[2]
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    t = m.get("target") or {}
+    if m.get("reason") == "compiler-artifact" and t.get("name") == name and kind in t.get("kind", []) and m.get("executable"):
+        print(m["executable"].replace("\\", "/"))
+' "$1" "$2"
+}
+
+# executable의 출력에서 줄 끝 \r을 지운다(Windows python의 print는 \r\n으로 끝난다).
+executable_path() {
+    executable "$@" | tr -d '\r'
+}
+
 # 자체 시험: 상한을 넘은 대기는 실패하고, 끝난 프로세스의 대기는 끝나며, 출력 없는 python
-# 스텁은 고르지 않는다.
+# 스텁은 고르지 않고, 줄 끝이 \r\n인 python 출력에서도 실행 파일 경로에 \r이 남지 않는다.
 self_test() {
-    local dir slow quick n=0
+    local dir slow quick got n=0 PY
     dir="$(mktemp -d)"
     sleep 30 &
     slow=$!
@@ -80,6 +102,16 @@ self_test() {
     chmod +x "$dir/python3"
     if PATH="$dir:$PATH" pick_python python3 >/dev/null; then
         echo "[p2p-example-pair] 자체 시험 실패: 아무것도 출력하지 않는 python3 스텁을 골랐다." >&2
+        exit 1
+    fi
+    n=$((n + 1))
+    # Windows의 python은 print 줄 끝에 \r\n을 쓴다.
+    printf '#!/bin/sh\ncat >/dev/null\nprintf "%%s\\r\\n" "C:/target/debug/tasty-rendezvous.exe"\n' > "$dir/crlf-python"
+    chmod +x "$dir/crlf-python"
+    PY="$dir/crlf-python"
+    got=$(echo '{}' | executable_path tasty-rendezvous bin)
+    if [ "$got" != "C:/target/debug/tasty-rendezvous.exe" ]; then
+        echo "[p2p-example-pair] 자체 시험 실패: 줄 끝이 CRLF인 출력에서 얻은 경로가 다르다: $(printf '%q' "$got")" >&2
         exit 1
     fi
     n=$((n + 1))
@@ -119,23 +151,6 @@ fail() {
     exit 1
 }
 
-# cargo build --message-format=json 출력에서 대상 이름 $1, 종류 $2의 executable 경로를 꺼낸다.
-# Windows 경로의 역슬래시는 Git Bash가 받는 슬래시로 바꾼다.
-executable() {
-    "$PY" -c '
-import json, sys
-name, kind = sys.argv[1], sys.argv[2]
-for line in sys.stdin:
-    try:
-        m = json.loads(line)
-    except ValueError:
-        continue
-    t = m.get("target") or {}
-    if m.get("reason") == "compiler-artifact" and t.get("name") == name and kind in t.get("kind", []) and m.get("executable"):
-        print(m["executable"].replace("\\", "/"))
-' "$1" "$2"
-}
-
 build() {
     local out
     echo "+ cargo build --locked $* --message-format=json" >&2
@@ -146,8 +161,8 @@ build() {
     printf '%s\n' "$out"
 }
 
-SERVER=$(build -p tasty-net-rendezvous --bin tasty-rendezvous | executable tasty-rendezvous bin)
-PEER=$(build -p tasty-net-p2p --example p2p_peer | executable p2p_peer example)
+SERVER=$(build -p tasty-net-rendezvous --bin tasty-rendezvous | executable_path tasty-rendezvous bin)
+PEER=$(build -p tasty-net-p2p --example p2p_peer | executable_path p2p_peer example)
 if [ -z "$SERVER" ] || [ ! -x "$SERVER" ]; then
     echo "[p2p-example-pair] 판정 불가: tasty-rendezvous 실행 파일 경로를 얻지 못했다." >&2
     exit 2
