@@ -414,6 +414,20 @@ impl EntryRef {
             .with_state(|state, config| state.transition(config, self.id, to, phase, cause));
     }
 
+    /// The path the consumer's profile chose (`with_holder`); the first link no longer
+    /// changes it.
+    pub(crate) fn choose_path(&self, holder: Holder) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                stored.info.path = match holder {
+                    Holder::Dialer => PathKind::SshForward,
+                    Holder::Acceptor => PathKind::SshRoleReversed,
+                };
+                stored.path_fixed = true;
+            }
+        });
+    }
+
     /// Moves a connection being set up to `phase`, keeping its state.
     pub(crate) fn phase(&self, phase: Phase) {
         self.table.with_state(|state, config| {

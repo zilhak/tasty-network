@@ -217,6 +217,9 @@ impl SshTransport {
                 info.segments = segments;
                 info.via = via;
             });
+            if let Some(holder) = options.holder {
+                pending.choose_path(holder);
+            }
             pending.phase(Phase::PortDiscovery);
             return Some(pending.clone());
         }

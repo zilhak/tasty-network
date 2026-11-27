@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionId,
-    ConnectionState, ConnectionTable, ConnectionTableConfig, HandshakeError, Phase, RedialError,
-    Redialer, RedialerConfig, SshTransport, Transport,
+    ConnectionState, ConnectionTable, ConnectionTableConfig, HandshakeError, Holder, PathKind,
+    Phase, RedialError, Redialer, RedialerConfig, SshTransport, Transport,
 };
 
 /// A transport whose `ssh` program does not exist, reporting in `table`.
@@ -337,4 +337,39 @@ fn redialer_follows_settings() {
     let table = ConnectionTable::default();
     assert!(Redialer::new(&table, RedialerConfig::new().with_multiplier(0.5)).is_err());
     assert!(Redialer::new(&table, RedialerConfig::new().with_jitter(1.5)).is_err());
+}
+
+/// A redial keeps the path the consumer's profile chose: the attempt's options name the
+/// holder, and the redial's entry follows them, not the lost entry's path.
+#[test]
+fn a_redial_keeps_the_chosen_role_reversal() {
+    let table = ConnectionTable::default();
+    let transport = failing(&table);
+    let lost = fail_once(&transport, &ConnectOptions::new());
+    assert_eq!(
+        table.connection(lost).map(|e| e.path),
+        Some(PathKind::SshForward)
+    );
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new()
+            .with_initial(Duration::from_millis(1))
+            .with_max_attempts(1),
+    )
+    .expect("valid");
+    let cancel = AttemptCancel::new();
+    let result = redialer.redial(lost, &cancel, |options| {
+        let options = options.clone().with_holder(Holder::Acceptor);
+        transport
+            .connect_with(&SshTarget::parse("nowhere"), &cancel, &options)
+            .map(drop)
+            .map_err(HandshakeError::Connect)
+    });
+    assert!(
+        matches!(result, Err(RedialError::Exhausted(_))),
+        "{result:?}"
+    );
+    let entry = table.connections().pop().expect("the redial's entry");
+    assert_eq!(entry.previous, Some(lost));
+    assert_eq!(entry.path, PathKind::SshRoleReversed);
 }

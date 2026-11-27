@@ -246,7 +246,8 @@ impl Redialer {
             state: ConnectionState::Reconnecting,
             phase: Some(Phase::RetryWait),
             held: true,
-            path_fixed: true,
+            // The lost entry's path until the attempt's options or its first link say.
+            path_fixed: false,
         });
         let applied = config.settings();
         pending.update(|info| info.applied = applied);
