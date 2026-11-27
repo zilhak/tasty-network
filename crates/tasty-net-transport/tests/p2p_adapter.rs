@@ -1162,6 +1162,129 @@ fn a_not_paired_close_before_the_first_stream_keeps_its_code() {
     b.close();
 }
 
+/// Message 1 of a handshake written by hand, as a peer that does not use this crate's dialer.
+fn open_line(params: Value) -> Vec<u8> {
+    let mut line = json!({"jsonrpc": "2.0", "id": 1, "method": "stream.open", "params": params})
+        .to_string()
+        .into_bytes();
+    line.push(b'\n');
+    line
+}
+
+/// Two endpoints share one acceptor configuration, and with it its bulk credentials. A
+/// credential issued on a link of one endpoint's connection is refused on the other's, also
+/// when the two connections have the same number within their endpoints.
+#[test]
+fn a_bulk_credential_does_not_cross_to_another_endpoints_connection() {
+    let server = Rendezvous::start();
+    let (ka, k1, k2) = (key(68), key(69), key(70));
+    let pairing = Arc::new(PairingList::new());
+    pairing.add(k1.id());
+    pairing.add(k2.id());
+    let mut config = P2pConfig::new(ka.clone(), pairing);
+    config.enabled = true;
+    config.server = Some(server.info);
+    let a = P2pEndpoint::bind(config).expect("bind");
+    let (b1, b2) = (
+        endpoint(&server, 69, ka.id()),
+        endpoint(&server, 70, ka.id()),
+    );
+    let accept = AcceptConfig::new(k1, "acceptor-69", None, Arc::new(Policy::default()))
+        .with_timeouts(timeouts());
+    let kept: Arc<Mutex<Vec<Accepted>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving: Vec<_> = [&b1, &b2]
+        .into_iter()
+        .map(|b| {
+            let listener = P2pListener::new(b.clone(), accept.clone()).expect("listener");
+            let (kept, stop) = (Arc::clone(&kept), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let Ok(inbound) = listener.accept_timeout(Some(Duration::from_millis(100)))
+                    else {
+                        continue;
+                    };
+                    // Kept, so the link's credential stays live.
+                    if let Ok(accepted) = inbound.handshake(&AttemptCancel::new()) {
+                        lock_kept(&kept).push(accepted);
+                    }
+                }
+            })
+        })
+        .collect();
+    let dial = |b: &P2pEndpoint| {
+        let started = Instant::now();
+        loop {
+            match a.connect(b.id()) {
+                Ok(conn) => break conn,
+                Err(_) if started.elapsed() < PATIENCE => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => panic!("connect: {error:?}"),
+            }
+        }
+    };
+    // An attach link on `b1`, by hand: the success ACK carries the bulk credential.
+    let to_b1 = dial(&b1);
+    let mut attach = to_b1.open_bi().expect("a stream");
+    attach.set_read_timeout(Some(PATIENCE));
+    attach
+        .write_all(&open_line(json!({
+            "proto": 2,
+            "purpose": "attach",
+            "device_id": ka.id().to_string(),
+            "instance_id": "raw-dialer",
+            "holder": "dialer",
+            "caps": [],
+        })))
+        .expect("message 1");
+    let ack = read_ack(&mut attach);
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    let credential = ack["bulk_credential"]
+        .as_str()
+        .expect("a credential")
+        .to_owned();
+    // The same credential on a connection to `b2`.
+    let to_b2 = dial(&b2);
+    let number = |b: &P2pEndpoint| {
+        b.connections()
+            .into_iter()
+            .find(|info| info.peer == ka.id())
+            .map(|info| info.id)
+    };
+    assert_eq!(
+        number(&b1),
+        number(&b2),
+        "the case under test: both connections have the same number in their endpoint"
+    );
+    let mut bulk = to_b2.open_bi().expect("a stream");
+    bulk.set_read_timeout(Some(PATIENCE));
+    bulk.write_all(&open_line(json!({
+        "proto": 2,
+        "purpose": "bulk",
+        "instance_id": "raw-dialer",
+        "bulk_credential": credential,
+    })))
+    .expect("message 1");
+    let ack = read_ack(&mut bulk);
+    assert_eq!(ack["ok"], json!(false), "{ack}");
+    assert_eq!(ack["reason"], json!("bulk_credential_invalid"), "{ack}");
+    stop.store(true, Ordering::SeqCst);
+    for serving in serving {
+        serving.join().expect("acceptor");
+    }
+    drop((attach, bulk, to_b1, to_b2));
+    lock_kept(&kept).clear();
+    a.close();
+    b1.close();
+    b2.close();
+}
+
+fn lock_kept(kept: &Mutex<Vec<Accepted>>) -> std::sync::MutexGuard<'_, Vec<Accepted>> {
+    kept.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Close scope, sixth row: when the last link and channel on the connection end, the dialer
 /// closes the QUIC connection (`P2pConnection::close`, code 0) while both endpoints stay up;
 /// it does not wait for the idle timeout.

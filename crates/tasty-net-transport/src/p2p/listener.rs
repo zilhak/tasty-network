@@ -106,7 +106,7 @@ impl P2pInbound {
         accept_p2p_handshake(
             self.channel,
             self.conn.conn.remote_device_id(),
-            self.conn.conn.id(),
+            self.conn.scope,
             &self.config,
             cancel,
         )

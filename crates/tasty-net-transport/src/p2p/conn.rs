@@ -16,6 +16,7 @@
 //! copies what `tasty-net-p2p` shows of it into the entry at every wake, and ends the entry
 //! when the connection closed.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,11 @@ pub(crate) enum ConnSide {
 /// [`ChannelSlot`].
 pub(crate) struct ConnState {
     pub(crate) conn: P2pConnection,
+    /// The connection's number in this process, which bulk credentials are bound to
+    /// (docs/design/handshake.md "bulk 자격"). `P2pConnection::id` is unique only within its
+    /// endpoint (docs/design/p2p.md "연결 정보"), and endpoints may share one acceptor's
+    /// credentials.
+    pub(crate) scope: u64,
     pub(crate) side: ConnSide,
     /// How long the accepting side waits for the dialer's close, and how long a stream's finish
     /// waits for the peer's end.
@@ -55,6 +61,9 @@ pub(crate) struct ConnState {
     pub(crate) entry: Option<EntryRef>,
     followed: Mutex<Followed>,
 }
+
+/// The next connection's [`ConnState::scope`].
+static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
 struct Channels {
@@ -83,6 +92,7 @@ impl ConnState {
         }
         let state = Arc::new(Self {
             conn,
+            scope: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
             side,
             drain_cap,
             channels: Mutex::new(Channels::default()),
