@@ -21,9 +21,15 @@ PREFIX="${PREFIX:-$PWD/target/tools}"
 DEST="$PREFIX/openssh-10.6p2"
 TAG="[install-openssh-ref]"
 
-# 판 문자열. 실행되지 않는 파일(다른 러너 이미지에서 캐시한 빌드 등)이면 그 사실을 낸다.
+# 판 문자열(`ssh -V` 첫 줄). 판 조회가 성공했을 때만 낸다. 실행되지 않거나(다른 러너
+# 이미지에서 캐시한 빌드 등) 실패하면 판 문자열을 찍었더라도 "실행 실패"를 내서 다른 판으로 본다.
 version_of() {
-    "$1" -V 2>&1 | head -n 1 || echo "실행되지 않는다"
+    local out
+    if out="$("$1" -V 2>&1)"; then
+        printf '%s\n' "${out%%$'\n'*}"
+    else
+        echo "실행 실패"
+    fi
 }
 
 if [ -x "$DEST/bin/ssh" ] && [ -x "$DEST/bin/ssh-keygen" ]; then
