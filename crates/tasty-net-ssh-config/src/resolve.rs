@@ -244,6 +244,10 @@ pub struct Resolution {
     /// that does not turn checking off, else `ask` (docs/design/ssh-backends.md
     /// "옵션 적용 순서").
     pub host_key_checking: StrictHostKey,
+    /// Where [`Resolution::host_key_checking`] comes from: the line of that value, or
+    /// [`Origin::Default`] for the default `ask`. [`Resolution::source_of`] gives the first
+    /// written `StrictHostKeyChecking`, which can be a value this crate does not apply.
+    pub host_key_checking_origin: Origin,
 }
 
 impl Resolution {
@@ -362,12 +366,12 @@ impl ConfigSet {
                 st.host.clone()
             }
         };
-        let host_key_checking = r
+        let (host_key_checking, host_key_checking_origin) = r
             .strict_values
             .iter()
-            .map(|(v, _)| *v)
-            .find(|v| *v != StrictHostKey::Off)
-            .unwrap_or(StrictHostKey::Ask);
+            .find(|(v, _)| *v != StrictHostKey::Off)
+            .cloned()
+            .unwrap_or((StrictHostKey::Ask, Origin::Default));
         Resolution {
             options: r.o,
             host,
@@ -375,6 +379,7 @@ impl ConfigSet {
             notes: r.notes,
             refusal: r.refusal,
             host_key_checking,
+            host_key_checking_origin,
         }
     }
 
@@ -469,11 +474,15 @@ impl ConfigSet {
                 if r.o.user.is_none()
                     && let Some(user) = u.user
                 {
+                    push_source(r, Op::User, &user, &target_origin);
                     r.o.user = Some(user);
                     user_on_cmdline = true;
                 }
-                if r.o.port.is_none() {
-                    r.o.port = u.port;
+                if r.o.port.is_none()
+                    && let Some(port) = u.port
+                {
+                    r.o.port = Some(port);
+                    push_source(r, Op::Port, &port.to_string(), &target_origin);
                 }
                 u.host
             }
@@ -486,7 +495,9 @@ impl ConfigSet {
                 }
                 Some(at) => {
                     if r.o.user.is_none() {
-                        r.o.user = Some(target.get(..at).unwrap_or("").to_string());
+                        let user = target.get(..at).unwrap_or("").to_string();
+                        push_source(r, Op::User, &user, &target_origin);
+                        r.o.user = Some(user);
                         user_on_cmdline = true;
                     }
                     target.get(at + 1..).unwrap_or("").to_string()

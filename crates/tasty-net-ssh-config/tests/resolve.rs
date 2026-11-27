@@ -207,6 +207,18 @@ fn first_value_wins_and_sources() {
             label: "override".to_string()
         }
     );
+
+    // The user and port of the destination come from the destination.
+    let destination = Origin::CommandLine {
+        label: "destination".to_string(),
+    };
+    let target = resolve("User deploy\nPort 3333\n", "alice@web");
+    assert_eq!(target.options.user.as_deref(), Some("alice"));
+    assert_eq!(target.source_of("user"), destination);
+    let uri = resolve("User deploy\nPort 3333\n", "ssh://bob@web:2201");
+    assert_eq!(uri.options.port, Some(2201));
+    assert_eq!(uri.source_of("port"), destination);
+    assert_eq!(uri.source_of("user"), destination);
 }
 
 #[test]
@@ -232,6 +244,12 @@ fn host_key_check_is_kept() {
         "web",
     );
     assert_eq!(next.host_key_checking, StrictHostKey::New);
+    // The origin is the line of the value in effect, not the skipped first line.
+    match &next.host_key_checking_origin {
+        Origin::File { line, .. } => assert_eq!(*line, 4),
+        other => panic!("host key checking came from {other:?}"),
+    }
+    assert_eq!(off.host_key_checking_origin, Origin::Default);
 
     let local = resolve("NoHostAuthenticationForLocalhost yes\n", "localhost");
     assert_eq!(

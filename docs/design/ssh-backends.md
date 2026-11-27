@@ -358,12 +358,13 @@ struct SshInspection {
 ```text
 ConfigSet::load(inputs: ConfigInputs) -> Result<ConfigSet, ConfigError>   // 맨 위 설정 파일 읽기
 ConfigSet::resolve(&self, host: &str, ctx: &ResolveContext) -> Resolution  // Include는 여기서 읽는다
-Resolution { options: Options, host: String, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal>, host_key_checking: StrictHostKey }
+Resolution { options: Options, host: String, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal>, host_key_checking: StrictHostKey, host_key_checking_origin: Origin }
 KnownHosts::load(files: &[PathBuf]) -> KnownHosts
 KnownHosts::check(&self, host: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict
 enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { file, line }, NotFound, DistrustedCaLine { file, line } }
 ```
 
+- `sources`는 적힌 값마다 그 출처를 순서대로 싣는다. 대상(`[user@]host`, `ssh://user@host:port`)이 정한 사용자·포트의 출처는 `destination`이다. `host_key_checking`은 이 크레이트가 하는 확인 모드(확인을 끄는 값을 건너뛴 첫 값)이고, `host_key_checking_origin`이 그 값의 줄이다(없으면 `default`). `StrictHostKeyChecking`의 첫 출처(`source_of`)는 건너뛴 값일 수 있다.
 - `ResolveContext`는 명령행에 해당하는 값(위 순서 1~8), 로컬 사용자, 홈, `ssh/` 폴더, 로컬 uid·호스트 이름, `${}`에 쓰는 환경 값, 원격 명령을 갖는다. `final` 두 번째 읽기는 `resolve`가 OpenSSH처럼 안에서 한다(`ssh.c:1246`–`:1265`).
 - `Include`는 `resolve`가 읽는다. OpenSSH는 `Include` 인자의 `%` 토큰과 `${}`를 대상마다 펼치고(`readconf.c:2086`의 `expand_match_exec_or_include_path`), 그 줄에 닿은 블록의 적용 여부에 따라 `NEVERMATCH`로 읽으므로 대상 없이 미리 펼칠 수 없다.
 - `Refusal`이 있으면 내장 백엔드는 네트워크에 나가기 전에 `SshBackendError::ConfigRefused`로 끝낸다.
