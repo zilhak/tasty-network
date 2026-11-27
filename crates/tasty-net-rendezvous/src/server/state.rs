@@ -83,7 +83,8 @@ pub(crate) struct Punch {
     pub token_b: PunchToken,
     pub created: Instant,
     pub go_at: Option<Instant>,
-    pub expires: Instant,
+    /// `None` when the deadline is past the clock's range: the punch does not expire.
+    pub expires: Option<Instant>,
     pub result_a: Option<PunchResult>,
     pub result_b: Option<PunchResult>,
     pub timer: Option<AbortHandle>,
@@ -135,6 +136,18 @@ fn refuse_to(reg: Option<&Registration>, request_id: u64, reason: RefuseReason) 
             reg,
             ServerMessage::PunchRefused(PunchRefused { request_id, reason }),
         );
+    }
+}
+
+/// A timer for `punch_id` at `at`, none when the deadline is past the clock's range.
+fn timer(punch_id: u64, stage: Stage, at: Option<Instant>) -> After {
+    match at {
+        Some(at) => After::Timer {
+            punch_id,
+            stage,
+            at,
+        },
+        None => After::Nothing,
     }
 }
 
@@ -333,7 +346,7 @@ impl State {
         };
         let punch_id = self.next_punch_id;
         self.next_punch_id += 1;
-        let expires = now + p.offer_timeout;
+        let expires = now.checked_add(p.offer_timeout);
         self.punches.insert(
             punch_id,
             Punch {
@@ -359,11 +372,7 @@ impl State {
             );
         }
         info!(device = %a, peer = %b, punch_id, mode = ?mode, "punch offered");
-        After::Timer {
-            punch_id,
-            stage: Stage::Offered,
-            at: expires,
-        }
+        timer(punch_id, Stage::Offered, expires)
     }
 
     /// `punch_answer` from `b`.
@@ -437,7 +446,8 @@ impl State {
         let rtt_b = rb.conn.rtt();
         let half_max = rtt_a.max(rtt_b) / 2;
         let start_after = |own: Duration| {
-            (half_max + p.start_delay_margin)
+            half_max
+                .saturating_add(p.start_delay_margin)
                 .saturating_sub(own / 2)
                 .min(p.start_delay_max)
         };
@@ -484,7 +494,7 @@ impl State {
             ),
         );
         let a = s.a;
-        let expires = now + p.punch_session_ttl();
+        let expires = now.checked_add(p.punch_session_ttl());
         if let Some(s) = self.punches.get_mut(&punch_id) {
             if let Some(t) = s.timer.take() {
                 t.abort();
@@ -494,11 +504,7 @@ impl State {
             s.expires = expires;
         }
         info!(device = %a, peer = %b, punch_id, "punch go sent");
-        After::Timer {
-            punch_id,
-            stage: Stage::GoSent,
-            at: expires,
-        }
+        timer(punch_id, Stage::GoSent, expires)
     }
 
     /// `punch_result` from `device`.

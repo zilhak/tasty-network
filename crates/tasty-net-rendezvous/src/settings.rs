@@ -814,6 +814,14 @@ const MIN_TLS_FRAGMENT: u64 = 32;
 const MAX_TLS_FRAGMENT: u64 = 16_384 + 5;
 const ONE_MINUTE: Duration = Duration::from_secs(60);
 const ONE_SECOND: Duration = Duration::from_secs(1);
+/// The longest time a setting takes, 2^32 − 1 s (about 136 years): a deadline of the current
+/// time plus such a time is in range on every supported system, and the sums the server makes
+/// of these values stay in range of [`Duration`].
+const MAX_DURATION: Duration = Duration::from_secs(u32::MAX as u64);
+/// The most streams a QUIC peer may allow, 2^60 (RFC 9000 §4.6).
+const MAX_STREAMS: u64 = 1 << 60;
+/// The coordination stream needs one bidirectional stream.
+const MIN_BIDI_STREAMS: u64 = 1;
 
 struct Resolver<'a>(&'a ServerSettings);
 
@@ -924,7 +932,27 @@ impl Resolver<'_> {
         })
     }
 
+    /// Every time is at most [`MAX_DURATION`] and can be added to the current time.
+    fn durations(&self, now: std::time::Instant) -> Result<(), SettingsError> {
+        for s in DEFAULTS {
+            let d = match (s.kind, self.value(s.key)) {
+                (Kind::Duration | Kind::OptionalDuration, Value::Duration(d)) => d,
+                _ => continue,
+            };
+            if d > MAX_DURATION || now.checked_add(d).is_none() {
+                return Err(SettingsError::OutOfRange {
+                    key: s.key,
+                    value: Value::Duration(d),
+                    expected: "at most 2^32 - 1 s",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn params(&self) -> Result<ServerParams, SettingsError> {
+        let now = std::time::Instant::now();
+        self.durations(now)?;
         let listen_primary = match self.value("listen.primary") {
             Value::Address(a) => a,
             other => panic!("listen.primary is an address, got {other:?}"),
@@ -984,7 +1012,7 @@ impl Resolver<'_> {
             &["listen.primary", "advertise.primary_ip"],
         )?;
         let quic = self.quic(keepalive_interval, idle_timeout)?;
-        Ok(ServerParams {
+        let params = ServerParams {
             listen_primary,
             listen_alternate_port: self.port("listen.alternate_port").unwrap_or_default(),
             listen_alternate_ip: self.opt_ip("listen.alternate_ip"),
@@ -1014,7 +1042,19 @@ impl Resolver<'_> {
             punch_request_window: ONE_MINUTE,
             stun_rate_window: ONE_SECOND,
             quic,
-        })
+        };
+        self.relation(
+            now.checked_add(params.punch_session_ttl()).is_some(),
+            "the current time + start_delay_max + punch_window + 2 × quic_handshake_timeout + \
+             punch_session_grace is in range of the clock",
+            &[
+                "start_delay_max",
+                "punch_window",
+                "quic_handshake_timeout",
+                "punch_session_grace",
+            ],
+        )?;
+        Ok(params)
     }
 
     fn quic(
@@ -1050,9 +1090,14 @@ impl Resolver<'_> {
             "quic.mtu_discovery.upper_bound >= quic.initial_mtu",
             &["quic.mtu_discovery.upper_bound", "quic.initial_mtu"],
         )?;
-        for key in [
+        self.range(
             "quic.max_bidi_streams",
-            "quic.max_uni_streams",
+            MIN_BIDI_STREAMS,
+            MAX_STREAMS,
+            "1 to 2^60",
+        )?;
+        self.range("quic.max_uni_streams", u64::MIN, MAX_STREAMS, "0 to 2^60")?;
+        for key in [
             "quic.stream_receive_window",
             "quic.receive_window",
             "quic.ack_frequency.ack_eliciting_threshold",
@@ -1449,5 +1494,63 @@ mod tests {
         s.set("max_host_candidates", Value::Count(60)).unwrap();
         s.set("max_message_bytes", Value::Bytes(1024)).unwrap();
         assert!(s.resolve().is_ok());
+    }
+
+    #[test]
+    fn times_and_stream_counts_stay_in_range() {
+        let local = || {
+            let mut s = ServerSettings::new();
+            s.set(
+                "listen.primary",
+                Value::Address("127.0.0.1:0".parse().unwrap()),
+            )
+            .unwrap();
+            s
+        };
+        let secs = |n: u64| Value::Duration(Duration::from_secs(n));
+        let longest = u64::from(u32::MAX);
+        // A time over 2^32 - 1 s is refused; the longest time is accepted.
+        for key in ["hello_timeout", "status_log_interval", "quic.cid_lifetime"] {
+            let mut s = local();
+            s.set(key, secs(longest + 1)).unwrap();
+            let err = s.resolve().expect_err(key);
+            assert!(err.to_string().contains(key), "{err}");
+            let mut s = local();
+            s.set(key, secs(longest)).unwrap();
+            assert!(s.resolve().is_ok(), "{key}");
+        }
+        assert!(matches!(
+            ServerSettings::from_toml_str(&format!(
+                "hello_timeout = \"{} s\"\n[listen]\nprimary = \"127.0.0.1:0\"\n",
+                u64::MAX
+            ))
+            .unwrap()
+            .resolve(),
+            Err(SettingsError::OutOfRange {
+                key: "hello_timeout",
+                ..
+            })
+        ));
+        // Stream counts: 1 to 2^60 bidirectional, 0 to 2^60 unidirectional.
+        let streams: Vec<(&str, u64, bool)> = vec![
+            ("quic.max_bidi_streams", 0, false),
+            ("quic.max_bidi_streams", 1, true),
+            ("quic.max_bidi_streams", 1 << 60, true),
+            ("quic.max_bidi_streams", (1 << 60) + 1, false),
+            ("quic.max_uni_streams", 0, true),
+            ("quic.max_uni_streams", 1 << 60, true),
+            ("quic.max_uni_streams", (1 << 60) + 1, false),
+        ];
+        for (key, n, ok) in streams {
+            let mut s = local();
+            s.set(key, Value::Count(n)).unwrap();
+            match s.resolve() {
+                Ok(_) => assert!(ok, "{key} = {n} accepted"),
+                Err(e) => {
+                    assert!(!ok, "{key} = {n} refused: {e}");
+                    assert!(e.to_string().contains(key), "{e}");
+                }
+            }
+        }
     }
 }

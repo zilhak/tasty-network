@@ -536,6 +536,15 @@ async fn accept_loop(inner: Arc<Inner>, endpoint: quinn::Endpoint) {
     }
 }
 
+/// `fut` until `deadline`: `None` when the deadline passed first. A deadline of `None` (past
+/// the clock's range) never passes.
+async fn until<F: std::future::IntoFuture>(deadline: Option<Instant>, fut: F) -> Option<F::Output> {
+    match deadline {
+        Some(at) => tokio::time::timeout_at(at, fut).await.ok(),
+        None => Some(fut.await),
+    }
+}
+
 fn close(conn: &quinn::Connection, code: CloseCode) {
     conn.close(code.var_int(), code.reason());
 }
@@ -549,14 +558,14 @@ enum HelloFailure {
 
 async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
     let p = &inner.params;
-    let deadline = Instant::now() + p.hello_timeout;
-    let conn = match tokio::time::timeout_at(deadline, incoming).await {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(e)) => {
+    let deadline = Instant::now().checked_add(p.hello_timeout);
+    let conn = match until(deadline, incoming).await {
+        Some(Ok(conn)) => conn,
+        Some(Err(e)) => {
             debug!(error = %e, "handshake failed");
             return;
         }
-        Err(_) => {
+        None => {
             debug!("handshake did not finish within hello_timeout");
             return;
         }
@@ -571,7 +580,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
         close(&conn, CloseCode::AccessDenied);
         return;
     }
-    let hello = tokio::time::timeout_at(deadline, async {
+    let hello = until(deadline, async {
         let (send, mut recv) = conn
             .accept_bi()
             .await
