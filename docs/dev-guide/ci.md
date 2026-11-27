@@ -1,6 +1,6 @@
 # CI
 
-워크플로는 `.github/workflows/ci.yml`과 `.github/workflows/relay.yml` 두 개다. 둘 다 `develop`·`release`·`main` push, 이 세 브랜치를 base로 한 PR, 수동 실행(`workflow_dispatch`)에서 돈다. `ci.yml`의 검사는 `scripts/check.sh`의 단계를, `relay.yml`의 검사는 `relay/check-config.sh`를 부르므로 로컬과 훅에서 같은 명령으로 다시 돌릴 수 있다.
+워크플로는 `.github/workflows/ci.yml`과 `.github/workflows/rendezvous.yml` 두 개다. 둘 다 `develop`·`release`·`main` push, 이 세 브랜치를 base로 한 PR, 수동 실행(`workflow_dispatch`)에서 돈다. `ci.yml`의 검사는 `scripts/check.sh`의 단계를, `rendezvous.yml`의 검사는 `rendezvous/check-config.sh`를 부르므로 로컬과 훅에서 같은 명령으로 다시 돌릴 수 있다.
 
 ## 잡
 
@@ -10,10 +10,11 @@
 | `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`), `p2p-isolation`(`scripts/check.sh p2p-isolation`), `no-hidden-constants`(`scripts/check.sh no-hidden-constants`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
-| `relay-config-check` (`relay.yml`) | `ubuntu-latest` | `bash relay/check-config.sh --self-test`, `bash relay/check-config.sh` |
+| `rendezvous-check` (`rendezvous.yml`) | `ubuntu-latest` | `bash rendezvous/check-config.sh --self-test`, `bash rendezvous/check-config.sh` |
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
-- `relay.yml`은 `relay/` 밖만 바뀐 커밋에서도 돈다. `develop`의 어느 커밋이든 D5 (a)의 실행 ID를 남기기 위해서다. 러너의 docker로 고정 이미지 `n0computer/iroh-relay:v1.5.0`(digest 고정)을 받아 띄운다. 아래 concurrency 규칙은 두 워크플로가 같고 그룹 이름의 앞머리(`ci-`·`relay-`)만 다르다.
+- `rendezvous.yml`은 `rendezvous/` 밖만 바뀐 커밋에서도 돈다. `develop`의 어느 커밋이든 D5 (a)의 실행 ID를 남기기 위해서다. 아래 concurrency 규칙은 두 워크플로가 같고 그룹 이름의 앞머리(`ci-`·`rendezvous-`)만 다르다.
+- `rendezvous-check`는 서버를 이미지가 아니라 그 커밋에서 빌드한 실행 파일로 띄운다(`cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe`). D5 (a)가 보는 것(예시 설정으로 뜸, 주·보조 포트의 STUN 응답, 설정값 조회)은 이미지 안과 같은 실행 파일의 동작이고, 이미지 빌드는 러너에서 몇 분을 더 쓴다. STUN 응답은 이 레포의 STUN 코덱을 쓰는 `stun_probe` 예제로 보므로 외부 STUN 클라이언트가 없다.
 - push와 수동 실행은 브랜치와 커밋마다 다른 concurrency 그룹을 쓴다. 그래서 서로 다른 커밋의 push는 각자 실행이 남는다. 같은 ref·같은 커밋의 push와 수동 실행은 그룹을 함께 쓰므로, 그 그룹에서 대기 중인 앞 실행은 같은 ref·커밋의 새 요청에 밀려 취소될 수 있다.
 - PR은 PR마다 그룹 하나를 쓰고, 새 커밋이 오면 앞 커밋의 실행을 취소한다.
 - Windows 잡은 Git Bash(`shell: bash`)로 돈다.
@@ -48,13 +49,13 @@
 - D7(tasty 의존 없음)은 `repo-checks` 잡의 `no-tasty-deps` 단계 결론으로 본다.
 - D8(P2P 크레이트 격리)의 격리 부분은 `repo-checks` 잡의 `p2p-isolation` 단계 결론으로 본다. 단독 실행 부분은 `clippy-test` 세 잡의 `test tasty-net-rendezvous alone`·`test tasty-net-p2p alone` 단계 로그로 본다. 의존 그래프는 OS와 무관하게 `cargo metadata` 하나로 정해지므로(선택 의존과 모든 target을 넣어 읽는다) ubuntu 잡 하나에서 돈다.
 - D10(설정값 노출)의 정적 검사 부분은 `repo-checks` 잡의 `no-hidden-constants` 단계 결론으로 본다. 소스와 설계 문서만 읽으므로 ubuntu 잡 하나에서 돈다. 대상·허용 목록·표 대응은 `scripts/no-hidden-constants.list` 한 파일이다.
-- D5 (a)(relay 설정 기동)는 `relay.yml`의 `relay-config-check` 잡 결론으로 본다.
+- D5 (a)(rendezvous 설정 기동)는 `rendezvous.yml`의 `rendezvous-check` 잡 결론과 로그의 `rendezvous-check result=ok` 줄로 본다.
 - 기준과 증거 형식의 정본은 [동작 수준 기준](../design/done-criteria.md)이다.
 
 ## cargo deny
 
 - `deny.toml`의 licenses·bans·sources를 본다. 라이선스 허용 목록은 tasty `deny.toml`과 같다. git 의존과 crates.io 밖의 레지스트리는 받지 않는다.
-- advisories는 보지 않는다. 새 보안 공지는 커밋과 무관하게 나와 바뀐 것이 없는 커밋의 실행도 실패시키기 때문이다. 외부 의존(iroh 등)이 들어오는 작업에서 따로 잡을 둘지 정한다.
+- advisories는 보지 않는다. 새 보안 공지는 커밋과 무관하게 나와 바뀐 것이 없는 커밋의 실행도 실패시키기 때문이다. 외부 의존(quinn·rustls 등)이 늘어나는 작업에서 따로 잡을 둘지 정한다.
 - cargo-deny는 공식 릴리스 아카이브를 받아 워크플로에 고정한 SHA-256과 대조한 뒤 쓴다.
 
 ## shellcheck

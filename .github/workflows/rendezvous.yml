@@ -1,0 +1,51 @@
+name: rendezvous
+
+# Check of the rendezvous server settings example (rendezvous/rendezvous.toml):
+# the server built from this commit starts with it, the primary and the
+# alternate port answer STUN, and the settings query works. This is criterion
+# D5 (a) of docs/design/done-criteria.md. It runs on every push, not only on
+# changes under rendezvous/, so that each develop commit has a run to cite. The
+# job is in docs/dev-guide/ci.md.
+
+on:
+  push:
+    branches: [develop, release, main]
+  pull_request:
+    branches: [develop, release, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Same grouping as ci.yml: one group per branch and commit for pushes and
+# manual runs, one group per pull request with older runs cancelled.
+concurrency:
+  group: rendezvous-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Use only the toolchain the job installs from rust-toolchain.toml.
+  RUSTUP_AUTO_INSTALL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rendezvous-check:
+    name: rendezvous-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      # The check's own functions, without a server or a build.
+      - name: rendezvous check self-test
+        run: bash rendezvous/check-config.sh --self-test
+      # Builds tasty-rendezvous and the stun_probe example from this commit, reads
+      # the example with settings --config, starts the server, and probes UDP 3478
+      # and 3479. The last line is "rendezvous-check result=ok|fail".
+      - name: rendezvous check
+        run: bash rendezvous/check-config.sh
