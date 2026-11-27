@@ -20,9 +20,9 @@
 #   allow    <파일> <대상> <이유>          <대상>은 다음 중 하나다
 #              리터럴(예: 20, 0x2112A442,  그 파일의 그 값 리터럴 전부
 #              u16::MAX)
-#              const NAME = 식             그 이름의 const·static 선언 안의 리터럴(타입 안 길이 포함).
-#              static NAME = 식            식은 선언의 = 오른쪽 식 전체다(연산자·부호·괄호 포함,
-#                                          공백은 토큰 사이 하나로 보고 비교한다). 다르면 위반이다
+#              const NAME: 타입 = 식       그 이름의 const·static 선언 안의 리터럴. 이름 뒤 선언 전체
+#              static NAME: 타입 = 식      (타입과 = 오른쪽 식, 연산자·부호·괄호 포함)를 공백을 토큰
+#                                          사이 하나로, >>를 > 둘로 보고 비교한다. 다르면 위반이다
 #              enum NAME = 식, 식…         enum 본문의 판별식(= 오른쪽)을 나온 순서대로 쉼표로 나눠
 #                                          적는다. 다르면 위반이다
 #              그 밖의 토큰 묶음(예: += 1)  그 토큰 순서가 나오는 자리 안의 리터럴
@@ -334,29 +334,20 @@ def parse_list(text):
     return entries
 
 
-DECL = re.compile(r"(const|static|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)")
+DECL = re.compile(r"(const|static|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*([:=].*)")
 
 
 def expr_text(toks):
-    """토큰 글자를 공백 하나로 이은 식."""
-    return " ".join(t[1] for t in toks)
+    """토큰 글자를 공백 하나로 이은 식. 닫는 꺾쇠 둘(>>)은 > 둘로 본다."""
+    return " ".join("> >" if t[1] == ">>" else t[1] for t in toks)
 
 
 def decl_expr(toks, keyword, a, b):
-    """선언 범위 [a, b]의 값 식. const·static은 바깥 깊이 = 오른쪽부터 ;까지, enum은 본문의
-    판별식을 쉼표로 이은 것. 값이 없으면 None."""
+    """선언 범위 [a, b]의 값. const·static은 이름 뒤부터 ; 앞까지(타입과 = 오른쪽 식), enum은
+    본문의 판별식을 = 뒤에서 쉼표로 이은 것. 값이 없으면 None."""
     if keyword in ("const", "static"):
-        depth = 0
-        for j in range(a, b + 1):
-            t = toks[j][1] if toks[j][0] == "punct" else None
-            if t in ("(", "[", "{", "<"):
-                depth += 1
-            elif t in (")", "]", "}", ">"):
-                depth -= 1
-            elif t == "=" and depth == 0:
-                end = b if toks[b][1] == ";" else b + 1
-                return expr_text(toks[j + 1:end])
-        return None
+        end = b if toks[b][1] == ";" else b + 1
+        return expr_text(toks[a + 2:end]) or None
     # enum: 본문 { … } 안 깊이 1의 = 뒤에서 , 나 } 까지.
     start = next((j for j in range(a, b + 1) if toks[j][1] == "{"), None)
     if start is None:
@@ -393,8 +384,9 @@ LITERAL = re.compile(r"Duration::[A-Z_]+|(?:u8|u16|u32|u64|u128|usize|i8|i16|i32
 def judge_file(path, text, allows):
     """(위반 목록, 리터럴 수, 쓰인 allow 행). allows: [(행, 대상, 이유)].
 
-    선언 허용(const NAME = 식)은 그 선언의 값 식이 목록의 식과 같을 때만(공백 정규화 뒤) 그
-    선언 안의 리터럴을 허용한다. 연산자·부호·리터럴 하나라도 바뀌면 위반이다."""
+    선언 허용(const NAME: 타입 = 식)은 이름 뒤 선언 전체가 목록과 같을 때만(공백 정규화 뒤) 그
+    선언 안의 리터럴을 허용한다. 타입 안 숫자, 연산자·부호·리터럴 하나라도 바뀌면 위반이다.
+    enum은 enum NAME = 판별식, …로 적는다."""
     toks = strip_cfg_test(tokenize(text))
     lits = literals(toks)
     allowed_at = {}
@@ -404,7 +396,14 @@ def judge_file(path, text, allows):
             raise ListError(f"{no}행: 선언 허용은 값까지 적는다(예: const NAME = 20): {target}")
         m = DECL.fullmatch(target)
         if m:
-            want = expr_text(tokenize(m.group(3)))
+            rest = m.group(3)
+            if m.group(1) == "enum":
+                if not rest.startswith("="):
+                    raise ListError(f"{no}행: enum 허용은 enum NAME = 판별식, …로 적는다: {target}")
+                rest = rest[1:]
+            elif not rest.startswith(":"):
+                raise ListError(f"{no}행: 선언 허용은 타입까지 적는다(const NAME: 타입 = 식): {target}")
+            want = expr_text(tokenize(rest))
             for a, b in decl_spans(toks, m.group(1), m.group(2)):
                 inside = [pos for pos, _, _ in lits if a <= pos <= b]
                 # 값이 다른 선언도 그 안 리터럴은 이 줄 하나로 알린다(리터럴마다 다시 알리지 않는다).
@@ -546,7 +545,7 @@ def self_test():
     doc = "# 문서\n\n## 표\n\n| 키 | 기본 |\n|---|---|\n| `a.x` | 5 |\n| `b` | on |\n"
     allow_listed = (
         "target\tsrc\n"
-        "allow\tsrc/listed.rs\tconst HEADER_LEN = 20\t와이어 형식\n"
+        "allow\tsrc/listed.rs\tconst HEADER_LEN: usize = 20\t와이어 형식\n"
         "allow\tsrc/listed.rs\tenum Code = 0, 1\t종료 코드\n"
         "allow\tsrc/listed.rs\t[0]\t첫 원소\n"
         "allow\tsrc/listed.rs\t+= 1\t세기\n"
@@ -595,9 +594,9 @@ def self_test():
          {"src/listed.rs"}, "목록 오류")
     files["src/listed.rs"] = listed
     expr_src = "const BUF: usize = 1 << 16;\nconst OFFSET: i32 = -5;\nstatic PREFIX: [u8; 2] = [0x30, 0x2a];\n"
-    expr_list = ("target\tsrc\nallow\tsrc/expr.rs\tconst BUF = 1<<16\t버퍼\n"
-                 "allow\tsrc/expr.rs\tconst OFFSET = - 5\t어긋남\n"
-                 "allow\tsrc/expr.rs\tstatic PREFIX = [0x30, 0x2a]\t앞머리\n")
+    expr_list = ("target\tsrc\nallow\tsrc/expr.rs\tconst BUF: usize = 1<<16\t버퍼\n"
+                 "allow\tsrc/expr.rs\tconst OFFSET: i32 = - 5\t어긋남\n"
+                 "allow\tsrc/expr.rs\tstatic PREFIX: [u8; 2] = [0x30, 0x2a]\t앞머리\n")
     files["src/expr.rs"] = expr_src
     case("선언 식이 같으면(공백만 다름) 통과", expr_list, {"src/expr.rs"}, 0)
     files["src/expr.rs"] = expr_src.replace("1 << 16", "1 + 16")
@@ -605,6 +604,18 @@ def self_test():
     files["src/expr.rs"] = expr_src.replace("-5", "5")
     case("선언 식의 부호가 바뀌면(-5 → 5) 위반", expr_list, {"src/expr.rs"}, 1)
     files["src/expr.rs"] = expr_src
+    case("값 식만 적은 선언 허용(타입 없음)은 목록 오류",
+         "target\tsrc\nallow\tsrc/expr.rs\tconst BUF = 1 << 16\t버퍼\n", {"src/expr.rs"}, "목록 오류")
+    typed_src = ("pub const ALL: [Code; 7] = [Code::A];\n"
+                 "const X: Option<Option<[u8; 4]>> = None;\n")
+    typed_list = ("target\tsrc\nallow\tsrc/typed.rs\tconst ALL: [Code; 7] = [Code::A]\t전부\n"
+                  "allow\tsrc/typed.rs\tconst X: Option<Option<[u8; 4]> > = None\t없음\n")
+    files["src/typed.rs"] = typed_src
+    case("타입까지 같은 선언(>>와 > >는 같다)은 통과", typed_list, {"src/typed.rs"}, 0)
+    files["src/typed.rs"] = typed_src.replace("[Code; 7]", "[Code; 7 + 0]")
+    case("타입 안 숫자가 바뀌면([Code; 7] → [Code; 7 + 0]) 위반", typed_list, {"src/typed.rs"}, 1)
+    files["src/typed.rs"] = typed_src.replace("[u8; 4]", "[u8; 5]")
+    case("꺾쇠 안 타입이 바뀌면(Option<Option<[u8; 4]>> → [u8; 5]) 위반", typed_list, {"src/typed.rs"}, 1)
     files["src/alias.rs"] = ("use std::time::Duration as D;\ntype Dur = std::time::Duration;\n"
                              "fn f() -> (D, Dur) { (D::ZERO, Dur::MAX) }\n")
     case("Duration 별칭의 상수", "target\tsrc\n", {"src/alias.rs"}, 2)
