@@ -1243,6 +1243,43 @@ mod tests {
         assert!(pick_session(&sessions, &stranger).is_none());
     }
 
+    /// A failed handshake is a session's only when its address fitted that session alone;
+    /// with several, each only counts the handshake as ended (docs/design/testing.md "같은
+    /// 주소가 두 상대의 세션에 맞을 때").
+    #[test]
+    fn a_failure_is_pinned_on_a_session_only_when_it_is_the_only_one() {
+        let session = |seed: u8| {
+            let (to, rx) = mpsc::unbounded_channel();
+            let s = AcceptSession {
+                probe: Arc::new(ProbeSession::new(
+                    DeviceKey::from_seed([seed; 32]).id(),
+                    PunchToken([1; 16]),
+                    PunchToken([2; 16]),
+                    PunchMode::All,
+                    Duration::from_secs(1),
+                    Vec::new(),
+                    8,
+                )),
+                to,
+            };
+            (s, rx)
+        };
+        let (one, mut one_rx) = session(34);
+        failed(std::slice::from_ref(&one), Some(session_mismatch()));
+        assert!(matches!(
+            one_rx.try_recv(),
+            Ok(Incoming::Failed(c)) if c.name == "session_mismatch"
+        ));
+        let (first, mut first_rx) = session(35);
+        let (second, mut second_rx) = session(36);
+        failed(&[first, second], Some(session_mismatch()));
+        assert!(matches!(first_rx.try_recv(), Ok(Incoming::Ended)));
+        assert!(matches!(second_rx.try_recv(), Ok(Incoming::Ended)));
+        // No cause known: ended even for one session.
+        failed(&[one], None);
+        assert!(matches!(one_rx.try_recv(), Ok(Incoming::Ended)));
+    }
+
     /// An endpoint whose server is never reached, with the test standing in for its
     /// registration: the coordination messages it sends come out of the receiver.
     struct StandIn {

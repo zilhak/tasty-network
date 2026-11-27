@@ -178,6 +178,8 @@ pub struct ServerStatus {
     pub pending: usize,
     /// Connection attempts refused because `max_pending_connections` were pending.
     pub pending_refused: u64,
+    /// `punch_cancel{expired}` messages sent (a punch's deadline passed before its results).
+    pub expired_cancels: u64,
 }
 
 struct Inner {
@@ -214,9 +216,9 @@ impl Inner {
     }
 
     fn status(&self) -> ServerStatus {
-        let (registrations, punches) = {
+        let (registrations, punches, expired_cancels) = {
             let s = self.state();
-            (s.devices.len(), s.punches.len())
+            (s.devices.len(), s.punches.len(), s.expired_cancels)
         };
         let c = &self.counters;
         let get = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
@@ -243,6 +245,7 @@ impl Inner {
             queue_full: get(&self.queue_full),
             pending: self.pending.load(Ordering::Relaxed),
             pending_refused: get(&c.pending_refused),
+            expired_cancels,
         }
     }
 
@@ -711,6 +714,7 @@ async fn status_loop(inner: Arc<Inner>) {
             queue_full = s.queue_full,
             pending = s.pending,
             pending_refused = s.pending_refused,
+            expired_cancels = s.expired_cancels,
             "status"
         );
     }

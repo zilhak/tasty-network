@@ -120,6 +120,8 @@ pub(crate) struct State {
     request_times: HashMap<DeviceId, VecDeque<Instant>>,
     next_punch_id: u64,
     next_conn_id: u64,
+    /// `punch_cancel{expired}` messages sent.
+    pub expired_cancels: u64,
 }
 
 /// Why a registration was not made.
@@ -192,6 +194,7 @@ impl State {
             request_times: HashMap::new(),
             next_punch_id: 1,
             next_conn_id: 1,
+            expired_cancels: u64::MIN,
         }
     }
 
@@ -495,7 +498,7 @@ impl State {
                 s.request_id,
                 RefuseReason::NatUnsupported,
             );
-            cancel_to(self.devices.get(&s.b), punch_id, CancelReason::Expired);
+            self.cancel_expired(s.b, punch_id);
             return After::Nothing;
         }
         // start_after = max(rtt_A, rtt_B)/2 + margin − rtt_self/2, capped at start_delay_max.
@@ -597,6 +600,14 @@ impl State {
         }
     }
 
+    /// Send `punch_cancel{expired}` to `to` if it is registered, and count it.
+    fn cancel_expired(&mut self, to: DeviceId, punch_id: u64) {
+        if self.devices.contains_key(&to) {
+            cancel_to(self.devices.get(&to), punch_id, CancelReason::Expired);
+            self.expired_cancels += 1;
+        }
+    }
+
     /// A punch deadline passed.
     pub fn expire(&mut self, punch_id: u64, stage: Stage) {
         if self.punches.get(&punch_id).is_none_or(|s| s.stage != stage) {
@@ -618,10 +629,10 @@ impl State {
             }
             Stage::GoSent => {
                 if s.result_a.is_none() {
-                    cancel_to(self.devices.get(&s.a), punch_id, CancelReason::Expired);
+                    self.cancel_expired(s.a, punch_id);
                 }
                 if s.result_b.is_none() {
-                    cancel_to(self.devices.get(&s.b), punch_id, CancelReason::Expired);
+                    self.cancel_expired(s.b, punch_id);
                 }
                 info!(
                     device = %s.a,

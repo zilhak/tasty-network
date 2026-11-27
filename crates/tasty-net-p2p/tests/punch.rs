@@ -951,6 +951,9 @@ fn session_ttl_covers_acceptor_deadline() {
         lb.drain(&b.ep);
         assert!(!closed_by_cancel(&lb.0, CancelReason::Expired));
         assert_eq!(cb.info().unwrap().state, AttemptPhase::Connected);
+        // The server sent no `expired` at all: one ignored during the handshake, or dropped
+        // after the connection, would not show in the events.
+        assert_eq!(w.running(&s).status().expired_cancels, 0);
     });
 }
 
@@ -1343,4 +1346,51 @@ fn attempt_info_shows_the_values_of_its_state() {
         let _ended = h.join();
     });
     drop(r.w);
+}
+
+/// The control of the `expired` count above: a punch whose dialer gives up without a result
+/// gets `expired` from the server once its TTL passes.
+#[test]
+fn an_unreported_punch_is_expired_after_its_ttl() {
+    let w = World::new();
+    let mut ss = server_settings();
+    for (key, secs) in [
+        ("punch_window", 1),
+        ("quic_handshake_timeout", 1),
+        ("punch_session_grace", 1),
+    ] {
+        ss.set(key, ServerValue::Duration(Duration::from_secs(secs)))
+            .unwrap();
+    }
+    let s = w.server(1, ss);
+    let (n1, n2) = two_nats(&w, NatSpec::eim(), NatSpec::eim());
+    // B answers no probe, so A stays Punching until the caller gives up.
+    let servers = server_ips(&s);
+    n2.set_rule(Arc::new(move |dest: SocketAddr, _: &[u8]| {
+        if servers.contains(&dest.ip()) {
+            Verdict::Pass
+        } else {
+            Verdict::Drop
+        }
+    }));
+    let a = device(&n1, 2, 1, &s, settings(&[]));
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    pair(&a, &b);
+    registered(&a);
+    registered(&b);
+    std::thread::scope(|sc| {
+        let (cancel, h) = hanging_dial(sc, &a, b.id());
+        let mut la = Log::default();
+        assert!(
+            la.wait(&a.ep, LONG, attempt_to(AttemptPhase::Punching))
+                .is_some()
+        );
+        cancel.cancel();
+        assert_eq!(error(h.join().unwrap()), P2pConnectError::Cancelled);
+    });
+    assert!(support::wait_until(Duration::from_secs(20), || w
+        .running(&s)
+        .status()
+        .expired_cancels
+        >= 1));
 }
