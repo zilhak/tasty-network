@@ -48,6 +48,7 @@
   | 4–63, 128–191 | 버린다(버린 수를 센다) |
 
 - QUIC bit를 비틀어 보내는 확장([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287))을 양쪽 모두 끈다(quinn `EndpointConfig::grease_quic_bit(false)`, 기본은 켬). RFC 9443 §1도 다른 프로토콜과 나눠 쓰는 포트에서는 `grease_quic_bit`를 보내지 말라고 한다. 켜 두면 고정 비트(0x40)가 0인 QUIC 패킷이 온다. 짧은 헤더는 첫 바이트가 0–63, 긴 헤더(Initial·Handshake·Retry 등에도 적용될 수 있다, RFC 9287 §3.1)는 128–191이 되어, 두 범위 모두 위 분류에서 QUIC으로 가지 않고 버려지거나(4–63, 128–191) STUN과 섞인다(0–3).
+- 받기 오류: 데이터그램 하나에 딸린 오류(ICMP 오류가 알려진 `ConnectionReset`·`ConnectionRefused`, Windows에서 버퍼보다 큰 데이터그램의 `WSAEMSGSIZE` 등)는 그 데이터그램을 버리고 세며 다음 데이터그램을 받는다. quinn은 `ConnectionReset` 밖의 받기 오류에 드라이버를 끝내므로 감싼 소켓이 걸러 준다. 버린 뒤에는 실행기를 한 번 돌려준다. 소켓이 망가졌다는 오류(`NotConnected`·`BrokenPipe`·`UnexpectedEof`·`Unsupported`)만 quinn에 넘긴다.
 - 분류는 단위 시험 `demux_classifies_first_byte`(경계값 0·3·4·63·64·127·128·191·192·255)가 고정한다. 서버의 주 포트도 같은 분류 코드를 쓴다.
 - 소켓은 `[::]:0` 이중 스택으로 연다. OS가 이중 스택을 받지 않으면 IPv4 `0.0.0.0:0`으로 연다. 반사 주소는 서버에 닿은 주소족 하나에서만 얻는다. 전역 IPv6 주소는 사설 후보와 같이 호스트 후보로 보낸다(NAT 없이 닿을 수 있다). IPv6 경로가 실제로 쓰이는지는 펀칭 실험에서 본다.
 - 소켓 수신·송신 버퍼 크기는 설정값이다(`socket.recv_buffer`·`socket.send_buffer`, 기본은 OS 값이고 조회에 실제 값과 출처 `os_default`가 보인다).

@@ -1091,6 +1091,64 @@ async fn advertise_defaults_follow_the_bound_sockets() {
     }
 }
 
+/// Packet I/O over a real socket that first returns `error` once.
+#[derive(Debug)]
+struct FailOnce {
+    io: UdpPacketIo,
+    error: Mutex<Option<std::io::Error>>,
+}
+
+impl PacketIo for FailOnce {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        if let Some(e) = self.error.lock().unwrap().take() {
+            return std::task::Poll::Ready(Err(e));
+        }
+        self.io.poll_recv_from(cx, buf)
+    }
+    fn poll_send_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.io.poll_send_ready(cx)
+    }
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        self.io.try_send_to(buf, dest)
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+}
+
+#[tokio::test]
+async fn datagram_receive_error_is_dropped() {
+    // Windows reports a datagram larger than the buffer as WSAEMSGSIZE (10040); quinn would
+    // end the driver of the primary port on it.
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let primary = FailOnce {
+        io: UdpPacketIo::bind(local).await.unwrap(),
+        error: Mutex::new(Some(std::io::Error::from_raw_os_error(10040))),
+    };
+    let mut config = ServerConfig::new(key(100));
+    config.settings = local_settings();
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(primary),
+            alternate_port: Arc::new(UdpPacketIo::bind(local).await.unwrap()),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    let (_d, _) = Device::register(&server, &key(1), &[]).await;
+    assert_eq!(server.status().receive_errors, 1);
+    assert_eq!(server.status().registrations, 1);
+}
+
 #[tokio::test]
 async fn wrong_alpn_fails_in_tls() {
     let server = start(local_settings()).await;

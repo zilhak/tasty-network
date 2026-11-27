@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use quinn::udp::{RecvMeta, Transmit};
+use tracing::debug;
 
 use crate::wire::demux::{PacketClass, classify};
 
@@ -88,6 +89,20 @@ pub trait StunSink: Send + Sync + fmt::Debug + 'static {
     fn on_stun(&self, packet: &[u8], from: SocketAddr, io: &dyn PacketIo);
 }
 
+/// Whether a receive error means the socket is broken, so that no later receive can succeed.
+/// Every other receive error belongs to one datagram (an ICMP error reported as
+/// `ConnectionReset`·`ConnectionRefused`, a datagram larger than the buffer on Windows
+/// `WSAEMSGSIZE`, and the like): the datagram is dropped and counted, and receiving goes on.
+pub fn receive_error_is_fatal(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotConnected
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::Unsupported
+    )
+}
+
 /// Counts of a [`DemuxSocket`].
 #[derive(Debug, Default)]
 pub struct DemuxCounters {
@@ -97,6 +112,8 @@ pub struct DemuxCounters {
     pub quic: AtomicU64,
     /// Packets of no known class, dropped.
     pub dropped: AtomicU64,
+    /// Receive errors of one datagram, dropped ([`receive_error_is_fatal`] is false).
+    pub receive_errors: AtomicU64,
 }
 
 /// A quinn socket over a [`PacketIo`] that splits received packets by their first byte.
@@ -174,7 +191,15 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
         loop {
             let (len, from) = match self.io.poll_recv_from(cx, buf) {
                 Poll::Ready(Ok(got)) => got,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) if receive_error_is_fatal(&e) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => {
+                    // quinn ends its driver on any error but `ConnectionReset`: drop this one
+                    // and give the executor back before the next receive.
+                    self.counters.receive_errors.fetch_add(1, Ordering::Relaxed);
+                    debug!(error = %e, "datagram receive error dropped");
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
                 Poll::Pending => return Poll::Pending,
             };
             let packet = &buf[..len];
