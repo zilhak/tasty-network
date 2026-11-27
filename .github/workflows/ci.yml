@@ -203,6 +203,8 @@ jobs:
         run: rustup target add aarch64-linux-android x86_64-linux-android
       # The NDK version and archive sums pinned in scripts/install-ndk.sh
       # (docs/dev-guide/ci.md). The runner image has its own NDK, which this replaces.
+      - name: install-ndk self-test
+        run: bash scripts/install-ndk.sh --self-test
       - name: Install Android NDK
         run: |
           ndk=$(PREFIX="$RUNNER_TEMP/ndk" bash scripts/install-ndk.sh | tail -n 1)
