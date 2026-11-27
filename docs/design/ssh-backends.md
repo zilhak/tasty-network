@@ -155,7 +155,7 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 | 새 필드 `ssh: Option<SshEntryInfo>` | `SshEntryInfo { backend: SelectedBackend, resolved: Option<ResolvedTarget>, config_notes: Vec<ConfigNote>, session_id: Option<u64> }`. SSH를 띄운 쪽 항목만 `Some`이다. 받는 쪽 `ssh_inbound`와 P2P 항목은 `None`이다(루프백으로 받은 TCP라 백엔드를 모른다) | 백엔드를 고른 직후, 포트 발견과 터널보다 먼저 채운다 |
 
 - 실패한 시도: 고르지 못했거나(`NotFound`) 설정 해석이 거부되면(`Refused`) 항목은 네트워크에 나가기 전에 `disconnected`로 끝난다. 원인은 `ssh_backend_unavailable`·`ssh_config_refused`이고, `ssh` 필드에 이유·본 경로·거부한 지시어가 남는다. 포트 발견이나 터널이 실패한 항목도 `ssh` 필드는 그 시도의 선택을 그대로 갖는다.
-- `session_id`는 [SSH 세션 목록](#ssh-세션-목록)의 세션 번호다(커넥터 안에서 1부터). 내장은 SSH 세션 하나, 시스템은 `ssh` 자식 하나가 세션 하나다. 같은 공유 키의 터널이 세션을 다시 열면 바뀐다. 1단계(커넥터 전)에는 `None`이다.
+- `session_id`는 [SSH 세션 목록](#ssh-세션-목록)의 세션 번호다(커넥터 안에서 1부터). 내장은 SSH 세션 하나, 시스템은 `ssh` 자식 하나가 세션 하나다. 같은 공유 키의 터널이 세션을 다시 열면 바뀐다. 터널 항목의 `session_id`는 그 터널이 쓰는 세션(내장은 터널 채널을 연 세션, 시스템은 `ssh -N` 자식)이 열린 때 채운다. 포트 발견 세션은 터널 세션과 다를 수 있으므로(시스템은 늘 다른 자식이다) 그 번호는 이 필드에 넣지 않는다. 그래서 `ssh` 필드가 채워진 뒤 터널 세션이 열리기 전(포트 발견 중, 세션 전에 실패한 시도)에는 `None`이다.
 - 1단계(내장 전)에는 이 필드가 없다. 2단계에서 [전송 추상화](transport.md#필드)의 필드 표에 이 행을 더한다.
 
 ## 옵션 적용 순서
@@ -167,7 +167,7 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 | 1 | 런처 고정 | `BatchMode=no` | `forced` |
 | 2 | 설정값 | `ServerAliveInterval`·`ServerAliveCountMax`(`ssh.server_alive_*`) | `setting:<키>` |
 | 3 | 확인 모드 | `with_verify`면 `StrictHostKeyChecking=accept-new` | `forced` |
-| 4 | 터널 고정 | `ExitOnForwardFailure=yes`, `ControlMaster=no`, `ControlPath=none`, `ClearAllForwardings=no`와 fork 금지 옵션(`tunnel.rs:91`) | `forced` |
+| 4 | 용도 고정 | 세션 종류: 터널 `-N`, SFTP `-s`, 포트 발견·exec `-o SessionType=default`(아래 8.7 미만 처리). 세션 공유 끄기 `ControlMaster=no`·`ControlPath=none`(모든 용도). 터널만: `ExitOnForwardFailure=yes`, `ClearAllForwardings=no`와 fork 금지 옵션(`tunnel.rs:91`) | `forced` |
 | 5 | 대상 | `SshTarget`의 포트(`-p`), 키 파일(`-i`) | `target` |
 | 6 | 대상 | `SshTarget.extra_options` | `target` |
 | 7 | 설정값 | `ssh.overrides`(`지시어=값` 목록) | `override` |
@@ -176,10 +176,12 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 | 10 | 시스템 설정 파일 | `/etc/ssh/ssh_config` 등 | `file:<경로>:<줄>` |
 | 11 | OpenSSH 기본값 | `fill_default_options`(`readconf.c:2860`)의 값 | `default` |
 
-- 1~4·6·8은 지금의 `push_common_opts` 순서(`tasty-net-ssh/src/lib.rs:126`–`:170`)와 같다. 바뀌는 것은 7(`ssh.overrides`)이 더해지는 것뿐이다. 대상 옵션이 전역 덮어쓰기를 이기고, 덮어쓰기가 `ssh.connect_timeout`을 이긴다.
+- 1~3·6·8과 4의 `-o` 옵션은 지금의 `push_common_opts` 순서(`tasty-net-ssh/src/lib.rs:126`–`:170`)와 같다. 바뀌는 것은 7(`ssh.overrides`)이 더해지는 것과 세션 종류 플래그의 자리다. 지금 터널은 `-N`을 대상 옵션 뒤에 둔다(`spawn.rs:146`–`:157`이 `push_common_opts` 다음에 플래그를 붙인다). OpenSSH는 `-N`·`-s`를 읽을 때 이미 다른 세션 종류가 정해져 있으면 실패하고(`ssh.c:1030`–`:1033`·`:1048`–`:1051`), `-o`는 첫 값이 이긴다. 그래서 대상 옵션에 `SessionType=subsystem`이 있으면 지금 터널은 `Cannot specify -N with -s/SessionType`로 끝난다. 2단계는 세 용도의 세션 종류 플래그·옵션을 4의 자리(대상 옵션과 `ssh.overrides` 앞)로 옮긴다. 그러면 뒤의 `SessionType`은 첫 값에 져서 쓰이지 않는다(OpenSSH 9.6p1의 `ssh -G`로 확인: `-s -o SessionType=none`은 `sessiontype subsystem`, `-o SessionType=none -s`는 그 오류). 대상 옵션이 전역 덮어쓰기를 이기고, 덮어쓰기가 `ssh.connect_timeout`을 이긴다.
+- 대상 옵션·`ssh.overrides`·설정 파일의 `SessionType`은 두 백엔드 모두 쓰이지 않고, 용도의 값과 다르면 `ConfigNote`(`shown`)로 남는다. 거절하지 않는 이유: 무시해도 보안이 약해지지 않고, OpenSSH도 같은 인자 순서에서 같은 값을 쓴다.
+- OpenSSH 8.7 미만: `SessionType`은 8.7p1에서 생겼다(8.6p1 `readconf.c`에 `sessiontype` 0건, 8.7p1 `:301`). 그 판은 `-o SessionType=default`를 `command-line: line 0: Bad configuration option: sessiontype`으로 거절하고 끝난다. 시스템 백엔드는 포트 발견·exec에서 이 줄을 보면 그 옵션 없이 한 번 다시 실행하고, 다시 실행이 그 줄 없이 끝났을 때만 런처에 "모름"을 기억한다. 터널의 `ForkAfterAuthentication` 처리(`tunnel.rs:172`–`:184`, `listener.rs:53` `is_fork_option_refusal`)와 같은 방식이다. 그 판에는 `SessionType`도 `Match sessiontype`도 없으므로 옵션 없이 실행해도 세션 종류가 바뀌지 않는다. 포트 발견은 같은 명령을 두 번 실행해도 되는 읽기 명령이다. exec는 원격 명령이 시작되기 전(옵션 해석 단계)에 끝난 경우만 다시 실행하므로 앱 명령이 두 번 돌지 않는다.
 - `with_verify`일 때만 3이 먼저 들어가므로 대상 옵션·`ssh.overrides`·설정 파일이 `StrictHostKeyChecking`을 약하게 만들 수 없다. `with_verify`가 없으면 시스템 백엔드는 호스트 키 옵션을 하나도 넣지 않는다(`lib.rs:117`·`:146`, 시험 `:860` `without_verify_no_host_key_option_is_added`). 그때는 대상 옵션·설정 파일·OpenSSH 기본(`ask`)이 정하고, 대상 옵션의 `StrictHostKeyChecking=no`는 `ssh`에 그대로 간다. 이것은 지금의 데스크톱 동작이고 대상 옵션은 소비자(tasty) 사용자의 값이라 바꾸지 않는다.
-- 라이브러리 설정값으로는 호스트 키 확인을 약하게 만들 수 없다(사용자 결정 "호스트 키 확인을 건너뛰는 설정값은 두지 않는다"). 그래서 `SshSettings::set("ssh.overrides", …)`는 [지시어 분류](#지시어-분류)의 "보안 관련 미구현"과 "모르는 지시어"에 드는 항목을 두 백엔드 모두에서 `SettingsError`로 거절한다(예: `StrictHostKeyChecking=no`, `NoHostAuthenticationForLocalhost=yes`, `ProxyCommand=…`).
-- 내장 백엔드는 `StrictHostKeyChecking no`가 어디서 오든(대상 옵션 포함) 거부한다. 같은 대상 옵션으로 시스템 백엔드는 확인 없이 붙고 내장 백엔드는 거부하는 차이가 남는다. 두 백엔드가 갈리는 경우로 둔다.
+- 라이브러리 설정값으로는 호스트 키 확인을 약하게 만들 수 없다(사용자 결정 "호스트 키 확인을 건너뛰는 설정값은 두지 않는다"). 그래서 `SshSettings::set("ssh.overrides", …)`는 두 백엔드 모두에서 `SettingsError`로 거절한다: [지시어 분류](#지시어-분류)의 "보안 관련 미구현"과 "모르는 지시어"에 드는 항목(예: `ProxyCommand=…`), 그리고 호스트 키 확인을 끄는 값(`StrictHostKeyChecking=no`·`off`, `NoHostAuthenticationForLocalhost=yes`). 뒤의 둘은 파일·대상 옵션에서 읽으면 표시만 하는 값이지만(아래), 라이브러리 설정값으로는 받지 않는다. 설정값이 확인을 끄는 길이 되지 않게 하기 위해서다.
+- 내장 백엔드는 설정 파일·대상 옵션의 `StrictHostKeyChecking no`·`off`와 `NoHostAuthenticationForLocalhost yes`를 적용하지 않고 호스트 키 확인을 그대로 한다. 그 값은 적히지 않은 것처럼 다루므로 확인 모드는 다음 값(앞의 3이 있으면 `accept-new`, 없으면 그다음 출처나 OpenSSH 기본 `ask`)이 정한다. `ConfigNote`(`shown`)에 "호스트 키 확인을 끄는 값은 적용하지 않고 확인을 계속한다"를 남긴다. 같은 대상 옵션으로 시스템 백엔드는 확인 없이 붙고 내장 백엔드는 확인하는 차이가 남는다. 두 백엔드가 갈리는 경우로 둔다.
 - 누적 지시어(`IdentityFile`·`CertificateFile`·`SendEnv`·`SetEnv`·`LocalForward` 등)는 첫 값 우선이 아니라 순서대로 쌓인다(OpenSSH와 같다).
 - `ConnectionAttempts`·`NumberOfPasswordPrompts`처럼 설정값으로 두지 않은 동작값은 지시어로만 정해지고, 없으면 OpenSSH 기본값(`ConnectionAttempts` 1 `readconf.c:2922`, `NumberOfPasswordPrompts` 3 `:2924`)이다. 연결 정보의 `resolved.sources`에서 출처와 함께 보인다. 라이브러리 설정값 규칙의 "조회"는 이 경로로 채운다.
 - 점프 호스트: OpenSSH는 `ProxyJump`를 `ssh -l <사용자> -p <포트> -J <나머지> -F <설정 파일> -W '[%h]:%p' <홉>` 명령으로 바꾼다(`ssh.c:1278`–`:1324`). 홉에는 `-o` 옵션이 하나도 넘어가지 않는다. 내장 백엔드도 같다: 홉은 같은 설정 파일로 자기 `Host`·`Match`를 해석하고, `ProxyJump` 문자열의 사용자·포트만 받는다. 위 1~8은 최종 목적지에만 적용된다. 홉의 해석 결과는 `resolved.proxy_jump`에 홉마다 있다. 같은 홉·포트·사용자가 목적지와 같으면 OpenSSH처럼 `jumphost loop`로 끝낸다(`ssh.c:1289`–`:1291`).
@@ -190,14 +192,14 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 
 OpenSSH의 `Match command`·`Match sessiontype`은 용도와 명령에 따라 호스트·사용자·키를 바꿀 수 있다(`readconf.c:850`–`:869`). 그래서 해석은 연결 전에 용도마다 한다.
 
-세션 종류는 두 백엔드 모두 용도가 첫 값으로 정한다. OpenSSH에서 `-N`·`-s`는 명령행에서 `SessionType`을 정하므로(`ssh.c:1030`–`:1033`·`:1048`–`:1051`) 설정 파일의 `SessionType`이 이기지 못하지만, 명령만 준 `ssh <대상> <명령>`에서는 설정 파일의 `SessionType none`이 이겨 명령을 실행하지 않고 `Match sessiontype none`이 참이 된다. 그래서 시스템 백엔드는 포트 발견·exec 자식에 `-o SessionType=default`를 대상 옵션 앞에 넣고, 내장 백엔드도 같은 첫 값으로 해석한다. 그러면 `Match sessiontype`의 판정 값이 아래 표와 같다.
+세션 종류는 두 백엔드 모두 용도가 첫 값으로 정한다. OpenSSH에서 `-N`·`-s`는 명령행에서 `SessionType`을 정하므로(`ssh.c:1030`–`:1033`·`:1048`–`:1051`) 설정 파일의 `SessionType`이 이기지 못하지만, 명령만 준 `ssh <대상> <명령>`에서는 설정 파일의 `SessionType none`이 이겨 명령을 실행하지 않고 `Match sessiontype none`이 참이 된다. 그래서 시스템 백엔드는 세 용도의 세션 종류(`-N`, `-s`, `-o SessionType=default`)를 대상 옵션과 `ssh.overrides`보다 앞에 넣고([옵션 적용 순서](#옵션-적용-순서) 4), 내장 백엔드도 같은 첫 값으로 해석한다. 그러면 `Match sessiontype`의 판정 값이 아래 표와 같다.
 
 | 용도 | `sessiontype` | `command`(Match의 판정 값) | OpenSSH의 같은 명령 |
 |---|---|---|---|
-| 터널 | `none` | 빈 값 | `ssh -N -L …` |
-| 포트 발견 | `exec` | 발견 명령 문자열 | `ssh -o SessionType=default <대상> <명령>` |
-| exec | `exec` | 앱이 준 명령 문자열 | `ssh -o SessionType=default <대상> -- <명령>` |
-| SFTP | `subsystem` | `sftp` | `ssh -s <대상> sftp` |
+| 터널 | `none` | 빈 값 | `ssh -N <대상 옵션> -L … <대상>` |
+| 포트 발견 | `exec` | 발견 명령 문자열 | `ssh -o SessionType=default <대상 옵션> <대상> <명령>` |
+| exec | `exec` | 앱이 준 명령 문자열 | `ssh -o SessionType=default <대상 옵션> <대상> -- <명령>` |
+| SFTP | `subsystem` | `sftp` | `ssh -s <대상 옵션> <대상> sftp` |
 
 - exec의 명령은 비어 있으면 안 된다. 빈 명령은 OpenSSH에서 셸 세션(`sessiontype` `shell`)이 되지만 이 API는 대화형 셸을 열지 않으므로 `exec`가 연결 전에 `ExecError::EmptyCommand`로 거절한다.
 - 내장 백엔드의 세션 키는 해석 결과 가운데 연결을 정하는 값의 묶음이다: 실제 호스트·포트·사용자, `ProxyJump` 홉별 해석 결과, 호스트 키 판정 값(`HostKeyAlias`·known_hosts 파일·`StrictHostKeyChecking`·`CheckHostIP`·`RevokedHostKeys`·`RequiredRSASize`), 알고리즘 목록, 인증 값(`IdentityFile`·`CertificateFile`·`IdentitiesOnly`·`IdentityAgent`·`PreferredAuthentications`와 방법별 켜기, 대상에 준 메모리 키의 공개키 지문 목록([android 요구](#android-요구의-자리) #2)), `BindAddress`·`AddressFamily`·`ConnectTimeout`·`ServerAlive*`·`RekeyLimit`. 키가 같은 열린 세션이 있으면 그 위에 채널을 연다. 다르면 새 세션을 연다. 메모리 키가 다른 두 대상은 서버·사용자가 같아도 세션을 나누지 않는다(한 키의 권한으로 다른 키의 호출이 돌지 않게).
@@ -234,12 +236,12 @@ russh 0.65.4는 받은 데이터만큼 수신 창을 먼저 늘리고(`client/en
 
 | 용도 | 자식 명령 | 결과 |
 |---|---|---|
-| 터널 | 지금 그대로 `ssh -N -L …` | 지금과 같다 |
-| 포트 발견 | `ssh <공통 옵션> -o SessionType=default <대상> <명령>`. 지금 명령에 세션 공유 끄기 두 옵션과 세션 종류 고정이 더해진다 | 지금과 같다 |
-| exec | `ssh <공통 옵션> -o SessionType=default <대상> -- <명령>`. 표준 입출력은 자식의 파이프 | 자식의 종료 코드가 0~254면 `ExitStatus::Code(n)`. 255는 원격 명령의 255와 ssh 자체 오류를 가를 수 없어 `ExitStatus::Ambiguous255`(stderr를 함께 준다). OpenSSH 클라이언트는 `exit-signal`을 처리하지 않아 신호 종료도 255로 끝나므로 신호 이름을 주지 못한다 |
-| SFTP | `ssh <공통 옵션> -s <대상> sftp`. 자식의 stdin·stdout을 tokio 쪽 스트림으로 잇고(파이프를 읽고 쓰는 스레드 둘, tokio `process` feature는 쓰지 않는다) 그 위에 russh-sftp `SftpSession::new_with_config(stream, config)` | 내장과 같은 `SftpClient` |
+| 터널 | `ssh <1~3> -N <4의 -o> <5~8> -L … <대상>`. 지금 명령에서 `-N`의 자리만 대상 옵션 앞으로 옮긴다 | 지금과 같다(대상 옵션에 `SessionType`이 있던 경우만 실패하지 않게 된다) |
+| 포트 발견 | `ssh <1~3> -o SessionType=default <4의 나머지> <5~8> <대상> <명령>`. 지금 명령에 세션 공유 끄기 두 옵션과 세션 종류 고정이 더해진다. 8.7 미만이면 `SessionType` 없이 다시 실행 | 지금과 같다 |
+| exec | `ssh <1~3> -o SessionType=default <4의 나머지> <5~8> <대상> -- <명령>`. 표준 입출력은 자식의 파이프. 8.7 미만 처리는 포트 발견과 같다 | 자식의 종료 코드가 0~254면 `ExitStatus::Code(n)`. 255는 원격 명령의 255와 ssh 자체 오류를 가를 수 없어 `ExitStatus::Ambiguous255`(stderr를 함께 준다). OpenSSH 클라이언트는 `exit-signal`을 처리하지 않아 신호 종료도 255로 끝나므로 신호 이름을 주지 못한다 |
+| SFTP | `ssh <1~3> -s <4의 나머지> <5~8> -E <임시 파일> <대상> sftp`(`-E`는 아래 오류 분류). 자식의 stdin·stdout을 tokio 쪽 스트림으로 잇고(파이프를 읽고 쓰는 스레드 둘, tokio `process` feature는 쓰지 않는다) 그 위에 russh-sftp `SftpSession::new_with_config(stream, config)` | 내장과 같은 `SftpClient` |
 
-- 공통 옵션은 [옵션 적용 순서](#옵션-적용-순서)의 1~3·5~8과 세션 공유 끄기 `ControlMaster=no`·`ControlPath=none`이다. 두 옵션은 터널 고정 옵션(4)과 같은 자리(대상 옵션 앞)에 넣는다. 그래서 사용자 설정의 `ControlMaster auto`·`ControlPath`가 있어도 기존 다중화 소켓을 쓰지 않는다. 기존 터널 코드가 두 옵션을 함께 두는 근거와 같다(`tunnel.rs:83`–`:96`: 다중화된 연결은 이 자식이 아니라 마스터 프로세스의 것이 된다). 지금의 포트 발견 명령에는 두 옵션이 없다(`discovery.rs`에 `Control` 0건, 대조: `tunnel.rs`의 `TUNNEL_FORCED_OPTIONS`(`:91`)에는 둘 다 있다). 내장 백엔드 작업이 더한다.
+- 위 표의 번호는 [옵션 적용 순서](#옵션-적용-순서)의 번호다. 4의 세션 종류와 세션 공유 끄기 `ControlMaster=no`·`ControlPath=none`은 대상 옵션 앞에 넣는다. 그래서 사용자 설정의 `ControlMaster auto`·`ControlPath`가 있어도 기존 다중화 소켓을 쓰지 않는다. 기존 터널 코드가 두 옵션을 함께 두는 근거와 같다(`tunnel.rs:83`–`:96`: 다중화된 연결은 이 자식이 아니라 마스터 프로세스의 것이 된다). 지금의 포트 발견 명령에는 두 옵션이 없다(`discovery.rs`에 `Control` 0건, 대조: `tunnel.rs`의 `TUNNEL_FORCED_OPTIONS`(`:91`)에는 둘 다 있다). 내장 백엔드 작업이 더한다.
 - 그래서 기능마다 SSH 세션과 인증이 따로다. 키에 passphrase가 있으면 기능마다 묻는다(agent가 있으면 묻지 않는다). 자식이 끝나면 세션도 끝난다. 내장 백엔드와 다른 점으로 둔다.
 - 4의 나머지 터널 고정 옵션(`ExitOnForwardFailure`·`ClearAllForwardings`·fork 금지)은 터널 자식에만 붙인다.
 - russh-sftp는 russh에 의존하지 않고 아무 `AsyncRead + AsyncWrite` 스트림을 받는다(아래 [의존 사실](#의존-사실)). 그래서 두 백엔드가 같은 SFTP 구현과 같은 설정값을 쓴다: 두 백엔드 모두 `SftpSession::new`(기본 `Config`를 쓴다, `client/session.rs:39`–`:44`)가 아니라 `new_with_config`에 `sftp.*`로 만든 `Config`를 준다. 시스템 백엔드의 SFTP는 `system-ssh`와 `embedded-ssh`가 함께 켜진 빌드에서만 russh-sftp가 들어온다. `system-ssh`만 켠 1단계 빌드에는 SFTP가 없다. 2단계 기본 빌드는 둘 다 켜므로 데스크톱 소비자는 두 백엔드에서 SFTP를 쓴다. 그래서 `SftpClient`는 `embedded-ssh`가 켜진 빌드에만 있다([공통 항목과 백엔드 전용 항목](#공통-항목과-백엔드-전용-항목)).
@@ -282,7 +284,8 @@ SshConnector::inspect(&self, target: Option<&SshTarget>, purpose: SshPurpose) ->
 enum SshPurpose { Tunnel, Discovery, Exec { command }, Sftp }
 struct SshInspection {
     settings: Vec<Setting>,                              // {key, value, source}
-    backend: Result<SelectedBackend, SshBackendError>,   // 대상이 없으면 런처 프로그램 기준
+    backend: Result<SelectedBackend, SshBackendError>,   // 대상이 없으면 런처 프로그램 기준. 선택 규칙의 결과 그대로
+    resolver: ResolverState,                             // embedded | embedded_preview | not_built. 대상이 없어도 늘 있다
     files: Vec<ConfigFileReport>,                        // 읽은 파일마다 {path, loaded | missing | refused{line, keyword}}
     file_notes: Vec<ConfigNote>,                         // 파일 단위 거부(모르는 지시어)와 OpenSSH가 버린 지시어
     target: Option<TargetInspection>,                    // 대상을 주면: {resolved, notes, refusal}
@@ -293,10 +296,10 @@ struct SshInspection {
 - 대상을 주면 그 용도로 해석한 결과(`resolved`, 대상 단위 `ConfigNote`, 거부 사유)를 싣는다. 해석이 거부되면 `refusal`에 지시어·파일·줄이 있고 `resolved`는 거부 전까지의 값이다.
 - 빌드 조합마다 싣는 것이 다르다. 해석기(`tasty-net-ssh-config`)는 `embedded-ssh`로만 들어오기 때문이다.
 
-  | 빌드 | `settings`·`backend` | `files`·`file_notes`·`target` |
+  | 빌드 | `settings`·`backend`·`resolver` | `files`·`file_notes`·`target` |
   |---|---|---|
-  | `embedded-ssh`가 있음(2단계 기본, 모바일) | 싣는다 | 싣는다. 시스템 백엔드를 고른 경우에도 내장 해석기로 같은 진단을 싣고, 실제 연결은 `ssh`가 하므로 `target.resolved`는 참고 값이라고 표시한다(`resolver: embedded_preview`) |
-  | `system-ssh`만 | 싣는다(백엔드는 늘 시스템, 이유와 찾은 경로) | 비어 있고 `resolver: not_built`. 지시어 분류는 내장 백엔드의 것이라 이 빌드에는 표시할 미지원 지시어가 없다. 시스템 `ssh -G`를 불러 진단을 채우지 않는다(`inspect`는 다른 프로그램을 실행하지 않는다) |
+  | `embedded-ssh`가 있음(2단계 기본, 모바일) | 싣는다. `resolver`는 내장을 고르면 `embedded`, 시스템을 고르면 `embedded_preview` | 싣는다. 시스템 백엔드를 고른 경우에도 내장 해석기로 같은 진단을 싣고, 실제 연결은 `ssh`가 하므로 `target.resolved`는 참고 값이다 |
+  | `system-ssh`만 | 싣는다. `backend`는 [선택 규칙](#선택-규칙)의 결과 그대로다: 찾으면 `Ok`(시스템, 이유와 찾은 경로), 못 찾으면 `Err(NotFound{searched})`. `resolver`는 `not_built` | 비어 있다(`files`·`file_notes`는 빈 목록, `target`은 대상을 주어도 `None`). 지시어 분류는 내장 백엔드의 것이라 이 빌드에는 표시할 미지원 지시어가 없다. 시스템 `ssh -G`를 불러 진단을 채우지 않는다(`inspect`는 다른 프로그램을 실행하지 않는다) |
 - FFI는 이 구조를 그대로 옮겨 낸다([모바일 바인딩 층](mobile.md#바인딩-층)).
 
 ## OpenSSH 해석 이식 크레이트
@@ -393,7 +396,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 
 거부와 표시를 가르는 기준(director 2881이 추가 결정 4의 "보안 관련"을 다듬었다): 묻는 것은 "그 값을 구현하지 않고 무시하면 무엇이 되는가"다.
 
-- 거부: 무시하면 보안이 약해지는 값. 호스트 키 확인과 그 근거(known_hosts, 폐기 목록, DNS 지문), 알고리즘 허용 범위, 인증서 신뢰, 사용자가 요구한 인증 방식의 강도다. 또 무시하면 다른 호스트나 다른 경로로 연결되는 값(대상 이름 바꾸기, 프록시, 나가는 인터페이스, 블록 적용을 판정할 수 없는 `Match`)도 거부한다. 사용자가 정하지 않은 상대에게 연결하고 인증 정보를 내밀게 되기 때문이다.
+- 거부: 무시하면 보안이 약해지는 값. 호스트 키 확인과 그 근거(known_hosts, 폐기 목록, DNS 지문), 알고리즘 허용 범위, 인증서 신뢰, 사용자가 요구한 인증 방식의 강도다. 또 무시하면 다른 호스트나 다른 경로로 연결되는 값(대상 이름 바꾸기, 프록시, 나가는 인터페이스, 블록 적용을 판정할 수 없는 `Match`)도 거부한다. 이 둘째 종류는 director 2881의 예(호스트 키·known_hosts·알고리즘·인증서) 밖으로 넓힌 것이다. 근거: 연결 상대나 경로가 바뀌면 사용자가 정한 대상을 확인한다는 호스트 키 확인이 뜻을 잃는다(바뀐 상대의 키를 그 상대로 확인할 뿐이다). 사용자가 정하지 않은 상대에게 인증 정보를 내밀게 되는 것도 같다.
 - 표시하고 계속: 무시하면 그 기능을 쓰지 않을 뿐인 값. 제공하지 않는 인증 방법이나 키 소스를 켜는 값(GSSAPI, hostbased, PKCS#11, 보안 키 제공자)은 그 방법을 시도하지 않고 다음 인증 방법으로 넘어간다. OpenSSH도 그 방법이 실패하면 다음으로 넘어가므로 결과는 그 방법이 실패한 OpenSSH와 같다. 상대에게 기능을 넘기는 값(agent·X11·포워딩·자격 위임), 연결 뒤 로컬 명령, 표시·로그 값도 같다.
 - 근거 사례: Fedora·RHEL 계열은 시스템 설정 `/etc/ssh/ssh_config.d/50-redhat.conf`에서 `GSSAPIAuthentication yes`를 켠다. 이것을 거부하면 그런 호스트에서 내장 백엔드의 모든 연결이 막힌다.
 
@@ -418,7 +421,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `IdentityFile`(`IdentityFile2`), `IdentitiesOnly`, `CertificateFile`, `IdentityAgent` | |
 | `PreferredAuthentications`, `PasswordAuthentication`, `KbdInteractiveAuthentication`(`ChallengeResponseAuthentication`·`SkeyAuthentication`·`TisAuthentication`), `KbdInteractiveDevices`, `NumberOfPasswordPrompts`, `BatchMode` | `BatchMode yes`면 `SshPrompt`를 부르지 않는다 |
 | `PubkeyAuthentication`(`DSAAuthentication`) | `no`·`unbound`는 같은 뜻으로 지원한다. `yes`(기본)는 OpenSSH에서 서버가 주면 host-bound 인증을 쓰지만 russh 0.65.4에는 host-bound 인증이 없다(`publickey-hostbound` 검색 0건, 대조: 같은 소스에서 `ext-info-c` 1건). 그래서 `yes`는 unbound로 인증한다. 적어 둔 `yes`에만 `shown`을 남긴다. `host-bound`는 거부 |
-| `StrictHostKeyChecking` | `yes`, `ask`(`SshPrompt`가 없거나 `BatchMode yes`면 `yes`), `accept-new`. `no`·`off`는 거부 |
+| `StrictHostKeyChecking` | `yes`, `ask`(`SshPrompt`가 없거나 `BatchMode yes`면 `yes`), `accept-new`. 설정 파일·대상 옵션의 `no`·`off`는 적용하지 않고 표시한다(아래 표). `ssh.overrides`로는 받지 않는다([옵션 적용 순서](#옵션-적용-순서)) |
 | `UserKnownHostsFile`, `GlobalKnownHostsFile`, `CheckHostIP`, `HashKnownHosts` | |
 | `RevokedHostKeys` | 공개키 목록 파일. 파일이 KRL 바이너리면 거부. 파일이 없거나 읽지 못하면 OpenSSH처럼 호스트 인증을 실패시킨다(`sshconnect.c:1544`–`:1563`) |
 | `RequiredRSASize` | 기본 1024(`readconf.c:3032`–`:3033`, `SSH_RSA_MINIMUM_MODULUS_SIZE`). 그보다 작은 RSA 호스트 키는 연결을 끊고, 작은 RSA 사용자 키는 건너뛴다(`sshconnect2.c:96`·`:1593`·`:1847`) |
@@ -430,17 +433,16 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `SendEnv`, `SetEnv` | exec·포트 발견 채널의 `env` 요청 |
 | `RemoteCommand` | 명령이 있는 용도(포트 발견·exec·SFTP)에 `RemoteCommand`(`none` 아님)도 적용되면 OpenSSH처럼 연결 전에 실패한다(`ssh.c:1363`–`:1364`, `Cannot execute command-line and remote command`). SFTP도 같다: `ssh -s <대상> sftp`는 `sftp`를 명령 버퍼에 넣는다(`ssh.c:1150`–`:1156`). 명령이 없는 터널(`-N`)에서는 OpenSSH도 실패하지 않고 실행하지도 않는다 |
 | `CanonicalizeHostname no`, `CanonicalDomains`, `CanonicalizeFallbackLocal`, `CanonicalizeMaxDots`, `CanonicalizePermittedCNAMEs` | 뒤의 넷은 `CanonicalizeHostname`이 켜졌을 때만 이름을 바꾼다(켜는 값은 거부). `CanonicalizePermittedCNAMEs`가 있으면 OpenSSH는 프록시 없는 연결에서 이름을 먼저 풀지만 `CanonicalizeHostname no`면 CNAME을 따라가지 않는다(`ssh.c:1229`–`:1240`이 부르는 `check_follow_cname`의 `:383`). 풀지 못하면 OpenSSH는 255로 끝나고, 내장 백엔드는 같은 이름으로 연결하다 같은 이름 풀기 실패로 끝난다 |
-| `NoHostAuthenticationForLocalhost no` | `yes`는 거부 |
+| `NoHostAuthenticationForLocalhost no` | 설정 파일·대상 옵션의 `yes`는 적용하지 않고 표시한다. `ssh.overrides`로는 받지 않는다 |
 | `VerifyHostKeyDNS no` | `yes`·`ask`는 거부 |
 | `SessionType` | 두 백엔드 모두 용도가 첫 값으로 정하므로 설정 파일의 값은 이기지 못한다([용도마다 해석](#용도마다-해석하고-같을-때만-세션을-나눈다)). 설정에 적힌 값과 용도의 값이 다르면 `shown`을 남긴다 |
+| `ChannelTimeout` | 이 레포가 여는 채널 종류의 양수 유휴 제한은 지원한다: `session`(exec·포트 발견·SFTP 채널), `direct-tcpip`(터널 채널), `global`(세션의 모든 채널). 그 시간 동안 데이터가 오가지 않은 채널을 닫는다(OpenSSH `channel_add_timeout`, `ssh.c:1693`–`:1706`). 이 레포가 열지 않는 종류(`agent-connection`, `direct-streamlocal@openssh.com`, `forwarded-*`, `tun-connection`, `x11-connection`)와 꺼진 값(`0`·`none`)은 쓰일 곳이 없어 표시만 한다. 거부가 아니라 지원인 이유: 무시하면 사용자가 닫도록 정한 채널이 열린 채 남아 제한이 약해지는데, 채널은 이 레포가 소유하므로 타이머로 같은 동작을 낼 수 있다. 터널 위 링크는 heartbeat가 오가므로 보통 걸리지 않는다. 시스템 백엔드는 OpenSSH가 한다 |
 | `RefuseConnection` | OpenSSH처럼 그 메시지로 연결을 끝낸다 |
 
 ### 보안 관련 미구현 (적용되면 거부)
 
 | 지시어·값 | 이유 |
 |---|---|
-| `StrictHostKeyChecking no`·`off` | 호스트 키 확인을 건너뛰는 동작은 두지 않는다(사용자 결정). 무시하고 확인하면 사용자가 적은 값과 다르게 동작하므로 조용히 바꾸지 않고 거부로 알린다 |
-| `NoHostAuthenticationForLocalhost yes` | localhost의 호스트 키 확인을 건너뛴다(`sshconnect.c:1013`). 위와 같은 이유 |
 | `VerifyHostKeyDNS yes`·`ask` | 호스트 키를 믿는 근거(DNS SSHFP)다. 무시하면 DNS 지문과 맞지 않는 키를 `accept-new`가 받을 수 있다 |
 | `KnownHostsCommand` | 다른 프로그램을 실행해야 하고, 빠지면 `accept-new`가 다른 키를 받을 수 있다 |
 | `RevokedHostKeys`가 KRL 파일 | 폐기 목록을 읽지 못하면 폐기된 키를 받을 수 있다 |
@@ -461,7 +463,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `ControlMaster`, `ControlPath`, `ControlPersist` | 세션을 프로세스 밖과 공유하지 않는다 |
 | `ForwardAgent`, `AddKeysToAgent` | agent를 넘기지 않고 키를 넣지 않는다 |
 | `ForwardX11`, `ForwardX11Trusted`, `ForwardX11Timeout`, `XAuthLocation`, `Tunnel`, `TunnelDevice`, `StreamLocalBindMask`, `StreamLocalBindUnlink` | 해당 기능이 없다 |
-| `RequestTTY`, `StdinNull`, `ForkAfterAuthentication`, `EscapeChar`, `EnableEscapeCommandline`, `ObscureKeystrokeTiming`, `ChannelTimeout` | 대화형 세션이 없다 |
+| `RequestTTY`, `StdinNull`, `ForkAfterAuthentication`, `EscapeChar`, `EnableEscapeCommandline`, `ObscureKeystrokeTiming` | 대화형 세션이 없다 |
 | `PermitLocalCommand`, `LocalCommand` | 연결 뒤 로컬 명령을 실행하지 않는다. 무시해도 보안이 약해지지 않는다 |
 | `GSSAPIAuthentication`, `GSSAPIDelegateCredentials` | GSSAPI 인증을 시도하지 않고 다음 인증 방법으로 넘어간다. russh에 GSSAPI 구현이 없다. `yes`일 때만 표시한다 |
 | `HostbasedAuthentication` | hostbased 인증을 시도하지 않는다(`ssh-keysign` 프로그램이 필요하다). `yes`일 때만 표시한다 |
@@ -469,6 +471,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `ProxyUseFdpass` | `ProxyCommand`가 거부되므로 쓰일 곳이 없다 |
 | `Compression yes` | 압축 없이 연결한다(russh `flate2` feature를 켜지 않는다) |
 | `HostbasedAcceptedAlgorithms`(`HostbasedKeyTypes`), `EnableSSHKeysign` | hostbased 인증을 하지 않으므로 쓰일 곳이 없다 |
+| `StrictHostKeyChecking no`·`off`, `NoHostAuthenticationForLocalhost yes`(설정 파일·대상 옵션) | 호스트 키 확인을 건너뛰는 동작은 두지 않는다(사용자 결정). 무시하면 확인이 계속되므로 보안이 약해지지 않는다. 값이 적히지 않은 것처럼 다음 값으로 확인하고, 노트에 "호스트 키 확인을 끄는 값은 적용하지 않고 확인을 계속한다"를 남긴다 |
 | `UpdateHostKeys` | known_hosts에 새 키를 더하지 않는다. 이 연결의 판정은 바뀌지 않는다 |
 | `LogLevel`, `LogVerbose`, `SyslogFacility`, `VisualHostKey`, `FingerprintHash`, `WarnWeakCrypto`, `VersionAddendum`, `IPQoS` | 출력·표시·패킷 표시 값이다 |
 
@@ -575,7 +578,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 - 판 확인: 시험이 먼저 `ssh -V`를 실행해 `OpenSSH_10.6p2`로 시작하는지 본다. 다르면 시험 전체가 실패하고 두 판을 찍는다(다른 판끼리의 차이를 이식 결함으로 잘못 보지 않게). 클라이언트가 없는 로컬 실행에서는 미실행으로 남기고 그 사실과 넣는 명령을 찍는다.
 - 고정: 모든 대조는 `ssh -F <fixture>/config -G <대상>`으로 한다. 시스템 설정은 `-F`가 읽지 않는다. known_hosts 대조는 `ssh-keygen -F <호스트> -f <fixture>/known_hosts`다. fixture는 `tasty-net-ssh-config/tests/fixtures/` 아래 파일이고 시험이 경로를 바꿔 쓰지 않는다.
 - 로컬 계정: OpenSSH는 로컬 사용자 이름과 홈을 환경 변수가 아니라 `getpwuid(getuid())`에서 얻는다(`ssh.c:664`, `~` 펼침 `misc.c:1276`–`:1325`, `%d`·`%u`·`Match localuser`·기본 사용자). 그래서 `HOME`·`USER`를 바꿔도 기준 클라이언트의 값은 고정되지 않는다. 시험은 실행 계정의 passwd 항목(이름·홈)을 읽어 이식 크레이트의 `embedded.local_user`·`embedded.home`에 같은 값을 주고, 기대값도 그 값으로 만든다. 읽는 방법은 [후속 작업](#후속-작업과-미정)이 정한다.
-- 상대 `Include`: `-F`로 준 파일의 상대 `Include`는 실제 계정의 `~/.ssh` 아래로 풀린다(`readconf.c:2094`–`:2108`, 사용자 설정으로 읽기 때문). 대조 fixture는 절대 경로 `Include`만 쓴다. 상대 경로 규칙은 주어진 홈으로 하는 단위 시험이 원본 규칙대로 본다. 실제 계정의 `~/.ssh`를 시험이 건드리지 않는다.
+- 상대 `Include`: `-F`로 준 파일의 상대 `Include`는 실제 계정의 `~/.ssh` 아래로 풀린다(`readconf.c:2094`–`:2108`, 사용자 설정으로 읽기 때문). 대조 fixture는 절대 경로 `Include`만 쓰고, 그 경로는 환경 변수로 적는다(예: `Include ${TASTY_FIXTURE_DIR}/sub.conf`). OpenSSH는 `Include` 인자의 토큰과 환경 변수를 경로 판정 전에 펼치므로(`readconf.c:2085`–`:2093`) fixture 파일을 고치지 않고 checkout 위치와 관계없이 같은 파일을 읽는다. 시험은 같은 값을 기준 클라이언트의 환경과 이식 크레이트에 준다. 상대 경로 규칙은 주어진 홈으로 하는 단위 시험이 원본 규칙대로 본다. 실제 계정의 `~/.ssh`를 시험이 건드리지 않는다.
 - 원격 빌드 머신에서 이 스크립트가 도는지는 이식 크레이트 작업이 처음 확인한다(빌드 도구: C 컴파일러, `make`, `autoreconf`, zlib·libcrypto 헤더).
 
 ### exec·SFTP 시험 서버
@@ -595,11 +598,14 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `ssh-keygen -F` 대조 | 같은 크레이트 `tests/known_hosts_matches_openssh.rs` | 해시·와일드카드·부정·`[호스트]:포트`·`@revoked`·`@cert-authority` 줄이 섞인 파일에서 `ssh-keygen -F <호스트> -f <파일>`이 찾는 줄과 이식 크레이트가 찾는 줄이 같다 |
 | 지시어 분류 | 같은 크레이트 단위 시험 | `keywords[]`의 132개 항목(이름 128개)을 원본 표로 시험 자료에 두고 모든 이름이 분류됐는지 본다. 별칭(`IdentityFile2`·`HostbasedKeyTypes`·`PubkeyAcceptedKeyTypes`·`ChallengeResponseAuthentication`·`KeepAlive`·`SmartcardDevice` 등)이 원래 지시어와 같은 처리를 받는다. 보안 관련 거부마다 거부, 표시마다 `shown`, 적지 않은 기본값에 노트 없음 |
 | 모르는 지시어 | 같은 크레이트 단위 시험과 기준 클라이언트 대조 | 기대값이 둘로 나뉜다. (1) 기준 클라이언트와 같아야 하는 것: 모르는 이름이 있으면 파일 전체 거부(적용되지 않는 `Host` 블록 안과, 적용되지 않는 블록의 `Include`가 읽는 파일 안도), 앞에서 적용된 `IgnoreUnknown`이 맞는 이름만 무시, 뒤에 오거나 적용되지 않는 블록의 `IgnoreUnknown`은 무시를 만들지 않음. 이 fixture에는 아는 이름의 보안 거부 값을 넣지 않고, `ssh -G` 종료 코드(0 또는 255)와 거부 여부를 맞춘다. (2) 이 레포만의 것: 아는 이름의 보안 거부(예: `IgnoreUnknown VerifyHostKeyDNS` 뒤의 `VerifyHostKeyDNS yes`)는 기준 클라이언트가 받아도 이 레포는 거부한다. 이 경우는 기준 대조가 아니라 기대값 "거부"를 적은 단위 시험이다. `ssh -G` 대조에는 해석 결과만 비교한다 |
-| `ssh.overrides` 거부 | `tasty-net-ssh` 단위 시험 | `StrictHostKeyChecking=no`·모르는 지시어를 `SshSettings::set`이 두 백엔드 모두에서 거절한다 |
+| `ssh.overrides` 거부 | `tasty-net-ssh` 단위 시험 | `StrictHostKeyChecking=no`·`off`, `NoHostAuthenticationForLocalhost=yes`, `ProxyCommand=…`, 모르는 지시어를 `SshSettings::set`이 두 백엔드 모두에서 거절한다 |
+| 확인 끄기 값의 표시 | `tasty-net-ssh-config`와 `tasty-net-ssh` 단위 시험 | 설정 파일·대상 옵션의 `StrictHostKeyChecking no`·`off`와 `NoHostAuthenticationForLocalhost yes`에서 내장 백엔드가 연결을 거부하지 않고, 모르는 호스트는 다음 값(`accept-new` 또는 `ask`→`yes`)대로 판정하고, 바뀐 키는 거절하고, 노트가 남는다. 기준 클라이언트 대조에서는 같은 fixture의 `ssh -G`가 `stricthostkeychecking false`를 내므로, 이 지시어의 해석 값은 대조하고 적용 여부는 이 레포의 기대값(확인 계속)으로 따로 본다 |
+| 세션 종류 고정 | `tasty-net-ssh` 단위 시험 | 대상 옵션·`ssh.overrides`·설정 파일에 `SessionType=none`·`subsystem`이 있어도 터널·포트 발견·exec·SFTP 자식 명령의 세션 종류 플래그·옵션이 대상 옵션 앞에 있고, 기준 클라이언트 `ssh -G`가 용도의 `sessiontype`을 낸다. 내장 백엔드도 같은 값으로 해석하고 노트를 남긴다 |
+| 8.7 미만 `ssh` | `tasty-net-ssh` 단위 시험(가짜 `ssh` 스크립트) | 포트 발견·exec에서 `Bad configuration option: sessiontype`을 내고 끝나는 `ssh`면 옵션 없이 한 번 다시 실행하고 성공한 뒤에만 기억한다. 다른 이유로 실패한 다시 실행은 기억하지 않는다. 터널의 `ForkAfterAuthentication` 시험(`tunnel.rs:818`–`:826`)과 같은 모양 |
 | 폴백 선택 | `tasty-net-ssh` 단위 시험 | 발견 함수에 프로그램 이름과 `PATH` 값을 인자로 주어(프로세스 환경 변수를 바꾸지 않는다) `found{path}`·`not_found{searched}`, Windows의 `.exe` 붙이기, `configured`, `system-ssh`만인 빌드의 `NotFound`를 본다. 다른 프로그램을 실행하지 않는다 |
 | 내장 백엔드 attach | `crates/tasty-net-demo/tests/ssh_attach.rs`·`ssh_reverse_attach.rs`의 D2·D3 흐름을 내장 백엔드로 한 번 더(시험 이름 끝 `_embedded`) | demo 자식에게 `ssh.backend = auto`와 런처 프로그램 `ssh`(구분자 없는 이름)를 주고, 자식 환경의 `PATH`를 빈 폴더 하나로 준다. 구분자 없는 이름이라 Windows의 `%WINDIR%` 규칙을 타지 않으므로 세 OS에서 `not_found`로 내장을 고른다. 연결 목록의 `ssh.backend.reason`이 `not_found`인지 본다. 터널 종료·재연결 단계는 자식 PID 대신 `SessionHook`(시험 훅, `SpawnHook`과 같은 자리)으로 내장 세션을 끊고, 새 `session_id`와 새 연결 항목을 본다 |
 | exec | demo 시험 | 위 시험 서버와 `exec-probe`로 두 백엔드의 종료 상태와 출력이 같다(`--exit 0`·`--exit 3`·`--echo-stdin`·`--stderr`). Unix에서 `exec`로 부른 `--kill-self TERM`은 내장이 `Signal{name: "TERM"}`, 시스템이 `Ambiguous255`. `--bytes`가 `exec.output_buffer`를 넘으면 stdout·stderr 각각에서 두 백엔드 모두 `OutputLimitExceeded`이고 같은 세션의 다른 exec는 계속 돈다(내장). 정확히 상한인 경우의 기대값은 후속 작업이 정한 뒤 더한다. 빈 명령은 `EmptyCommand` |
-| SFTP | demo 시험 | 위 시험 서버에서 두 백엔드로 파일 쓰기·읽기·`read_dir`·`rename`·`remove_file`의 결과가 같다. 내장은 같은 세션 위에서 터널과 SFTP를 함께 연다. `sftp.*` 값이 두 백엔드의 russh-sftp `Config`에 들어간다. `Subsystem` 줄이 없는 sshd에서는 두 백엔드 모두 `SubsystemUnavailable`, 인증이 거절되는 대상에서는 시스템이 `EndedBeforeSftp`, 내장이 인증 오류다 |
+| SFTP | demo 시험 | 위 시험 서버에서 두 백엔드로 파일 쓰기·읽기·`read_dir`·`rename`·`remove_file`의 결과가 같다. 내장은 같은 세션 위에서 터널과 SFTP를 함께 연다. `sftp.*` 값이 두 백엔드의 russh-sftp `Config`에 들어간다. `Subsystem` 줄이 없는 sshd에서는 두 백엔드 모두 `SubsystemUnavailable`, 인증이 거절되는 대상에서는 시스템이 `EndedBeforeSftp`, 내장이 인증 오류다. sftp subsystem을 SFTP 협상 전에 stderr에 `subsystem request failed on channel 0`을 쓰고 끝나는 시험 프로그램으로 바꾼 sshd에서는 두 백엔드 모두 `EndedBeforeSftp`다(원격 문구를 거절로 보지 않는다) |
 | 세션 키 | `tasty-net-ssh` 단위 시험 | `Match command`·`Match sessiontype`으로 exec만 다른 `User`를 고르는 설정에서 세션이 둘이고, 같은 값을 고르면 하나다. 서버·사용자가 같고 메모리 키만 다른 두 대상은 세션이 둘이고 각 호출이 자기 키로 인증한 세션에서 돈다. 설정의 `SessionType none`이 exec 용도를 바꾸지 않는다(두 백엔드, 시스템은 자식 명령에 `-o SessionType=default`가 있다) |
 | `RemoteCommand` 충돌 | `tasty-net-ssh` 단위 시험과 demo 시험 | `RemoteCommand`가 적용된 대상으로 exec·포트 발견·SFTP는 두 백엔드 모두 연결 전에 실패하고, 터널은 연결한다. 기준 클라이언트의 `ssh -s <대상> sftp`도 같은 설정에서 실패한다 |
 | 시스템 백엔드 명령 | `tasty-net-ssh` 단위 시험 | 포트 발견·exec·SFTP 자식 명령에 `ControlMaster=no`·`ControlPath=none`이 대상 옵션 앞에 있다 |
@@ -617,7 +623,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 1 | 앱이 준 폴더의 OpenSSH 형식 config·키·known_hosts로 접속, 비밀번호·passphrase·keyboard-interactive·호스트 키 확인을 콜백으로 | `embedded.home`·`embedded.ssh_dir`([설정값](#설정값))과 `SshPrompt`. 모르는 지시어 거부와 `@cert-authority` 불신은 [지시어 분류](#지시어-분류)·[호스트 키 판정](#호스트-키-판정)대로 | 내장 SSH 백엔드 |
 | 2 | 키를 파일 대신 메모리 바이트로 주기 | 대상 옵션에 메모리 키 원천을 더한다. 메모리 키는 `IdentityFile`보다 앞에 내민다(OpenSSH의 `-i`와 같은 자리). 바이트는 넘겨받은 뒤 이 레포가 소유하고 세션이 끝나거나 대상이 지워지면 지운다(zeroize). `inspect`·`ConfigNote`·`Debug`·오류에는 키 바이트도 passphrase도 내지 않고 "메모리 키 n개"와 공개키 지문만 낸다. 시스템 백엔드는 메모리 키를 쓸 수 없으므로 그런 대상은 내장 백엔드가 필요하다(`auto`에서 시스템을 고르면 `BackendUnavailable{reason: memory_key}`로 거절, 백엔드를 바꾸지 않는다) | 내장 SSH 백엔드 |
 | 3 | exec: 스트림 또는 상한 있는 수집, 종료 상태, 시간 제한·취소, env | [공개 API](#공개-api-tasty-net-ssh)와 [출력 상한](#출력-상한과-세션-수신-루프) | 내장 SSH 백엔드 |
-| 4 | SFTP 연산과 실패 사유 구분 | 연산: `read_dir`(이름·종류·크기·mtime·권한·링크 대상), `metadata`·`symlink_metadata`, `canonicalize`, 범위 읽기(offset·len). `SftpError`는 적어도 `PermissionDenied`·`NotFound`·`SubsystemUnavailable`·`EndedBeforeSftp{ssh_exit, stderr_tail}`·`SessionLost`·`Timeout`·`Other{code, message}`(SFTP 상태 코드 그대로)를 가른다. `SubsystemUnavailable`은 서버가 `subsystem` 요청을 거절한 것을 확인한 경우만이다: 내장은 그 요청의 `SSH_MSG_CHANNEL_FAILURE`, 시스템은 자식 stderr의 `subsystem request failed on channel` 줄(OpenSSH `clientloop.c:835`–`:846`이 그 줄을 찍고 끝낸다). 시스템 백엔드에서 그 줄 없이 SFTP 판 협상 전에 자식이 끝나면(인증 거절, 호스트 키 불일치, 접속 실패, `LogLevel QUIET`로 줄이 없는 경우) 분류할 수 없는 조기 종료 `EndedBeforeSftp`다. SFTP 상태 코드 `SSH_FX_PERMISSION_DENIED`(3)·`SSH_FX_NO_SUCH_FILE`(2)을 앞의 둘로 옮긴다 | 내장 SSH 백엔드 |
+| 4 | SFTP 연산과 실패 사유 구분 | 연산: `read_dir`(이름·종류·크기·mtime·권한·링크 대상), `metadata`·`symlink_metadata`, `canonicalize`, 범위 읽기(offset·len). `SftpError`는 적어도 `PermissionDenied`·`NotFound`·`SubsystemUnavailable`·`EndedBeforeSftp{ssh_exit, stderr_tail}`·`SessionLost`·`Timeout`·`Other{code, message}`(SFTP 상태 코드 그대로)를 가른다. `SubsystemUnavailable`은 서버가 `subsystem` 요청을 거절한 것을 원격 출력과 분리된 증거로 확인한 경우만이다: 내장은 그 요청의 `SSH_MSG_CHANNEL_FAILURE`. 시스템은 자식 stderr를 증거로 쓰지 않는다. stderr에는 OpenSSH 자신의 진단과 원격 채널의 stderr(확장 데이터)가 섞이므로, 원격 프로그램이 같은 문구를 쓰고 끝나도 구분할 수 없기 때문이다. 대신 SFTP 자식에 `-E <임시 파일>`을 주어 OpenSSH의 로그를 그 파일로 보낸다(`ssh.c:735`–`:737`, `:1167`–`:1168` `log_redirect_stderr_to`). 원격 stderr는 그 파일에 가지 않는다. 그 파일에 `subsystem request failed on channel` 줄(`clientloop.c:835`–`:846`)이 있을 때만 `SubsystemUnavailable`이고, 그 밖에 SFTP 판 협상 전에 자식이 끝나면(인증 거절, 호스트 키 불일치, 접속 실패, 원격 프로그램이 일찍 끝남, `LogLevel QUIET`) 분류할 수 없는 조기 종료 `EndedBeforeSftp`다. Windows OpenSSH에서 `-E`가 같은지는 확인하지 않았다([후속 작업](#후속-작업과-미정)). 확인되지 않은 판에서는 늘 `EndedBeforeSftp`다. SFTP 상태 코드 `SSH_FX_PERMISSION_DENIED`(3)·`SSH_FX_NO_SUCH_FILE`(2)을 앞의 둘로 옮긴다 | 내장 SSH 백엔드 |
 | 5 | SFTP 쓰기 | 공개 API에 이미 있다. 앱이 쓸지는 앱 쪽 결정 뒤다 | 보류 |
 | 6 | 터널·exec·SFTP가 한 세션을 함께 쓰는 경계 | [용도마다 해석하고 같을 때만 세션을 나눈다](#용도마다-해석하고-같을-때만-세션을-나눈다) | 정해짐 |
 | 6b | attach 없는 일반 SSH 세션의 수명·끊김을 연결 목록과 같은 상태 API로 | [SSH 세션 목록](#ssh-세션-목록)이 맡는다. transport의 [연결 목록](transport.md#연결-목록)은 바꾸지 않는다 | 내장 SSH 백엔드 |
@@ -637,6 +643,8 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |
 | SSH 세션 목록의 필드와 보관 상한 | 후속 작업(내장 SSH 백엔드). [SSH 세션 목록](#ssh-세션-목록)의 경계 안에서 필드 표, 닫힌 세션의 보관 상한, 이벤트 종류 |
+| Windows OpenSSH의 `-E` | 후속 작업(내장 SSH 백엔드). 시스템 SFTP의 `SubsystemUnavailable` 판정에 쓰는 `-E <임시 파일>`이 Windows OpenSSH에서도 로컬 로그만 그 파일로 보내는지. 확인 전에는 Windows 시스템 백엔드에서 늘 `EndedBeforeSftp` |
+| `ChannelTimeout` 구현 | 후속 작업(내장 SSH 백엔드). 채널 종류별 유휴 타이머와 `global`의 세션 전체 판정, 시험(짧은 `session=`·`direct-tcpip=` 값에서 그 채널만 닫힘) |
 | 비교 시험의 로컬 계정 읽기 | 후속 작업(OpenSSH 해석 이식). 실행 계정의 passwd 항목(이름·홈)을 시험이 읽는 방법(Linux·macOS) |
 | 터널 채널이 세션 수신 루프를 멈추는 경우 | 알려진 한계. 로컬 쪽이 읽지 않는 터널 채널은 russh 큐를 채워 같은 세션 전체를 멈춘다. 링크 읽기가 늘 읽으므로 막는 장치를 두지 않는다 |
 | android 요구의 세부 API | 후속 작업(내장 SSH 백엔드, 바인딩 크레이트). [android 요구의 자리](#android-요구의-자리) |
