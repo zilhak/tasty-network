@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 이 레포의 검사 진입점. git 훅, CI, 원격 빌드가 모두 이 스크립트의 단계를 부른다.
 #
-#   scripts/check.sh [all]          fmt + shell + no-tasty-deps + p2p-isolation + lint + test
+#   scripts/check.sh [all]          fmt + shell + no-tasty-deps + p2p-isolation + no-hidden-constants
+#                                   + lint + test
 #   scripts/check.sh fmt            cargo fmt --all --check
 #   scripts/check.sh lint           cargo clippy (workspace, 모든 target, -D warnings)
 #   scripts/check.sh test [ARGS]    cargo test --workspace. ARGS는 cargo test에 그대로 넘긴다
@@ -9,6 +10,9 @@
 #   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh p2p-isolation  판정 자체 시험 뒤 P2P 크레이트의 workspace 안 의존 범위 (scripts/check-p2p-isolation.sh)
+#   scripts/check.sh no-hidden-constants
+#                                   판정 자체 시험 뒤 숨은 동작값 없음과 설정 표 키 대조
+#                                   (scripts/check-no-hidden-constants.sh, 목록 scripts/no-hidden-constants.list)
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
 # 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
@@ -36,6 +40,10 @@ cmd_no_tasty_deps() {
 cmd_p2p_isolation() {
     run bash scripts/check-p2p-isolation.sh --self-test
     run bash scripts/check-p2p-isolation.sh
+}
+cmd_no_hidden_constants() {
+    run bash scripts/check-no-hidden-constants.sh --self-test
+    run bash scripts/check-no-hidden-constants.sh
 }
 # advisories는 커밋과 무관하게 새 공지로 실패하므로 여기서 보지 않는다(docs/dev-guide/ci.md).
 cmd_deny() { run cargo deny --locked --workspace check licenses bans sources; }
@@ -82,6 +90,7 @@ case "$sub" in
         cmd_shell
         cmd_no_tasty_deps
         cmd_p2p_isolation
+        cmd_no_hidden_constants
         cmd_lint
         cmd_test
         ;;
@@ -92,9 +101,10 @@ case "$sub" in
     shell) cmd_shell ;;
     no-tasty-deps) cmd_no_tasty_deps ;;
     p2p-isolation) cmd_p2p_isolation ;;
+    no-hidden-constants) cmd_no_hidden_constants ;;
     deny) cmd_deny ;;
     -h | --help | help)
-        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

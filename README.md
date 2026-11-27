@@ -18,10 +18,10 @@ After cloning, run once:
 bash scripts/dev-setup.sh
 ```
 
-It points `core.hooksPath` at `.githooks`, so commits, merges, and pushes run the checks, and prepares shellcheck and the cargo dependencies. On Linux it installs a pinned shellcheck into `~/.local/bin`; elsewhere install shellcheck with your package manager (for example `brew install shellcheck` or `scoop install shellcheck`). If shellcheck is still not on `PATH`, the script ends with exit code 1, because the pre-commit hook would block commits without it; fix `PATH` and run it again. The pre-push checks for tasty dependencies (B.3) and P2P crate isolation (B.4) also need Python 3 (`python3` or `python`) on `PATH`. All checks go through one entry point:
+It points `core.hooksPath` at `.githooks`, so commits, merges, and pushes run the checks, and prepares shellcheck and the cargo dependencies. On Linux it installs a pinned shellcheck into `~/.local/bin`; elsewhere install shellcheck with your package manager (for example `brew install shellcheck` or `scoop install shellcheck`). If shellcheck is still not on `PATH`, the script ends with exit code 1, because the pre-commit hook would block commits without it; fix `PATH` and run it again. The pre-push checks for tasty dependencies (B.3), P2P crate isolation (B.4), and hidden constants (B.5) also need Python 3 (`python3` or `python`) on `PATH`. All checks go through one entry point:
 
 ```bash
-bash scripts/check.sh          # fmt, shellcheck, no-tasty-deps, p2p-isolation, clippy, test
+bash scripts/check.sh          # fmt, shellcheck, no-tasty-deps, p2p-isolation, no-hidden-constants, clippy, test
 bash scripts/check.sh help     # every step
 ```
 

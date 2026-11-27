@@ -1,0 +1,68 @@
+# no-hidden-constants의 목록 하나(docs/design/testing.md "설정값 시험"). 칸은 탭으로 나눈다.
+# 종류와 칸은 scripts/check-no-hidden-constants.sh 머리 주석에 있다.
+# 뒤 크레이트(tasty-net-p2p, transport의 연결 목록·Redialer)는 target·settings·table 줄과
+# 자기 파일의 allow 줄을 이 파일에 더한다. 와이어 형식 상수는 docs/design/p2p.md
+# "와이어 형식 상수 (설정 아님)" 표에 있는 값만 올린다.
+target	crates/tasty-net-rendezvous/src/
+settings	crates/tasty-net-rendezvous/src/settings.rs
+table	crates/tasty-net-rendezvous/src/settings.rs	rendezvous.md	서버 설정값
+table	crates/tasty-net-rendezvous/src/settings.rs	p2p.md	의존성이 노출하는 값
+table	crates/tasty-net-rendezvous/src/settings.rs	p2p.md	고정값 (설정 불가, 조회에는 보임)
+allow	crates/tasty-net-rendezvous/src/wire/mod.rs	const PROTO	와이어 형식: 조정 프로토콜 판 1 (p2p.md 와이어 형식 상수)
+allow	crates/tasty-net-rendezvous/src/wire/mod.rs	enum CloseCode	와이어 형식: 조정 연결 QUIC 종료 코드 0~6 (rendezvous.md 메시지 표)
+allow	crates/tasty-net-rendezvous/src/wire/mod.rs	const ALL	종료 코드 목록의 길이 7 (CloseCode 변형 수)
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const STUN_FIRST_BYTES	와이어 형식: 첫 바이트 STUN 0–3
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_SHORT_FIRST_BYTES	와이어 형식: 첫 바이트 QUIC 64–127
+allow	crates/tasty-net-rendezvous/src/wire/demux.rs	const QUIC_LONG_FIRST_BYTES	와이어 형식: 첫 바이트 QUIC 192–255
+allow	crates/tasty-net-rendezvous/src/wire/frame.rs	const FRAME_HEADER_LEN	와이어 형식: 조정 프레임 길이 접두 4 B
+allow	crates/tasty-net-rendezvous/src/wire/frame.rs	declared == 0	와이어 형식: 길이 0 프레임은 형식 오류 (rendezvous.md 프레임)
+allow	crates/tasty-net-rendezvous/src/wire/frame.rs	first == 0	읽은 바이트 0은 스트림 끝
+allow	crates/tasty-net-rendezvous/src/wire/frame.rs	[0;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const STUN_HEADER_LEN	와이어 형식: STUN 헤더 20 B
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const MAGIC_COOKIE	와이어 형식: STUN magic cookie 0x2112A442
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const MAGIC_COOKIE_HIGH	와이어 형식: magic cookie 위 16비트(XOR 포트, RFC 8489 §14.2)
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const TRANSACTION_ID_LEN	와이어 형식: STUN 트랜잭션 ID 12 B
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const BINDING_REQUEST	와이어 형식: Binding 요청 0x0001
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const BINDING_SUCCESS_RESPONSE	와이어 형식: Binding 성공 응답 0x0101
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const ATTR_XOR_MAPPED_ADDRESS	와이어 형식: XOR-MAPPED-ADDRESS 0x0020
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const ATTR_TASTY_PUNCH	와이어 형식: TASTY-PUNCH 0xC0A1
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const PUNCH_TOKEN_LEN	와이어 형식: 펀칭 토큰 16 B
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const COMPREHENSION_OPTIONAL_MIN	와이어 형식: 0x8000 미만 속성은 이해 필수
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const ATTR_HEADER_LEN	와이어 형식: STUN 속성 머리 4 B
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const ATTR_ALIGN	와이어 형식: STUN 속성 4 B 정렬
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const FAMILY_V4	와이어 형식: 주소족 IPv4 0x01
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const FAMILY_V6	와이어 형식: 주소족 IPv6 0x02
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const ADDRESS_RESERVED	와이어 형식: XOR-MAPPED-ADDRESS 첫 바이트 0 (RFC 8489 §14.2)
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const TYPE_TOP_BITS	와이어 형식: 메시지 종류 위 두 비트
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	TYPE_TOP_BITS != 0	와이어 형식: 위 두 비트가 0이 아니면 STUN이 아니다
+allow	crates/tasty-net-rendezvous/src/wire/stun.rs	[0;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-rendezvous/src/wire/message.rs	const HEX_DIGITS_PER_BYTE	와이어 형식: 펀칭 토큰 글자는 바이트마다 hex 두 자
+allow	crates/tasty-net-rendezvous/src/wire/message.rs	const HEX_RADIX	와이어 형식: hex는 16진
+allow	crates/tasty-net-rendezvous/src/wire/message.rs	[0;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	const GLOBAL_UNICAST_MASK	와이어 형식: 호스트 후보 2000::/3의 마스크
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	const GLOBAL_UNICAST_PREFIX	와이어 형식: 호스트 후보 2000::/3의 앞머리
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	port() == 0	후보 규칙: 포트 0은 버린다 (rendezvous.md 후보 주소 규칙)
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut taken = 0	세기: 고른 후보 수의 시작
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut dropped = 0	세기: 버린 후보 수의 시작
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	+= 1	세기: 하나씩 센다
+allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_SPKI_PREFIX	와이어 형식: ed25519 SPKI 앞머리 12 B (RFC 8410)
+allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_PKCS8_V1_PREFIX	와이어 형식: ed25519 PKCS#8 v1 앞머리 16 B (RFC 8410 §7)
+allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_KEY_LEN	와이어 형식: ed25519 키 32 B (RFC 8032)
+allow	crates/tasty-net-rendezvous/src/tls.rs	send_tls13_tickets = 0	고정값 tls.tickets 0 (p2p.md 고정값)
+allow	crates/tasty-net-rendezvous/src/tls.rs	max_early_data_size = 0	고정값 tls.early_data 끔 (p2p.md 고정값)
+allow	crates/tasty-net-rendezvous/src/quic.rs	const QUIC_VERSION_1	와이어 형식: QUIC 판 v1 (고정값 quic.supported_versions)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	fetch_add(1,	세기: 패킷 하나
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(0)	quinn AsyncUdpSocket::poll_recv: 받을 자리가 없으면 채운 버퍼 0개
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(1)	quinn AsyncUdpSocket::poll_recv: 한 번에 데이터그램 하나를 채운다
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	+= 1	세기: 출처별 STUN 수
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	[0u8;	버퍼를 0으로 채워 만든다(길이는 u16::MAX)
+allow	crates/tasty-net-rendezvous/src/server/state.rs	fetch_add(1,	세기: 사건 하나
+allow	crates/tasty-net-rendezvous/src/server/state.rs	next_punch_id: 1	punch_id는 1부터 매긴다
+allow	crates/tasty-net-rendezvous/src/server/state.rs	next_conn_id: 1	연결 번호는 1부터 매긴다
+allow	crates/tasty-net-rendezvous/src/server/state.rs	+= 1	세기·번호 매기기: 하나씩
+allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut rejected = 0	세기: 버린 호스트 후보 수의 시작
+allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut dropped = 0	세기: 버린 반사 주소 수의 시작
+allow	crates/tasty-net-rendezvous/src/server/state.rs	/ 2	start_after 식의 절반 RTT (rendezvous.md 서버 상태)
+allow	crates/tasty-net-rendezvous/src/access.rs	index + 1	오류의 행 번호는 1부터
+allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	skip(1)	argv 첫 칸은 실행 파일 이름
