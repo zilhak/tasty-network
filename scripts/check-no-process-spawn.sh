@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+# 다른 프로그램 실행 금지의 정적 검사(docs/design/mobile.md "정적 검사 no-process-spawn").
+# 모바일 target에서 컴파일되는 라이브러리 코드가 std::process의 실행 항목(Command·Child·Stdio 등),
+# std::os::<os>::process::CommandExt, tokio::process를 쓰지 않는지 본다.
+#
+# 사용: bash scripts/check-no-process-spawn.sh               이 레포의 금지 크레이트를 검사한다
+#       bash scripts/check-no-process-spawn.sh --self-test   판정 함수를 고정 사례로 시험한다
+# 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·대상 0개) 2.
+#
+# 보는 파일과 지우는 자리, 실패로 보는 모양의 정본은 위 설계 절이다. 요약:
+#   - 금지 크레이트(아래 CRATES)의 src/**/*.rs에서 src/bin/**와 src/main.rs를 뺀다. 없는 크레이트는
+#     건너뛴다(앞으로 생길 ssh-config·ffi).
+#   - tasty-net-ssh의 src/system/**는 보지 않는다. 대신 src/lib.rs의 mod system; 선언에
+#     #[cfg(feature = "system-ssh")]가 없으면 실패다.
+#   - #[cfg(test)]·#[cfg(all(test, …))] 항목과 그런 속성으로 선언한 파일 모듈은 보지 않는다
+#     (scripts/lib/rust_scan.py). 문자열·주석 안의 글자도 보지 않는다.
+#   - use 선언은 나무로 펼쳐 가져온 경로마다 판정하고, use 밖에 적은 경로도 찾는다.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+PY=""
+for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -n "$PY" ] || { echo "[no-process-spawn] 판정 불가: python3가 PATH에 없다." >&2; exit 2; }
+
+MODE=check
+case "${1:-}" in
+    --self-test) MODE=self-test ;;
+    "") ;;
+    *)
+        echo "[no-process-spawn] 모르는 인자: $*" >&2
+        exit 2
+        ;;
+esac
+
+"$PY" - "$MODE" <<'PY'
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts", "lib"))
+from rust_scan import (  # noqa: E402  (scripts/lib/rust_scan.py)
+    matching_close, strip_cfg_test, test_module_files, tokenize,
+)
+
+TAG = "[no-process-spawn]"
+
+# 금지 크레이트(설계 "다른 프로그램 실행 금지" 경계 표). rendezvous는 라이브러리 target만 본다.
+CRATES = [
+    "tasty-net-frame", "tasty-net-identity", "tasty-net-topology", "tasty-net-ssh",
+    "tasty-net-ssh-config", "tasty-net-transport", "tasty-net-p2p", "tasty-net-rendezvous",
+    "tasty-net-ffi",
+]
+SSH_CRATE = "tasty-net-ssh"
+SSH_SYSTEM_FEATURE = "system-ssh"
+
+# std::process 아래에서 가져와도 되는 이름. 그 밖은 모두 실패다.
+STD_PROCESS_OK = {"id", "exit", "abort", "ExitCode"}
+# use 밖에 적은 경로에서 찾는 금지 이름.
+STD_PROCESS_BAD = {"Command", "Child", "Stdio", "ChildStdin", "ChildStdout", "ChildStderr",
+                   "ExitStatus"}
+
+
+class ScanError(Exception):
+    pass
+
+
+def forbidden_paths(path):
+    """path(조각 목록)에 견줄 금지 경로들. std::os::<os>::process는 그 path의 <os> 자리로 채운다."""
+    out = [["std", "process"], ["tokio", "process"]]
+    os_name = path[2] if len(path) >= 3 and path[:2] == ["std", "os"] else "<os>"
+    out.append(["std", "os", os_name, "process"])
+    return out
+
+
+def judge_import(path, glob):
+    """펼친 use 항목 하나(가져온 경로, 글롭인지)의 판정. 실패면 이유 문자열, 통과면 None."""
+    if not path:
+        return None
+    if glob and len(path) == 4 and path[:2] == ["std", "os"] and path[3] == "prelude":
+        return "std::os::<os>::prelude의 글롭"
+    for bad in forbidden_paths(path):
+        if len(path) <= len(bad) and bad[:len(path)] == path:
+            what = "글롭" if glob else "모듈·윗 경로를 지역 이름으로 들임"
+            return f"금지 경로 {'::'.join(bad)}의 {what}"
+        if len(path) > len(bad) and path[:len(bad)] == bad:
+            name = path[len(bad)]
+            if bad == ["std", "process"]:
+                if glob or len(path) > len(bad) + 1 or name not in STD_PROCESS_OK:
+                    return "std::process 아래에서 id·exit·abort·ExitCode 밖의 항목"
+            elif bad[0] == "tokio":
+                return "tokio::process 아래 항목"
+            elif name == "CommandExt":
+                return "CommandExt"
+    return None
+
+
+def parse_use_tree(toks, i, prefix, out):
+    """toks[i]에서 시작하는 use 나무를 펼쳐 out에 (경로, 글롭인지, 줄)을 더한다. 다음 위치를 돌려준다."""
+    path = list(prefix)
+    if i < len(toks) and toks[i][1] == "::":
+        i += 1
+    while i < len(toks):
+        k, t, line = toks[i]
+        if t == "*":
+            out.append((path, True, line))
+            return i + 1
+        if t == "{":
+            close = matching_close(toks, i)
+            j = i + 1
+            while j < close:
+                j = parse_use_tree(toks, j, path, out)
+                if j < close and toks[j][1] == ",":
+                    j += 1
+                elif j < close:
+                    raise ScanError(f"{line}행: use 묶음을 읽지 못했다(토큰 {toks[j][1]!r})")
+            return close + 1
+        if k != "ident":
+            raise ScanError(f"{line}행: use 경로를 읽지 못했다(토큰 {t!r})")
+        if t == "self" and path:
+            seg_path = list(path)
+        else:
+            seg_path = path + [t]
+        i += 1
+        if i < len(toks) and toks[i][1] == "::":
+            path = seg_path
+            i += 1
+            continue
+        if i < len(toks) and toks[i][1] == "as":
+            i += 2
+        out.append((seg_path, False, line))
+        return i
+    raise ScanError("use 선언이 끝나지 않았다")
+
+
+def use_items(toks):
+    """(시작, 끝) 범위와 함께 펼친 use 항목 목록. 범위는 use 밖 경로 찾기에서 뺀다."""
+    items, spans = [], []
+    i = 0
+    while i < len(toks):
+        if toks[i][:2] == ("ident", "use"):
+            end = i
+            depth = 0
+            while end < len(toks):
+                t = toks[end][1]
+                if t == "{":
+                    depth += 1
+                elif t == "}":
+                    depth -= 1
+                elif t == ";" and depth == 0:
+                    break
+                end += 1
+            got = []
+            parse_use_tree(toks[:end], i + 1, [], got)
+            items += got
+            spans.append((i, end))
+            i = end + 1
+            continue
+        i += 1
+    return items, spans
+
+
+def path_hits(toks, spans):
+    """use 밖에 적은 금지 경로와 크레이트 별칭 선언: (줄, 경로 글자, 이유)."""
+    skip = set()
+    for a, b in spans:
+        skip.update(range(a, b + 1))
+    hits = []
+    n = len(toks)
+
+    def words(i, count):
+        out, j = [], i
+        while len(out) < count and j < n:
+            if toks[j][0] != "ident":
+                return None
+            out.append(toks[j][1])
+            if len(out) < count:
+                if j + 1 >= n or toks[j + 1][1] != "::":
+                    return None
+                j += 2
+            else:
+                j += 1
+        return out if len(out) == count else None
+
+    for i in range(n):
+        if i in skip or toks[i][0] != "ident":
+            continue
+        if (i > 1 and toks[i - 1][1] == "::"
+                and (toks[i - 2][0] == "ident" or toks[i - 2][1] == ">")):
+            # 경로 한가운데(a::std::…, <T>::std::…)는 그 경로의 첫 조각에서 본다. 앞에 ::만 있으면
+            # (::std::…) 루트 경로라 여기서 본다.
+            continue
+        t, line = toks[i][1], toks[i][2]
+        if t == "extern" and i + 4 < n and toks[i + 1][1] == "crate" \
+                and toks[i + 2][1] in ("std", "tokio") and toks[i + 3][1] == "as":
+            hits.append((line, f"extern crate {toks[i + 2][1]} as {toks[i + 4][1]}",
+                         "크레이트 별칭 선언"))
+            continue
+        w = words(i, 3)
+        if w and w[:2] == ["std", "process"] and w[2] in STD_PROCESS_BAD:
+            hits.append((line, "::".join(w), "std::process의 실행 항목"))
+            continue
+        if w and w[:2] == ["tokio", "process"]:
+            hits.append((line, "::".join(w), "tokio::process 아래 항목"))
+            continue
+        w = words(i, 5)
+        if w and w[:2] == ["std", "os"] and w[3] == "process" and w[4] == "CommandExt":
+            hits.append((line, "::".join(w), "CommandExt"))
+    return hits
+
+
+def judge_source(text):
+    """제품 코드 글자 하나의 위반: (줄, 경로 글자, 이유) 목록과 펼친 use 항목 수."""
+    toks = strip_cfg_test(tokenize(text))
+    items, spans = use_items(toks)
+    out = []
+    for path, glob, line in items:
+        why = judge_import(path, glob)
+        if why:
+            out.append((line, "::".join(path) + ("::*" if glob else ""), why))
+    out += path_hits(toks, spans)
+    return sorted(out), len(items)
+
+
+def system_mod_guarded(text):
+    """src/lib.rs의 mod system; 선언에 #[cfg(feature = "system-ssh")]가 붙어 있는지."""
+    toks = tokenize(text)
+    for i in range(len(toks) - 2):
+        if toks[i][:2] == ("ident", "mod") and toks[i + 1][1] == "system" and toks[i + 2][1] == ";":
+            j = i - 1
+            if j >= 0 and toks[j][1] == ")":
+                # pub(crate) mod system;
+                depth = 0
+                while j >= 0:
+                    if toks[j][1] == ")":
+                        depth += 1
+                    elif toks[j][1] == "(":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j -= 1
+                j -= 1
+            if j >= 0 and toks[j][1] == "pub":
+                j -= 1
+            while j >= 0 and toks[j][1] == "]":
+                depth, k = 0, j
+                while k >= 0:
+                    if toks[k][1] == "]":
+                        depth += 1
+                    elif toks[k][1] == "[":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k -= 1
+                attr = [t[1] for t in toks[k + 1:j]]
+                if attr == ["cfg", "(", "feature", "=", f'"{SSH_SYSTEM_FEATURE}"', ")"]:
+                    return True
+                j = k - 2  # #[ 앞으로
+            return False
+    return False
+
+
+def crate_files(crate, listing):
+    """금지 크레이트에서 볼 파일 목록. listing(crate) -> src 아래 .rs 상대 경로 목록(crates/<c>/src/…)."""
+    src = f"crates/{crate}/src/"
+    out = []
+    for f in listing(crate):
+        rel = f[len(src):]
+        if rel == "main.rs" or rel.startswith("bin/"):
+            continue
+        if crate == SSH_CRATE and rel.startswith("system/"):
+            continue
+        out.append(f)
+    return out
+
+
+def collect(read, listing, exists):
+    """판정: (위반 문자열 목록, 요약, 대상 파일 수)."""
+    violations = []
+    seen_crates, files_checked, use_count, excluded_hits = 0, 0, 0, 0
+    for crate in CRATES:
+        if not exists(crate):
+            continue
+        seen_crates += 1
+        all_files = listing(crate)
+        files = crate_files(crate, listing)
+        if crate == SSH_CRATE:
+            lib = f"crates/{crate}/src/lib.rs"
+            if not system_mod_guarded(read(lib)):
+                violations.append(f"{lib}: mod system;에 #[cfg(feature = \"{SSH_SYSTEM_FEATURE}\")]가"
+                                  " 없다(src/system/ 예외는 그 feature로만 켜져야 한다)")
+        tests = test_module_files(read, files)
+        checked = [f for f in files if f not in tests]
+        for f in checked:
+            try:
+                hits, uses = judge_source(read(f))
+            except ScanError as e:
+                raise ScanError(f"{f}: {e}") from None
+            use_count += uses
+            violations += [f"{f}:{line}: {p} ({why})" for line, p, why in hits]
+        files_checked += len(checked)
+        # 대조값: 뺀 자리(시험 항목·시험 모듈 파일·src/system·src/bin)에서 같은 판정이 찾는 수.
+        for f in all_files:
+            try:
+                toks = tokenize(read(f))
+                items, spans = use_items(toks)
+            except ScanError:
+                continue
+            raw = [1 for p, g, _ in items if judge_import(p, g)] + path_hits(toks, spans)
+            kept = 0
+            if f in checked:
+                kept = len(judge_source(read(f))[0])
+            excluded_hits += len(raw) - kept
+    summary = (f"크레이트 {seen_crates}개 · 파일 {files_checked}개 · 펼친 use 항목 {use_count}개"
+               f" · 위반 {len(violations)}개 (대조: 뺀 자리의 같은 모양 {excluded_hits}건)")
+    return violations, summary, files_checked
+
+
+def self_test():
+    bad = [
+        ("std::process::Command::new", "fn f() { let _ = std::process::Command::new(\"ssh\"); }\n"),
+        ("::std::process::Child", "fn f(_c: ::std::process::Child) {}\n"),
+        ("use std::process::Command;", "use std::process::Command;\n"),
+        ("use std::process as p;", "use std::process as p;\n"),
+        ("use std::{process as proc};", "use std::{process as proc};\n"),
+        ("use std::{io, process::{self, id}};", "use std::{io, process::{self, id}};\n"),
+        ("use std::process::{self as p};", "use std::process::{self as p};\n"),
+        ("use tokio::{process as p};", "use tokio::{process as p};\n"),
+        ("use tokio::process::Command as C;", "use tokio::process::Command as C;\n"),
+        ("tokio::process::Command::new", "fn f() { tokio::process::Command::new(\"x\"); }\n"),
+        ("use std::process::*;", "use std::process::*;\n"),
+        ("use std::process::Output;", "use std::process::Output;\n"),
+        ("extern crate std as s;", "extern crate std as s;\n"),
+        ("extern crate tokio as t;", "extern crate tokio as t;\n"),
+        ("use std as s;", "use std as s;\n"),
+        ("use ::std as s;", "use ::std as s;\n"),
+        ("use std::{self as s};", "use std::{self as s};\n"),
+        ("use tokio as t;", "use tokio as t;\n"),
+        ("use std::os::unix as u;", "use std::os::unix as u;\n"),
+        ("use std::os::unix;", "use std::os::unix;\n"),
+        ("use std::os::{self as o};", "use std::os::{self as o};\n"),
+        ("use std::os::unix::prelude::*;", "use std::os::unix::prelude::*;\n"),
+        ("use std::os::unix::process::CommandExt as _;",
+         "use std::os::unix::process::CommandExt as _;\n"),
+        ("std::os::windows::process::CommandExt 경로", "fn f() { use_it::<std::os::windows::process::CommandExt>(); }\n"),
+        ("use std::*;", "use std::*;\n"),
+        ("use ::std::*;", "use ::std::*;\n"),
+        ("use std::os::*;", "use std::os::*;\n"),
+        ("use std::os::unix::*;", "use std::os::unix::*;\n"),
+        ("use std::{os::*};", "use std::{os::*};\n"),
+        ("use tokio::*;", "use tokio::*;\n"),
+        ("여러 줄로 나눈 묶음 선언", "use std::{\n    io,\n    process::{\n        id,\n        Command,\n    },\n};\n"),
+        ("cfg(any(test, unix)) 안의 금지 경로", "#[cfg(any(test, unix))]\nfn f() { std::process::Command::new(\"x\"); }\n"),
+    ]
+    good = [
+        ("use std::process::{id, exit};", "use std::process::{id, exit};\n"),
+        ("use std::process::ExitCode;", "use std::process::ExitCode;\n"),
+        ("use std::os::unix::fs::PermissionsExt;", "use std::os::unix::fs::PermissionsExt;\n"),
+        ("use std::io;", "use std::io;\n"),
+        ("pub(crate) use 와 다른 크레이트", "pub(crate) use crate::process::Command;\nuse self::a::{b as c};\n"),
+        ("std::process::abort()", "fn f() -> ! { std::process::abort() }\n"),
+        ("std::process::id()·exit()", "fn f() -> u32 { if false { std::process::exit(1) } std::process::id() }\n"),
+        ("cfg(test) 안에만 둔 금지 경로",
+         "#[cfg(test)]\nmod tests {\n    use std::process::Command;\n    fn f() { Command::new(\"x\"); }\n}\n"),
+        ("cfg(all(test, unix)) 안에만 둔 금지 경로",
+         "#[cfg(all(test, unix))]\nfn f() { std::process::Command::new(\"sh\"); }\n"),
+        ("주석·문자열 안의 std::process::Command",
+         "// std::process::Command\n/* use std::process::Command; */\nconst S: &str = \"std::process::Command\";\n"),
+    ]
+    cases = []
+    for title, src in bad:
+        try:
+            hits, _ = judge_source(src)
+            got = "실패" if hits else "통과"
+        except ScanError as e:
+            got, hits = "읽기 오류", [str(e)]
+        cases.append((title, got, "실패", hits))
+    for title, src in good:
+        try:
+            hits, _ = judge_source(src)
+            got = "실패" if hits else "통과"
+        except ScanError as e:
+            got, hits = "읽기 오류", [str(e)]
+        cases.append((title, got, "통과", hits))
+
+    # 크레이트 단위: src/system/ 예외와 그 feature 속성, 시험 모듈 파일, src/bin.
+    guarded = "#[cfg(feature = \"system-ssh\")]\nmod system;\n#[cfg(test)]\nmod tests;\n"
+    tree = {
+        "crates/tasty-net-ssh/src/lib.rs": guarded,
+        "crates/tasty-net-ssh/src/system/spawn.rs": "use std::process::{Child, Command};\n",
+        "crates/tasty-net-ssh/src/tests.rs": "use std::process::Command;\n",
+        "crates/tasty-net-rendezvous/src/lib.rs": "pub fn f() {}\n",
+        "crates/tasty-net-rendezvous/src/bin/server.rs": "use std::process::Command;\n",
+    }
+
+    def run(files):
+        def listing(c):
+            return sorted(f for f in files if f.startswith(f"crates/{c}/src/"))
+        return collect(lambda p: files[p], listing,
+                       lambda c: any(f.startswith(f"crates/{c}/") for f in files))
+
+    def crate_case(title, files, want):
+        try:
+            v, _, _ = run(files)
+            got = "실패" if v else "통과"
+        except ScanError as e:
+            got, v = "읽기 오류", [str(e)]
+        cases.append((title, got, want, v))
+
+    crate_case("src/system/·시험 모듈 파일·src/bin 안에만 둔 금지 경로", tree, "통과")
+    unguarded = dict(tree)
+    unguarded["crates/tasty-net-ssh/src/lib.rs"] = "mod system;\n#[cfg(test)]\nmod tests;\n"
+    crate_case("mod system;의 feature 속성을 뺀 입력", unguarded, "실패")
+    other = dict(tree)
+    other["crates/tasty-net-ssh/src/lib.rs"] = ("#[cfg(feature = \"embedded-ssh\")]\npub(crate) mod system;\n"
+                                                "#[cfg(test)]\nmod tests;\n")
+    crate_case("mod system;에 다른 feature 속성", other, "실패")
+    pub_guarded = dict(tree)
+    pub_guarded["crates/tasty-net-ssh/src/lib.rs"] = ("#[cfg(feature = \"system-ssh\")]\n#[doc(hidden)]\n"
+                                                      "pub(crate) mod system;\n#[cfg(test)]\nmod tests;\n")
+    crate_case("속성 둘과 pub(crate) mod system;", pub_guarded, "통과")
+    leak = dict(tree)
+    leak["crates/tasty-net-ssh/src/listener.rs"] = "use std::process::Stdio;\n"
+    crate_case("src/system/ 밖의 금지 경로", leak, "실패")
+
+    failed = 0
+    for title, got, want, v in cases:
+        if got != want:
+            print(f"  ✘ {title}: 결과 {got}, 기대 {want} {v}", file=sys.stderr)
+            failed += 1
+    if failed:
+        print(f"{TAG} 자체 시험 실패 — 사례 {len(cases)}개 중 {failed}개", file=sys.stderr)
+        sys.exit(1)
+    print(f"{TAG} 자체 시험 통과 — 사례 {len(cases)}개(실패해야 하는 입력 {len(bad) + 3}개)")
+
+
+mode = sys.argv[1]
+if mode == "self-test":
+    self_test()
+    sys.exit(0)
+
+
+def read(p):
+    with open(p, encoding="utf-8") as f:
+        return f.read()
+
+
+def listing(crate):
+    out = []
+    for d, _, names in os.walk(f"crates/{crate}/src"):
+        out += [os.path.join(d, n).replace(os.sep, "/") for n in names if n.endswith(".rs")]
+    return sorted(out)
+
+
+try:
+    violations, summary, count = collect(read, listing, lambda c: os.path.isdir(f"crates/{c}"))
+except (ScanError, OSError) as e:
+    print(f"{TAG} 판정 불가: {e}", file=sys.stderr)
+    sys.exit(2)
+if count == 0:
+    print(f"{TAG} 판정 불가: 검사 대상 파일이 0개다.", file=sys.stderr)
+    sys.exit(2)
+if violations:
+    for v in violations:
+        print(f"  {v}", file=sys.stderr)
+    print(f"{TAG} 위반 — {summary}", file=sys.stderr)
+    print("  모바일 target에서 컴파일되는 라이브러리 코드는 다른 프로그램을 실행하지 않는다"
+          "(docs/design/mobile.md \"다른 프로그램 실행 금지\").", file=sys.stderr)
+    sys.exit(1)
+print(f"{TAG} 통과 — {summary}")
+PY

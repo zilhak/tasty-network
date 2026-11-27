@@ -56,6 +56,7 @@ run_check B.4 'P2P 크레이트 격리' bash scripts/check.sh p2p-isolation
 run_check B.5 '숨은 동작값 없음' bash scripts/check.sh no-hidden-constants
 run_check B.6 'cargo clippy --workspace --all-targets -- -D warnings' bash scripts/check.sh lint
 run_check B.7 'cargo check --workspace --all-targets --locked' bash scripts/check.sh check
+run_check B.8 '모바일 대상 코드의 다른 프로그램 실행 없음' bash scripts/check.sh no-process-spawn
 
 printf '\npush 전 검사 결과 (총 %s초)\n' "$((SECONDS - STARTED))"
 cat "$SUMMARY"

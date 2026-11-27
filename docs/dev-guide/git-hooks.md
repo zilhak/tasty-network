@@ -35,6 +35,7 @@ push 전에 아래 단계를 `scripts/check.sh`로 돌린다. 앞 단계가 실�
 | B.5 | `scripts/check.sh no-hidden-constants` (Python 3이 PATH에 있어야 한다) |
 | B.6 | `scripts/check.sh lint` |
 | B.7 | `scripts/check.sh check` |
+| B.8 | `scripts/check.sh no-process-spawn` (Python 3이 PATH에 있어야 한다) |
 
 - 시험(`cargo test`)은 돌리지 않는다. 실제 `ssh`·포트를 쓰는 시험이 있어 환경에 따라 실패할 수 있다. 시험은 [CI](ci.md)가 세 OS에서 돌린다.
 - 검사 명령에는 git이 훅에 넘기는 저장소 변수(`git rev-parse --local-env-vars`)를 지우고 넘긴다.

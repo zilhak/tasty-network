@@ -2,7 +2,7 @@
 # 이 레포의 검사 진입점. git 훅, CI, 원격 빌드가 모두 이 스크립트의 단계를 부른다.
 #
 #   scripts/check.sh [all]          fmt + shell + no-tasty-deps + p2p-isolation + no-hidden-constants
-#                                   + lint + test + transport-no-ssh
+#                                   + no-process-spawn + lint + test + transport-no-ssh
 #   scripts/check.sh fmt            cargo fmt --all --check
 #   scripts/check.sh lint           cargo clippy (workspace, 모든 target, -D warnings)
 #   scripts/check.sh test [ARGS]    cargo test --workspace. ARGS는 cargo test에 그대로 넘긴다
@@ -17,6 +17,9 @@
 #   scripts/check.sh no-hidden-constants
 #                                   판정 자체 시험 뒤 숨은 동작값 없음과 설정 표 키 대조
 #                                   (scripts/check-no-hidden-constants.sh, 목록 scripts/no-hidden-constants.list)
+#   scripts/check.sh no-process-spawn
+#                                   판정 자체 시험 뒤 모바일 대상 라이브러리 코드의 다른 프로그램 실행 없음
+#                                   (scripts/check-no-process-spawn.sh)
 #   scripts/check.sh p2p-example-pair
 #                                   자체 시험 뒤 서버와 p2p_peer 예제 두 개를 루프백에 띄워 펀칭·연결·echo
 #                                   (scripts/check-p2p-example-pair.sh). all에 없고 CI의 clippy·test 잡이 부른다
@@ -144,6 +147,10 @@ cmd_no_hidden_constants() {
     run bash scripts/check-no-hidden-constants.sh --self-test
     run bash scripts/check-no-hidden-constants.sh
 }
+cmd_no_process_spawn() {
+    run bash scripts/check-no-process-spawn.sh --self-test
+    run bash scripts/check-no-process-spawn.sh
+}
 cmd_p2p_example_pair() {
     run bash scripts/check-p2p-example-pair.sh --self-test
     run bash scripts/check-p2p-example-pair.sh
@@ -194,6 +201,7 @@ case "$sub" in
         cmd_no_tasty_deps
         cmd_p2p_isolation
         cmd_no_hidden_constants
+        cmd_no_process_spawn
         cmd_lint
         cmd_test
         cmd_transport_no_ssh
@@ -207,10 +215,11 @@ case "$sub" in
     no-tasty-deps) cmd_no_tasty_deps ;;
     p2p-isolation) cmd_p2p_isolation ;;
     no-hidden-constants) cmd_no_hidden_constants ;;
+    no-process-spawn) cmd_no_process_spawn ;;
     p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
     -h | --help | help)
-        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2
