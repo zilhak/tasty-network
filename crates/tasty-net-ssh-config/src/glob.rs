@@ -108,6 +108,10 @@ const PATH_MAX: usize = if cfg!(any(
     4096
 };
 
+/// The places `glob3` needs after a name: its `EOS` and `pathend_last`, which is one before
+/// the end of `pathbuf[PATH_MAX]` (`glob.c:619`, `:755`-`:760`).
+const NAME_ROOM: usize = 2;
+
 /// The `isctype` test of one class.
 type ClassTest = fn(u8) -> bool;
 
@@ -368,7 +372,9 @@ fn glob3(
         if name.first() == Some(&b'.') && part.first() != Some(&DOT) {
             continue;
         }
-        if base + name.len() >= PATH_MAX {
+        // The name and its `EOS` are copied up to `pathend_last` (`pathbuf + PATH_MAX - 1`),
+        // and reaching it is an error, matched or not.
+        if base + name.len() + NAME_ROOM >= PATH_MAX {
             return Err(GlobFailed);
         }
         let name: Vec<Char> = name.iter().map(|&b| Char::from(b)).collect();
@@ -562,5 +568,36 @@ mod tests {
         // An escaped pattern character is literal.
         assert!(got("\\*.conf").is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Unix only: the folders are named with `/`.
+    #[cfg(unix)]
+    #[test]
+    fn path_length_bounds() {
+        const PART: usize = 100;
+        const WIDE: usize = 200;
+        let root =
+            std::env::temp_dir().join(format!("tasty-ssh-config-glen-{}", std::process::id()));
+        // Folders deep enough that a name of more than `PART` bytes reaches the bound.
+        let mut dir = root.clone();
+        while PATH_MAX - NAME_ROOM - (dir.as_os_str().len() + 1) > WIDE {
+            dir.push("a".repeat(PART));
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.to_str().unwrap().to_string();
+        // `base/` and a name of this length reach `pathend_last`.
+        let at_bound = PATH_MAX - NAME_ROOM - (base.len() + 1);
+        std::fs::write(dir.join("b".repeat(at_bound - 1)), "").unwrap();
+        let star = format!("{base}/*");
+        assert_eq!(glob(&star).unwrap().len(), 1);
+        std::fs::write(dir.join("c".repeat(at_bound)), "").unwrap();
+        assert_eq!(glob(&star), Err(GlobFailed));
+
+        // A pattern of `PATH_MAX - 1` bytes without pattern characters is copied and looked
+        // up; one of `PATH_MAX` bytes matches nothing.
+        let literal = |len: usize| format!("{base}/{}", "d".repeat(len - base.len() - 1));
+        assert_eq!(glob(&literal(PATH_MAX - 1)), Ok(Vec::new()));
+        assert_eq!(glob(&literal(PATH_MAX)), Ok(Vec::new()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

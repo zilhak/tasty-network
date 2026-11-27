@@ -302,7 +302,7 @@ settings	crates/tasty-net-ssh-config/src/settings.rs
 table	crates/tasty-net-ssh-config/src/settings.rs	ssh-backends.md	고정값
 allow	crates/tasty-net-ssh-config/src/glob.rs	0	첫 바이트·빈 길이
 allow	crates/tasty-net-ssh-config/src/glob.rs	1	다음 바이트로 한 칸
-allow	crates/tasty-net-ssh-config/src/glob.rs	2	두 칸 건너뛰기(범위 a-z, 클래스 끝 :], glob.c match·glob0)
+allow	crates/tasty-net-ssh-config/src/glob.rs	2	두 칸 건너뛰기(범위 a-z, 클래스 끝 :], glob.c match·glob0), glob3 이름 뒤의 EOS와 pathend_last 두 칸
 allow	crates/tasty-net-ssh-config/src/glob.rs	const M_QUOTE: Char = 0x8000	glob.c M_QUOTE 0x8000(패턴 문자 표시 비트)
 allow	crates/tasty-net-ssh-config/src/glob.rs	const M_PROTECT: Char = 0x4000	glob.c M_PROTECT 0x4000(이스케이프한 글자 표시 비트)
 allow	crates/tasty-net-ssh-config/src/glob.rs	const M_ASCII: Char = 0x00ff	glob.c M_ASCII 0x00ff(글자 바이트)
