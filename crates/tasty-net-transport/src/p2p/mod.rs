@@ -188,7 +188,12 @@ impl P2pTransport {
         let followed = Mutex::new(Followed::default());
         let connected = match &entry {
             Some(entry) => self.punch_followed(peer, &punch, entry, &followed),
-            None => self.endpoint.connect_with_cancel(peer, &punch),
+            None => {
+                // Counted too: the entry of another punch of this transport to `peer` must not
+                // take this attempt for its own.
+                let _punching = Punching::start(self, peer);
+                self.endpoint.connect_with_cancel(peer, &punch)
+            }
         };
         drop(punching);
         let conn = connected.map_err(|e| connect_error(e, cancel))?;
@@ -214,9 +219,8 @@ impl P2pTransport {
         followed: &Mutex<Followed>,
     ) -> Result<P2pConnection, P2pError> {
         let done = (Mutex::new(false), Condvar::new());
-        // The attempts to `peer` before this one: this attempt is none of them.
-        let before: Vec<u64> = self.attempts_to(peer).map(|info| info.id).collect();
-        let _punching = Punching::start(&self.punching, peer);
+        // `before`: the attempts to `peer` before this one; this attempt is none of them.
+        let (_punching, before) = Punching::start(self, peer);
         std::thread::scope(|scope| {
             let follower = std::thread::Builder::new()
                 .name("p2p-punch".into())
@@ -250,9 +254,11 @@ impl P2pTransport {
 
     /// The attempt an entry follows: the one it followed already, or else this attempt once it
     /// is the only one it can be. `tasty-net-p2p` does not say which attempt a dial is, so
-    /// while this transport punches to `peer` more than once, or more than one new attempt to
-    /// `peer` is in progress, the entry waits; the connection's history is copied whole once
-    /// it stands.
+    /// while this transport punches to `peer` more than once (with an entry or without), or
+    /// more than one new attempt to `peer` is in progress, the entry waits; the connection's
+    /// history is copied whole once it stands. The count and the attempts are read under the
+    /// lock a punch of this transport starts under ([`Punching::start`]), so no punch of it
+    /// starts between the two.
     fn attempt_of(
         &self,
         peer: DeviceId,
@@ -266,14 +272,17 @@ impl P2pTransport {
                 .into_iter()
                 .find(|info| info.id == id);
         }
-        if lock(&self.punching).get(&peer).copied() != Some(1) {
+        let punching = lock(&self.punching);
+        if punching.get(&peer).copied() != Some(1) {
             return None;
         }
         let mut new = self
             .attempts_to(peer)
             .filter(|info| !before.contains(&info.id));
         let attempt = new.next()?;
-        new.next().is_none().then_some(attempt)
+        let only = new.next().is_none().then_some(attempt);
+        drop(punching);
+        only
     }
 
     /// The attempts this device dials to `peer` that are in progress.
@@ -293,9 +302,20 @@ struct Punching<'a> {
 }
 
 impl<'a> Punching<'a> {
-    fn start(punching: &'a Mutex<HashMap<DeviceId, usize>>, peer: DeviceId) -> Self {
-        *lock(punching).entry(peer).or_default() += 1;
-        Self { punching, peer }
+    /// Counts a punch of `transport` to `peer` from here on; with it, the numbers of the
+    /// attempts to `peer` in progress before it, read in the same step.
+    fn start(transport: &'a P2pTransport, peer: DeviceId) -> (Self, Vec<u64>) {
+        let mut punching = lock(&transport.punching);
+        let before = transport.attempts_to(peer).map(|info| info.id).collect();
+        *punching.entry(peer).or_default() += 1;
+        drop(punching);
+        (
+            Self {
+                punching: &transport.punching,
+                peer,
+            },
+            before,
+        )
     }
 }
 

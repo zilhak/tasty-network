@@ -28,8 +28,8 @@ use tasty_net_transport::{
     ChannelWriter, ConnectError, ConnectOptions, Connection, ConnectionEvent, ConnectionId,
     ConnectionInfo, ConnectionState, ConnectionTable, DialConfig, DomainAccept, DomainPolicy,
     DomainReject, EdgeTransport, EndReason, HandshakeError, Holder, Link, LinkTimeouts,
-    P2pListener, P2pTransport, PathKind, PeerInfo, Phase, RejectReason, RequestHandler, Transport,
-    Via, dial_handshake, dial_request, domain_code,
+    P2pListener, P2pTransport, PathKind, PeerInfo, Phase, Redialer, RedialerConfig, RejectReason,
+    RequestHandler, Transport, Via, dial_handshake, dial_request, domain_code,
 };
 
 /// How long a test waits for something that comes in well under a second on loopback.
@@ -768,6 +768,88 @@ fn concurrent_attempts_to_one_peer_keep_their_own_entries() {
     let _ended = done_two
         .recv_timeout(PATIENCE)
         .expect("the second attempt's end");
+}
+
+/// A punch with an entry (the redialer's) and one without (a transport without a table) of
+/// the same transport to the same peer: the entry does not take the other punch's attempt,
+/// and waits while both run; once the other ends, it follows its own.
+#[test]
+fn a_punch_without_an_entry_is_counted_among_the_transports_punches() {
+    let (pair, gate) = Pair::start_with(84, Mode::Echo, true);
+    let gate = gate.expect("gate");
+    // `b` is registered once a link stood; the link's end closes its connection.
+    drop(pair.link(None).expect("link"));
+    let lost = pair.table_a.connections()[0].id;
+    wait_until("the first connection's close", || {
+        pair.transport.live_connections() == 0
+    });
+    gate.shut.store(true, Ordering::SeqCst);
+    let plain = Arc::new(P2pTransport::new(pair.a.clone()));
+    let peer = pair.b.id();
+    let attempts = |a: &P2pEndpoint| -> Vec<u64> {
+        a.connections()
+            .into_iter()
+            .filter(|info| {
+                info.side == tasty_net_p2p::Side::Dialer
+                    && !matches!(
+                        info.state,
+                        tasty_net_p2p::AttemptPhase::Connected
+                            | tasty_net_p2p::AttemptPhase::Closed
+                    )
+            })
+            .map(|info| info.id)
+            .collect()
+    };
+    let cancel_plain = AttemptCancel::new();
+    let plain_done = {
+        let (plain, cancel) = (Arc::clone(&plain), cancel_plain.clone());
+        std::thread::spawn(move || plain.connect(&peer, &cancel).map(|_| ()))
+    };
+    wait_until("the plain attempt", || attempts(&pair.a).len() == 1);
+    let other = attempts(&pair.a)[0];
+    let table = ConnectionTable::default();
+    let cancel_redial = AttemptCancel::new();
+    let redial_done = {
+        let (plain, cancel, table) = (Arc::clone(&plain), cancel_redial.clone(), table.clone());
+        std::thread::spawn(move || {
+            let config = RedialerConfig::new()
+                .with_initial(Duration::from_millis(1))
+                .with_jitter(0.0)
+                .with_max_attempts(1);
+            let redialer = Redialer::new(&table, config).expect("valid settings");
+            redialer.redial(lost, None, &cancel, |options| {
+                plain
+                    .connect_with(&peer, &cancel, options)
+                    .map(drop)
+                    .map_err(HandshakeError::Connect)
+            })
+        })
+    };
+    wait_until("the redialer's attempt", || attempts(&pair.a).len() == 2);
+    let own = attempts(&pair.a)
+        .into_iter()
+        .find(|id| *id != other)
+        .expect("the redialer's attempt");
+    let pending = || table.connections().into_iter().next().expect("the entry");
+    // Several polls while both punch (within the server's offer timeout): the entry follows
+    // neither attempt.
+    let watch_until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < watch_until {
+        let shown = pending().p2p_id;
+        assert_eq!(
+            shown, None,
+            "the entry follows attempt {shown:?} (own {own}, other {other})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cancel_plain.cancel();
+    let ended = plain_done.join().expect("the plain attempt");
+    assert!(matches!(ended, Err(ConnectError::Cancelled)), "{ended:?}");
+    wait_until("the entry on its own attempt", || {
+        pending().p2p_id == Some(own)
+    });
+    cancel_redial.cancel();
+    let _ended = redial_done.join().expect("the redialer");
 }
 
 /// A cancel of the attempt before its first handshake succeeded closes the new connection it
