@@ -1,0 +1,6 @@
+# Defaults the Debug output of quinn-proto 0.11.19 does not show, copied from its source
+# (docs/design/testing.md "설정값 시험", dependency_defaults_match_source). Check them again
+# when the version changes. Columns: crate, version, key, value, where in the source.
+quinn-proto	0.11.19	quic.min_reset_interval	20ms	src/config/mod.rs EndpointConfig::new
+quinn-proto	0.11.19	quic.cid_lifetime	None	src/cid_generator.rs HashedConnectionIdGenerator::from_key
+quinn-proto	0.11.19	quic.congestion_controller	CubicConfig::default()	src/config/transport.rs TransportConfig::default

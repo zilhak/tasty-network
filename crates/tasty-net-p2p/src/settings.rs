@@ -1052,3 +1052,633 @@ impl Resolver<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use tasty_net_identity::DeviceKey;
+    use tasty_net_rendezvous::quic;
+    use tasty_net_rendezvous::tls::{self, TlsOptions};
+    use tasty_net_rendezvous::wire::ALPN_P2P;
+
+    fn manifest_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn read(path: PathBuf) -> String {
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    }
+
+    fn design(doc: &str) -> String {
+        read(manifest_dir().join("../../docs/design").join(doc))
+    }
+
+    /// The lines of the section under `heading` (up to the next heading).
+    fn section(text: &str, heading: &str) -> Vec<String> {
+        text.lines()
+            .skip_while(|l| l.trim_start_matches('#').trim() != heading)
+            .skip(1)
+            .take_while(|l| !l.starts_with('#'))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The rows of the first table under `heading` of p2p.md, as (keys, value text) with the
+    /// value from the column named `column`.
+    fn table_rows(heading: &str, column: &str) -> Vec<(Vec<String>, String)> {
+        let lines = section(&design("p2p.md"), heading);
+        assert!(!lines.is_empty(), "p2p.md: no heading {heading}");
+        let mut table = lines
+            .iter()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'));
+        let cells = |l: &str| -> Vec<String> {
+            l.trim()
+                .trim_matches('|')
+                .split('|')
+                .map(|c| c.trim().to_owned())
+                .collect()
+        };
+        let header = cells(table.next().expect("table header"));
+        let col = header
+            .iter()
+            .position(|h| h == column)
+            .unwrap_or_else(|| panic!("{heading}: no column {column} in {header:?}"));
+        table.next(); // the |---| line
+        table
+            .map(|l| {
+                let row = cells(l);
+                let keys = row[0]
+                    .split(',')
+                    .map(|k| k.trim().trim_matches('`').to_owned())
+                    .collect();
+                (keys, row[col].clone())
+            })
+            .collect()
+    }
+
+    /// The comparable form of a design cell: the text before a parenthesis, without backticks
+    /// and without the spaces that group digits.
+    fn normalize(cell: &str) -> String {
+        let head = cell.split('(').next().unwrap_or(cell);
+        let head = head.replace('`', "");
+        let chars: Vec<char> = head.trim().chars().collect();
+        let mut out = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            let between_digits = *c == ' '
+                && i > 0
+                && chars[i - 1].is_ascii_digit()
+                && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+            if !between_digits {
+                out.push(*c);
+            }
+        }
+        out
+    }
+
+    const TABLES: [(&str, &str); 3] = [
+        ("이 레포가 정하는 값", "기본"),
+        ("의존성이 노출하는 값", "기본"),
+        ("고정값 (설정 불가, 조회에는 보임)", "고정값"),
+    ];
+
+    fn design_rows() -> Vec<(String, String)> {
+        let mut rows = Vec::new();
+        for (heading, column) in TABLES {
+            for (keys, cell) in table_rows(heading, column) {
+                let value = normalize(&cell);
+                if keys.len() == 1 {
+                    rows.push((keys[0].clone(), value));
+                } else {
+                    // Several keys in one row: one value for all, or one value each.
+                    let values: Vec<String> = cell.split(',').map(normalize).collect();
+                    for (i, k) in keys.iter().enumerate() {
+                        let v = if values.len() == keys.len() {
+                            values[i].clone()
+                        } else {
+                            value.clone()
+                        };
+                        rows.push((k.clone(), v));
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn defaults_match_design_tables() {
+        let rows = design_rows();
+        let doc_keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+        let code_keys: Vec<&str> = DEFAULTS.iter().map(|s| s.key).collect();
+        assert_eq!(code_keys, doc_keys, "the keys and their order");
+        for ((key, doc), s) in rows.iter().zip(DEFAULTS) {
+            let code = s.default.doc_form();
+            assert_eq!(normalize(&code), *doc, "{key}");
+        }
+    }
+
+    #[test]
+    fn settings_list_matches_query() {
+        let mut s = P2pSettings::new();
+        s.set("punch.attempts", Value::Count(3))
+            .set(
+                "quic.initial_rtt",
+                Value::Duration(Duration::from_millis(100)),
+            )
+            // The same value as the default given explicitly is still `configured`.
+            .set("history.limit", Value::Count(32))
+            .set("socket.recv_buffer", Value::Bytes(MIB));
+        let configured = [
+            "punch.attempts",
+            "quic.initial_rtt",
+            "history.limit",
+            "socket.recv_buffer",
+        ];
+        let entries = s.entries();
+        let keys: Vec<&str> = entries.iter().map(|e| e.key).collect();
+        let listed: Vec<&str> = DEFAULTS.iter().map(|d| d.key).collect();
+        assert_eq!(keys, listed);
+        for e in &entries {
+            let want = match e.key {
+                k if configured.contains(&k) => Source::Configured,
+                "socket.send_buffer" => Source::OsDefault,
+                k if setting(k).unwrap().kind == Kind::Fixed => Source::Fixed,
+                _ => Source::Default,
+            };
+            assert_eq!(e.source, want, "{e}");
+            assert_eq!(s.get(e.key), Some(*e));
+        }
+        // Before a socket exists, an OS value is not known.
+        assert_eq!(s.get("socket.send_buffer").unwrap().value, Value::Os);
+        // A bound endpoint shows what the OS gave.
+        let mut config = crate::P2pConfig::new(
+            DeviceKey::from_seed([1; 32]),
+            Arc::new(crate::PairingList::new()),
+        );
+        config.enabled = true;
+        config.server = Some(crate::RendezvousServer {
+            addr: "127.0.0.1:9".parse().unwrap(),
+            public_key: DeviceKey::from_seed([2; 32]).id(),
+        });
+        config.settings = s.clone();
+        let ep = crate::P2pEndpoint::bind(config.clone()).expect("bind");
+        let shown = ep.settings();
+        assert_eq!(
+            shown.iter().map(|e| e.key).collect::<Vec<_>>(),
+            listed,
+            "the query lists every key"
+        );
+        let send = shown
+            .iter()
+            .find(|e| e.key == "socket.send_buffer")
+            .unwrap();
+        assert_eq!(send.source, Source::OsDefault);
+        assert!(matches!(send.value, Value::Bytes(n) if n > 0), "{send}");
+        let recv = shown
+            .iter()
+            .find(|e| e.key == "socket.recv_buffer")
+            .unwrap();
+        assert_eq!(recv.source, Source::Configured);
+        ep.close();
+        // Fixed keys and unknown keys are refused by bind.
+        for key in ["tls.resumption", "quic.grease_quic_bit", "relay.enabled"] {
+            let mut bad = config.clone();
+            bad.settings.set(key, Value::Count(0));
+            match crate::P2pEndpoint::bind(bad) {
+                Err(crate::P2pError::Settings(SettingsError::UnknownKey(k))) => assert_eq!(k, key),
+                other => panic!("{key}: {:?}", other.map(|_| ())),
+            }
+        }
+        // A wrong type and a broken relation are refused.
+        let mut wrong = P2pSettings::new();
+        wrong.set("punch.attempts", Value::Duration(Duration::ZERO));
+        assert!(matches!(
+            wrong.resolve(),
+            Err(SettingsError::WrongType { .. })
+        ));
+        let mut relation = P2pSettings::new();
+        relation.set(
+            "quic.idle_timeout",
+            Value::Duration(Duration::from_secs(15)),
+        );
+        assert!(matches!(
+            relation.resolve(),
+            Err(SettingsError::Relation { .. })
+        ));
+    }
+
+    /// The value of `name` in a `Debug` string of a struct, without `Some(…)` and `VarInt(…)`.
+    fn field(debug: &str, name: &str) -> String {
+        let pat = format!("{name}: ");
+        let start = debug
+            .match_indices(&pat)
+            .find(|(i, _)| {
+                debug[..*i]
+                    .chars()
+                    .last()
+                    .is_none_or(|c| c == ' ' || c == '{')
+            })
+            .map(|(i, _)| i + pat.len())
+            .unwrap_or_else(|| panic!("no field {name} in {debug}"));
+        let mut depth = 0i32;
+        let mut end = debug.len();
+        for (i, c) in debug[start..].char_indices() {
+            match c {
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' if depth == 0 => {
+                    end = start + i;
+                    break;
+                }
+                ')' | '}' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    end = start + i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        unwrap(debug[start..end].trim())
+    }
+
+    fn unwrap(v: &str) -> String {
+        for wrap in ["Some(", "VarInt("] {
+            if let Some(inner) = v.strip_prefix(wrap).and_then(|r| r.strip_suffix(')')) {
+                return unwrap(inner);
+            }
+        }
+        v.to_owned()
+    }
+
+    /// The `Debug` form a quinn value of `v` has.
+    fn quinn_form(v: Value) -> String {
+        match v {
+            Value::Duration(d) => format!("{d:?}"),
+            Value::Count(n) | Value::Bytes(n) => n.to_string(),
+            #[allow(clippy::cast_precision_loss)]
+            Value::Ratio(n, d) => format!("{:?}", n as f32 / d as f32),
+            Value::Absent(_) | Value::Switch(false) => "None".to_owned(),
+            other => panic!("no quinn form for {other:?}"),
+        }
+    }
+
+    fn default_of(key: &str) -> Value {
+        setting(key).unwrap().default
+    }
+
+    fn crypto() -> quinn::crypto::rustls::QuicServerConfig {
+        let tls = tls::server_config(
+            &DeviceKey::from_seed([3; 32]),
+            ALPN_P2P,
+            TlsOptions {
+                max_fragment_size: None,
+            },
+        )
+        .unwrap();
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap()
+    }
+
+    /// (crate, version) pairs of Cargo.lock.
+    fn locked(name: &str) -> String {
+        let lock = read(manifest_dir().join("../../Cargo.lock"));
+        let at = lock
+            .find(&format!("name = \"{name}\"\n"))
+            .unwrap_or_else(|| panic!("{name} not in Cargo.lock"));
+        let rest = &lock[at..];
+        let v = rest.lines().nth(1).unwrap();
+        v.trim_start_matches("version = ")
+            .trim_matches('"')
+            .to_owned()
+    }
+
+    #[test]
+    fn dependency_defaults_match_source() {
+        let t = format!("{:?}", quinn::TransportConfig::default());
+        let m = format!("{:?}", quinn::MtuDiscoveryConfig::default());
+        let a = format!("{:?}", quinn::AckFrequencyConfig::default());
+        let e = format!("{:?}", quinn::EndpointConfig::default());
+        let s = format!("{:?}", quinn::ServerConfig::with_crypto(Arc::new(crypto())));
+        let v = format!("{:?}", quinn::ValidationTokenConfig::default());
+        let c = format!("{:?}", quinn::congestion::CubicConfig::default());
+        // The keys whose design default is the dependency's own.
+        let shown: [(&str, &str, &str); 27] = [
+            ("quic.initial_rtt", &t, "initial_rtt"),
+            ("quic.packet_threshold", &t, "packet_threshold"),
+            ("quic.time_threshold", &t, "time_threshold"),
+            (
+                "quic.persistent_congestion_threshold",
+                &t,
+                "persistent_congestion_threshold",
+            ),
+            ("quic.stream_receive_window", &t, "stream_receive_window"),
+            ("quic.receive_window", &t, "receive_window"),
+            ("quic.send_window", &t, "send_window"),
+            ("quic.initial_mtu", &t, "initial_mtu"),
+            ("quic.min_mtu", &t, "min_mtu"),
+            ("quic.mtu_discovery.interval", &m, "interval"),
+            ("quic.mtu_discovery.upper_bound", &m, "upper_bound"),
+            (
+                "quic.mtu_discovery.black_hole_cooldown",
+                &m,
+                "black_hole_cooldown",
+            ),
+            ("quic.mtu_discovery.minimum_change", &m, "minimum_change"),
+            ("quic.crypto_buffer_size", &t, "crypto_buffer_size"),
+            ("quic.ack_frequency", &t, "ack_frequency_config"),
+            (
+                "quic.ack_frequency.ack_eliciting_threshold",
+                &a,
+                "ack_eliciting_threshold",
+            ),
+            ("quic.ack_frequency.max_ack_delay", &a, "max_ack_delay"),
+            (
+                "quic.ack_frequency.reordering_threshold",
+                &a,
+                "reordering_threshold",
+            ),
+            (
+                "quic.datagram_send_buffer_size",
+                &t,
+                "datagram_send_buffer_size",
+            ),
+            ("quic.cubic.initial_window", &c, "initial_window"),
+            ("quic.max_udp_payload_size", &e, "max_udp_payload_size"),
+            ("quic.retry_token_lifetime", &s, "retry_token_lifetime"),
+            ("quic.validation_token.lifetime", &v, "lifetime"),
+            ("quic.validation_token.sent", &v, "sent"),
+            ("quic.max_incoming", &s, "max_incoming"),
+            ("quic.incoming_buffer_size", &s, "incoming_buffer_size"),
+            (
+                "quic.incoming_buffer_size_total",
+                &s,
+                "incoming_buffer_size_total",
+            ),
+        ];
+        for (key, debug, name) in shown {
+            assert_eq!(
+                field(debug, name),
+                quinn_form(default_of(key)),
+                "{key} ({name})"
+            );
+        }
+        // The design turns datagrams off; the table names quinn's own default.
+        assert_eq!(field(&t, "datagram_receive_buffer_size"), "1250000");
+        let row = section(&design("p2p.md"), "의존성이 노출하는 값")
+            .into_iter()
+            .find(|l| l.starts_with("| `quic.datagram_receive_buffer_size`"))
+            .unwrap();
+        assert!(row.contains("1 250 000 B"), "{row}");
+        // The two values quinn's repo keys differ from (the table names quinn's).
+        assert_eq!(field(&t, "max_concurrent_bidi_streams"), "100");
+        assert_eq!(field(&t, "max_concurrent_uni_streams"), "100");
+        // The values Debug does not show, copied from the pinned source.
+        let data = read(manifest_dir().join("tests/data/dependency-defaults.txt"));
+        let mut copied = 0;
+        for line in data.lines().filter(|l| !l.starts_with('#')) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            let [krate, version, key, value, _where] = cols[..] else {
+                panic!("bad line {line}");
+            };
+            assert_eq!(locked(krate), version, "{line}: the pinned version");
+            match key {
+                "quic.congestion_controller" => {
+                    assert_eq!(value, "CubicConfig::default()");
+                    assert_eq!(default_of(key), Value::Fixed("CUBIC", "CUBIC"));
+                }
+                _ => assert_eq!(quinn_form(default_of(key)), value, "{key}"),
+            }
+            copied += 1;
+        }
+        assert_eq!(copied, 3);
+        // rustls: the public fields.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        assert_eq!(client.max_fragment_size, None);
+        assert_eq!(
+            default_of("tls.max_fragment_size"),
+            Value::Absent(Absent::None)
+        );
+        let server = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(rustls::server::ResolvesServerCertUsingSni::new()));
+        assert_eq!(server.max_fragment_size, None);
+        // The fixed table names these rustls defaults.
+        assert_eq!(server.send_tls13_tickets, 2);
+        assert_eq!(server.max_tls13_tickets, 0);
+        assert_eq!(server.max_early_data_size, 0);
+        assert!(!client.enable_early_data);
+        // quinn's default turns grease on; the fixed table says so.
+        assert_eq!(field(&e, "grease_quic_bit"), "true");
+    }
+
+    #[test]
+    fn dependency_setters_are_covered() {
+        let data = read(manifest_dir().join("tests/data/dependency-setters.txt"));
+        let text = design("p2p.md");
+        let lines: Vec<String> = section(&text, "의존성이 노출하는 값")
+            .into_iter()
+            .chain(section(&text, "고정값 (설정 불가, 조회에는 보임)"))
+            .collect();
+        let mut checked = 0;
+        for line in data.lines().filter(|l| !l.starts_with('#')) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols[0] == "version" {
+                assert_eq!(locked(cols[1]), cols[2], "{line}: the pinned version");
+                continue;
+            }
+            let [_krate, kind, name, _ty] = cols[..] else {
+                panic!("bad line {line}");
+            };
+            let (ty, member) = match kind {
+                "setter" => name.split_once("::").unwrap(),
+                _ => name.split_once('.').unwrap(),
+            };
+            let quoted = format!("`{member}`");
+            let covered = lines.iter().any(|l| {
+                // A row that names the type and the member (or a key ending in it), or a
+                // sentence or fixed row that names the member alone.
+                (l.contains(ty) && l.contains(member)) || l.contains(&quoted)
+            });
+            assert!(covered, "{name} ({kind}) is in no row of p2p.md");
+            checked += 1;
+        }
+        assert!(checked >= 30, "{checked}");
+    }
+
+    /// Settings that change every value that goes into quinn or rustls.
+    fn changed() -> P2pSettings {
+        let d = |ms: u64| Value::Duration(Duration::from_millis(ms));
+        let mut s = P2pSettings::new();
+        s.set("quic.initial_rtt", d(100))
+            .set("quic.packet_threshold", Value::Count(5))
+            .set("quic.time_threshold", Value::Ratio(5, 4))
+            .set("quic.persistent_congestion_threshold", Value::Count(4))
+            .set("quic.stream_receive_window", Value::Bytes(2_000_000))
+            .set("quic.receive_window", Value::Bytes(3_000_000))
+            .set("quic.send_window", Value::Bytes(4_000_000))
+            .set("quic.initial_mtu", Value::Bytes(1300))
+            .set("quic.min_mtu", Value::Bytes(1250))
+            .set("quic.mtu_discovery.interval", d(300_000))
+            .set("quic.mtu_discovery.upper_bound", Value::Bytes(1400))
+            .set("quic.mtu_discovery.black_hole_cooldown", d(30_000))
+            .set("quic.mtu_discovery.minimum_change", Value::Bytes(30))
+            .set("quic.crypto_buffer_size", Value::Bytes(32 * KIB))
+            .set("quic.ack_frequency", Value::Switch(true))
+            .set(
+                "quic.ack_frequency.ack_eliciting_threshold",
+                Value::Count(3),
+            )
+            .set("quic.ack_frequency.max_ack_delay", d(40))
+            .set("quic.ack_frequency.reordering_threshold", Value::Count(4))
+            .set("quic.datagram_receive_buffer_size", Value::Bytes(5000))
+            .set("quic.datagram_send_buffer_size", Value::Bytes(6000))
+            .set("quic.max_udp_payload_size", Value::Bytes(1400))
+            .set("quic.retry_token_lifetime", d(20_000))
+            .set("quic.validation_token.lifetime", d(86_400_000))
+            .set("quic.validation_token.sent", Value::Count(2))
+            .set("quic.max_incoming", Value::Count(100))
+            .set("quic.incoming_buffer_size", Value::Bytes(2_000_000))
+            .set("quic.incoming_buffer_size_total", Value::Bytes(3_000_000))
+            .set("quic.max_bidi_streams", Value::Count(10))
+            .set("quic.max_uni_streams", Value::Count(1))
+            .set("quic.keepalive_interval", d(7000))
+            .set("quic.idle_timeout", d(21_000))
+            .set("tls.max_fragment_size", Value::Bytes(1000));
+        s
+    }
+
+    #[test]
+    fn dependency_settings_are_applied() {
+        let p = changed().resolve().expect("valid");
+        let t = format!("{:?}", quic::transport_config(&p.quic));
+        for (name, want) in [
+            ("initial_rtt", "100ms"),
+            ("packet_threshold", "5"),
+            ("time_threshold", "1.25"),
+            ("persistent_congestion_threshold", "4"),
+            ("stream_receive_window", "2000000"),
+            ("receive_window", "3000000"),
+            ("send_window", "4000000"),
+            ("initial_mtu", "1300"),
+            ("min_mtu", "1250"),
+            ("crypto_buffer_size", "32768"),
+            ("datagram_receive_buffer_size", "5000"),
+            ("datagram_send_buffer_size", "6000"),
+            ("keep_alive_interval", "7s"),
+            ("max_concurrent_bidi_streams", "10"),
+            ("max_concurrent_uni_streams", "1"),
+        ] {
+            assert_eq!(field(&t, name), want, "{name}");
+        }
+        assert!(field(&t, "max_idle_timeout").contains("21000"), "{t}");
+        let mtu = field(&t, "mtu_discovery_config");
+        for (name, want) in [
+            ("interval", "300s"),
+            ("upper_bound", "1400"),
+            ("black_hole_cooldown", "30s"),
+            ("minimum_change", "30"),
+        ] {
+            assert_eq!(field(&mtu, name), want, "{name}");
+        }
+        let ack = field(&t, "ack_frequency_config");
+        for (name, want) in [
+            ("ack_eliciting_threshold", "3"),
+            ("max_ack_delay", "40ms"),
+            ("reordering_threshold", "4"),
+        ] {
+            assert_eq!(field(&ack, name), want, "{name}");
+        }
+        let e = format!("{:?}", quic::endpoint_config(&p.quic));
+        assert_eq!(field(&e, "max_udp_payload_size"), "1400");
+        // Fixed: grease off.
+        assert_eq!(field(&e, "grease_quic_bit"), "false");
+        let s = format!("{:?}", quic::server_config(&p.quic, crypto()));
+        for (name, want) in [
+            ("retry_token_lifetime", "20s"),
+            ("max_incoming", "100"),
+            ("incoming_buffer_size", "2000000"),
+            ("incoming_buffer_size_total", "3000000"),
+        ] {
+            assert_eq!(field(&s, name), want, "{name}");
+        }
+        let v = field(&s, "validation_token");
+        assert_eq!(field(&v, "lifetime"), "86400s");
+        assert_eq!(field(&v, "sent"), "2");
+        // rustls: the fragment size, and the fixed values (no resumption, tickets or 0-RTT).
+        let options = TlsOptions {
+            max_fragment_size: p.quic.tls_max_fragment_size,
+        };
+        let key = DeviceKey::from_seed([4; 32]);
+        let client = tls::client_config(&key, key.id(), ALPN_P2P, options).unwrap();
+        assert_eq!(client.max_fragment_size, Some(1000));
+        assert!(!client.enable_early_data);
+        assert_eq!(
+            format!("{:?}", client.resumption),
+            format!("{:?}", rustls::client::Resumption::disabled())
+        );
+        let server = tls::server_config(&key, ALPN_P2P, options).unwrap();
+        assert_eq!(server.max_fragment_size, Some(1000));
+        assert_eq!(server.send_tls13_tickets, 0);
+        assert_eq!(server.max_tls13_tickets, 0);
+        assert_eq!(server.max_early_data_size, 0);
+        assert_eq!(server.alpn_protocols, vec![ALPN_P2P.to_vec()]);
+        // The stream limit reaches the peer: with the default 0, a stream the peer opens
+        // waits for credit that never comes; with 1 it opens.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let opens = |uni: u64| {
+            let mut s = P2pSettings::new();
+            s.set("quic.max_uni_streams", Value::Count(uni));
+            let p = s.resolve().unwrap();
+            rt.block_on(async move {
+                let server_key = DeviceKey::from_seed([5; 32]);
+                let client_key = DeviceKey::from_seed([6; 32]);
+                let tls = tls::server_config(&server_key, ALPN_P2P, options).unwrap();
+                let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+                let server = quinn::Endpoint::server(
+                    quic::server_config(&p.quic, crypto),
+                    "127.0.0.1:0".parse().unwrap(),
+                )
+                .unwrap();
+                let addr = server.local_addr().unwrap();
+                let accepting = tokio::spawn(async move {
+                    let c = server.accept().await.unwrap().await.unwrap();
+                    c.closed().await;
+                });
+                let client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+                let tls =
+                    tls::client_config(&client_key, server_key.id(), ALPN_P2P, options).unwrap();
+                let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+                let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+                config.transport_config(Arc::new(quic::transport_config(&p.quic)));
+                let conn = client
+                    .connect_with(config, addr, tls::SERVER_NAME)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                let opened = tokio::time::timeout(Duration::from_millis(500), conn.open_uni())
+                    .await
+                    .is_ok();
+                conn.close(quinn::VarInt::from_u32(0), b"");
+                let _done = accepting.await;
+                opened
+            })
+        };
+        assert!(
+            !opens(0),
+            "a uni stream opened with quic.max_uni_streams = 0"
+        );
+        assert!(opens(1));
+    }
+}

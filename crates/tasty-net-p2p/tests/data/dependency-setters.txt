@@ -1,0 +1,45 @@
+# Public setters and public fields of the pinned dependency config types that take a time,
+# count, size or limit (docs/design/testing.md "설정값 시험", dependency_setters_are_covered).
+# Made with tests/data/extract_setters.py from rustdoc JSON (format 57) of these versions;
+# make it again when a version changes. Columns: crate, setter or field, name, parameter type.
+version	quinn-proto	0.11.19
+version	rustls	0.23.46
+quinn_proto	setter	AckFrequencyConfig::ack_eliciting_threshold	VarInt
+quinn_proto	setter	AckFrequencyConfig::max_ack_delay	Option<Duration>
+quinn_proto	setter	AckFrequencyConfig::reordering_threshold	VarInt
+quinn_proto	setter	ClientConfig::version	u32
+quinn_proto	setter	CubicConfig::initial_window	u64
+quinn_proto	setter	EndpointConfig::max_udp_payload_size	u16
+quinn_proto	setter	EndpointConfig::min_reset_interval	Duration
+quinn_proto	setter	HashedConnectionIdGenerator::set_lifetime	Duration
+quinn_proto	setter	MtuDiscoveryConfig::black_hole_cooldown	Duration
+quinn_proto	setter	MtuDiscoveryConfig::interval	Duration
+quinn_proto	setter	MtuDiscoveryConfig::minimum_change	u16
+quinn_proto	setter	MtuDiscoveryConfig::upper_bound	u16
+quinn_proto	setter	ServerConfig::incoming_buffer_size	u64
+quinn_proto	setter	ServerConfig::incoming_buffer_size_total	u64
+quinn_proto	setter	ServerConfig::max_incoming	usize
+quinn_proto	setter	ServerConfig::retry_token_lifetime	Duration
+quinn_proto	setter	TransportConfig::crypto_buffer_size	usize
+quinn_proto	setter	TransportConfig::datagram_receive_buffer_size	Option<usize>
+quinn_proto	setter	TransportConfig::datagram_send_buffer_size	usize
+quinn_proto	setter	TransportConfig::initial_mtu	u16
+quinn_proto	setter	TransportConfig::initial_rtt	Duration
+quinn_proto	setter	TransportConfig::keep_alive_interval	Option<Duration>
+quinn_proto	setter	TransportConfig::max_concurrent_bidi_streams	VarInt
+quinn_proto	setter	TransportConfig::max_concurrent_uni_streams	VarInt
+quinn_proto	setter	TransportConfig::max_idle_timeout	Option<IdleTimeout>
+quinn_proto	setter	TransportConfig::min_mtu	u16
+quinn_proto	setter	TransportConfig::packet_threshold	u32
+quinn_proto	setter	TransportConfig::persistent_congestion_threshold	u32
+quinn_proto	setter	TransportConfig::receive_window	VarInt
+quinn_proto	setter	TransportConfig::send_window	u64
+quinn_proto	setter	TransportConfig::stream_receive_window	VarInt
+quinn_proto	setter	TransportConfig::time_threshold	f32
+quinn_proto	setter	ValidationTokenConfig::lifetime	Duration
+quinn_proto	setter	ValidationTokenConfig::sent	u32
+rustls	field	ClientConfig.max_fragment_size	Option<usize>
+rustls	field	ServerConfig.max_early_data_size	u32
+rustls	field	ServerConfig.max_fragment_size	Option<usize>
+rustls	field	ServerConfig.max_tls13_tickets	usize
+rustls	field	ServerConfig.send_tls13_tickets	usize
