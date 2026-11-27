@@ -10,3 +10,6 @@ bad.example.com
 deploy@WEB.Example.COM
 ssh://user@uri.example.com:2201
 -o IdentityFile=~/.ssh/id_%h web
+-N web
+-N -o UpdateHostKeys=ask web
+-o RequestTTY=force -N web

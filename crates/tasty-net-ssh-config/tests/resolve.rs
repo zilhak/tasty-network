@@ -517,6 +517,29 @@ fn identity_file_duplicates_by_origin() {
 }
 
 #[test]
+fn no_command_sets_request_tty() {
+    use tasty_net_ssh_config::options::{RequestTty, YesNoAsk};
+    let n = CommandLineValue {
+        value: CommandLine::NoCommand,
+        label: "forced".to_string(),
+    };
+    let r = resolve_with(
+        "UpdateHostKeys ask\n",
+        "web",
+        vec![option("RequestTTY=force", "target"), n],
+    );
+    assert_eq!(r.options.request_tty, Some(RequestTty::No));
+    assert_eq!(
+        r.source_of("requesttty"),
+        Origin::CommandLine {
+            label: "forced".to_string()
+        }
+    );
+    // `RequestTTY no` turns `UpdateHostKeys ask` off (ssh.c:1344-1351).
+    assert_eq!(r.options.update_hostkeys, Some(YesNoAsk::No));
+}
+
+#[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());
     ctx.env.insert("NAME".to_string(), "value".to_string());

@@ -448,6 +448,11 @@ impl ConfigSet {
                     }
                     r.o.session_type = Some(SessionType::None);
                     push_source(r, Op::SessionType, "none", &origin);
+                    // `ssh.c:1034`: `-N` also sets `RequestTTY no`, over an earlier `-o`.
+                    r.o.request_tty = Some(crate::options::RequestTty::No);
+                    let name = crate::keywords::keyword_name(Op::RequestTty);
+                    r.sources.retain(|v| v.keyword != name);
+                    push_source(r, Op::RequestTty, "no", &origin);
                 }
                 CommandLine::Subsystem => {
                     if r.o
