@@ -23,7 +23,7 @@
 # 환경 변수:
 #   RENDEZVOUS_BIN                 tasty-rendezvous 실행 파일. 주면 빌드하지 않는다(STUN_PROBE와 함께 준다)
 #   STUN_PROBE                     stun_probe 예제 실행 파일
-#   RENDEZVOUS_START_SECONDS       서버 시작 로그를 기다리는 시간. 기본 30
+#   RENDEZVOUS_START_SECONDS       서버 시작 로그(시작 줄, 설정 줄, wildcard 경고)를 다 기다리는 시간. 기본 30
 #   RENDEZVOUS_STUN_TIMEOUT_MS     STUN 응답 하나를 기다리는 시간. 기본 2000
 #   RENDEZVOUS_STOP_SECONDS        SIGINT 뒤 서버가 끝나기를 기다리는 시간. 넘으면 SIGKILL하고 실패. 기본 10
 #   RENDEZVOUS_CLEANUP_SECONDS     실패 경로 정리에서 SIGTERM 뒤 기다리는 시간. 넘으면 SIGKILL. 기본 5
@@ -217,6 +217,26 @@ executable_of() {
         | tail -n 1
 }
 
+# missing_lines <로그> <글자...>: 로그에 없는 글자를 ; 로 이어 낸다(고정 글자 비교).
+missing_lines() {
+    local file=$1 p out=""
+    shift
+    for p in "$@"; do
+        grep -qF -- "$p" "$file" 2>/dev/null || out+="${out:+; }$p"
+    done
+    printf '%s' "$out"
+}
+
+# wait_start_log <로그> <pid> <초> <글자...>: 로그에 모든 글자가 나올 때까지 기다린다.
+# 다 나오면 0, 기한을 넘기면 1, 그 전에 프로세스가 끝나면 2(끝난 뒤의 로그를 한 번 더 본다).
+wait_start_log() {
+    local file=$1 pid=$2 limit=$3
+    shift 3
+    all_logged() { [[ -z "$(missing_lines "$file" "$@")" ]] || gone "$pid"; }
+    wait_until "$limit" all_logged "$@" || return 1
+    [[ -z "$(missing_lines "$file" "$@")" ]] || return 2
+}
+
 # 주소 $1(IP:포트 또는 [IPv6]:포트)의 포트.
 port_of() { echo "${1##*:}"; }
 
@@ -404,6 +424,35 @@ while True: time.sleep(0.1)'
             [[ -z "$SERVER_PID" ]]
         ) && gone "$(cat "$t/deaf.pid")" && [[ $((SECONDS - start)) -le 5 ]]
     }
+    # 시작 로그 기다리기. 가짜 서버가 시작 줄을 먼저 찍고 나머지를 늦게 찍는다.
+    local late='echo "INFO s: rendezvous server started public_key=k primary=x" >&2; sleep 0.5
+echo "INFO s: setting key=a value=1 source=configured" >&2; sleep 0.5
+echo "WARN s: bound to a wildcard address" >&2; sleep 30'
+    start_late() { # wait_start_log <예상 rc> <기한> <글자...>
+        local want=$1 limit=$2 rc=0 pid
+        shift 2
+        : >"$t/start.log"
+        bash -c "$late" 2>"$t/start.log" >/dev/null &
+        pid=$!
+        wait_start_log "$t/start.log" "$pid" "$limit" "$@" || rc=$?
+        kill -s KILL "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        [[ "$rc" == "$want" ]]
+    }
+    start_ends() { # 시작 줄만 찍고 끝나는 가짜: 2
+        local rc=0 pid
+        : >"$t/start.log"
+        bash -c 'echo "rendezvous server started public_key=k " >&2; exit 1' 2>"$t/start.log" &
+        pid=$!
+        wait_start_log "$t/start.log" "$pid" 5 "rendezvous server started public_key=k " "wildcard address" || rc=$?
+        wait "$pid" 2>/dev/null
+        [[ "$rc" == 2 ]]
+    }
+    expect ok "wait_start_log: 늦게 찍히는 설정·경고 줄을 기한 안에서 기다린다" start_late 0 5 "rendezvous server started public_key=k " "setting key=a value=1 source=configured" "wildcard address"
+    expect ok "wait_start_log: 끝내 안 나오는 줄은 기한 뒤 1" start_late 1 1.5 "rendezvous server started public_key=k " "setting key=b value=2 source=configured"
+    expect ok "wait_start_log: 다 찍기 전에 끝나면 2" start_ends
+    expect ok "missing_lines: 없는 줄만 낸다" test "$(printf 'a b\nc\n' >"$t/m.log"; missing_lines "$t/m.log" "a b" "d" "c")" == d
+
     expect ok "stop_server: SIGINT에 끝나는 서버는 통과" stop_ok
     expect ok "stop_server: 신호를 무시하는 서버는 기한 뒤 SIGKILL, result=fail step=stop" stop_deaf
     expect ok "cleanup: 신호를 무시하는 서버를 기한 뒤 SIGKILL로 거둔다" cleanup_deaf
@@ -504,21 +553,19 @@ main_check() {
     STEP=start
     "$BIN" --config "$cfg" 2>"$TMP/server.log" &
     SERVER_PID=$!
-    local waited=0
-    until grep -q 'rendezvous server started' "$TMP/server.log"; do
-        kill -0 "$SERVER_PID" 2>/dev/null || { cat "$TMP/server.log" >&2; fail_at "서버가 시작 전에 끝났다"; }
-        [[ "$waited" -lt $((START_SECONDS * 10)) ]] || { cat "$TMP/server.log" >&2; fail_at "서버 시작 로그를 ${START_SECONDS}s 안에 보지 못했다"; }
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-    grep 'rendezvous server started' "$TMP/server.log" | grep -q "public_key=$pub" \
-        || fail_at "시작 로그의 공개키가 keygen과 다르다: $(grep 'rendezvous server started' "$TMP/server.log")"
+    # 시작 줄과 그 뒤의 설정 줄·wildcard 경고는 차례로 찍힌다. 모두 나올 때까지 기한 안에서 기다린다.
+    local want=("rendezvous server started public_key=$pub ")
     while read -r key value; do
-        grep -q "key=$key value=$value source=configured setting" "$TMP/server.log" \
-            || grep -q "setting key=$key value=$value source=configured" "$TMP/server.log" \
-            || fail_at "시작 로그에 설정 줄이 없다: $key=$value"
+        want+=("setting key=$key value=$value source=configured")
     done < <(configured_keys "$cfg")
-    grep -q 'wildcard address' "$TMP/server.log" || fail_at "wildcard로 듣는데 경고 줄이 없다"
+    want+=("wildcard address")
+    local w=0
+    wait_start_log "$TMP/server.log" "$SERVER_PID" "$START_SECONDS" "${want[@]}" || w=$?
+    case "$w" in
+        0) ;;
+        2) cat "$TMP/server.log" >&2; fail_at "서버가 시작 로그를 다 찍기 전에 끝났다" ;;
+        *) cat "$TMP/server.log" >&2; fail_at "시작 로그에 없는 줄(${START_SECONDS}s): $(missing_lines "$TMP/server.log" "${want[@]}")" ;;
+    esac
     step_ok "pid=$SERVER_PID"
 
     for STEP in stun-primary stun-alternate; do
