@@ -21,9 +21,10 @@ use tasty_net_p2p::{
     P2pCancel, P2pCloseReason, P2pConnection, P2pRecvStream, P2pSendStream, P2pStream,
 };
 
+use crate::cancel::{AttemptCancel, Cancellable};
 use crate::channel::{ChannelControl, RawChannel};
 use crate::lock::lock;
-use crate::transport::TransportKind;
+use crate::transport::{ConnectError, TransportKind};
 
 use super::conn::{ChannelSlot, ConnSide};
 
@@ -270,6 +271,95 @@ pub(crate) fn channel(
     )
     .with_finish_now(Arc::new(move || shared.finish_now()))
     .keep_alive(Arc::new(slot))
+}
+
+/// Opens a stream on `conn`, under `cancel`.
+///
+/// `tasty-net-p2p`'s `open_bi` waits without a limit while the peer allows no more streams
+/// (`quic.max_bidi_streams`) and takes no cancel, so it runs on a thread of its own and the
+/// cancel ends the wait here. A stream that opens after its attempt was cancelled is refused at
+/// once; the thread ends with the open, which the connection's close ends too.
+pub(crate) fn open(
+    conn: &P2pConnection,
+    cancel: &AttemptCancel,
+) -> Result<P2pStream, ConnectError> {
+    let opening = Arc::new(Opening::default());
+    let _registration = cancel
+        .register(Arc::clone(&opening) as Arc<dyn Cancellable>)
+        .map_err(|_| ConnectError::Cancelled)?;
+    let spawned = {
+        let opening = Arc::clone(&opening);
+        let conn = conn.clone();
+        std::thread::Builder::new()
+            .name("p2p-open".into())
+            .spawn(move || opening.opened(conn.open_bi()))
+    };
+    if let Err(error) = spawned {
+        // Without the thread the open waits here, as `open_bi` does.
+        tracing::debug!(%error, "no thread for a P2P stream open");
+        return conn.open_bi().map_err(ConnectError::Io);
+    }
+    opening.wait()
+}
+
+/// One stream open waiting on its thread.
+#[derive(Default)]
+struct Opening {
+    state: Mutex<OpenState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct OpenState {
+    result: Option<io::Result<P2pStream>>,
+    /// The attempt was cancelled: nobody takes the result any more.
+    cancelled: bool,
+}
+
+impl Opening {
+    /// The open's result, from its thread.
+    fn opened(&self, result: io::Result<P2pStream>) {
+        let mut state = lock(&self.state);
+        if state.cancelled {
+            drop(state);
+            if let Ok(stream) = result {
+                refuse(stream);
+            }
+            return;
+        }
+        state.result = Some(result);
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// Waits for the open or the cancel, whichever comes first.
+    fn wait(&self) -> Result<P2pStream, ConnectError> {
+        let mut state = lock(&self.state);
+        loop {
+            if state.cancelled {
+                let late = state.result.take();
+                drop(state);
+                if let Some(Ok(stream)) = late {
+                    refuse(stream);
+                }
+                return Err(ConnectError::Cancelled);
+            }
+            if let Some(result) = state.result.take() {
+                return result.map_err(ConnectError::Io);
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+impl Cancellable for Opening {
+    fn cancel(&self) {
+        lock(&self.state).cancelled = true;
+        self.changed.notify_all();
+    }
 }
 
 /// Refuses a stream this end does not take: resets its sending side and stops its receiving

@@ -278,7 +278,7 @@ fn open_channel(
         return Err(ConnectError::Cancelled);
     }
     let slot = state.acquire().ok_or_else(closed)?;
-    let stream = state.conn.open_bi().map_err(ConnectError::Io)?;
+    let stream = stream::open(&state.conn, cancel)?;
     Ok(state.entered(stream::channel(
         stream,
         &state.conn,

@@ -93,15 +93,17 @@ fn timeouts() -> LinkTimeouts {
 }
 
 fn endpoint(server: &Rendezvous, seed: u8, peer: DeviceId) -> P2pEndpoint {
-    endpoint_with(server, seed, peer, None)
+    endpoint_with(server, seed, peer, None, None)
 }
 
-/// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers.
+/// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers; with
+/// `streams`, the peer may open at most that many streams at a time on its connections.
 fn endpoint_with(
     server: &Rendezvous,
     seed: u8,
     peer: DeviceId,
     gate: Option<Arc<Gate>>,
+    streams: Option<u64>,
 ) -> P2pEndpoint {
     let pairing = Arc::new(PairingList::new());
     pairing.add(peer);
@@ -117,6 +119,11 @@ fn endpoint_with(
                 P2pValue::Duration(Duration::from_millis(300)),
             )
             .set("quic.idle_timeout", P2pValue::Duration(IDLE_TIMEOUT));
+    }
+    if let Some(streams) = streams {
+        config
+            .settings
+            .set("quic.max_bidi_streams", P2pValue::Count(streams));
     }
     P2pEndpoint::bind(config).expect("bind")
 }
@@ -248,7 +255,7 @@ struct Pair {
     _server: Rendezvous,
     a: P2pEndpoint,
     b: P2pEndpoint,
-    transport: P2pTransport,
+    transport: Arc<P2pTransport>,
     dial: DialConfig,
     policy: Arc<Policy>,
     /// The connection tables of `a` (the dialer) and `b`.
@@ -269,18 +276,32 @@ impl Pair {
     /// [`Pair::start`]; with `gated`, both endpoints run with short QUIC timers and `b` runs on
     /// the returned gate.
     fn start_with(seed: u8, mode: Mode, gated: bool) -> (Self, Option<Arc<Gate>>) {
+        Self::start_full(seed, mode, gated, None)
+    }
+
+    /// [`Pair::start`] where `a` may open at most `streams` streams at a time to `b`.
+    fn start_limited(seed: u8, mode: Mode, streams: u64) -> Self {
+        Self::start_full(seed, mode, false, Some(streams)).0
+    }
+
+    fn start_full(
+        seed: u8,
+        mode: Mode,
+        gated: bool,
+        streams: Option<u64>,
+    ) -> (Self, Option<Arc<Gate>>) {
         let server = Rendezvous::start();
         let (ka, kb) = (key(seed), key(seed + 1));
         let gate = gated.then(|| Gate::bind(&server));
         let (a, b) = if gated {
             (
-                endpoint_with(&server, seed, kb.id(), Some(Gate::bind(&server))),
-                endpoint_with(&server, seed + 1, ka.id(), gate.clone()),
+                endpoint_with(&server, seed, kb.id(), Some(Gate::bind(&server)), None),
+                endpoint_with(&server, seed + 1, ka.id(), gate.clone(), streams),
             )
         } else {
             (
                 endpoint(&server, seed, kb.id()),
-                endpoint(&server, seed + 1, ka.id()),
+                endpoint_with(&server, seed + 1, ka.id(), None, streams),
             )
         };
         let policy = Arc::new(Policy::default());
@@ -311,7 +332,7 @@ impl Pair {
         };
         let pair = Self {
             _server: server,
-            transport: P2pTransport::new(a.clone()).with_connections(table_a.clone()),
+            transport: Arc::new(P2pTransport::new(a.clone()).with_connections(table_a.clone())),
             a,
             b,
             dial: DialConfig::new(ka, format!("dialer-{seed}")).with_timeouts(timeouts()),
@@ -626,6 +647,39 @@ fn the_refusing_ack_is_followed_by_the_eof_at_once() {
         waited < timeouts().drain_cap,
         "the EOF came {waited:?} after the ACK, not before the drain cap"
     );
+}
+
+/// A channel that waits for a stream on a shared connection where the peer allows no more
+/// streams ends with its attempt's cancel (docs/design/transport.md "시도 취소, 닫기, 회수").
+#[test]
+fn a_cancel_ends_the_wait_for_a_stream() {
+    let pair = Pair::start_limited(52, Mode::Echo, 1);
+    let _link = pair.link(None).expect("the link takes the one stream");
+    assert_eq!(pair.transport.live_connections(), 1);
+    let cancel = AttemptCancel::new();
+    let (done_tx, done) = mpsc::channel();
+    {
+        let transport = Arc::clone(&pair.transport);
+        let cancel = cancel.clone();
+        let peer = pair.b.id();
+        // Not joined: before the fix it never returns, and the test fails below instead.
+        std::thread::spawn(move || {
+            let result = transport.connect_with(&peer, &cancel, &ConnectOptions::new());
+            let _sent = done_tx.send(result.map(|_| ()));
+        });
+    }
+    assert!(
+        done.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the second channel did not wait for a stream"
+    );
+    cancel.cancel();
+    match done.recv_timeout(PATIENCE) {
+        Ok(Err(ConnectError::Cancelled)) => {}
+        Ok(other) => panic!("expected a cancel, got {other:?}"),
+        Err(_) => panic!("the cancel did not end the wait for a stream"),
+    }
+    // The shared connection and its link stay.
+    assert_eq!(pair.transport.live_connections(), 1);
 }
 
 /// Both sides send a last frame and end their side; each application reads the other's last
