@@ -251,17 +251,22 @@ def strip_cfg_test(toks):
 
 
 def duration_names(toks):
-    """Duration과 그 별칭(use … Duration as X, type X = … Duration;)."""
+    """Duration과 그 별칭(use … X as Y, type Y = … X;에서 X가 이미 찾은 이름). 별칭의 별칭도
+    따라가도록 새 이름이 없을 때까지 되풀이한다."""
     names = {"Duration"}
-    for i, (k, t, _) in enumerate(toks):
-        if (t == "Duration" and i + 2 < len(toks) and toks[i + 1][1] == "as"
-                and toks[i + 2][0] == "ident"):
-            names.add(toks[i + 2][1])
-        if t == "type" and i + 2 < len(toks) and toks[i + 2][1] == "=":
-            end = item_end(toks, i)
-            if end > 0 and toks[end - 1][1] == "Duration":
-                names.add(toks[i + 1][1])
-    return names
+    while True:
+        found = set()
+        for i, (k, t, _) in enumerate(toks):
+            if (t in names and i + 2 < len(toks) and toks[i + 1][1] == "as"
+                    and toks[i + 2][0] == "ident"):
+                found.add(toks[i + 2][1])
+            if t == "type" and i + 2 < len(toks) and toks[i + 2][1] == "=":
+                end = item_end(toks, i)
+                if end > 0 and toks[end - 1][1] in names:
+                    found.add(toks[i + 1][1])
+        if found <= names:
+            return names
+        names |= found
 
 
 def literals(toks):
@@ -596,6 +601,10 @@ def self_test():
     files["src/alias.rs"] = ("use std::time::Duration as D;\ntype Dur = std::time::Duration;\n"
                              "fn f() -> (D, Dur) { (D::ZERO, Dur::MAX) }\n")
     case("Duration 별칭의 상수", "target\tsrc\n", {"src/alias.rs"}, 2)
+    files["src/chain.rs"] = ("use std::time::Duration as D;\ntype Delay = D;\ntype Late = Delay;\n"
+                             "fn f() -> (Delay, Late) { (Delay::ZERO, Late::MAX) }\n")
+    case("별칭의 별칭(Duration as D → type Delay = D → type Late = Delay)의 상수", "target\tsrc\n",
+         {"src/chain.rs"}, 2)
     files["src/generic.rs"] = ("#[cfg(test)]\nconst X: Foo<{ 1 + 2 }> = 3;\n"
                                "#[cfg(test)]\nstatic Y: [u8; { 4 }] = [5; { 4 }];\nfn f() -> u8 { 7 }\n")
     case("#[cfg(test)] const의 제네릭 블록 뒤 값도 시험 코드", "target\tsrc\n", {"src/generic.rs"}, 1)
