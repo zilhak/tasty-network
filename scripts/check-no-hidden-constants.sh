@@ -26,9 +26,9 @@
 #              enum NAME = 식, 식…         enum 본문의 판별식(= 오른쪽)을 나온 순서대로 쉼표로 나눠
 #                                          적는다. 다르면 위반이다
 #              그 밖의 토큰 묶음(예: += 1)  그 토큰 순서가 나오는 자리 안의 리터럴
-# 쓰이지 않은 allow 줄도 위반이다. 문자열·주석·#[cfg(test)] 항목·tests/ 폴더는 보지 않는다.
-# #[cfg(test)]로 선언한 파일 모듈(mod NAME;, #[path = "…"] 포함)과 그 아래 모듈 파일도 시험
-# 코드라 보지 않는다. 다만 제품 모듈 선언으로도 닿는 파일은 본다. 인라인 모듈(mod x { … }) 안의
+# 쓰이지 않은 allow 줄도 위반이다. 문자열·주석·#[cfg(test)]와 #[cfg(all(test, …))] 항목·tests/
+# 폴더는 보지 않는다. 그런 속성으로 선언한 파일 모듈(mod NAME;, #[path = "…"] 포함)과 그 아래
+# 모듈 파일도 시험 코드라 보지 않는다. 다만 제품 모듈 선언으로도 닿는 파일은 본다. 인라인 모듈(mod x { … }) 안의
 # mod NAME;은 그 인라인 모듈의 경로(…/x/NAME.rs)로 푼다.
 
 set -euo pipefail
@@ -492,6 +492,12 @@ def self_test():
     files["src/generic.rs"] = ("#[cfg(test)]\nconst X: Foo<{ 1 + 2 }> = 3;\n"
                                "#[cfg(test)]\nstatic Y: [u8; { 4 }] = [5; { 4 }];\nfn f() -> u8 { 7 }\n")
     case("#[cfg(test)] const의 제네릭 블록 뒤 값도 시험 코드", "target\tsrc\n", {"src/generic.rs"}, 1)
+    files["src/allcfg.rs"] = ("#[cfg(all(test, unix))]\nfn t() -> u8 { 3 }\n"
+                              "#[cfg(all(unix, test))]\nmod m { fn u() -> u8 { 4 } }\n"
+                              "#[cfg(any(test, unix))]\nfn a() -> u8 { 5 }\n"
+                              "#[cfg(all(unix, not(test)))]\nfn b() -> u8 { 6 }\n")
+    case("cfg(all(test, …))는 시험 코드, cfg(any(test, …))·cfg(all(…, not(test)))는 아니다",
+         "target\tsrc\n", {"src/allcfg.rs"}, 2)
     files["src/settings.rs"] = settings_mod + "/* entry(\"removed\", 1) */\n// fixed(\"gone\", \"x\", \"x\")\n"
     case("주석 안의 entry는 키가 아니다",
          "target\tsrc\nsettings\tsrc/settings.rs\ntable\tsrc/settings.rs\td.md\t표\n",

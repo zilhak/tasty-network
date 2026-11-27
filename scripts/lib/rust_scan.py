@@ -155,14 +155,37 @@ def item_end(toks, i):
     return len(toks) - 1
 
 
+def is_test_cfg(words):
+    """속성 안의 글자 목록(#[ ] 안)이 시험에서만 켜지는 cfg인지: cfg(test), 또는 직접 인자에
+    test가 있는 cfg(all(…))(예: cfg(all(test, unix))). cfg(any(test, …))는 시험 밖에서도 켜지므로
+    아니다."""
+    if words == ["cfg", "(", "test", ")"]:
+        return True
+    if words[:4] != ["cfg", "(", "all", "("] or words[-2:] != [")", ")"]:
+        return False
+    args, cur, depth = [], [], 0
+    for w in words[4:-2]:
+        if w in ("(", "[", "{"):
+            depth += 1
+        elif w in (")", "]", "}"):
+            depth -= 1
+        if w == "," and depth == 0:
+            args.append(cur)
+            cur = []
+        else:
+            cur.append(w)
+    args.append(cur)
+    return ["test"] in args
+
+
 def strip_cfg_test(toks):
-    """#[cfg(test)]가 붙은 항목을 뺀 토큰 목록."""
+    """시험 cfg(is_test_cfg)가 붙은 항목을 뺀 토큰 목록."""
     out, i = [], 0
     while i < len(toks):
         if (toks[i][1] == "#" and i + 1 < len(toks) and toks[i + 1][1] == "["):
             close = matching_close(toks, i + 1)
             inner = [t[1] for t in toks[i + 2:close]]
-            if inner == ["cfg", "(", "test", ")"]:
+            if is_test_cfg(inner):
                 i = item_end(toks, close + 1) + 1
                 continue
         out.append(toks[i])
@@ -172,7 +195,7 @@ def strip_cfg_test(toks):
 
 def file_mods(text):
     """파일 안의 mod NAME; 선언 목록: (이름, 시험인지, #[path] 값 또는 None, 둘러싼 인라인 모듈
-    이름들). #[cfg(test)]가 붙었거나 #[cfg(test)] 인라인 모듈(mod x { … }) 안에 있으면 시험이다."""
+    이름들). 시험 cfg(is_test_cfg)가 붙었거나 그런 인라인 모듈(mod x { … }) 안에 있으면 시험이다."""
     toks = tokenize(text)
     out, stack, depth, i, n = [], [], 0, 0, len(toks)
     while i < n:
@@ -181,7 +204,7 @@ def file_mods(text):
             close = matching_close(toks, j + 1)
             inner = toks[j + 2:close]
             words = [t[1] for t in inner]
-            if words == ["cfg", "(", "test", ")"]:
+            if is_test_cfg(words):
                 is_test = True
             if len(inner) == 3 and words[:2] == ["path", "="] and inner[2][0] == "str":
                 path = inner[2][1][1:-1]
