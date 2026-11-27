@@ -86,10 +86,11 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
 4. 남은 코드의 `use` 선언을 나무로 펼친다. 묶음(`use std::{io, process::{Command, id}};`), 중첩 중괄호, 별칭(`as`), `self`(`use std::process::{self};`), 여러 줄에 걸친 선언, 앞의 `::`를 모두 풀어 `가져온 경로 → 지역 이름` 목록을 만든다.
    - 모듈 자체를 가져오는 것은 별칭과 관계없이 실패다: `std::process`(예: `use std::process;`, `use std::process as proc;`, `use std::{process as proc};`, `use std::process::{self as p};`)와 `tokio::process`(같은 모양들). 모듈을 지역 이름으로 들이면 그 뒤 `proc::Command`를 이름만으로는 가를 수 없기 때문이다. `std::process` 아래에서 가져와도 되는 것은 이름을 적은 `id`·`exit`·`abort`·`ExitCode`뿐이다. 글롭(`use std::process::*;`)도 실패다.
    - 금지 모듈의 윗 경로를 지역 이름으로 들이는 것도 별칭과 관계없이 실패다: 크레이트 루트 `std`·`::std`·`tokio`·`::tokio`(`use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`), `std::os`와 `std::os::<os>`(`use std::os::unix as u;`, `use std::os::{self as o};`). edition 2018부터는 `extern crate` 없이 `use`만으로 크레이트에 별칭을 줄 수 있어서, 이것을 두면 `s::process::Command`·`u::process::CommandExt`를 경로 문자열로 찾지 못하기 때문이다. 규칙을 한 줄로 쓰면: 펼친 `use` 항목의 가져온 경로가 금지 경로(`std::process`, `tokio::process`, `std::os::<os>::process`)와 같거나 그 앞부분이면, 그리고 이름을 적은 `id`·`exit`·`abort`·`ExitCode`가 아니면 실패다. 별칭 없이 `use std::os::unix;`처럼 윗 경로를 그대로 들이는 것도 같다. `std::os::<os>::prelude`에서의 글롭도 실패다.
+   - 금지 경로의 윗 경로(크레이트 루트 포함)에서의 글롭도 실패다: `use std::*;`, `use ::std::*;`, `use std::os::*;`, `use std::os::unix::*;`, `use std::{os::*};`, `use tokio::*;`. 글롭은 그 경로 아래의 공개 모듈을 지역 이름으로 들이므로(`use std::*;` 뒤의 `process::Command`, `use std::os::*;` 뒤의 `unix::process::CommandExt`) 경로 문자열로 찾지 못한다. 펼친 항목이 `<경로>::*`이면 `<경로>`를 가져온 경로로 보고 위 한 줄 규칙을 적용한다(`<경로>`가 금지 경로와 같거나 그 앞부분이면 실패).
    - 금지 이름을 직접 가져오는 것은 별칭과 관계없이 실패다(`use std::process::Command as Cmd;`, `use std::os::unix::process::CommandExt as _;`).
    - `use` 없이 적은 경로도 찾는다: `std::process::`·`::std::process::`·`tokio::process::` 뒤의 금지 이름, `std::os::<os>::process::CommandExt`. `extern crate std as s;`·`extern crate tokio as t;`처럼 크레이트에 별칭을 주는 선언은 실패다(별칭 경로를 다시 찾지 않아도 되게).
    - 하나라도 있으면 파일:줄과 펼친 경로를 찍고 실패한다. 펼치기는 `rustc`를 부르지 않는 스크립트 안의 작은 파서다. 문자열·주석 안의 글자는 먼저 지운다.
-5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식). 실패해야 하는 입력: `std::process::Command::new`, `use std::process::Command;`, `use std::process as p;`, `use std::{process as proc};`, `use std::{io, process::{self, id}};`, `use tokio::{process as p};`, `use tokio::process::Command as C;`, `use std::process::*;`, `extern crate std as s;`, `use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`, `use std::os::unix as u;`, `use std::os::unix;`, `use std::os::unix::prelude::*;`, 여러 줄로 나눈 묶음 선언, `mod system;`의 feature 속성을 뺀 입력. 통과해야 하는 입력: `use std::process::{id, exit};`, `use std::os::unix::fs::PermissionsExt;`, `use std::io;`, `std::process::abort()`, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 금지 경로, `src/system/` 안에만 둔 금지 경로, 주석·문자열 안의 `std::process::Command`.
+5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식). 실패해야 하는 입력: `std::process::Command::new`, `use std::process::Command;`, `use std::process as p;`, `use std::{process as proc};`, `use std::{io, process::{self, id}};`, `use tokio::{process as p};`, `use tokio::process::Command as C;`, `use std::process::*;`, `extern crate std as s;`, `use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`, `use std::os::unix as u;`, `use std::os::unix;`, `use std::os::unix::prelude::*;`, `use std::*;`, `use ::std::*;`, `use std::os::*;`, `use std::os::unix::*;`, `use std::{os::*};`, `use tokio::*;`, 여러 줄로 나눈 묶음 선언, `mod system;`의 feature 속성을 뺀 입력. 통과해야 하는 입력: `use std::process::{id, exit};`, `use std::os::unix::fs::PermissionsExt;`, `use std::io;`, `std::process::abort()`, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 금지 경로, `src/system/` 안에만 둔 금지 경로, 주석·문자열 안의 `std::process::Command`.
 
 ### 의존 쪽 검사
 
@@ -135,7 +136,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 - 이벤트는 들어온 순서대로 두 값을 바꾼다: 앞·뒤(`Foreground`·`Background`), 망 있음·없음(`NetworkChanged`는 있음, `NetworkLost`는 없음). 처음 값은 앞·망 있음이다. 같은 값이 다시 오면 값은 그대로이고, `NetworkChanged`만은 값이 같아도 "망 바뀜" 처리를 한다.
 - endpoint는 이벤트마다 두 값과 붙들기 값 하나로 목표를 다시 계산한다. 목표가 "등록"인 조건은 `망 있음 && (앞 || lifecycle.background_registration = keep || 붙들기)`이고, 아니면 "멈춤"이다. 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
 - 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산하고, 전이 원인은 `background_hold`(켜짐)·`background_hold_released`(꺼짐)다.
-- 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`으로 가지 않고, 목표가 "등록"인 동안에는 `Paused`로 가지 않는다.
+- 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`·`Backoff`로 가지 않고(재시도할 오류도 `Paused`로 간다), 목표가 "등록"인 동안에는 `Paused`로 가지 않는다. 실행 중의 설정 바뀜(`lifecycle.background_registration`)도 목표를 다시 계산한다.
 - 예정된 닫기: `Registered`에서 목표가 "멈춤"이 되면(`app_background`, `background_hold_released`) 바로 닫지 않고 `lifecycle.background_grace` 뒤로 닫기를 예약한다(`network_lost`는 예약 없이 바로 `Paused`). 예약이 끝나기 전에 목표가 다시 "등록"이 되면(`app_foreground`, `background_hold`, 설정 바뀜) 예약을 취소한다. endpoint는 `Registered` 그대로이고 이력에는 취소한 원인만 남는다. 예약이 끝나는 때에 목표를 한 번 더 보고, 그때도 "멈춤"일 때만 닫는다.
 
 ### endpoint 상태 (p2p.md에 더할 것)
@@ -143,8 +144,10 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 | 전이 | 원인(그 뒤 목표) |
 |---|---|
 | `Registered` → `Paused` | 예약한 닫기가 끝남(목표 "멈춤", 서버 연결을 코드 0으로 닫음), `network_lost`(바로) |
+| `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | 조정 연결이 예약보다 먼저 끊김(`idle_timeout`, `io` 등 P2P 정본이 `Backoff`로 보내는 원인). 목표가 "멈춤"이므로 `Backoff`로 가지 않는다. 예약을 지우고 backoff 대기도 만들지 않는다. 원인은 끊긴 원인 그대로 남긴다. `Stopped`로 가는 재시도하지 않는 원인(`superseded`·`access_denied` 등)은 P2P 정본 그대로 `Stopped`다 |
+| `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | `network_changed`. 옛 망의 조정 연결을 예약 끝까지 둘 까닭이 없으므로 예약을 지우고 바로 코드 0으로 닫는다. 다시 등록은 목표가 "등록"이 될 때(`Paused → Connecting`)다 |
 | `Connecting`·`Backoff` → `Paused` | `app_background`, `background_hold_released`, `network_lost`(모두 목표 "멈춤"일 때, 바로). 하던 시도와 backoff 대기를 멈춘다 |
-| `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
+| `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`, 설정 바뀜(`lifecycle.background_registration`을 `keep`으로, 원인 `setting_changed`)(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
 | `Backoff` → `Connecting` | `network_changed`(목표 "등록"일 때, 대기를 끝내고 바로, 시도 번호 1). 목표가 "멈춤"이면 위 `Paused` 행이다 |
 | `Registered` → `Connecting` | `network_changed`(목표 "등록"일 때, 아래 "망 바뀜") |
 
@@ -156,7 +159,7 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 
 | 상태 | 하는 일 |
 |---|---|
-| `Registered` | 조정 연결(서버와의 QUIC 연결)을 코드 0(`closed`)으로 닫고 backoff 없이 흐름 1~4(흐름 14와 같다, 시도 번호 1)를 한다. 옛 연결을 먼저 닫는 것은, 새 등록이 옛 연결을 `superseded`(코드 2, 멈춤)로 닫게 두지 않기 위해서다([rendezvous](rendezvous.md#메시지-표)). 조정 연결이 새 망에서 살아 있는지 판정하지 않고 늘 다시 맺는다. 근거: rendezvous 프로토콜에는 등록 뒤 서버가 답하는 요청이 없어(흐름 4 `nat_report`도 응답이 없다) 새 망으로 보낸 것이 전달됐다는 증거를 받을 수 없다. quinn `Connection`에는 ping API가 없고, `Connection::stats()`의 `udp_rx.datagrams`는 패킷 인증 전에 늘고 같은 연결의 아무 패킷이나 세므로 증거가 아니다. 흐름 3(STUN)은 조정 연결 밖이다. 다시 맺는 비용은 QUIC handshake와 `hello`·`welcome` 한 번이고 망 바뀜은 드물다 |
+| `Registered` | 조정 연결(서버와의 QUIC 연결)을 코드 0(`closed`)으로 닫고 backoff 없이 흐름 1~4(흐름 14와 같다, 시도 번호 1)를 한다. 옛 연결은 로컬에서 먼저 닫고 퇴역시킨다. 옛 경로가 이미 죽어 CLOSE가 서버에 가지 않으면 서버는 새 등록 때 옛 연결에 `superseded`(코드 2)를 보낼 수 있다([rendezvous](rendezvous.md#메시지-표)). 퇴역한 조정 연결에서 오는 종료는 원인과 관계없이 endpoint 전이에 반영하지 않으므로, 그 `superseded`가 endpoint를 `Stopped`로 보내지 않는다. 서버는 등록 제거를 연결로 가려서 하므로 새 등록은 지워지지 않는다. 조정 연결이 새 망에서 살아 있는지 판정하지 않고 늘 다시 맺는다. 근거: rendezvous 프로토콜에는 등록 뒤 서버가 답하는 요청이 없어(흐름 4 `nat_report`도 응답이 없다) 새 망으로 보낸 것이 전달됐다는 증거를 받을 수 없다. quinn `Connection`에는 ping API가 없고, `Connection::stats()`의 `udp_rx.datagrams`는 패킷 인증 전에 늘고 같은 연결의 아무 패킷이나 세므로 증거가 아니다. 흐름 3(STUN)은 조정 연결 밖이다. 다시 맺는 비용은 QUIC handshake와 `hello`·`welcome` 한 번이고 망 바뀜은 드물다 |
 | `Connecting` | 하던 시도를 그대로 둔다(새 망에서 흐름 1부터 하고 있다) |
 | `Backoff`·`Paused` | 위 전이 표대로 흐름 1~4를 한다 |
 
@@ -265,7 +268,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 | 영역 | 뼈대 | 코어 쪽 정본 |
 |---|---|---|
 | 시작 | `TastyNet::new(config)`(키 디렉터리, `ssh/` 폴더, 설정값), `TastyNet::app_event(AppEvent)` | 위 "앱 수명" |
-| 연결 | 연결 열기·닫기, 연결 목록 조회, `EventStream` | [전송 추상화](transport.md#연결-목록) |
+| 연결 | 연결 열기·닫기, 연결 목록 조회, SSH 세션 목록 조회, `EventStream` | [전송 추상화](transport.md#연결-목록), [SSH 세션 목록](ssh-backends.md#ssh-세션-목록) |
 | SSH exec | 명령 실행, 표준 입력 쓰기, stdout·stderr 읽기, 종료 상태 | [터널·exec·SFTP](ssh-backends.md#터널execsftp) |
 | SFTP | 열기·읽기·쓰기·목록·정보·이름 바꾸기·지우기 | 같다 |
 | 설정 | 설정값 쓰기·조회(`{key, value, source}`), SSH 설정 조회(`SshConnector::inspect`: 백엔드와 선택 이유, 읽은 파일, 거부·미지원 지시어) | 각 크레이트의 설정값 표, [설정 조회](ssh-backends.md#설정-조회) |
@@ -280,7 +283,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 2 | 메모리 바이트 키 | FFI는 키 바이트를 `Vec<u8>`로 한 번 받아 바로 Rust 쪽 소유로 옮긴다. 그 뒤 FFI 쪽 사본을 지운다. 키 바이트를 다시 돌려주는 메서드는 없고, 조회는 지문만 낸다. Kotlin 쪽 배열을 지우는 것은 앱의 몫이다 |
 | 3·4·6 | exec·SFTP·세션 공유 | Rust API를 그대로 옮긴다. SFTP 실패 사유(`PermissionDenied`·`NotFound`·`SubsystemUnavailable` 등)는 FFI 오류 enum의 변형으로 낸다(문자열로 가르지 않는다, 위 "오류 변환") |
 | 5 | SFTP 쓰기 | 앱 쪽 결정 뒤. 보류 |
-| 6b | attach 없는 SSH 세션의 상태 | Rust 쪽은 `tasty-net-ssh`의 [SSH 세션 목록](ssh-backends.md#ssh-세션-목록)이다(transport 연결 목록은 바꾸지 않는다). ffi는 transport 연결 목록과 SSH 세션 목록의 이벤트를 앱에 하나의 `EventStream`으로 합쳐 내고, 이벤트마다 어느 목록의 것인지 종류를 붙인다 |
+| 6b | attach 없는 SSH 세션의 상태 | Rust 쪽은 `tasty-net-ssh`의 [SSH 세션 목록](ssh-backends.md#ssh-세션-목록)이다(transport 연결 목록은 바꾸지 않는다). ffi는 transport 연결 목록과 SSH 세션 목록의 이벤트를 앱에 하나의 `EventStream`으로 합쳐 내고, 이벤트마다 어느 목록의 것인지 종류를 붙인다. 현재 상태를 다시 읽는 조회도 낸다: 연결 목록 조회와 나란히 `SshConnector::sessions()`의 스냅샷을 FFI 조회 API로 낸다. 앱이 이벤트 흐름을 늦게 열었거나 `Lagged{dropped}`를 받은 뒤에는 두 조회로 상태를 다시 맞춘다. 메서드 이름·레코드 필드·보관 상한은 바인딩 크레이트 작업이 정한다 |
 | 7 | 원격 Tasty attach 경로의 노출 범위 | FFI가 내는 것: 대상으로 연결 열기(포트 발견 → `direct-tcpip` → handshake v2는 Rust 안에서 한다), 열린 연결 위 `attach`·`request`·`bulk` 채널 열기, 채널 위 프레임 읽기·쓰기(바이트), 닫기, 연결 레코드의 포트·인스턴스 ID·상대 기기 ID. 프레임의 도메인 해석은 앱·tasty 쪽이다. FFI가 내지 않는 것: 연결 토큰. 토큰은 Rust 안에서 포트 발견 결과에서 handshake로만 간다. FFI 레코드·오류 메시지·`Debug`·이벤트·설정 조회 어디에도 토큰을 싣지 않고, 시험이 그 출력들에 토큰 문자열이 없는지 본다. `PeerTooOld`(숫자 포트만 돌려주는 상대)는 FFI 오류 변형이다 |
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
@@ -331,6 +334,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
 | `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 앱 쪽 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
+| FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
 | 의존(tokio·quinn·ring·russh)의 최소 iOS 배포 대상 | 확인하지 않음 |
