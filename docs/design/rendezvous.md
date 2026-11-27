@@ -30,7 +30,7 @@
 - 반사 후보에 루프백을 막지 않는 것은 같은 머신의 루프백 서버로 도는 예제와 시험 때문이다. 서버 반사 주소는 서버가 관측한 값이다. 보고 반사 주소는 기기의 주장이므로 종류를 `reported_reflexive`로 따로 표시하고, 서버 반사 주소와 주소족이 같은 것만 받는다.
 - 중복 제거: 같은 주소·포트는 하나만 남기고, 앞선 종류를 남긴다.
 - 우선순위와 상한: 서버는 `server_reflexive`(1개) → `reported_reflexive`(최대 `max_reported_reflexive`) → `host`(기기가 보낸 순서로 최대 `max_host_candidates`) 순으로 싣는다. `mode = host_only`면 `host`만 싣는다. 그래서 `punch_go.candidates`는 `1 + max_reported_reflexive + max_host_candidates`개를 넘지 않는다.
-- 상한의 관계: `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`(기기 설정)여야 한다. 기기는 `welcome.limits`의 두 값으로 이것을 검사하고, 어긋나면 `server_limits_mismatch`를 낸다(아래). 그래도 기기 상한보다 많은 후보가 오면 기기는 받은 순서(위 우선순위)대로 `punch.max_candidates`개만 쓰고 버린 수를 센다.
+- 상한의 관계: `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`(기기 설정)여야 한다. 기기는 `welcome.limits`의 두 값으로 이것을 검사하고, 어긋나면 `server_limits_mismatch`를 낸다(아래). 우선순위에 따른 절단은 서버의 정상 동작이다. 기기 상한을 넘는 후보가 실린 `punch_go`가 기기에 도착하면 서버가 이 규칙을 어긴 것이므로, 기기는 그 후보를 잘라 쓰지 않고 `limits_invalid`로 끝낸다(아래 "한계값 검사" 2).
 - 기기는 `host_candidates`를 자기 우선순위(사설 IPv4, 전역 IPv6 고정 주소, 전역 IPv6 임시 주소)로 정렬해 보낸다.
 
 - 기기가 보낸 메시지의 모르는 필드는 파싱할 때 버린다. 저장하지도 넘기지도 않는다. 조정 스트림은 연결마다 하나만 받고, 둘째 스트림은 연결을 `malformed`로 닫는다.
@@ -98,14 +98,14 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `punch_offer` | 서버 → 기기 | `punch_id`, `from` | 받는 쪽에게 요청을 알림 |
 | `punch_answer` | 기기 → 서버 | `punch_id`, `accept`, `reason`(거절일 때 `not_paired`·`limits_invalid`) | 받는 쪽의 답. `not_paired`는 A에게 `declined`, `limits_invalid`는 `peer_limits_invalid`로 간다 |
 | `punch_go` | 서버 → 기기 | `punch_id`, `request_id`(A에게만), `peer`, `role`(`controlling`·`controlled`), `mode`(`all`·`host_only`), `candidates`(주소와 종류 `server_reflexive`·`reported_reflexive`·`host`), `peer_nat`(상대 `NatMapping`), `token_local`, `token_peer`(각 16바이트 hex), `start_after_ms`, `window_ms`, `handshake_ms` | 펀칭 시작 |
-| `punch_cancel` | 서버 → 기기 | `punch_id`, `reason`(`peer_gone`·`expired`·`peer_limits_invalid`) | 진행 중 펀칭 취소 |
+| `punch_cancel` | 서버 → 기기 | `punch_id`, `reason`(`peer_gone`·`expired`·`superseded`·`peer_limits_invalid`) | 진행 중 펀칭 취소. `superseded`는 같은 A가 새 요청으로 옛 세션을 바꿨을 때 B에게 간다 |
 | `punch_result` | 기기 → 서버 | `punch_id`, `ok`, `reason`(실패일 때 `limits_invalid`·`timeout`·`handshake_failed`) | 끝 보고. `limits_invalid`면 서버는 상대에게 `punch_cancel{peer_limits_invalid}`를 보낸다 |
 
 - `welcome.limits`: 기기가 자기 설정과의 관계를 검사할 서버 값이다. `offer_timeout_ms`, `start_delay_max_ms`, `punch_window_ms`, `quic_handshake_ms`, `punch_session_ttl_ms`, `max_host_candidates`, `max_reported_reflexive`, `max_message_bytes`. 기기는 이 값으로 `punch.request_timeout > offer_timeout_ms`, `punch_window_ms ≤ punch.window_max`, `quic_handshake_ms ≤ quic.handshake_timeout_max`, `1 + max_reported_reflexive + max_host_candidates ≤ punch.max_candidates`([후보 주소 규칙](#후보-주소-규칙))를 검사하고, 어긋나면 endpoint 이벤트 `server_limits_mismatch`(어긋난 키와 두 값)를 내고 그 서버로의 펀칭 시도를 `ServerLimitsInvalid`로 끝낸다([P2P](p2p.md#재시도와-포기)).
 - 한계값 검사는 두 단계이고 A와 B가 똑같이 한다.
   1. 등록 때(`welcome.limits`): 위 관계가 어긋나면 기기는 `server_limits_mismatch`를 낸다. 등록은 남는다(상대의 요청을 받아 거절 사유를 돌려줘야 하기 때문이다). A는 그 서버로 `punch_request`를 보내지 않고 바로 `ServerLimitsInvalid`로 끝낸다. B는 `punch_offer`를 받으면 `punch_answer{accept: false, reason: limits_invalid}`로 답하고, 서버는 A에게 `punch_refused{peer_limits_invalid}`를 보낸다. A의 공개 오류는 `PeerLimitsInvalid`다.
-  2. 펀칭 때(`punch_go`): 실린 값이 `welcome.limits`와 기기 상한을 벗어나면(`window_ms > punch.window_max`, `handshake_ms > quic.handshake_timeout_max`, `start_after_ms > start_delay_max_ms`, 후보가 상한 초과) 그 기기는 프로브를 보내지 않고 `punch_result{ok: false, reason: limits_invalid}`를 보낸다. 자기 쪽 공개 오류는 `ServerLimitsInvalid`(A)나 `Closed{server_limits_invalid}`(B)다. 서버는 상대에게 `punch_cancel{peer_limits_invalid}`를 보내고, A가 받는 쪽이면 A의 공개 오류는 `PeerLimitsInvalid`다.
-- 한 쌍에 세션 하나: 서버는 같은 두 기기(방향과 관계없이) 사이의 진행 중 펀칭을 하나만 둔다. 이미 있으면 새 `punch_request`는 `punch_refused{busy}`다. 그래서 B가 들어온 QUIC Initial을 세션에 묶을 때([P2P](p2p.md#펀칭-절차) 9) 맞는 세션은 언제나 많아야 하나다.
+  2. 펀칭 때(`punch_go`): 실린 값이 `welcome.limits`와 기기 상한을 벗어나면(`window_ms > punch.window_max`, `handshake_ms > quic.handshake_timeout_max`, `start_after_ms > start_delay_max_ms`, 후보가 상한 초과) 그 기기는 프로브를 보내지 않고 `punch_result{ok: false, reason: limits_invalid}`를 보낸다. 자기 쪽 결과는 A면 공개 오류 `ServerLimitsInvalid`, B면 `Closed{server_limits_invalid}`다. 서버는 상대에게 `punch_cancel{peer_limits_invalid}`를 보낸다. 받는 쪽은 `Scheduled`·`Punching`·`Handshaking` 어느 단계에서 받아도 재시도 없이 `Closed`로 끝나고, A면 공개 오류는 `PeerLimitsInvalid`, B면 `Closed{peer_limits_invalid}`다.
+- 한 쌍에 세션 하나: 서버는 같은 두 기기(방향과 관계없이) 사이의 진행 중 펀칭을 하나만 둔다. 옛 세션을 연 A가 같은 B에게 새 `punch_request`를 보내면(펀칭 재시도), 서버는 옛 세션을 끝내고 B에게 `punch_cancel{superseded}`를 보낸 뒤 새 세션을 만든다. 반대 방향(B가 A에게) 요청이 진행 중 세션과 겹치면 `punch_refused{busy}`다. 이 규칙은 기기 ID 쌍에 대한 것이다. B가 들어온 Initial을 세션에 묶는 일은 주소와 기기 ID의 두 단계로 한다([P2P](p2p.md#펀칭-절차) 9).
 - `punch_go.window_ms`·`handshake_ms`가 펀칭 창과 QUIC handshake 기한의 정본이다. 두 기기가 같은 값을 받으므로 양쪽 기한이 맞는다. 값은 서버 설정 `punch_window`·`quic_handshake_timeout`에서 온다.
 - `mode = host_only`는 두 기기가 모두 `dependent`일 때다. 서버는 반사 주소 후보를 빼고 호스트 주소만 싣는다. 어느 한쪽에도 호스트 후보가 없으면 `punch_go` 대신 `punch_refused{nat_unsupported}`를 보낸다([P2P](p2p.md#nat-판별) "시도 규칙").
 
@@ -137,7 +137,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | 상태 | 담는 것 | 지우는 때 |
 |---|---|---|
 | 등록 | 기기 ID, 조정 연결, 반사 주소(조정 연결의 원격 주소), 보고된 보조 반사 주소, 호스트 후보, `NatMapping`, 등록 시각, 마지막 수신 시각(keepalive 포함) | 연결이 닫힘, idle timeout(`idle_timeout`), 같은 기기 ID의 새 등록(옛 연결을 `superseded`로 닫는다), 서버 종료 |
-| 진행 중 펀칭 | `punch_id`, A·B 기기 ID, 상태(`offered`·`go_sent`), 두 토큰, 만든 시각, `punch_go`를 보낸 시각, 만료 시각, 받은 `punch_result` | 두 기기의 `punch_result`를 모두 받음, `punch_refused`, `offer_timeout`, 아래 TTL 만료(남은 쪽에 `punch_cancel{expired}`), `limits_invalid` 보고(상대에게 `punch_cancel{peer_limits_invalid}`), A나 B의 등록이 지워짐(남은 쪽에 `punch_cancel{peer_gone}`) |
+| 진행 중 펀칭 | `punch_id`, A·B 기기 ID, 상태(`offered`·`go_sent`), 두 토큰, 만든 시각, `punch_go`를 보낸 시각, 만료 시각, 받은 `punch_result` | 두 기기의 `punch_result`를 모두 받음, `punch_refused`, 같은 A의 새 요청(B에게 `punch_cancel{superseded}`), `offer_timeout`, 아래 TTL 만료(남은 쪽에 `punch_cancel{expired}`), `limits_invalid` 보고(상대에게 `punch_cancel{peer_limits_invalid}`), A나 B의 등록이 지워짐(남은 쪽에 `punch_cancel{peer_gone}`) |
 
 - 세션 TTL: 두 단계로 잰다.
   - `offered`: `punch_request`를 받은 때부터 `offer_timeout`. 지나면 A에게 `not_found`.

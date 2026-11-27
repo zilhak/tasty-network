@@ -101,17 +101,17 @@ A                         서버                          B
 1. 요청: A가 서버에 `punch_request{request_id, peer: B의 기기 ID}`를 보낸다. 서버는 B가 등록돼 있는지, 상한(동시 펀칭 수), NAT 규칙을 본다. 통과하지 못하면 `punch_refused{reason}`(`not_found`·`nat_unsupported`·`busy`·`self`)로 끝난다. A가 `punch.request_timeout` 안에 `punch_go`나 `punch_refused`를 받지 못하면 `RequestTimeout`으로 끝난다.
 2. 받는 쪽 확인: 서버가 B에게 `punch_offer{punch_id, from: A}`를 보낸다. B는 A가 자기 페어링 허용 목록에 있는지 보고 `punch_answer{punch_id, accept}`로 답한다. B가 거절하면 A는 `declined`를 받는다. 수락 전에는 서버가 양쪽 주소를 서로에게 주지 않는다. 그래서 페어링하지 않은 기기는 B의 주소를 얻지 못한다. B가 서버 설정 `offer_timeout`(기본 2 s) 안에 답하지 않으면 서버는 `not_found`로 끝낸다. B의 등록 때 `welcome.limits` 검사가 어긋나 있었으면 B는 페어링과 관계없이 `punch_answer{accept: false, reason: limits_invalid}`로 답하고 A는 `PeerLimitsInvalid`를 받는다([rendezvous](rendezvous.md#메시지-표) "한계값 검사"). 수락한 B는 `punch.go_timeout` 안에 `punch_go`나 `punch_cancel`을 기다리고, 오지 않으면 그 시도를 끝낸다.
 3. 통지와 시각 맞춤: 수락되면 서버가 두 기기에게 동시에 `punch_go`를 보낸다. 실린 것은 [rendezvous](rendezvous.md#메시지-표)의 표에 있다: 상대 기기 ID, 후보와 종류, 상대 `NatMapping`, 이쪽이 보낼 토큰과 상대가 보낼 토큰(서버가 만든 16바이트 난수 두 개), 역할(A는 `controlling`, B는 `controlled`), `mode`, `start_after_ms`, `window_ms`, `handshake_ms`. 두 기기의 시계는 맞추지 않는다. 서버는 자기 쪽 QUIC 연결의 RTT 추정(quinn `Connection::rtt`)으로 `start_after_ms = max(rtt_A, rtt_B)/2 + start_delay_margin − rtt_자기/2`(서버 설정, 상한 `start_delay_max`)를 계산해, 두 기기가 서버 기준으로 거의 같은 때 보내기 시작하게 한다. 두 기기 모두 받은 `punch_go`의 값을 `welcome.limits`와 자기 상한으로 다시 검사하고, 어긋나면 프로브를 보내지 않고 `punch_result{ok: false, reason: limits_invalid}`를 보낸다.
-4. 후보 주소: 서버가 본 반사 주소(`server_reflexive`), 상대가 판별에서 보고한 다른 반사 주소(`reported_reflexive`), 상대가 알린 호스트 주소(`host`: 사설 IPv4, 전역 IPv6, 소켓 포트)다. `host_only`면 호스트 주소만 온다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 허용 주소·포트, 종류별 우선순위, 상한(기본 1 + 3 + 4 = 8 ≤ `punch.max_candidates` 8)은 서버와 기기가 같은 규칙을 쓴다([rendezvous](rendezvous.md#후보-주소-규칙)). 기기는 받은 후보도 그 규칙으로 다시 거른다.
+4. 후보 주소: 서버가 본 반사 주소(`server_reflexive`), 상대가 판별에서 보고한 다른 반사 주소(`reported_reflexive`), 상대가 알린 호스트 주소(`host`: 사설 IPv4, 전역 IPv6, 소켓 포트)다. `host_only`면 호스트 주소만 온다. 같은 공유기 안의 두 기기는 사설 주소로 닿는다. 허용 주소·포트, 종류별 우선순위, 상한(기본 1 + 3 + 4 = 8 ≤ `punch.max_candidates` 8)은 서버와 기기가 같은 규칙을 쓴다([rendezvous](rendezvous.md#후보-주소-규칙)). 기기는 받은 후보의 주소도 그 규칙으로 다시 거른다. 후보 수가 기기 상한을 넘은 `punch_go`는 서버의 규칙 위반이므로 잘라 쓰지 않고 `limits_invalid`로 끝낸다(흐름 3).
 5. 동시 송신: 시작 시각부터 양쪽이 상대 후보마다 STUN Binding Request를 보낸다. `punch.probe_interval`(기본 50 ms)마다 후보 하나씩 돌아가며 보낸다. 후보가 상한인 8개면 한 후보에 400 ms마다 한 번이다. 요청에는 이쪽 토큰을 속성 `TASTY-PUNCH`로 싣는다([rendezvous](rendezvous.md#펀칭-프로브)). 프로브를 받은 쪽은 토큰이 상대 토큰(`token_peer`)과 같으면 XOR-MAPPED-ADDRESS와 자기 토큰을 실은 Binding Success Response를 그 프로브가 온 주소로 돌려준다.
 6. peer reflexive: `mode = all`일 때 후보에 없던 주소에서 맞는 토큰의 프로브가 오면 그 주소를 `peer_reflexive` 후보로 더하고 그 주소에도 프로브를 보낸다. `mode = host_only`에서는 더하지 않는다. 호스트 후보가 아닌 주소에서 온 프로브에는 응답하지 않고 버린 수를 센다(양쪽이 `dependent`라 그 주소는 다음 패킷에서 바뀌므로 경로가 되지 않는다). 더한 뒤에도 후보 수는 `punch.max_candidates`를 넘지 않는다. 다 찼으면 그 주소는 응답만 하고 후보에 넣지 않으며 버린 수를 센다.
 7. 성공 판정: 이쪽이 보낸 요청에 대한 응답이 (a) 그 요청의 transaction ID를 담고, (b) 그 요청을 보낸 후보 주소에서 왔고, (c) 상대 토큰을 담았을 때만 그 주소 쌍이 양방향으로 통한다고 본다([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) §6.3, [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445) §7.2.5.3과 같은 뜻). 셋 중 하나라도 어긋난 STUN 패킷은 버린다.
 8. QUIC으로 넘어가는 때: A(`controlling`)는 처음 성공한 주소로 바로 quinn `connect`를 건다. 다른 후보의 프로브는 멈추고, 그 주소로 온 프로브에는 계속 응답한다. QUIC 연결은 언제나 A가 연다([전송 추상화](transport.md#p2p의-닫기-범위)의 "스트림은 연결을 연 쪽만 연다"와 맞는다). B(`controlled`)는 성공을 먼저 보거나 A의 응답을 못 받았더라도 QUIC을 걸지 않는다. B의 성공 여부는 B가 QUIC을 받을지에 쓰지 않는다. A의 응답이 잃어 A가 성공을 못 보면 A는 다른 후보나 같은 후보로 프로브를 계속 보내고, 창이 끝나면 실패다.
-9. B가 QUIC을 받는 조건(펀칭 세션에 묶기): B는 활성 펀칭 세션이 있고, 들어온 QUIC Initial의 원격 주소가 그 세션에서 맞는 토큰의 프로브를 받은 주소일 때만 연결을 받는다(`host_only`면 호스트 후보 주소만). 서버가 한 쌍에 세션 하나만 두므로 맞는 세션은 많아야 하나다. 그 밖의 Initial은 TLS 전에 거절한다(quinn `Incoming::refuse`. 상대는 QUIC 전송 오류 `CONNECTION_REFUSED`를 받는다, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §20.1). handshake가 끝나면 TLS가 확인한 기기 ID가 그 세션의 상대(`punch_go.peer`)와 같은지 보고, 다르면 종료 코드 `session_mismatch`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 같으면 그 세션을 끝내고 연결을 그 세션의 서버·후보 정보와 묶어 [연결 정보](#연결-정보)에 남긴다.
+9. B가 QUIC을 받는 조건(펀칭 세션에 묶기): 두 단계로 고른다. TLS 전에는 Initial의 원격 주소만 안다. 그 주소가 활성 펀칭 세션 하나 이상에서 맞는 토큰의 프로브를 받은 주소(`host_only`면 호스트 후보 주소만)이면 Initial을 받는다. 맞는 세션이 하나도 없으면 TLS 전에 거절한다(quinn `Incoming::refuse`. 상대는 QUIC 전송 오류 `CONNECTION_REFUSED`를 받는다, [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §20.1). 서버의 한 쌍 한 세션 규칙은 기기 ID 쌍에 대한 것이라, 다른 상대들과의 세션 여럿이 같은 원격 주소에 맞을 수 있다. handshake가 끝나면 그 주소에 맞는 세션 가운데 상대(`punch_go.peer`)가 TLS가 확인한 기기 ID와 같은 세션을 고른다. 그런 세션이 없으면 종료 코드 `session_mismatch`로 닫는다([handshake v2](handshake.md#quic-종료-코드)). 고른 세션은 끝내고 연결을 그 세션의 서버·후보 정보와 묶어 [연결 정보](#연결-정보)에 남긴다.
 10. 기한: 두 기기 모두 프로브 송신은 시작 시각부터 `window_ms`까지다. A는 창 안에 성공을 보고 QUIC을 걸면 그때부터 `handshake_ms` 안에 handshake가 끝나야 한다. B는 새 QUIC Initial을 시작 시각 + `window_ms` + `handshake_ms`까지 받는다(A가 창 끝 직전에 걸어도 받을 수 있게). B는 이미 받기 시작한 handshake에는 받은 때부터 `handshake_ms`를 준다. B는 연결이 서거나 받기 기한이 끝날 때까지 프로브 응답을 계속한다(B 쪽 NAT 매핑을 열어 두기 위해서다).
 11. 끝: 각 기기는 QUIC handshake가 끝나거나 자기 기한이 지나면 `punch_result{punch_id, ok, reason}`를 서버에 보낸다. 서버는 두 기기의 결과를 모두 받거나 세션 TTL이 지나면 그 펀칭 상태를 지운다. TTL은 B의 기한 전체와 한쪽 통지 지연을 덮도록 서버가 계산한다([rendezvous](rendezvous.md#서버-상태)).
 
 - 창과 handshake 기한의 정본은 서버다(`punch_go.window_ms`·`handshake_ms`). 기기 설정 `punch.window_max`·`quic.handshake_timeout_max`는 서버 값의 상한 검사에만 쓴다(넘으면 `ServerLimitsInvalid`, [rendezvous](rendezvous.md#메시지-표)의 `welcome.limits`).
-- 진행 중 `punch_cancel`을 받으면: 프로브 단계면 그 시도를 끝낸다(`PunchCancelled{reason}`). 이미 QUIC handshake 중이거나 연결이 섰으면 무시한다. 서버가 없어도 기기 사이 경로는 성립하기 때문이다.
+- 진행 중 `punch_cancel`을 받으면: 사유가 `peer_limits_invalid`면 `Scheduled`·`Punching`·`Handshaking` 어느 단계든 재시도 없이 끝낸다(A는 `PeerLimitsInvalid`). 상대가 프로브를 보내지 않으므로 그 시도는 설 수 없다. 그 밖의 사유(`peer_gone`·`expired`·`superseded`)는 프로브 단계면 그 시도를 끝내고(A는 `PunchCancelled{reason}`, 재시도 가능), 이미 QUIC handshake 중이거나 연결이 섰으면 무시한다. 서버가 없어도 기기 사이 경로는 성립하기 때문이다. B가 받는 `superseded`는 같은 A가 재시도로 새 세션을 연 것이므로 B는 옛 시도를 `Closed`로 끝내고 새 `punch_offer`를 따로 받는다.
 - 조정 연결을 잃으면: 아직 `punch_go`를 받지 못한 단계(A의 `Requesting`, B의 `Offered`)는 `RendezvousLost`로 끝난다. `punch_go`를 받은 뒤의 단계는 서버 없이 계속하고, `punch_result`는 보내지 않는다.
 
 ## 흐름
@@ -171,8 +171,8 @@ A                         서버                          B
 ## 재시도와 포기
 
 - 서버 재연결: 서버 연결이 끊기면 지수 backoff로 다시 붙는다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 그래서 대기는 `max_delay`(기본 60 s)를 넘지 않는다. 대기 뒤의 접속·등록 시간(`rendezvous.connect_timeout`, `hello_timeout`)은 이 대기와 따로 걸린다. 연결이 `reset_after`(60 s) 넘게 유지되면 n을 1로 되돌린다. 횟수 상한 `max_attempts` 기본은 0(켜져 있는 동안 계속)이다. 상한을 주면 그 횟수 뒤 `Stopped{cause: reconnect_exhausted}`로 멈춘다. P2P를 끄면 재연결을 멈춘다. `superseded`, `access_denied`, `unsupported_proto`, ALPN 불일치, 서버 키 불일치면 다시 붙지 않고 `Stopped`로 알린다(소비자가 사용자에게 보인다, [rendezvous](rendezvous.md#메시지-표)).
-- 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 창이나 handshake 기한으로 실패하면 반사 주소 재확인(흐름 3)을 바로 시작하고, `punch.retry_delay`(기본 1 s)와 재확인 중 늦게 끝나는 쪽을 기다린 뒤 새 `punch_request`로 다시 한다. 모두 실패하면 마지막 시도의 `mode`로 오류를 정한다: `all`이면 `P2pConnectError::PunchFailed`, `host_only`면 `NatUnsupported`(두 기기 모두 `dependent`라 호스트 경로 밖에는 길이 없다는 뜻).
-- 연결 시도 하나의 전체 상한: 시도마다 `punch.request_timeout` + 서버 `start_delay_max` + `window_ms` + `handshake_ms`, 시도 사이마다 `max(punch.retry_delay, nat.stun_rto × nat.stun_attempts)`. 기본값이면 2 × (3 + 1 + 5 + 5) s + 1.5 s = 29.5 s다. 서버 값은 `welcome.limits`로 알고 계산해 연결 정보에 보인다.
+- 펀칭 재시도: 연결 시도 하나 안에서 펀칭을 최대 `punch.attempts`(기본 2)번 한다. 한 시도가 창이나 handshake 기한으로 실패하면 반사 주소 재확인(흐름 3)을 바로 시작하고, `punch.retry_delay`(기본 1 s)와 재확인 중 늦게 끝나는 쪽을 기다린 뒤 새 `punch_request`로 다시 한다. 이때 B는 옛 세션의 받기 기한 안에 있을 수 있지만, 같은 A의 새 요청이므로 서버가 옛 세션을 끝내고(B에게 `punch_cancel{superseded}`) 새 세션을 만든다([rendezvous](rendezvous.md#메시지-표) "한 쌍에 세션 하나"). 그래서 재시도는 `busy`로 막히지 않는다. 모두 실패하면 마지막 시도의 `mode`로 오류를 정한다: `all`이면 `P2pConnectError::PunchFailed`, `host_only`면 `NatUnsupported`(두 기기 모두 `dependent`라 호스트 경로 밖에는 길이 없다는 뜻).
+- 연결 시도 하나의 전체 상한: 시도마다 `punch.request_timeout` + 서버 `start_delay_max` + `window_ms` + `handshake_ms`, 시도 사이마다 `max(punch.retry_delay, nat.stun_rto × nat.stun_attempts)`. 기본값이면 2 × (3 + 1 + 5 + 5) s + 1.5 s = 29.5 s다. 재시도가 옛 세션을 바꾸므로 B 쪽 옛 세션의 남은 기한은 이 합에 들어가지 않는다. 서버 값은 `welcome.limits`로 알고 계산해 연결 정보에 보인다.
 - 바로 끝내는 경우(재시도 없음): `nat_unsupported`, `declined`, `self`, P2P 꺼짐, 상대 키 불일치, ALPN 불일치, 서버 한계값 불일치(이쪽이든 상대든).
 - 서버에 아직 붙지 못한 상태의 연결 시도는 `RendezvousUnavailable`로 바로 끝난다. 다음 시도를 언제 할지는 연결 목록의 재연결 도우미나 소비자가 정한다([전송 추상화](transport.md#연결-목록)).
 
@@ -185,7 +185,7 @@ A                         서버                          B
 | `PeerNotFound` | 서버에 상대가 없다(꺼져 있음, 다른 서버, 응답 없음) | 예 |
 | `Declined` | 상대가 이 기기를 페어링 목록에 두지 않았다 | 아니오 |
 | `NatUnsupported` | 두 기기 모두 `dependent`이고 호스트 후보로도 닿지 않았다(또는 호스트 후보가 없다) | 아니오 |
-| `PunchCancelled{reason}` | 서버가 진행 중 펀칭을 취소했다(`peer_gone`·`expired`) | 예 |
+| `PunchCancelled{reason}` | 서버가 진행 중 펀칭을 취소했다(`peer_gone`·`expired`·`superseded`. `peer_limits_invalid`는 아래 `PeerLimitsInvalid`) | 예 |
 | `PeerLimitsInvalid` | 상대 기기가 서버 한계값을 자기 설정과 맞지 않는다고 거절했다(`punch_refused{peer_limits_invalid}`·`punch_cancel{peer_limits_invalid}`) | 아니오 |
 | `PunchFailed` | 펀칭 시도가 모두 시간 안에 서지 않았다 | 아니오 |
 | `Busy` | 서버 상한(동시 펀칭 수 등) | 예 |
@@ -243,9 +243,10 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | (시작) → `Offered` | `punch_offer` |
 | `Offered` → `Scheduled` | `punch_go`(수락 뒤) |
 | `Offered` → `Closed` | `not_paired`·`limits_invalid`(B가 거절), `go_timeout`, `punch_cancelled(reason)`, `rendezvous_lost` |
-| `Scheduled` → `Closed` | `server_limits_invalid`(받은 `punch_go`가 상한을 벗어남. A·B 모두 재시도 없음), `punch_cancelled(peer_limits_invalid)` |
+| `Scheduled` → `Closed` | `server_limits_invalid`(받은 `punch_go`가 상한을 벗어남. A·B 모두 재시도 없음) |
+| `Scheduled`·`Punching`·`Handshaking` → `Closed` | `punch_cancelled(peer_limits_invalid)`(재시도 없음. A의 오류는 `PeerLimitsInvalid`) |
 | `Scheduled` → `Punching` | `start_elapsed` |
-| `Scheduled`·`Punching` → `RetryWait` / `Closed` | `punch_cancelled(reason)`(A는 남은 시도가 있으면 `RetryWait`, B는 `Closed`) |
+| `Scheduled`·`Punching` → `RetryWait` / `Closed` | `punch_cancelled(reason)`, 사유는 `peer_gone`·`expired`·`superseded`(A는 남은 시도가 있으면 `RetryWait`, B는 `Closed`) |
 | `Punching` → `Handshaking` | A: `probe_succeeded`(주소 포함). B: `quic_incoming`(세션에 묶인 주소에서 온 Initial) |
 | `Punching` → `RetryWait` / `Closed` | A: `punch_window_elapsed`(남은 시도가 있으면 `RetryWait`, 없으면 `Closed`. 마지막 시도가 `host_only`면 오류는 `NatUnsupported`, 아니면 `PunchFailed`). B: `accept_deadline_elapsed`(`Closed`) |
 | `Handshaking` → `Connected` | `quic_established` |
