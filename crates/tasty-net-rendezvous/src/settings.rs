@@ -878,8 +878,10 @@ const MAX_STREAMS: u64 = 1 << 60;
 const MIN_QUEUED_MESSAGES: u64 = 1;
 /// The longest send queue, far under the channel's limit on every platform.
 const MAX_QUEUED_MESSAGES: u64 = 1 << 20;
-/// The coordination stream needs one bidirectional stream.
-const MIN_BIDI_STREAMS: u64 = 1;
+/// The coordination stream and a place for a second stream, which the server takes only to
+/// close the connection as `malformed`: with 1 the second stream never opens and the server
+/// cannot see the rule broken.
+const MIN_BIDI_STREAMS: u64 = 2;
 
 struct Resolver<'a>(&'a ServerSettings);
 
@@ -1217,7 +1219,7 @@ impl Resolver<'_> {
             "quic.max_bidi_streams",
             MIN_BIDI_STREAMS,
             MAX_STREAMS,
-            "1 to 2^60",
+            "2 to 2^60",
         )?;
         self.range("quic.max_uni_streams", u64::MIN, MAX_STREAMS, "0 to 2^60")?;
         for key in [
@@ -1905,10 +1907,11 @@ mod tests {
                 ..
             })
         ));
-        // Stream counts: 1 to 2^60 bidirectional, 0 to 2^60 unidirectional.
+        // Stream counts: 2 to 2^60 bidirectional, 0 to 2^60 unidirectional.
         let streams: Vec<(&str, u64, bool)> = vec![
             ("quic.max_bidi_streams", 0, false),
-            ("quic.max_bidi_streams", 1, true),
+            ("quic.max_bidi_streams", 1, false),
+            ("quic.max_bidi_streams", 2, true),
             ("quic.max_bidi_streams", 1 << 60, true),
             ("quic.max_bidi_streams", (1 << 60) + 1, false),
             ("quic.max_uni_streams", 0, true),
