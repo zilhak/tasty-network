@@ -372,7 +372,7 @@ struct SshInspection {
 - 암호 연산이 드는 검사 둘은 하지 않는다(새 의존 없이는 할 수 없다): ECDSA 점이 곡선 위에 있는지(`EC_POINT_oct2point`·`sshkey_ec_validate_public`)와 인증서의 CA 서명(`cert_parse`의 `sshkey_verify`, `sshkey.c:1976`)이다. 그런 키는 이 크레이트가 키로 읽고 기준판은 무효로 본다. 판정이 바뀌는 방향은 다음과 같다.
   - known_hosts 줄에 있을 때는 더 거절하는 쪽이다. 기준판은 그 줄을 건너뛴다(`hostfile_read_key` 실패, `hostfile.c:157`–`:178`). 표식 없는 줄이면 이 크레이트는 그 줄을 다른 키로 보아 기준판의 `HOST_NEW` 대신 `Mismatch`를 낸다. 인증서 줄은 평문 키와 형식이 달라 `Match`의 근거가 되지 않는다. `@revoked` 줄이면 그 공개키를 거절한다.
   - 서버가 보낸 blob이 그런 키일 때는 통과로 새는 경우가 있다. 기준판은 키 교환에서 그 blob을 키로 읽지 못해 판정 전에 끊는다(`sshkey_fromb_allowlist`, `kexgen.c:168`). `check`는 곡선 밖 점이 표식 없는 줄과 바이트가 같으면 `Match`를 낸다. CA 서명이 틀린 인증서는 폐기 확인 뒤 평문 키로 판정하므로, 그 평문 키가 표식 없는 줄에 있으면 `Match`를 낸다.
-  - 통과로 새는 두 경우와 인증서 CA 키의 폐기([호스트 키 판정](#호스트-키-판정))를 어떻게 할지는 [후속 작업과 미정](#후속-작업과-미정)의 "곡선 검사·CA 서명·CA 키 폐기"다.
+  - 그래서 `check`는 전제를 둔다: 서버 키 blob은 전송 계층(russh)이 이미 키로 읽고 서명을 확인한 것이어야 한다. `check`는 곡선 검사와 인증서 서명 확인을 하지 않는다. 남은 두 경우는 [후속 작업과 미정](#후속-작업과-미정)의 "곡선 검사·CA 서명"이다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
 ### 결과 API
@@ -556,7 +556,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
   5. 4이고 `HostKeyAlias`가 없고 포트가 0·22가 아니면, 포트 없는 호스트 이름으로 1~4를 읽기 전용으로 다시 본다. 거기서 `HOST_OK`면 통과이고, 아니면 4 그대로다(`sshconnect.c:1181`–`:1193`).
 - 결과마다: `HOST_OK`는 통과, `HOST_CHANGED`·`HOST_REVOKED`는 거절(`accept-new`·`ask`에서도 기록하거나 묻지 않는다), `HOST_NEW`는 `StrictHostKeyChecking`에 따라 묻거나(`ask`) 기록하거나(`accept-new`) 거절한다(`yes`). `CheckHostIP yes`면 주소로도 같은 판정을 한다.
 - 알고리즘 순서(`order_hostkeyalgs`)가 known_hosts에 있는 형식을 앞으로 당기므로 보통 서버는 아는 형식의 키를 낸다. 2는 서버가 그 형식을 내지 않게 바뀐 경우다.
-- `@cert-authority` 줄은 1단계에서 믿지 않는다. 그 줄은 판정에서 통과 근거가 되지 않고, `DistrustedCaLine`으로 `ConfigNote`(`cert_authority_distrusted`)에 남는다. `DistrustedCaLine`은 4(`HOST_NEW`)이면서 그 호스트를 가리키는 `@cert-authority` 줄이 있을 때이고 자리는 그 첫 줄이다. 호스트 인증서 알고리즘(`*-cert-v01@openssh.com`)은 제안 목록에서 빼므로 서버는 평문 호스트 키를 낸다. 그래도 인증서가 오면 폐기 확인(인증서의 공개키) 뒤 평문 키로 1~4를 다시 본다. `ssh`가 맞는 CA가 없을 때 하는 재시도와 같다(`sshconnect.c:1474`–`:1486`). CA 키 자체의 폐기 확인(`check_key_not_revoked`의 서명 키 갈래, `hostfile.c:325`–`:328`)은 하지 않는다. 그래서 CA 키가 `@revoked`에 있고 평문 키가 표식 없는 줄에 있으면, 기준판은 `HOST_REVOKED`이고 `check`는 `Match`다(통과로 새는 경우, [후속 작업과 미정](#후속-작업과-미정)의 "곡선 검사·CA 서명·CA 키 폐기"). `@cert-authority` 줄은 위 1~4의 "표식 없는 줄"이 아니다.
+- `@cert-authority` 줄은 1단계에서 믿지 않는다. 그 줄은 판정에서 통과 근거가 되지 않고, `DistrustedCaLine`으로 `ConfigNote`(`cert_authority_distrusted`)에 남는다. `DistrustedCaLine`은 4(`HOST_NEW`)이면서 그 호스트를 가리키는 `@cert-authority` 줄이 있을 때이고 자리는 그 첫 줄이다. 호스트 인증서 알고리즘(`*-cert-v01@openssh.com`)은 제안 목록에서 빼므로 서버는 평문 호스트 키를 낸다. 그래도 인증서가 오면 폐기 확인(인증서의 공개키) 뒤 평문 키로 1~4를 다시 본다. `ssh`가 맞는 CA가 없을 때 하는 재시도와 같다(`sshconnect.c:1474`–`:1486`). 폐기 확인은 기준판 `check_key_not_revoked`(`hostfile.c:315`–`:332`)처럼 인증서의 공개키와 CA 키(서명 키 갈래 `:325`–`:328`) 둘 다로 하고, 일치 판정보다 앞선다. 어느 쪽이든 걸린 첫 `@revoked` 줄이 `Revoked`의 자리다. CA 키는 인증서 본문에서 읽은 것이다. `@cert-authority` 줄은 위 1~4의 "표식 없는 줄"이 아니다.
 - `RevokedHostKeys`와 `RequiredRSASize`는 위 [지원](#지원) 표대로 판정에 들어간다.
 - `accept-new`의 기록은 OpenSSH `add_host_to_hostfile`(`hostfile.c:542`)과 같은 형식이고 `HashKnownHosts`를 따른다. 기록할 파일은 `UserKnownHostsFile`의 첫 파일이다.
 
@@ -709,7 +709,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 이식 크레이트 `tasty-net-ssh-config` | 1단계가 만들었다: `ssh_config` 해석(`readconf.c`, `ssh.c` 설정 단계, `dump_client_config`)과 결과 API, 기준 클라이언트 `ssh -G` 대조 시험. 2단계가 더했다: known_hosts 읽기와 판정(`KnownHosts`), `ssh-keygen -F` 대조, `IdentityFile`·`CertificateFile` 펼침과 출처(`identity_files`·`certificate_files`), known_hosts 파일 목록과 조회 이름. 남은 것: `accept-new` 기록(`add_host_to_hostfile`·`HashKnownHosts`), 메모리 키 입구(아래) |
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
-| 곡선 검사·CA 서명·CA 키 폐기 | 결정 대기. `check`가 기준판과 달리 통과시키는 입력이 셋 있다([OpenSSH 해석 이식 크레이트](#openssh-해석-이식-크레이트)의 키 비교, [호스트 키 판정](#호스트-키-판정)): 표식 없는 줄과 바이트가 같은 곡선 밖 ECDSA 점, 평문 키가 줄에 있는 CA 서명이 틀린 호스트 인증서, CA 키가 `@revoked`인 호스트 인증서. 앞의 둘은 곡선 연산·서명 확인이 들어 새 의존 없이는 기준판처럼 할 수 없다. 셋째는 읽은 CA 키를 `@revoked` 줄과 비교하면 된다. 인증서를 받지 않는 쪽(인증서 blob은 늘 `Revoked`나 판정 거부)도 선택지다 |
+| 곡선 검사·CA 서명 | 결정 대기. `check`가 기준판과 달리 통과시키는 입력이 둘 남았다([OpenSSH 해석 이식 크레이트](#openssh-해석-이식-크레이트)의 키 비교): 표식 없는 줄과 같은 곡선 밖 ECDSA 점, 평문 키가 줄에 있는 CA 서명이 틀린 호스트 인증서. 곡선 연산·서명 확인이 들어 새 의존 없이는 기준판처럼 할 수 없다. 그동안 `check`는 전송 계층이 키로 읽고 서명을 확인한 서버 키를 받는다는 전제다. CA 키가 `@revoked`인 호스트 인증서는 닫혔다(`Revoked`, [호스트 키 판정](#호스트-키-판정)) |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
 | IPv6 scope의 정규화 | 175500 질문. 기준판은 `getaddrinfo`·`getnameinfo`가 scope를 OS 인터페이스 표로 풀어 `hostname`을 바꾼다(`fe80::1%0001`→`fe80::1%lo`, 16진 소문자화). 이식 크레이트는 인터페이스 표를 읽지 않아 scope가 붙은 주소를 적힌 그대로 둔다. 인터페이스 표를 읽을지, 그 값이 `%h`·호스트 키 조회 이름에 쓰이는 차이를 둘지 |
 | 숫자 주소의 OS별 규칙 | 결정됨(director 3106). 실행 OS의 libc 규칙(glibc·bionic·Darwin)을 따르고, 규칙이 없는 OS에서 라이브러리마다 갈리는 표기(앞자리 0·`0x` 16진·짧은 형식·`AddressFamily inet`의 IPv4 매핑 IPv6·IPv6 그룹과 점 표기 꼬리 첫 조각의 자리 수·점 표기 꼬리의 앞자리 0)와 Darwin의 둘째 워드 scope 주소는 거부한다([옮기는 원본](#옮기는-원본)의 숫자 주소). bionic 규칙의 실제 기기 확인은 android 쪽이 한다 |

@@ -1257,6 +1257,11 @@ impl KnownHosts {
     /// [`HostKeyQuery::without_port`], that name is judged too and its
     /// [`HostKeyVerdict::Match`] is taken; any other verdict of it leaves the first
     /// (`sshconnect.c:1181`-`:1193`). Nothing is written.
+    ///
+    /// The server key blob must be one the transport has already read as a key and whose
+    /// signature it has checked. This function does not check that an ECDSA point is on its
+    /// curve or that the CA signature of a certificate is valid (docs/design/ssh-backends.md
+    /// "OpenSSH 해석 이식 크레이트").
     pub fn check(&self, query: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict {
         let verdict = self.check_name(&query.name, key_blob);
         if let (HostKeyVerdict::NotFound | HostKeyVerdict::DistrustedCaLine { .. }, Some(name)) =
