@@ -143,6 +143,9 @@ pub struct Exploration {
     done_parts: HashMap<(String, DeviceId), PartTrack>,
     /// This device's local view was merged: its own edges are the local view's.
     local_merged: bool,
+    /// The link IDs of the merged local view: a remote report of one of them is dropped
+    /// whatever ends it names.
+    local_links: HashSet<EdgeKey>,
     /// This device's own edges as its local view had them when a remote exploration
     /// started: a remote copy with the same `link_id` as one of them is merged as this
     /// copy, so its own edges are the local ones even when the exploration never comes back
@@ -218,7 +221,14 @@ impl Exploration {
         }
         if !self.local_merged {
             self.local_merged = true;
-            self.edges.retain(|edge| !edge.touches(&me));
+            self.local_links = view.edges.iter().map(Edge::key).collect();
+            let own_links: HashSet<EdgeKey> = self.own_edges.iter().map(Edge::key).collect();
+            let local_links = &self.local_links;
+            self.edges.retain(|edge| {
+                !edge.touches(&me)
+                    && !local_links.contains(&edge.key())
+                    && !own_links.contains(&edge.key())
+            });
             self.edge_index = self
                 .edges
                 .iter()
@@ -227,7 +237,18 @@ impl Exploration {
                 .collect();
         }
         for edge in view.edges {
-            self.merge_edge(edge);
+            self.put_own(edge);
+        }
+    }
+
+    /// Puts this device's own copy of a link in place of any edge with its `link_id`.
+    fn put_own(&mut self, edge: Edge) {
+        match self.edge_index.get(&edge.key()) {
+            Some(&at) => self.edges[at] = edge,
+            None => {
+                self.edge_index.insert(edge.key(), self.edges.len());
+                self.edges.push(edge);
+            }
         }
     }
 
@@ -260,24 +281,26 @@ impl Exploration {
             self.merge_node(node, &part.from, unix_ms);
         }
         for edge in part.edges {
-            let edge = if edge.touches(&self.me) {
-                if self.local_merged {
+            let own = self
+                .own_edges
+                .iter()
+                .find(|own| own.link_id == edge.link_id);
+            if self.local_merged {
+                // The local view decides this device's edges and its link IDs.
+                if edge.touches(&self.me) || own.is_some() || self.local_links.contains(&edge.key())
+                {
                     continue;
                 }
-                // A remote copy of a link this device had when the exploration started is
-                // merged as the local copy; a link it did not have stays the remote copy.
-                match self
-                    .own_edges
-                    .iter()
-                    .find(|own| own.link_id == edge.link_id)
-                {
-                    Some(own) => own.clone(),
-                    None => edge,
-                }
+                self.merge_edge(edge);
+            } else if let Some(own) = own {
+                // A report of a link this device had when the exploration started, whatever
+                // ends it names, is that link's local copy.
+                let own = own.clone();
+                self.put_own(own);
             } else {
-                edge
-            };
-            self.merge_edge(edge);
+                // A link this device did not have at the start stays the remote copy.
+                self.merge_edge(edge);
+            }
         }
     }
 
@@ -597,6 +620,7 @@ impl Agent {
             parts: HashMap::new(),
             done_parts: HashMap::new(),
             local_merged: false,
+            local_links: HashSet::new(),
             incomplete: HashMap::new(),
             own_edges: if request.origin == me {
                 Vec::new()

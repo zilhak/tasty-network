@@ -238,10 +238,14 @@ impl Edge {
 
     /// Merge another report of the same link into this one (docs/design/topology.md "모델"):
     /// a workspace field carried by either report is kept, the smaller `rtt_ms` and the
-    /// earlier `connected_at` win. The two reports agree on the ends, the holder and the
-    /// transport, which the handshake fixes for both ends.
+    /// earlier `connected_at` win. Both ends of an honest link report the same ends, holder
+    /// and transport, which the handshake fixes; a report of the same `link_id` that differs
+    /// in them is not that link and is dropped, so the report that came first stays.
     pub(crate) fn merge_report(&mut self, other: Edge) {
         debug_assert_eq!(self.link_id, other.link_id);
+        if !self.same_link_as(&other) {
+            return;
+        }
         self.workspace = match (self.workspace.take(), other.workspace) {
             (Some(a), Some(b)) => Some(WorkspaceRef {
                 id: a.id.or(b.id),
@@ -254,6 +258,12 @@ impl Edge {
             (a, b) => a.or(b),
         };
         self.connected_at = self.connected_at.min(other.connected_at);
+    }
+
+    /// Whether `other` describes the same ends, holder and transport.
+    fn same_link_as(&self, other: &Edge) -> bool {
+        (self.dialer, self.acceptor, self.holder, self.transport)
+            == (other.dialer, other.acceptor, other.holder, other.transport)
     }
 
     /// Whether `device` is one end of this edge.
@@ -432,6 +442,11 @@ mod tests {
             name: Some("main".into()),
         };
         let mut a = report(Some(30), 20, None);
+        // A report of the same link ID that names other ends is not this link: dropped.
+        let mut other_ends = report(Some(1), 1, Some(id_only.clone()));
+        other_ends.dialer = id(3);
+        a.merge_report(other_ends);
+        assert_eq!(a, report(Some(30), 20, None));
         a.merge_report(report(Some(10), 25, Some(id_only.clone())));
         assert_eq!(a, report(Some(10), 20, Some(id_only.clone())));
         a.merge_report(report(None, 5, Some(name_only)));

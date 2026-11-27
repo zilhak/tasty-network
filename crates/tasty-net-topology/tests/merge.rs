@@ -2,9 +2,9 @@
 //! per `link_id`, whatever the two ends report about it (docs/design/testing.md "연결 목록
 //! 시험", "토폴로지 합치기").
 //!
-//! A requester R explores from itself at depth 2 over R → A → B, so both A and B report
-//! the links between them and R merges the two reports. The clock stands still: no deadline
-//! passes, every message is delivered in the order it was sent.
+//! A requester R explores over R → A → B, so both A and B report the links between them
+//! and R merges the two reports. The clock stands still: no deadline passes, every message
+//! is delivered in the order it was sent.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -40,6 +40,8 @@ struct End {
     rtt_ms: u64,
     connected_at: u64,
     workspace: Option<WorkspaceRef>,
+    /// The link ID this end reports, when it is not the link's own (a broken end).
+    link_id: Option<u8>,
 }
 
 impl End {
@@ -48,6 +50,7 @@ impl End {
             rtt_ms: 5,
             connected_at: 100,
             workspace: None,
+            link_id: None,
         }
     }
 }
@@ -102,7 +105,7 @@ impl Net {
     /// `End` says.
     fn link(&mut self, link: u8, dialer: u8, acceptor: u8, at_dialer: End, at_acceptor: End) {
         let make = |peer: u8, local_side: Side, end: End| LocalLink {
-            link_id: link_id(link),
+            link_id: link_id(end.link_id.unwrap_or(link)),
             peer: id(peer),
             local_side,
             holder: Side::Dialer,
@@ -147,10 +150,15 @@ impl Net {
 
     /// R explores from itself at depth 2 and every message is delivered.
     fn explore_from_r(&mut self) -> Exploration {
+        self.explore(R, 2)
+    }
+
+    /// R explores from `origin`, a neighbor or R itself, and every message is delivered.
+    fn explore(&mut self, origin: u8, depth: u32) -> Exploration {
         let request = ExploreRequest {
-            origin: id(R),
+            origin: id(origin),
             route: Vec::new(),
-            depth: 2,
+            depth,
             timeout: Duration::from_secs(10),
         };
         let rid = self
@@ -195,11 +203,13 @@ fn both_ends_report_one_edge() {
             rtt_ms: 9,
             connected_at: 205,
             workspace: None,
+            link_id: None,
         },
         End {
             rtt_ms: 4,
             connected_at: 200,
             workspace: None,
+            link_id: None,
         },
     );
     let x = net.explore_from_r();
@@ -269,4 +279,60 @@ fn ends_with_different_exposure_merge_into_one() {
     assert_eq!(ab.len(), 1, "{ab:?}");
     assert_eq!(ab[0].link_id, link_id(2));
     assert_eq!(ab[0].workspace, Some(workspace()));
+}
+
+/// The edges of `x` as (link ID, dialer, acceptor), sorted.
+fn edge_ends(x: &Exploration) -> Vec<(LinkId, DeviceId, DeviceId)> {
+    let mut ends: Vec<_> = x
+        .edges()
+        .iter()
+        .map(|e| (e.link_id, e.dialer, e.acceptor))
+        .collect();
+    ends.sort();
+    ends
+}
+
+#[test]
+fn a_report_naming_other_ends_with_an_own_link_id_keeps_the_local_copy() {
+    // A reports R's link 1 under ID 9, and its link to B under ID 1, R's own link ID. B
+    // reports the A → B link under its real ID 2.
+    let net = || {
+        let mut net = Net::new();
+        net.link(
+            1,
+            R,
+            A,
+            End::plain(),
+            End {
+                link_id: Some(9),
+                ..End::plain()
+            },
+        );
+        net.link(
+            2,
+            A,
+            B,
+            End {
+                link_id: Some(1),
+                ..End::plain()
+            },
+            End::plain(),
+        );
+        net
+    };
+    let expected = {
+        let mut e = vec![(link_id(1), id(R), id(A)), (link_id(2), id(A), id(B))];
+        e.sort();
+        e
+    };
+    // R's local view is merged first, A's report comes after it.
+    let local_first = net().explore(R, 2);
+    assert_eq!(edge_ends(&local_first), expected);
+    // A's report comes first; R's local view is merged when A's query visits R.
+    let report_first = net().explore(A, 1);
+    assert_eq!(edge_ends(&report_first), expected);
+    for x in [&local_first, &report_first] {
+        let own = x.edges().iter().find(|e| e.link_id == link_id(1)).unwrap();
+        assert_eq!(own.rtt_ms, Some(5));
+    }
 }
