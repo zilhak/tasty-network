@@ -2217,3 +2217,47 @@ fn a_silent_peer_ends_the_link_at_the_idle_timeout() {
     });
     assert_eq!(entry(&pair.table_a, id).last_cause, Some(Cause::Lost));
 }
+
+/// A stream open on the shared connection that waits (the peer allows one stream, which a
+/// link holds) while the connection ends at the QUIC idle timeout fails without a close code;
+/// the connection had ended, so the connect punches a new one instead of returning that
+/// failure (docs/design/transport.md "연결 공유의 시작").
+#[test]
+fn a_shared_connection_that_idles_out_under_an_open_is_passed_over() {
+    let (pair, gate) = Pair::start_full(
+        48,
+        Mode::Echo,
+        true,
+        &[("quic.max_bidi_streams", P2pValue::Count(1))],
+        timeouts(),
+    );
+    let gate = gate.expect("gate");
+    let mut link = pair.link(None).expect("link");
+    let old = live(&pair.table_a)[0].id;
+    let (mut reader, writer) = link.take_ordered().expect("halves");
+    writer.write_frame(StreamTag::Data, b"one").expect("write");
+    assert_eq!(reader.read_frame().expect("echo").payload, b"one");
+    gate.shut.store(true, Ordering::SeqCst);
+    // The peer comes back once the old connection ended, for the new punch.
+    let reopen = std::thread::spawn({
+        let gate = Arc::clone(&gate);
+        move || {
+            let failed = reader.read_frame().expect_err("the connection timed out");
+            gate.shut.store(false, Ordering::SeqCst);
+            failed.failure()
+        }
+    });
+    let conn = pair.connect(&AttemptCancel::new(), &ConnectOptions::new());
+    assert_eq!(
+        reopen.join().expect("the reader"),
+        ReadFailure::HeartbeatTimeout
+    );
+    let conn = conn.expect("a channel on a new connection");
+    drop(conn);
+    assert!(
+        live(&pair.table_a).iter().all(|entry| entry.id != old),
+        "{:?}",
+        pair.table_a.connections()
+    );
+    drop((writer, link));
+}

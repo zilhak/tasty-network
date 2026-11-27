@@ -425,10 +425,7 @@ fn open_on(state: &Arc<ConnState>, cancel: &AttemptCancel) -> Result<RawChannel,
             slot,
         ))),
         // Read while the slot holds the connection: no release of this end closed it yet.
-        Err(error) => Err(OpenError::of_open(
-            error,
-            state.conn.close_reason().is_some(),
-        )),
+        Err(error) => Err(OpenError::of_open(error, state.has_ended())),
     }
 }
 

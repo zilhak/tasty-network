@@ -190,6 +190,12 @@ impl ConnState {
         !channels.closing && !channels.ended && self.conn.close_reason().is_none()
     }
 
+    /// Whether the connection ended, with a close code or without one (the idle timeout, which
+    /// leaves no [`P2pConnection::close_reason`]).
+    pub(crate) fn has_ended(&self) -> bool {
+        lock(&self.channels).ended || self.conn.close_reason().is_some() || self.is_closed()
+    }
+
     /// Whether this end closes or closed the connection.
     pub(crate) fn closed_here(&self) -> bool {
         lock(&self.channels).closing
