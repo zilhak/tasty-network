@@ -137,9 +137,11 @@ install_main() {
     fi
     CLAIMED_DEST=""
     if ! mv -- "$tmp/x/$NAME/source.properties" "$dest/source.properties"; then
-        # source.properties가 없으니 다른 실행이 받아들였을 수 없다.
         say "$dest로 source.properties를 옮기지 못했다."
-        rm -rf -- "${dest:?}"
+        # 이동이 실패로 보여도 그 파일이 목적지에 있으면 다른 실행이 이미 받았을 수 있어 그대로 둔다.
+        if [ ! -e "$dest/source.properties" ] && [ ! -L "$dest/source.properties" ]; then
+            rm -rf -- "${dest:?}"
+        fi
         return 2
     fi
     if ! ndk_ok "$dest"; then
@@ -186,7 +188,9 @@ PY
     # (race는 받는 동안 목적지에 파일이 든 폴더가, race-empty는 빈 폴더가 생긴다. quote는 PREFIX에 작은따옴표가
     # 든다. filling은 목적지를 채우는 중(wrap.sh를 옮기기 직전)에 같은 PREFIX로 다른 호출을 하고, 그
     # 호출이 2가 아니면 실패다. filling-fail은 거기에 더해 wrap.sh 옮기기가 실패한다. 어느 경우든 끝난 뒤
-    # PREFIX에 임시 폴더 .install-ndk.*가 남으면 실패다)
+    # PREFIX에 임시 폴더 .install-ndk.*가 남으면 실패다. props-moved-fail은 source.properties 이동이
+    # 이름을 바꾼 뒤 실패로 끝난 것처럼 하고 그 사이 다른 호출을 한다. 다른 호출이 0이 아니거나 목적지가
+    # 지워지면 실패다)
     local cases=(
         "빈 PREFIX에 설치한다#0#fresh#good"
         "같은 판이 이미 있다#0#again#good"
@@ -206,6 +210,7 @@ PY
         "PREFIX에 작은따옴표가 든다#0#quote#good"
         "채우는 중인 목적지를 다른 호출이 본다#0#filling#good"
         "채우는 중 실패하고 다른 호출이 그 목적지를 본다#2#filling-fail#good"
+        "source.properties 이동이 끝난 뒤 실패로 보이고 다른 호출이 그 목적지를 받는다#2#props-moved-fail#good"
     )
     for c in "${cases[@]}"; do
         IFS='#' read -r name want setup archive <<<"$c"
@@ -241,6 +246,14 @@ PY
                 local a
                 for a in "$@"; do
                     case "$a" in
+                        */source.properties)
+                            if [ "$setup" = props-moved-fail ]; then
+                                command mv "$@" || return 1
+                                (INSTALL_TMP="" CLAIMED_DEST="" PREFIX="$pfx" install_main >/dev/null 2>&1)
+                                echo "$?" >"$work/other.rc"
+                                return 1
+                            fi
+                            ;;
                         */wrap.sh)
                             if [ "$setup" = filling ] || [ "$setup" = filling-fail ]; then
                                 (INSTALL_TMP="" CLAIMED_DEST="" PREFIX="$pfx" install_main >/dev/null 2>&1)
@@ -265,6 +278,15 @@ PY
         if [ "$got" = 0 ] && { [ "$out" != "$dest" ] || [ "$(revision_of "$dest")" != "$NDK_REVISION" ] \
             || [ ! -f "$dest/$CLANG_REL" ] || [ ! -x "$dest/$CLANG_REL" ] || [ -e "$dest/$NAME" ]; }; then
             got="0(찍은 폴더 '$out'이 고정 판의 NDK가 아님)"
+        fi
+        if [ "$setup" = props-moved-fail ]; then
+            if [ "$(cat "$work/other.rc" 2>/dev/null)" != 0 ]; then
+                got="$got(이동 뒤 다른 호출의 결과 $(cat "$work/other.rc" 2>/dev/null), 기대 0)"
+            fi
+            if [ "$(revision_of "$dest")" != "$NDK_REVISION" ] || [ ! -f "$dest/$CLANG_REL" ]; then
+                got="$got(다른 호출이 받은 목적지가 지워짐)"
+            fi
+            rm -f "$work/other.rc"
         fi
         if [ "$setup" = filling ] || [ "$setup" = filling-fail ]; then
             if [ "$(cat "$work/other.rc" 2>/dev/null)" != 2 ]; then
