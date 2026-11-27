@@ -569,8 +569,12 @@ fn a_tunnel_is_one_entry_with_its_links_and_channels() {
         ]
     );
 
-    // The far end saw three loopback channels: two links and the bulk channel.
-    wait_until("the far end's entries", || far.connections().len() == 3);
+    // The far end saw three loopback channels: two links and the bulk channel. Its link rows
+    // come after its ACKs, so the wait covers them too.
+    wait_until("the far end's entries and link rows", || {
+        let entries = far.connections();
+        entries.len() == 3 && entries.iter().map(|e| e.links.len()).sum::<usize>() == 2
+    });
     let far_entries = far.connections();
     let far_links: Vec<_> = far_entries.iter().flat_map(|e| e.links.clone()).collect();
     assert_eq!(far_links.len(), 2);
