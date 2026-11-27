@@ -12,6 +12,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tasty_net_identity::DeviceId;
 
@@ -97,18 +98,41 @@ fn parse_object<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, MessageErro
     serde_json::from_slice(body).map_err(json)
 }
 
+/// A list whose entries are JSON objects. serde would also read an array entry as the fields
+/// in order; that is not an entry of the message table.
+fn objects<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
+    Vec::<serde_json::Map<String, serde_json::Value>>::deserialize(d)?
+        .into_iter()
+        .map(|m| T::deserialize(serde_json::Value::Object(m)).map_err(D::Error::custom))
+        .collect()
+}
+
+/// A field the table requires that may be `null`: the key must be there.
+fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    Option::deserialize(d)
+}
+
 impl DeviceMessage {
     /// Parse a frame body. Besides the JSON shape, a `punch_result` must give a reason exactly
-    /// when it is not `ok`, and a `punch_answer` exactly when it does not `accept`.
+    /// when it is not `ok`, and a `punch_answer` exactly when it does not `accept`: a success or
+    /// an acceptance has no `reason` key at all, not even `null`.
     pub fn parse(body: &[u8]) -> Result<Self, MessageError> {
-        let msg: DeviceMessage = parse_object(body)?;
+        let value: serde_json::Value = parse_object(body)?;
+        let has_reason = value.get("reason").is_some();
+        let msg: DeviceMessage = serde_json::from_value(value).map_err(json)?;
         match &msg {
-            DeviceMessage::PunchResult(r) if r.ok == r.reason.is_some() => {
+            DeviceMessage::PunchResult(r)
+                if (r.ok && has_reason) || (!r.ok && r.reason.is_none()) =>
+            {
                 Err(shape("punch_result has a reason exactly when ok is false"))
             }
-            DeviceMessage::PunchAnswer(a) if a.accept == a.reason.is_some() => Err(shape(
-                "punch_answer has a reason exactly when accept is false",
-            )),
+            DeviceMessage::PunchAnswer(a)
+                if (a.accept && has_reason) || (!a.accept && a.reason.is_none()) =>
+            {
+                Err(shape(
+                    "punch_answer has a reason exactly when accept is false",
+                ))
+            }
             _ => Ok(msg),
         }
     }
@@ -159,6 +183,7 @@ pub struct NatReport {
     pub mapping: NatMapping,
     /// For each server STUN address the device asked, the reflexive address it got
     /// (required, may be empty).
+    #[serde(deserialize_with = "objects")]
     pub stun_results: Vec<StunResult>,
     /// Changed host addresses. Absent keeps the addresses the server has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,7 +195,9 @@ pub struct NatReport {
 pub struct StunResult {
     /// The server STUN address that was asked.
     pub server: String,
-    /// The reflexive address in its answer, `null` when there was no answer.
+    /// The reflexive address in its answer, `null` when there was no answer (the key is
+    /// required).
+    #[serde(deserialize_with = "nullable")]
     pub reflexive: Option<String>,
 }
 
@@ -282,6 +309,7 @@ pub struct PunchGo {
     /// Which candidates are in the message.
     pub mode: PunchMode,
     /// The peer's candidates in priority order.
+    #[serde(deserialize_with = "objects")]
     pub candidates: Vec<Candidate>,
     /// The peer's NAT mapping.
     pub peer_nat: NatMapping,
@@ -551,6 +579,11 @@ mod tests {
         assert!(json.contains(&"ab".repeat(16)), "{json}");
         assert!(json.contains(&peer.to_string()), "{json}");
         assert_eq!(ServerMessage::parse(json.as_bytes()).unwrap(), go);
+        // A candidate written as an array (fields in order) is not an entry.
+        let entry = r#"{"addr":"[2001:db8::1]:3478","kind":"reported_reflexive"}"#;
+        assert!(json.contains(entry), "{json}");
+        let as_array = json.replace(entry, r#"["[2001:db8::1]:3478","reported_reflexive"]"#);
+        assert!(ServerMessage::parse(as_array.as_bytes()).is_err());
 
         let refused = ServerMessage::PunchRefused(PunchRefused {
             request_id: 1,
@@ -572,6 +605,23 @@ mod tests {
             assert!(DeviceMessage::parse(body).is_err(), "{body:?}");
         }
         assert!(ServerMessage::parse(br#"["punch_cancel",1,"expired"]"#).is_err());
+        // List entries are objects too, and a nullable field the table requires has its key.
+        for (body, ok) in [
+            (
+                &br#"{"type":"nat_report","mapping":"unknown","stun_results":[{"server":"192.0.2.1:3478","reflexive":null}]}"#[..],
+                true,
+            ),
+            (
+                br#"{"type":"nat_report","mapping":"unknown","stun_results":[{"server":"192.0.2.1:3478"}]}"#,
+                false,
+            ),
+            (
+                br#"{"type":"nat_report","mapping":"unknown","stun_results":[["192.0.2.1:3478",null]]}"#,
+                false,
+            ),
+        ] {
+            assert_eq!(DeviceMessage::parse(body).is_ok(), ok, "{body:?}");
+        }
         // Fields the table requires.
         for body in [
             &br#"{"type":"hello","proto":1}"#[..],
@@ -600,6 +650,10 @@ mod tests {
                 false,
             ),
             (br#"{"type":"punch_result","punch_id":1,"ok":false}"#, false),
+            (
+                br#"{"type":"punch_result","punch_id":1,"ok":true,"reason":null}"#,
+                false,
+            ),
             (br#"{"type":"punch_result","punch_id":1,"ok":true}"#, true),
             (
                 br#"{"type":"punch_result","punch_id":1,"ok":false,"reason":"timeout"}"#,
@@ -611,6 +665,10 @@ mod tests {
             ),
             (
                 br#"{"type":"punch_answer","punch_id":1,"accept":false}"#,
+                false,
+            ),
+            (
+                br#"{"type":"punch_answer","punch_id":1,"accept":true,"reason":null}"#,
                 false,
             ),
             (
