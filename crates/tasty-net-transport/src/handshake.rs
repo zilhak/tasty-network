@@ -1106,7 +1106,7 @@ fn accept_on(
         let (parent, guard, ext) = accept_bulk(&mut io, open, path, config)?;
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
-            .map_err(HandshakeError::Io)?;
+            .map_err(|e| handover_failed(cancel, e))?;
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
             writer: framed.writer,
@@ -1174,7 +1174,7 @@ fn accept_on(
         io.write_control(&ack.encode())?;
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
-            .map_err(HandshakeError::Io)?;
+            .map_err(|e| handover_failed(cancel, e))?;
         return Ok(Accepted::Request(RequestServer {
             reader: framed.reader,
             writer: framed.writer,
@@ -1264,7 +1264,7 @@ fn accept_on(
             // The ACK is out but no link stands: end it so the credential is revoked and the
             // socket closes (the dialer sees the channel close).
             closer.force_close(EndReason::Forced);
-            return Err(HandshakeError::Io(e));
+            return Err(handover_failed(cancel, e));
         }
     };
     let normal = closer.clone();
@@ -1281,6 +1281,19 @@ fn accept_on(
         bulk: None,
         _guard: accept.guard,
     })))
+}
+
+/// The error of an accepting handshake whose channel could not be handed on after the ACK
+/// (setting the link's socket timeouts failed). The attempt is still registered then, so a
+/// cancel may have shut the socket, and on macOS the timeouts then fail with `EINVAL`: a
+/// cancel that came first makes it `Cancelled`, even with the ACK out. No channel reaches the
+/// caller either way, and the peer sees the channel close.
+fn handover_failed(cancel: &AttemptCancel, error: io::Error) -> HandshakeError {
+    if cancel.is_cancelled() {
+        HandshakeError::Cancelled
+    } else {
+        HandshakeError::Io(error)
+    }
 }
 
 /// Sends the challenge and checks the proof. `Ok(None)` means the signature did not verify.

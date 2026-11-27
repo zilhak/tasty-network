@@ -1052,3 +1052,127 @@ fn a_refusal_written_past_the_deadline_times_out() {
     );
     drop(dialer);
 }
+
+/// A TCP channel control that refuses socket options once a cancel shut the socket, as XNU
+/// (macOS) does with `EINVAL` where Linux takes them. The first option call that sets the read
+/// timeout to `mark` runs `hook` before it answers.
+struct ShutRefusesOptions {
+    stream: SharedTcp,
+    wake: Arc<dyn ChannelControl>,
+    shut: std::sync::atomic::AtomicBool,
+    mark: Duration,
+    hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl ShutRefusesOptions {
+    fn refused(&self) -> io::Result<()> {
+        if self.shut.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid argument",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ChannelControl for ShutRefusesOptions {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        if timeout == Some(self.mark) {
+            let hook = self.hook.lock().expect("hook").take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.refused()?;
+        self.stream.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.refused()?;
+        self.stream.0.set_write_timeout(timeout)
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.stream.0.shutdown(std::net::Shutdown::Write)
+    }
+
+    fn shutdown_and_wake(&self) -> io::Result<()> {
+        self.shut.store(true, Ordering::SeqCst);
+        self.wake.shutdown_and_wake()
+    }
+}
+
+/// A cancel that comes after the ACK, while the accepting handshake hands the channel on as a
+/// link, is `Cancelled` too, also where the OS then refuses the link's socket timeouts on the
+/// shut socket (macOS). No link reaches the caller, and the dialer, which got its ACK, sees
+/// the channel close. The cancel is given from inside the first call that sets the link's
+/// read timeout (a value no handshake step uses: its timeouts are the time left of a shorter
+/// handshake deadline).
+#[test]
+fn a_cancel_while_the_link_is_handed_over_is_cancelled() {
+    const LINK_READ: Duration = Duration::from_millis(9_876);
+    let link_timeouts = LinkTimeouts {
+        read_timeout: LINK_READ,
+        handshake_timeout: Duration::from_secs(5),
+        ..timeouts()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let policy = Arc::new(common::EchoPolicy::default());
+    let config = AcceptConfig::new(key(2), "acceptor-1", Some(token('a')), policy.clone())
+        .with_timeouts(link_timeouts);
+    let cancel = AttemptCancel::new();
+    let attempt = cancel.clone();
+    let acceptor = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let tcp = RawChannel::from_tcp(stream.try_clone().expect("clone")).expect("channel");
+        let shared = SharedTcp(Arc::new(stream));
+        let canceller = attempt.clone();
+        let control = Arc::new(ShutRefusesOptions {
+            stream: shared.clone(),
+            wake: tcp.control(),
+            shut: std::sync::atomic::AtomicBool::new(false),
+            mark: LINK_READ,
+            hook: std::sync::Mutex::new(Some(Box::new(move || canceller.cancel()))),
+        });
+        let mut channel = RawChannel::new(
+            Box::new(shared.clone()),
+            Box::new(shared),
+            control.clone(),
+            TransportKind::Tcp,
+        );
+        let line = read_first_line(
+            &mut channel,
+            MAX_HANDSHAKE_LINE,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("first line");
+        let result = accept_handshake(channel, &line, Vec::new(), &config, &attempt);
+        (result.map(drop), control.shut.load(Ordering::SeqCst))
+    });
+    let transport = Loopback {
+        addr,
+        token: token('a'),
+    };
+    let conn = transport
+        .connect(&(), &AttemptCancel::new())
+        .expect("connect");
+    let mut link = dial_handshake(conn, &client(), Holder::Dialer, None, &AttemptCancel::new())
+        .expect("the dialer got its ACK");
+    let (result, shut) = acceptor.join().expect("acceptor");
+    assert!(shut, "the cancel shut the acceptor's socket");
+    assert!(cancel.is_cancelled());
+    assert!(
+        matches!(result, Err(HandshakeError::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(
+        policy.links.load(Ordering::SeqCst),
+        1,
+        "the domain took the link before the ACK"
+    );
+    let (mut reader, _writer) = link.take_ordered().expect("ordered");
+    let error = reader.read_frame().expect_err("the channel closed");
+    assert_eq!(error.failure(), ReadFailure::PeerClosed, "{error}");
+}
