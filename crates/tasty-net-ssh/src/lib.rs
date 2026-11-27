@@ -253,10 +253,9 @@ const TIME_UNITS: [(char, u64); 5] = [
 
 /// A time in the integer OpenSSH time format (`convtime`): whole numbers, each followed by a
 /// unit `s`, `m`, `h`, `d` or `w` (either case) or by nothing (seconds), written one after
-/// another (`1m30s`, `90`), each unit at most once. A number may start with `+`, as `strtol`
-/// reads it (`+5`). A unit written twice (`1s2s`, also `1s2`)
-/// and a fraction (`1.5`, which newer OpenSSH reads) are not read. OpenSSH refuses a total above
-/// `i32::MAX` seconds; so does this.
+/// another (`1m30s`, `90`), each unit at most once. A sign (`+5`), a unit written twice (`1s2s`,
+/// also `1s2`) and a fraction (`1.5`, which newer OpenSSH reads) are not read. OpenSSH refuses a
+/// total above `i32::MAX` seconds; so does this.
 pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
     let mut total: u64 = 0;
     let mut used = [false; TIME_UNITS.len()];
@@ -275,7 +274,7 @@ pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
         return None;
     }
     for c in text.chars() {
-        if c.is_ascii_digit() || (c == '+' && digits.is_empty()) {
+        if c.is_ascii_digit() {
             digits.push(c);
         } else {
             add(&mut digits, c.to_ascii_lowercase())?;
