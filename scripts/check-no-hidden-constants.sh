@@ -18,8 +18,9 @@
 #                                         같은 설정 파일의 table 줄들은 키를 합쳐서 비교한다
 #   allow    <파일> <대상> <이유>          <대상>은 다음 중 하나다
 #              리터럴(예: 20, 0x2112A442)  그 파일의 그 값 리터럴 전부
-#              const NAME / static NAME   그 이름의 const·static 선언 안의 리터럴
-#              enum NAME                  그 이름의 enum 본문 안의 리터럴(판별값)
+#              const NAME = 값…            그 이름의 const·static 선언, enum 본문 안의 리터럴.
+#              static NAME = 값…           값은 선언 안 리터럴을 나온 순서대로 공백으로 나눠 적고
+#              enum NAME = 값…             (타입의 길이 포함), 코드 값이 다르면 위반이다
 #              그 밖의 토큰 묶음(예: += 1)  그 토큰 순서가 나오는 자리 안의 리터럴
 # 쓰이지 않은 allow 줄도 위반이다. 문자열·주석·#[cfg(test)] 항목·tests/ 폴더는 보지 않는다.
 
@@ -104,14 +105,14 @@ def tokenize(text):
             close = "\"" + m.group(2)
             j = text.find(close, i + len(m.group(0)))
             j = n if j < 0 else j + len(close)
-            out.append(("str", "\"\"", line))
+            out.append(("str", text[i:j], line))
             line += text.count("\n", i, j)
             i = j
         elif c == "\"" or text.startswith("b\"", i):
             j = i + (2 if c == "b" else 1)
             while j < n and text[j] != "\"":
                 j += 2 if text[j] == "\\" else 1
-            out.append(("str", "\"\"", line))
+            out.append(("str", text[i:j + 1], line))
             line += text.count("\n", i, j)
             i = j + 1
         elif c == "'" or text.startswith("b'", i):
@@ -119,7 +120,7 @@ def tokenize(text):
             j = i + (2 if c == "b" else 1)
             m = re.match(r"(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]+\}|.)|[^\\'\n])'", text[j:])
             if m:
-                out.append(("str", "''", line))
+                out.append(("str", text[i:j + len(m.group(0))], line))
                 i = j + len(m.group(0))
             else:
                 m = IDENT.match(text, j)
@@ -156,7 +157,11 @@ def tokenize(text):
 
 def num_value(text):
     t = text.replace("_", "")
-    t = re.sub(r"(?<=[0-9])(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64)$", "", t)
+    if t[:2].lower() in ("0x", "0o", "0b"):
+        # 16진수의 f32·f64는 숫자다. 정수 접미만 뗀다.
+        t = re.sub(r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)$", "", t)
+    else:
+        t = re.sub(r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64)$", "", t)
     try:
         if t.lower().startswith("0x"):
             return int(t, 16)
@@ -185,8 +190,29 @@ def matching_close(toks, i):
     return len(toks) - 1
 
 
+# 바깥 깊이의 ;에서 끝나는 항목. 그 안의 {…}(제네릭 인수의 블록, 초기식)는 항목을 끝내지 않는다.
+SEMI_ITEMS = {"const", "static", "type", "use", "let"}
+BLOCK_ITEMS = {"fn", "mod", "struct", "enum", "union", "impl", "trait", "macro_rules"}
+
+
+def item_kind(toks, i):
+    for j in range(i, len(toks)):
+        k, t, _ = toks[j]
+        if k != "ident":
+            if t in ("{", ";"):
+                return None
+            continue
+        if t == "const" and j + 1 < len(toks) and toks[j + 1][1] == "fn":
+            return "fn"
+        if t in SEMI_ITEMS or t in BLOCK_ITEMS:
+            return t
+    return None
+
+
 def item_end(toks, i):
-    """i에서 시작하는 항목(속성 뒤)의 끝 위치: 첫 {…} 블록의 끝이나 바깥 깊이의 ;."""
+    """i에서 시작하는 항목(속성 뒤)의 끝 위치. const·static·type·use·let은 바깥 깊이의 ;,
+    그 밖은 첫 {…} 블록의 끝이나 바깥 깊이의 ;."""
+    semi = item_kind(toks, i) in SEMI_ITEMS
     depth = 0
     for j in range(i, len(toks)):
         k, t, _ = toks[j]
@@ -196,7 +222,7 @@ def item_end(toks, i):
             depth += 1
         elif t in ")]":
             depth -= 1
-        elif t == "{" and depth == 0:
+        elif t == "{" and depth == 0 and not semi:
             return matching_close(toks, j)
         elif t == "{":
             depth += 1
@@ -222,18 +248,38 @@ def strip_cfg_test(toks):
     return out
 
 
+def duration_names(toks):
+    """Duration과 그 별칭(use … Duration as X, type X = … Duration;)."""
+    names = {"Duration"}
+    for i, (k, t, _) in enumerate(toks):
+        if (t == "Duration" and i + 2 < len(toks) and toks[i + 1][1] == "as"
+                and toks[i + 2][0] == "ident"):
+            names.add(toks[i + 2][1])
+        if t == "type" and i + 2 < len(toks) and toks[i + 2][1] == "=":
+            end = item_end(toks, i)
+            if end > 0 and toks[end - 1][1] == "Duration":
+                names.add(toks[i + 1][1])
+    return names
+
+
 def literals(toks):
-    """(위치, 글자, 줄) 목록: 숫자 리터럴과 Duration 상수. 튜플 첨자(.0)는 빼되 ..0은 본다."""
+    """(위치, 글자, 줄) 목록: 숫자 리터럴과 Duration 상수(별칭 포함). 튜플 첨자(.0)는 빼되
+    ..0은 본다."""
     out = []
+    names = duration_names(toks)
     for i, (k, t, line) in enumerate(toks):
         if k == "num":
             if i > 0 and toks[i - 1] == ("punct", ".", toks[i - 1][2]):
                 continue
             out.append((i, t, line))
         elif (k == "ident" and t in DURATION_CONSTS and i >= 2
-              and toks[i - 1][1] == "::" and toks[i - 2][1] == "Duration"):
+              and toks[i - 1][1] == "::" and toks[i - 2][1] in names):
             out.append((i, "Duration::" + t, line))
     return out
+
+
+def lit_value(text):
+    return text if text.startswith("Duration::") else num_value(text)
 
 
 def decl_spans(toks, keyword, name):
@@ -274,30 +320,53 @@ def parse_list(text):
     return entries
 
 
+DECL = re.compile(r"(const|static|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)")
+LITERAL = re.compile(r"Duration::[A-Z_]+|0[xob][0-9A-Fa-f_]+[a-z0-9]*|[0-9][0-9_.eE]*[a-z0-9]*")
+
+
 def judge_file(path, text, allows):
-    """(위반 목록, 리터럴 수). allows: [(행, 대상, 이유)]. 쓰인 allow 행을 used에 넣는다."""
+    """(위반 목록, 리터럴 수, 쓰인 allow 행). allows: [(행, 대상, 이유)].
+
+    선언 허용(const NAME = 값…)은 그 선언 안의 리터럴이 목록의 값과 순서까지 같을 때만 허용한다.
+    값이 바뀌면 위반이다."""
     toks = strip_cfg_test(tokenize(text))
     lits = literals(toks)
     allowed_at = {}
+    mismatches = []
     for no, target, _reason in allows:
-        m = re.fullmatch(r"(const|static|enum)\s+([A-Za-z_][A-Za-z0-9_]*)", target)
+        if re.fullmatch(r"(const|static|enum)\s+[A-Za-z_][A-Za-z0-9_]*", target):
+            raise ListError(f"{no}행: 선언 허용은 값까지 적는다(예: const NAME = 20): {target}")
+        m = DECL.fullmatch(target)
         if m:
-            spans = decl_spans(toks, m.group(1), m.group(2))
-        elif re.fullmatch(r"Duration::[A-Z_]+|0x[0-9A-Fa-f_]+|[0-9][0-9_.eE]*[a-z0-9]*", target):
-            want = target if target.startswith("Duration::") else num_value(target)
+            want = m.group(3).split()
+            if not all(LITERAL.fullmatch(w) for w in want):
+                raise ListError(f"{no}행: 선언의 값은 리터럴을 공백으로 나눠 적는다: {target}")
+            want_values = [lit_value(w) for w in want]
+            for a, b in decl_spans(toks, m.group(1), m.group(2)):
+                inside = [(pos, t) for pos, t, _ in lits if a <= pos <= b]
+                if [lit_value(t) for _, t in inside] == want_values:
+                    for pos, _ in inside:
+                        allowed_at.setdefault(pos, no)
+                else:
+                    # 값이 다른 선언은 이 줄 하나로 알린다(리터럴마다 다시 알리지 않는다).
+                    for pos, _ in inside:
+                        allowed_at.setdefault(pos, no)
+                    got = " ".join(t for _, t in inside)
+                    mismatches.append(f"목록 {no}행: {path}의 {m.group(1)} {m.group(2)} 값이 목록과 다르다"
+                                      f"(코드 {got or '없음'}, 목록 {' '.join(want)})")
+            continue
+        if LITERAL.fullmatch(target):
+            want = lit_value(target)
             for pos, t, _ in lits:
-                got = t if t.startswith("Duration::") else num_value(t)
-                if got == want:
+                if lit_value(t) == want:
                     allowed_at.setdefault(pos, no)
             continue
-        else:
-            spans = snippet_spans(toks, target)
-        for a, b in spans:
+        for a, b in snippet_spans(toks, target):
             for pos, _, _ in lits:
                 if a <= pos <= b:
                     allowed_at.setdefault(pos, no)
     used = set(allowed_at.values())
-    violations = [f"{path}:{line}: {t}" for pos, t, line in lits if pos not in allowed_at]
+    violations = mismatches + [f"{path}:{line}: {t}" for pos, t, line in lits if pos not in allowed_at]
     return violations, len(lits), used
 
 
@@ -329,11 +398,14 @@ def table_keys(doc_text, heading):
 
 
 def code_keys(text):
-    """설정 모듈의 entry("키"·fixed("키" 항목. 주석과 #[cfg(test)] 모듈 안은 읽지 않는다."""
-    body = re.sub(r"//[^\n]*", "", text)
-    m = re.search(r"#\[cfg\(test\)\]\s*mod\s", body)
-    body = body[:m.start()] if m else body
-    return set(re.findall(r"\b(?:entry|fixed)\(\s*\"([^\"]+)\"", body))
+    """설정 모듈의 entry("키"·fixed("키" 항목. 주석(줄·블록)과 #[cfg(test)] 항목 안은 읽지 않는다."""
+    toks = strip_cfg_test(tokenize(text))
+    keys = set()
+    for i in range(len(toks) - 2):
+        if (toks[i][:2] in (("ident", "entry"), ("ident", "fixed")) and toks[i + 1][1] == "("
+                and toks[i + 2][0] == "str" and toks[i + 2][1].startswith("\"")):
+            keys.add(toks[i + 2][1][1:-1])
+    return keys
 
 
 def collect(read, list_text, root_files):
@@ -414,8 +486,8 @@ def self_test():
     doc = "# 문서\n\n## 표\n\n| 키 | 기본 |\n|---|---|\n| `a.x` | 5 |\n| `b` | on |\n"
     allow_listed = (
         "target\tsrc\n"
-        "allow\tsrc/listed.rs\tconst HEADER_LEN\t와이어 형식\n"
-        "allow\tsrc/listed.rs\tenum Code\t종료 코드\n"
+        "allow\tsrc/listed.rs\tconst HEADER_LEN = 20\t와이어 형식\n"
+        "allow\tsrc/listed.rs\tenum Code = 0 1\t종료 코드\n"
         "allow\tsrc/listed.rs\t[0]\t첫 원소\n"
         "allow\tsrc/listed.rs\t+= 1\t세기\n"
     )
@@ -457,6 +529,25 @@ def self_test():
     files["docs/design/d.md"] = doc
     files["src/zero.rs"] = "fn f() -> std::time::Duration { Duration::ZERO }\nfn g(r: std::ops::Range<u8>) { let _ = (r, ..2); }\n"
     case("Duration::ZERO와 ..2", "target\tsrc\n", {"src/zero.rs"}, 2)
+    files["src/listed.rs"] = listed.replace("usize = 20;", "usize = 21;")
+    case("허용된 선언의 값이 바뀌면 위반", allow_listed, {"src/listed.rs"}, 1)
+    case("값 없는 선언 허용은 목록 오류", "target\tsrc\nallow\tsrc/listed.rs\tconst HEADER_LEN\t형식\n",
+         {"src/listed.rs"}, "목록 오류")
+    files["src/listed.rs"] = listed
+    files["src/alias.rs"] = ("use std::time::Duration as D;\ntype Dur = std::time::Duration;\n"
+                             "fn f() -> (D, Dur) { (D::ZERO, Dur::MAX) }\n")
+    case("Duration 별칭의 상수", "target\tsrc\n", {"src/alias.rs"}, 2)
+    files["src/generic.rs"] = ("#[cfg(test)]\nconst X: Foo<{ 1 + 2 }> = 3;\n"
+                               "#[cfg(test)]\nstatic Y: [u8; { 4 }] = [5; { 4 }];\nfn f() -> u8 { 7 }\n")
+    case("#[cfg(test)] const의 제네릭 블록 뒤 값도 시험 코드", "target\tsrc\n", {"src/generic.rs"}, 1)
+    files["src/settings.rs"] = settings_mod + "/* entry(\"removed\", 1) */\n// fixed(\"gone\", \"x\", \"x\")\n"
+    case("주석 안의 entry는 키가 아니다",
+         "target\tsrc\nsettings\tsrc/settings.rs\ntable\tsrc/settings.rs\td.md\t표\n",
+         {"src/settings.rs"}, 0)
+    files["src/settings.rs"] = settings_mod
+    files["src/suffix.rs"] = "fn f() -> (u8, u32) { (0xFFu8, 0x1f32) }\n"
+    case("접미 붙은 16진 리터럴", "target\tsrc\nallow\tsrc/suffix.rs\t0xFF\t바이트 끝\n"
+         "allow\tsrc/suffix.rs\t0x1f32\t16진의 f32는 숫자\n", {"src/suffix.rs"}, 0)
 
     failed = 0
     for title, got, want, v in cases:
