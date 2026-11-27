@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SSH 통합 시험(crates/tasty-net-demo/tests/ssh_attach.rs)이 쓸 OpenSSH sshd를 확인하고 결과를 로그에 남긴다.
+# SSH 통합 시험(crates/tasty-net-demo/tests/ssh_attach.rs, ssh_reverse_attach.rs)이 쓸 OpenSSH sshd를 확인하고 결과를 로그에 남긴다.
 # CI의 clippy·test 잡이 시험 전에 부른다(docs/dev-guide/ci.md). 로컬에서도 같은 명령으로 돌린다.
 #
 #   bash scripts/prepare-test-sshd.sh

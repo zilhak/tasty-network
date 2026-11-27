@@ -20,7 +20,7 @@
 
 ## SSH 통합 시험의 sshd
 
-`clippy-test` 잡은 시험 단계 전에 SSH 통합 시험(`crates/tasty-net-demo/tests/ssh_attach.rs`)이 쓸 OpenSSH sshd를 준비하고 결과를 로그에 남긴다. 규칙의 정본은 [CI와 시험 환경](../design/testing.md) "SSH 통합 시험의 sshd"다.
+`clippy-test` 잡은 시험 단계 전에 SSH 통합 시험(`crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs`)이 쓸 OpenSSH sshd를 준비하고 결과를 로그에 남긴다. 규칙의 정본은 [CI와 시험 환경](../design/testing.md) "SSH 통합 시험의 sshd"다.
 
 | 단계 | OS | 하는 일 |
 |---|---|---|
@@ -29,7 +29,7 @@
 | `Check sshd for the SSH tests` | 세 OS | `scripts/prepare-test-sshd.sh`: sshd 경로·판을 `sshd-prep ...` 줄로 남기고, 시험 도우미와 같은 설정을 `sshd -t`로 검사 |
 
 - 설치 단계는 `continue-on-error`다. 설치가 안 되거나 sshd가 시험에 쓸 수 없으면 시험이 시험 전용 Rust SSH 서버로 돈다. 둘 다 안 되면 시험이 `sshd=none`으로 실패한다. 준비 단계가 시험을 통과시키거나 건너뛰게 하지 않는다.
-- 어느 서버로 돌았는지는 시험 단계 로그의 `[ssh_attach] sshd=openssh|russh|none` 줄로 본다. 이 줄과 PID 줄은 시험이 통과해도 stderr에 남는다([예제](../examples.md) "통합 시험").
+- 어느 서버로 돌았는지는 시험 단계 로그의 `[ssh_attach] sshd=openssh|russh|none` 줄(역할 반전 시험은 `[ssh_reverse_attach] sshd=...`)로 본다. 이 줄과 PID 줄은 시험이 통과해도 stderr에 남는다([예제](../examples.md) "통합 시험").
 - macOS는 기본 `/usr/sbin/sshd`를 쓰고 설치 단계가 없다.
 
 ## 툴체인
@@ -40,6 +40,7 @@
 
 - D1(세 OS CI)은 이 워크플로 실행 하나의 `fmt` 잡과 `clippy-test` 세 잡의 결론으로 본다.
 - D2(SSH 정방향 attach)는 `clippy-test` 세 잡의 시험 단계 로그에서 `ssh_attach` 시험마다의 `test <이름> ... ok` 줄과 `[ssh_attach] sshd=` 줄로 본다.
+- D3(SSH 역할 반전 attach)는 같은 로그에서 `ssh_reverse_attach` 시험마다의 `test <이름> ... ok` 줄과 `[ssh_reverse_attach] sshd=` 줄로 본다.
 - D7(tasty 의존 없음)은 `repo-checks` 잡의 `no-tasty-deps` 단계 결론으로 본다.
 - D5 (a)(relay 설정 기동)는 `relay.yml`의 `relay-config-check` 잡 결론으로 본다.
 - 기준과 증거 형식의 정본은 [동작 수준 기준](../design/done-criteria.md)이다.
