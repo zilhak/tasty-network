@@ -320,6 +320,7 @@ allow	crates/tasty-net-ssh-config/src/hostfile.rs	const MPINT_SIGN_BIT: u8 = 0x8
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const RSA_MINIMUM_MODULUS_BITS: usize = 1024	sshkey.h SSH_RSA_MINIMUM_MODULUS_SIZE 1024비트
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const BITS_PER_BYTE: usize = 8	바이트 하나의 비트 수
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const STRING_LENGTH_BYTES: usize = 4	와이어 형식: SSH string 앞의 uint32 길이 4 B
+allow	crates/tasty-net-ssh-config/src/hostfile.rs	const SSHBUF_SIZE_MAX: usize = 0x0800_0000	sshbuf.h SSHBUF_SIZE_MAX 0x8000000(버퍼 하나의 상한, 디코딩한 키 blob 상한)
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P256: usize = 32	NIST P-256 좌표 하나 32 B
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P384: usize = 48	NIST P-384 좌표 하나 48 B
 allow	crates/tasty-net-ssh-config/src/hostfile.rs	const P521: usize = 66	NIST P-521 좌표 하나 66 B

@@ -238,6 +238,23 @@
 //  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //  */
 //
+// sshbuf-misc.c:
+// /*
+//  * Copyright (c) 2011 Damien Miller
+//  *
+//  * Permission to use, copy, modify, and distribute this software for any
+//  * purpose with or without fee is hereby granted, provided that the above
+//  * copyright notice and this permission notice appear in all copies.
+//  *
+//  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+//  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+//  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+//  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+//  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+//  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+//  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//  */
+//
 // sshbuf.h:
 // /*
 //  * Copyright (c) 2011 Damien Miller
@@ -387,6 +404,9 @@ const RSA_MINIMUM_MODULUS_BITS: usize = 1024;
 const BITS_PER_BYTE: usize = 8;
 /// The `uint32` length before an SSH string.
 const STRING_LENGTH_BYTES: usize = 4;
+/// `SSHBUF_SIZE_MAX` (`sshbuf.h:39`): the largest buffer, so the largest decoded key blob
+/// (`sshbuf_b64tod`, `sshbuf-misc.c:183`-`:203`).
+const SSHBUF_SIZE_MAX: usize = 0x0800_0000;
 
 /// The NIST curves of ECDSA keys (`sshkey_curve_name_to_nid`, `sshkey.c:569`-`:580`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -737,6 +757,17 @@ fn b64_pton(text: &[u8]) -> Option<Vec<u8>> {
     STANDARD.decode(kept).ok()
 }
 
+/// `sshbuf_b64tod`: [`b64_pton`] into a buffer, which takes at most [`SSHBUF_SIZE_MAX`]
+/// bytes.
+fn b64_to_buffer(text: &[u8]) -> Option<Vec<u8>> {
+    b64_pton(text).filter(|d| fits_buffer(d.len()))
+}
+
+/// Whether `len` bytes fit an `sshbuf` ([`SSHBUF_SIZE_MAX`]).
+fn fits_buffer(len: usize) -> bool {
+    len <= SSHBUF_SIZE_MAX
+}
+
 /// `extract_salt` (`hostfile.c:68`-`:113`).
 fn extract_salt(name: &[u8]) -> Option<Vec<u8>> {
     let rest = name.strip_prefix(HASH_MAGIC)?;
@@ -863,7 +894,7 @@ fn read_key(raw: &[u8]) -> Option<(Key, String)> {
         return None;
     }
     let end = word_end(cp);
-    let key = parse_blob(&b64_pton(cp.get(..end)?)?)?;
+    let key = parse_blob(&b64_to_buffer(cp.get(..end)?)?)?;
     if key.kind != imp.kind || key.cert != imp.cert {
         return None;
     }
@@ -933,6 +964,27 @@ fn lines(text: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
         })
         .zip(1..)
         .map(|(l, n)| (n, l))
+}
+
+/// The lines of a file up to its end or the first read error: `None` when it cannot be
+/// opened.
+fn read_lines(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    Some(read_lines_from(std::io::BufReader::new(file)))
+}
+
+/// The lines of `reader` up to its end or the first read error; a line cut by the error is
+/// dropped.
+fn read_lines_from(mut reader: impl std::io::BufRead) -> Vec<u8> {
+    let mut text = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(_) if !line.is_empty() => text.extend_from_slice(&line),
+            _ => break,
+        }
+    }
+    text
 }
 
 /// The name a host key is looked up by in known_hosts files.
@@ -1018,18 +1070,20 @@ pub struct KnownHosts {
 
 impl KnownHosts {
     /// Read the files in order (`UserKnownHostsFile` then `GlobalKnownHostsFile`,
-    /// [`crate::Resolution::known_hosts_files`]). A file that cannot be read is skipped, as
-    /// `load_hostkeys` skips a file it cannot open (`hostfile.c:291`-`:294`).
+    /// [`crate::Resolution::known_hosts_files`]). A file that cannot be opened is skipped, as
+    /// `load_hostkeys` skips a file it cannot open (`hostfile.c:291`-`:294`). A file is read
+    /// line by line as `getline` reads it (`hostfile.c:806`): a read error ends the file and
+    /// keeps the lines read before it.
     pub fn load(files: &[PathBuf]) -> KnownHosts {
         KnownHosts {
             files: files
                 .iter()
-                .filter_map(|p| std::fs::read(p).ok().map(|text| (p.clone(), text)))
+                .filter_map(|p| read_lines(p).map(|text| (p.clone(), text)))
                 .collect(),
         }
     }
 
-    /// The files that were read.
+    /// The files that were opened.
     pub fn files(&self) -> impl Iterator<Item = &Path> {
         self.files.iter().map(|(p, _)| p.as_path())
     }
@@ -1491,8 +1545,38 @@ mod tests {
     #[test]
     fn missing_files_are_skipped() {
         let dir = tempdir::Dir::new();
-        let kh = KnownHosts::load(&[dir.0.join("none"), dir.0.clone()]);
+        let kh = KnownHosts::load(&[dir.0.join("none")]);
         assert_eq!(kh.files().count(), 0);
+        let path = dir.0.join("known_hosts");
+        std::fs::write(&path, "").unwrap();
+        let kh = KnownHosts::load(&[dir.0.join("none"), path]);
+        assert_eq!(kh.files().count(), 1, "the file that exists is opened");
+    }
+
+    #[test]
+    fn decoded_blobs_fit_an_sshbuf() {
+        assert!(fits_buffer(SSHBUF_SIZE_MAX));
+        assert!(!fits_buffer(SSHBUF_SIZE_MAX + 1));
+    }
+
+    #[test]
+    fn a_read_error_keeps_the_lines_before_it() {
+        struct Failing(&'static [u8]);
+        impl std::io::Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(std::io::Error::other("read error"));
+                }
+                let n = buf.len().min(self.0.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let got = read_lines_from(std::io::BufReader::new(Failing(b"one\ntwo\nthr")));
+        assert_eq!(got, b"one\ntwo\n", "the cut line is dropped");
+        let got = read_lines_from(&b"one\nlast"[..]);
+        assert_eq!(got, b"one\nlast", "the last line without a newline is kept");
     }
 
     #[test]
