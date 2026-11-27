@@ -140,7 +140,8 @@ def use_items(toks):
     items, spans = [], []
     i = 0
     while i < len(toks):
-        if toks[i][:2] == ("ident", "use"):
+        if toks[i][:2] == ("ident", "use") and not (i + 1 < len(toks) and toks[i + 1][1] == "<"):
+            # use<…>는 정밀 캡처(impl Trait + use<'a>)이지 import가 아니다.
             end = i
             depth = 0
             while end < len(toks):
@@ -380,6 +381,8 @@ def self_test():
         ("raw 문자열(# 8개) 안의 따옴표와 std::process::Command", "const S: &str = r########\"a \"# std::process::Command \"## b\"########;\n"),
         ("raw 식별자 r#match는 키워드가 아니다", "fn r#match() {}\n"),
         ("a::std::process::Command(다른 크레이트 안의 std 모듈)", "fn f() { other::std::process::Command::new(\"x\"); }\n"),
+        ("정밀 캡처 impl Copy + use<'a>는 import가 아니다",
+         "fn f<'a>(x: &'a u8) -> impl Copy + use<'a> { *x }\nfn g<T>() -> impl Sized + use<T> {}\n"),
     ]
     cases = []
     for title, src in bad:
