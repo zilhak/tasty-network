@@ -2,7 +2,7 @@
 
 use std::{ffi::OsStr, fmt, io, path::Path, str::FromStr};
 
-use iroh_base::{PublicKey, SecretKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use crate::{
     error::{CorruptKind, FileOp, IdentityError, RandomError},
@@ -15,10 +15,10 @@ pub const DEVICE_KEY_FILE: &str = "device_key";
 const HEADER: &[u8] = b"tasty-net-device-key-v1";
 
 /// The ed25519 secret key of this device. Its canonical form is the 32-byte seed, which
-/// `iroh_base::SecretKey::from_bytes` takes as is, so SSH and P2P see the same device ID.
+/// `ed25519_dalek::SigningKey::from_bytes` takes as is, so SSH and P2P see the same device ID.
 #[derive(Clone)]
 pub struct DeviceKey {
-    secret: SecretKey,
+    secret: SigningKey,
 }
 
 impl DeviceKey {
@@ -73,7 +73,7 @@ impl DeviceKey {
     /// A key from a 32-byte seed, without any file.
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
-            secret: SecretKey::from_bytes(&seed),
+            secret: SigningKey::from_bytes(&seed),
         }
     }
 
@@ -82,14 +82,14 @@ impl DeviceKey {
         os_random_32().map(Self::from_seed)
     }
 
-    /// The 32-byte seed, for `iroh_base::SecretKey::from_bytes`.
+    /// The 32-byte seed, for `ed25519_dalek::SigningKey::from_bytes` (the P2P TLS key).
     pub fn to_seed(&self) -> [u8; 32] {
         self.secret.to_bytes()
     }
 
     /// The device ID (the public key).
     pub fn id(&self) -> DeviceId {
-        DeviceId(self.secret.public())
+        DeviceId(self.secret.verifying_key())
     }
 
     /// Sign `message` with this key.
@@ -174,21 +174,33 @@ pub(crate) mod random_fault {
 }
 
 /// The device ID: the ed25519 public key of a [`DeviceKey`]. Its text form is 64 lowercase hex
-/// digits, the same string as the `Display` of the iroh endpoint ID of the same key.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DeviceId(PublicKey);
+/// digits. IDs are ordered by their 32 bytes, which is also the order of their text.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceId(VerifyingKey);
+
+impl PartialOrd for DeviceId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeviceId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
 
 impl DeviceId {
     /// The ID from the 32 raw public key bytes. Bytes that are not a valid ed25519 point are
     /// refused.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, DeviceIdParseError> {
-        PublicKey::from_bytes(bytes)
+        VerifyingKey::from_bytes(bytes)
             .map(Self)
             .map_err(|_| DeviceIdParseError::InvalidKey)
     }
 
     /// The 32 raw public key bytes (the form signed into the handshake and taken by
-    /// `iroh_base::PublicKey::from_bytes`).
+    /// [`DeviceId::from_bytes`]).
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
@@ -197,7 +209,7 @@ impl DeviceId {
     /// strict (`verify_strict`).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
         self.0
-            .verify(message, &iroh_base::Signature::from_bytes(&signature.0))
+            .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
             .is_ok()
     }
 }
@@ -217,7 +229,8 @@ impl fmt::Debug for DeviceId {
 impl FromStr for DeviceId {
     type Err = DeviceIdParseError;
 
-    /// Only 64 lowercase hex digits. Unlike iroh's parser, base32 and uppercase are refused.
+    /// Only 64 lowercase hex digits: any other text is [`DeviceIdParseError::Format`], and hex
+    /// that is not a valid ed25519 public key is [`DeviceIdParseError::InvalidKey`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bytes = hex::decode::<32>(s.as_bytes()).ok_or(DeviceIdParseError::Format)?;
         Self::from_bytes(&bytes)

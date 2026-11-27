@@ -228,13 +228,13 @@ fn assert_vector(seed: &str, id: &str, message: &[u8], signature: &str) {
 }
 
 /// The device ID and signature of a fixed seed. The expected values were taken from the
-/// iroh-base 1.5.0 implementation (develop 132a3d6), so a change of the ed25519 implementation
+/// implementation of develop 132a3d6, so a change of the ed25519 implementation
 /// that alters key files, device IDs or signatures fails here.
 #[test]
 fn a_fixed_seed_keeps_its_id_and_signature() {
     assert_vector(
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        FIXED_ID,
         b"tasty-net fixed vector",
         "4780ca113a06f7f67815d44feda1eac6a036f4fce368744ec9e57d2b6d61f150\
          1c9e883874f22c6a99aa53e9aa5db6bc9dd08e1f754cc0d4ca1b2de2f0c72601",
@@ -276,34 +276,34 @@ fn seed_round_trip_keeps_the_id() {
     let key = DeviceKey::generate().unwrap();
     let again = DeviceKey::from_seed(key.to_seed());
     assert_eq!(key.id(), again.id());
-    assert_eq!(
-        iroh_base::SecretKey::from_bytes(&key.to_seed())
-            .public()
-            .to_string(),
-        key.id().to_string(),
-        "the device ID text is the iroh endpoint ID text of the same key"
-    );
+    assert_eq!(again.to_seed(), key.to_seed());
 }
+
+/// The ID of the fixed seed in [`a_fixed_seed_keeps_its_id_and_signature`].
+const FIXED_ID: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
 
 #[test]
 fn device_id_text_is_strict_lowercase_hex() {
-    let id = DeviceKey::generate().unwrap().id();
-    let text = id.to_string();
-    assert_eq!(text.len(), 64);
-    assert_eq!(text.parse::<DeviceId>().unwrap(), id);
+    let id = FIXED_ID.parse::<DeviceId>().unwrap();
+    assert_eq!(id.to_string(), FIXED_ID);
     assert_eq!(DeviceId::from_bytes(id.as_bytes()).unwrap(), id);
-    assert_eq!(
-        "A".repeat(64).parse::<DeviceId>(),
-        Err(DeviceIdParseError::Format)
-    );
-    assert_eq!(
-        text[..63].parse::<DeviceId>(),
-        Err(DeviceIdParseError::Format)
-    );
-    let z32 = iroh_base::PublicKey::from_bytes(id.as_bytes())
-        .unwrap()
-        .to_z32();
-    assert_eq!(z32.parse::<DeviceId>(), Err(DeviceIdParseError::Format));
+    let refused = [
+        // Uppercase hex of a valid key.
+        FIXED_ID.to_ascii_uppercase(),
+        // The z-base-32 text of the same key.
+        "yqooxx9u3aemh8mo5wcqq16yufu6jitouq1o4za751dger1igghy".to_owned(),
+        // 63 and 65 hex digits.
+        FIXED_ID[..63].to_owned(),
+        format!("{FIXED_ID}0"),
+        String::new(),
+    ];
+    for text in refused {
+        assert_eq!(
+            text.parse::<DeviceId>(),
+            Err(DeviceIdParseError::Format),
+            "{text:?}"
+        );
+    }
     // y = 2 is not on the curve.
     let mut off_curve = [0u8; 32];
     off_curve[0] = 2;
@@ -311,6 +311,22 @@ fn device_id_text_is_strict_lowercase_hex() {
         DeviceId::from_bytes(&off_curve),
         Err(DeviceIdParseError::InvalidKey)
     );
+    assert_eq!(
+        hex::encode(&off_curve).parse::<DeviceId>(),
+        Err(DeviceIdParseError::InvalidKey)
+    );
+}
+
+#[test]
+fn device_ids_are_ordered_by_their_bytes() {
+    let mut ids: Vec<DeviceId> = (0..8)
+        .map(|_| DeviceKey::generate().unwrap().id())
+        .collect();
+    ids.sort();
+    for pair in ids.windows(2) {
+        assert!(pair[0].as_bytes() < pair[1].as_bytes());
+        assert!(pair[0].to_string() < pair[1].to_string());
+    }
 }
 
 #[test]
