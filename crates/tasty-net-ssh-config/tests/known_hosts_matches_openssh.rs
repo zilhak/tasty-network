@@ -6,8 +6,8 @@
 //! them, and looks every name of `queries` up twice:
 //!
 //! - `ssh-keygen -F <name> -f <file>`: the lines it lists (line number and marker) are the
-//!   [`HostKeyEntry`] values with a `key_type`, and it exits with 0 exactly when there are
-//!   some;
+//!   [`HostKeyEntry`] values with a `key_type`, and it exits with 0 when there are some and
+//!   with 1 when there are none (any other exit or a signal fails the test);
 //! - `ssh-keygen -l -E sha1 -F <name> -f <file>`: the lines it lists, with the key type, the
 //!   SHA-1 fingerprint and the comment, are the entries with a `key`.
 //!
@@ -115,6 +115,12 @@ fn listed(stdout: &str) -> Vec<(usize, String, String)> {
         out.push((line, marker, lines.next().unwrap_or_default().to_string()));
     }
     out
+}
+
+/// `ssh-keygen -F` exits with 0 when it lists lines and 1 when it lists none
+/// (`ssh-keygen.c:1383`; an error is `fatal`, 255); a signal has no code.
+fn exit_agrees(status: std::process::ExitStatus, lists: bool) -> bool {
+    status.code() == Some(if lists { 0 } else { 1 })
 }
 
 #[test]
@@ -239,7 +245,7 @@ fn matches_ssh_keygen_f() {
             .filter(|e| e.key_type.is_some())
             .map(|e| (e.line, marker_word(e.marker).to_string()))
             .collect();
-        if want_f != got_f || f.status.success() == got_f.is_empty() {
+        if want_f != got_f || !exit_agrees(f.status, !want_f.is_empty()) {
             failures.push(format!(
                 "-F {name}: ssh-keygen {want_f:?} (exit {:?}), crate {got_f:?}",
                 f.status.code()
@@ -269,14 +275,14 @@ fn matches_ssh_keygen_f() {
                 ))
             })
             .collect();
-        if want_l != got_l || l.status.success() == got_l.is_empty() {
+        if want_l != got_l || !exit_agrees(l.status, !want_l.is_empty()) {
             failures.push(format!(
                 "-l -F {name}: ssh-keygen {want_l:?} (exit {:?}), crate {got_l:?}",
                 l.status.code()
             ));
         }
         listed_l += want_l.len();
-        if want_f.is_empty() && want_l.is_empty() && entries.is_empty() {
+        if f.status.code() == Some(1) && l.status.code() == Some(1) && entries.is_empty() {
             rejected_alike += 1;
         }
     }
