@@ -336,7 +336,8 @@ fn connection_table_reports_ssh_role_reversed() {
     let (mut server, ready) = start_accepting_server(&mut scene);
     let mut dialer = start_reversing_dialer(&mut scene, &["--channels"]);
     let before = reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
-    dialer.expect_prefix("dialer channels-open ", LOCAL_STEP);
+    // The request channel discovers the record over SSH and runs a handshake.
+    dialer.expect_prefix("dialer channels-open ", SSH_STEP);
     held_echo(&mut server, &mut dialer, 1, "hello-1");
     let instance = dialer_instance(&server, 1);
     let tunnel = check_tunnel_entries(
@@ -455,9 +456,10 @@ fn mixed_holders_on_one_tunnel() {
     let mut dialer = scene.start_dialer_with(&record, &["--also-holder", "acceptor"], &[]);
     let line = scene.connected(&mut dialer);
     assert_eq!(field(&line, "instance"), Some(ready.instance.as_str()));
-    let extra = dialer.expect_prefix("dialer extra-connected ", LOCAL_STEP);
+    // The second link discovers the record over SSH and runs a handshake.
+    let extra = dialer.expect_prefix("dialer extra-connected ", SSH_STEP);
     assert_eq!(field(&extra, "holder"), Some("acceptor"), "{extra}");
-    server.expect_prefix("server control client=2 ", LOCAL_STEP);
+    server.expect_prefix("server control client=2 ", SSH_STEP);
     // Both links work: the dialer holds the first, the server the second.
     echo(&mut dialer, "hello-forward");
     server.send_line("send hello-reversed");

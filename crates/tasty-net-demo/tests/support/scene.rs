@@ -477,7 +477,9 @@ pub fn connect_and_check(
     ));
     assert_ne!(server.pid(), dialer.pid(), "two separate processes");
     assert_ne!(tunnel, 0, "the dialer reported its tunnel ssh");
-    let control = dialer.expect_prefix("dialer control ", LOCAL_STEP);
+    // The dialer reads the link after it opened what `--channels` asks for, which discovers
+    // the record over SSH again, so the snapshot may take as long as an SSH step.
+    let control = dialer.expect_prefix("dialer control ", SSH_STEP);
     assert!(
         control.contains(&ready.instance),
         "the snapshot names the server instance: {control}"
