@@ -732,3 +732,74 @@ fn frame_limits_after_welcome() {
         Some("rendezvous.max_message_bytes")
     );
 }
+
+/// Panics seen by the panic hook on the threads `f` marks as watched.
+fn panics_while(f: impl FnOnce()) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    let before = SEEN.load(Ordering::SeqCst);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if WATCHED.with(std::cell::Cell::get) {
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        }
+        prev(info);
+    }));
+    f();
+    SEEN.load(Ordering::SeqCst) - before
+}
+
+thread_local! {
+    static WATCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The blocking calls refuse an async task with `InAsyncContext` without a panic (the panic
+/// hook is not called), and work in `spawn_blocking` (docs/design/p2p.md "endpoint와 런타임").
+#[test]
+fn blocking_calls_in_a_task_are_refused_without_a_panic() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let d = device(&n, 2, 1, &s, settings(&[]));
+    registered(&d);
+    let ep = d.ep.clone();
+    let mut refused = None;
+    let panics = panics_while(|| {
+        refused = Some(w.rt.block_on(async move {
+            tokio::spawn(async move {
+                WATCHED.with(|x| x.set(true));
+                let got = (
+                    ep.accept_timeout(Some(Duration::from_millis(10))).err(),
+                    ep.next_event(Duration::from_millis(10)).err(),
+                    ep.connect(key(9).id()).err(),
+                );
+                WATCHED.with(|x| x.set(false));
+                got
+            })
+            .await
+            .expect("task")
+        }));
+    });
+    assert_eq!(panics, 0);
+    let (accept, next, connect) = refused.unwrap();
+    assert!(
+        matches!(accept, Some(tasty_net_p2p::P2pError::InAsyncContext)),
+        "{accept:?}"
+    );
+    assert!(
+        matches!(next, Some(tasty_net_p2p::P2pError::InAsyncContext)),
+        "{next:?}"
+    );
+    assert!(
+        matches!(connect, Some(tasty_net_p2p::P2pError::InAsyncContext)),
+        "{connect:?}"
+    );
+    let ep = d.ep.clone();
+    let blocking = w.rt.block_on(async move {
+        tokio::task::spawn_blocking(move || ep.next_event(Duration::from_millis(10)))
+            .await
+            .expect("blocking")
+    });
+    assert!(blocking.is_ok(), "{blocking:?}");
+    d.ep.close();
+}

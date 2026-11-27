@@ -775,7 +775,9 @@ impl Log {
         }
         let end = Instant::now() + limit;
         while let Some(left) = end.checked_duration_since(Instant::now()) {
-            let Some(e) = ep.next_event(left) else { break };
+            let Some(e) = ep.next_event(left).expect("next event") else {
+                break;
+            };
             self.0.push(e.clone());
             if f(&e) {
                 return Some(e);

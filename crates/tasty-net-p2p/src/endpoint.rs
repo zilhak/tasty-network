@@ -546,9 +546,14 @@ impl P2pEndpoint {
         self.core().map(|c| c.events.drain()).unwrap_or_default()
     }
 
-    /// The oldest queued event, waiting up to `limit` for one.
-    pub fn next_event(&self, limit: Duration) -> Option<P2pEvent> {
-        self.core().and_then(|c| c.events.next(limit))
+    /// The oldest queued event, waiting up to `limit` for one. It blocks, so inside an async
+    /// task it is refused with [`P2pError::InAsyncContext`] ([`P2pEndpoint::events`] does not
+    /// wait).
+    pub fn next_event(&self, limit: Duration) -> Result<Option<P2pEvent>, P2pError> {
+        if crate::runtime::in_async_task() {
+            return Err(P2pError::InAsyncContext);
+        }
+        Ok(self.core().and_then(|c| c.events.next(limit)))
     }
 
     /// Every setting with the value in effect and its source.
@@ -579,7 +584,7 @@ impl P2pEndpoint {
             o.stop(shutdown_work(on.core.clone()));
             finished
         };
-        if block_on(&on.core.handle, async {}).is_ok() {
+        if !crate::runtime::in_async_task() {
             finished.wait(on.core.params.shutdown_timeout);
         }
     }
