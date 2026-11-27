@@ -135,6 +135,43 @@ no_forward_ok() {
     (($1 < $2))
 }
 
+# path_ok <dialer 줄> <listener 줄> <호스트 IP> <서버가 본 반사 주소들(쉼표)>: 두 예제의 성공 후보 종류가
+# host이고, 상대 주소의 IP가 알린 호스트 IP이며, 상대 주소가 서버가 본 반사 주소 어느 것과도 다르다.
+# 맞으면 0. 아니면 까닭 한 줄을 내고 1이다. 반사 후보로 붙은 경우는 그 사실을 따로 적는다.
+path_ok() {
+    local dial_path listen_path dial_remote listen_remote
+    dial_path=$(field_of "$1" path)
+    listen_path=$(field_of "$2" path)
+    dial_remote=$(field_of "$1" remote)
+    listen_remote=$(field_of "$2" remote)
+    if [[ "$dial_path" != host || "$listen_path" != host ]]; then
+        case "$dial_path/$listen_path" in
+            *reflexive*) echo "반사 후보로 붙었다(dialer path=$dial_path, listener path=$listen_path, 서버가 본 반사 주소 $4). 게시 포트를 docker-proxy가 나르지 않는 Docker로 보인다" ;;
+            *) echo "성공 후보 종류가 host가 아니다: dialer path=$dial_path, listener path=$listen_path" ;;
+        esac
+        return 1
+    fi
+    if [[ "$(ip_of "$dial_remote")" != "$3" || "$(ip_of "$listen_remote")" != "$3" ]]; then
+        echo "상대 주소가 알린 호스트 IP가 아니다: dialer remote=$dial_remote, listener remote=$listen_remote"
+        return 1
+    fi
+    if [[ -z "$4" ]]; then
+        echo "서버 로그에 기기의 반사 주소(registered addresses)가 없다"
+        return 1
+    fi
+    case ",$4," in
+        *",$dial_remote,"* | *",$listen_remote,"*)
+            echo "연결 주소가 서버가 본 반사 주소와 같다: $4"
+            return 1
+            ;;
+    esac
+}
+
+# 서버 로그 $1에서 기기마다 서버가 본 반사 주소(registered addresses)를 쉼표로 이어 낸다.
+reflexive_of() {
+    grep -F 'registered addresses' <<<"$1" | sed -n 's/.* reflexive=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//'
+}
+
 # 글자 $1이 십진수이고 $2–$3 안이면 앞의 0을 뗀 값을 낸다. 아니면 실패한다. 산술식에 넣기 전에 형식과
 # 자릿수(9자리까지)를 보므로 08 같은 값이 8진수로 읽히거나 큰 수가 넘쳐 감기지 않는다.
 decimal_in() {
@@ -199,6 +236,21 @@ self_test() {
     check not decimal_in -5 1 120000
     check not decimal_in '' 1 120000
     check not decimal_in 1e3 1 120000
+    local d l r
+    d='echo ok with b via path=host local=[::]:5001 local_reflexive=172.31.255.1:6001 remote=10.255.0.1:5002 server=127.0.0.1:3478'
+    l='echoed 9 bytes from a via path=host local=10.255.0.1 local_reflexive=172.31.255.1:6002 remote=10.255.0.1:5001 server=127.0.0.1:3478'
+    r=172.31.255.1:6001,172.31.255.1:6002
+    check path_ok "$d" "$l" 10.255.0.1 "$r" >/dev/null
+    check not path_ok "${d/path=host/path=server_reflexive}" "$l" 10.255.0.1 "$r" >/dev/null
+    check test "$(path_ok "$d" "${l/path=host/path=reported_reflexive}" 10.255.0.1 "$r" | grep -c '반사 후보로 붙었다')" = 1
+    check not path_ok "${d/path=host/path=unknown}" "$l" 10.255.0.1 "$r" >/dev/null
+    check not path_ok "$d" "$l" 10.255.0.2 "$r" >/dev/null
+    check not path_ok "${d/remote=10.255.0.1:5002/remote=10.255.0.9:5002}" "$l" 10.255.0.1 "$r" >/dev/null
+    check not path_ok "$d" "$l" 10.255.0.1 "" >/dev/null
+    check not path_ok "$d" "$l" 10.255.0.1 "172.31.255.1:6001,10.255.0.1:5001" >/dev/null
+    check not path_ok "$d" "$l" 10.255.0.1 "10.255.0.1:5002" >/dev/null
+    check test "$(reflexive_of $'DEBUG x: registered addresses device=a reflexive=172.31.255.1:6002 stun=[127.0.0.1:1]\nINFO x: registered device=a\nDEBUG x: registered addresses device=b reflexive=172.31.255.1:6001 stun=[]\nDEBUG x: registered addresses device=b reflexive=172.31.255.1:6001 stun=[]')" = 172.31.255.1:6001,172.31.255.1:6002
+    check test -z "$(reflexive_of 'INFO x: registered device=a')"
     if [[ "$fails" -eq 0 ]]; then
         log "자체 시험 통과 — 사례 ${n}개"
         echo "rendezvous-check container self-test result=ok"
@@ -366,7 +418,7 @@ server_started() { server_logs | grep -qF "rendezvous server started public_key=
 main_check() {
     local tool json peer peer_from image image_from sha host_ip ports primary_port alternate_port cfg out keyout pub
     local before after rx0 rx1 pk0 pk1 message listener_id dialer_id dial_rc listen_rc
-    local dial_line listen_line dial_path listen_path dial_remote listen_remote reflexive nat mode state rc
+    local dial_line listen_line reflexive nat mode why state rc
 
     STEP=build
     for tool in docker cargo python3 ip git; do
@@ -504,25 +556,10 @@ main_check() {
     step_ok "listener: $listen_line"
 
     STEP=path
-    dial_path=$(field_of "$dial_line" path)
-    listen_path=$(field_of "$listen_line" path)
-    dial_remote=$(field_of "$dial_line" remote)
-    listen_remote=$(field_of "$listen_line" remote)
-    reflexive=$(server_logs | grep -F 'registered addresses' | sed -n 's/.* reflexive=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
+    reflexive=$(reflexive_of "$(server_logs)")
     nat=$(server_logs | grep -F 'nat report' | sed -n 's/.* mapping=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
     mode=$(server_logs | grep -F 'punch offered' | sed -n 's/.* mode=\([^ ]*\).*/\1/p' | tail -n 1)
-    if [[ "$dial_path" != host || "$listen_path" != host ]]; then
-        case "$dial_path/$listen_path" in
-            *reflexive*) fail_at "반사 후보로 붙었다(dialer path=$dial_path, listener path=$listen_path, 서버가 본 반사 주소 $reflexive, mode=$mode). 게시 포트를 docker-proxy가 나르지 않는 Docker로 보인다" ;;
-            *) fail_at "성공 후보 종류가 host가 아니다: dialer path=$dial_path, listener path=$listen_path" ;;
-        esac
-    fi
-    [[ "$(ip_of "$dial_remote")" == "$host_ip" && "$(ip_of "$listen_remote")" == "$host_ip" ]] \
-        || fail_at "상대 주소가 알린 호스트 IP가 아니다: dialer remote=$dial_remote, listener remote=$listen_remote"
-    [[ -n "$reflexive" ]] || fail_at "서버 로그에 기기의 반사 주소(registered addresses)가 없다"
-    case ",$reflexive," in
-        *",$dial_remote,"* | *",$listen_remote,"*) fail_at "연결 주소가 서버가 본 반사 주소와 같다: $reflexive" ;;
-    esac
+    why=$(path_ok "$dial_line" "$listen_line" "$host_ip" "$reflexive") || fail_at "$why (nat=$nat mode=$mode)"
     step_ok "path=host devices=same-host-processes network=private-ipv4 nat=$nat mode=$mode"
 
     STEP=no-forward
