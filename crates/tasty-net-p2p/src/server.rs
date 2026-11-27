@@ -573,21 +573,25 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
             .collect(),
         host_candidates: Some(crate::endpoint::host_candidates(&core)),
     });
-    let changed = {
+    let (sent, changed) = {
         let mut r = lock(&core.reg);
         if core.generation() != Some(generation) {
             debug!("a judgement of an earlier registration dropped");
             return;
         }
+        // The report goes into the link's queue before the judgement shows in the status:
+        // whatever this device asks after seeing it (a punch_request) reaches the server
+        // after the report, on the same stream.
+        let sent = core.send_on(generation, report);
         let before = r
             .nat
             .as_ref()
             .map(|n| (n.mapping, n.answers.first().and_then(|a| a.reflexive)));
         let changed = before != Some((j.mapping, j.answers.first().and_then(|a| a.reflexive)));
         r.nat = Some(j);
-        changed && r.phase == Some(EndpointPhase::Registered)
+        (sent, changed && r.phase == Some(EndpointPhase::Registered))
     };
-    if core.send_on(generation, report) && changed {
+    if sent && changed {
         core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
     }
 }

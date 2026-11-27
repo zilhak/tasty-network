@@ -1725,6 +1725,44 @@ mod tests {
         );
     }
 
+    /// A NAT judgement shows in the status only after its report is in the coordination
+    /// link's queue: a punch_request the device sends after seeing the judgement reaches the
+    /// server after the report, and the server picks the mode with the reported mapping.
+    #[test]
+    fn a_judgement_shows_in_the_status_after_its_report_is_queued() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([39; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            38,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        for round in 0..100 {
+            lock(&core.reg).nat = None;
+            let _judging = core
+                .handle
+                .spawn(crate::server::rejudge(core.clone(), generation));
+            let until = Instant::now() + Duration::from_secs(10);
+            while ep.status().nat_answers.is_empty() {
+                assert!(Instant::now() < until, "judged");
+                std::hint::spin_loop();
+            }
+            assert!(
+                matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))),
+                "round {round}: the report is not queued yet"
+            );
+        }
+        ep.close();
+    }
+
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
     /// judgement that wait started ends with it: no STUN request goes out after that and no
     /// transaction ID waits. Only the shutdown signal is sent, so the runtime still runs and a
