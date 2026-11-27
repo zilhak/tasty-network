@@ -23,6 +23,7 @@
 - `proto`는 handshake나 프레임 형식이 호환되지 않게 바뀔 때만 올린다. 기능 추가는 `caps`로 협상한다.
 - `proto`를 올리는 릴리스는 크레이트 minor(1.0 뒤에는 major)도 올린다.
 - 토폴로지 메시지의 형식 변경은 새 capability 이름(예: `net.topology.v2`)으로 낸다.
+- 예외: 첫 태그 전의 형식 변경은 이름을 유지한다. 엣지의 `link_id` 필수화와 `transport` 값 정리(`p2p_direct`·`p2p_relay` → `p2p_udp`)가 그렇다. 아직 태그된 판을 쓰는 소비자가 없고 마이그레이션을 지원하지 않으므로(사용자 결정 2026-11-27) 옛 형식을 함께 받을 이유가 없다. 첫 태그 뒤의 형식 변경부터 새 이름으로 낸다.
 - rendezvous 조정 프로토콜은 따로 번호를 가진다. `hello.proto`(지금 1)와 서버 ALPN `tasty-rendezvous/1`이 같이 움직인다. 서버가 모르는 `proto`는 종료 코드 `unsupported_proto`로 닫는다([rendezvous](rendezvous.md#메시지)). 마이그레이션 미지원 정책(사용자 결정 2026-11-27)대로 서버는 한 번에 한 판만 받는다. 판을 올릴 때는 서버와 기기를 함께 올린다.
 - 펀칭 프로브의 STUN 속성(`TASTY-PUNCH`)과 기기 사이 ALPN `tasty-net/2`는 위 두 번호에 묶인다. 프로브 형식을 바꾸면 조정 프로토콜 번호를 올린다.
 

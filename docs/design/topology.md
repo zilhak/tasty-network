@@ -17,7 +17,7 @@
 - `TransportKind`는 링크의 경로와 attach 방향을 함께 나타낸다. 값은 링크마다 그 링크의 holder와 경로 종류에서 나온다([전송 추상화](transport.md#토폴로지와의-관계)). 연결 목록 항목의 `direction` 요약은 쓰지 않는다. `p2p_udp`는 펀칭된 직접 UDP 경로의 QUIC 연결이다. 중계 경로가 없으므로 iroh 설계의 `p2p_direct`·`p2p_relay` 구분은 없앤다.
 - SSH 포워딩으로 들어온 루프백 연결을 받은 쪽은 연결 목록에 `path = ssh_inbound` 항목을 둔다. 그래도 엣지 값으로는 handshake가 확인한 holder로 `ssh_forward`(holder = dialer)나 `ssh_role_reversed`(holder = acceptor)를 낸다. 그래서 SSH를 띄운 쪽과 받은 쪽의 보고가 같은 엣지 하나로 합쳐진다. `ssh_inbound`는 엣지 값이 아니다.
 - P2P 엣지의 `rtt_ms`는 P2P 연결의 RTT(`P2pConnection::rtt`)에서 온다. SSH 엣지는 `rtt_ms`가 없다.
-- 이 값 바꿈은 문서 결정이다. 지금 topology 크레이트 코드는 다른 작업이 고치고 있어 이번에 바꾸지 않는다. 와이어 값이 바뀌므로 그 작업이나 후속 작업이 같이 맞춘다.
+- 옛 값(`p2p_direct`·`p2p_relay`)은 와이어에서 읽지 않는다(마이그레이션 미지원). 와이어 모양이 바뀌어도 capability 이름은 그대로다(아래 "질의와 결과 메시지", [버전·호환](versioning.md#와이어-버전과-크레이트-버전)).
 - SSH 엣지의 `transport`는 링크의 holder에서 온다. transport `peer()`의 전송 종류가 `Ssh`·`Tcp`이고 holder가 dialer면 `ssh_forward`, acceptor면 `ssh_role_reversed`다(위 "역할" 표). 메모리 전송 링크는 시험용이라 엣지가 아니다. 대응표는 `tasty_net_topology::TransportKind` 문서 주석에 있다.
 - 기기가 자기 자신에 대해 답한 노드는 `reported_by`가 없다. 다른 기기에 대해 보고한 노드(실패 관측, `no_capability`, 경로 중단의 `origin`)에는 보고한 기기가 들어 있다.
 
@@ -49,7 +49,7 @@
 | 억제 | `net.topology.suppressed` | `request_id`, `branch`, `from`, `return_path`. 같은 질의를 이미 같거나 큰 남은 depth로 답했다는 뜻 |
 | 분기 완료 | `net.topology.done` | `request_id`, `branch`, `from`, `return_path`, `timed_out`(`from`이 이 `branch`에서 기다리다 포기한 이웃 기기 ID 목록), `final`(bool. 이 `done`으로 질의 전체가 끝남. 기준 머신, 또는 `route` 전달을 중간에서 멈춘 hop만 `true`로 보낸다), `more`(bool, 없으면 `false`. `true`면 같은 `branch`·`from`의 `done`이 `timed_out` 나머지를 싣고 더 온다. `more`가 없는 마지막 것만 분기를 끝낸다), `part`(정수, 없으면 0. 같은 `branch`·`from`의 `done` 중 몇 번째인지, 0부터), `incomplete`(선택, 기기 ID 목록. `from`이 이 `branch`에서 응답을 온전히 중계하지 못한 기기. `timed_out`과 함께 `more`로 나눈다) |
 
-- 상대가 `caps`에 `net.topology`를 알리지 않았으면 질의를 보내지 않고 그 노드를 `no_capability`로 둔다. tasty는 모르는 event를 조용히 버리므로(`tasty:crates/tasty-ipc/src/stream_hub.rs` `collect_other_control`) 보내 봐야 답이 오지 않는다.
+- 상대가 `caps`에 `net.topology`를 알리지 않았으면 질의를 보내지 않고 그 노드를 `no_capability`로 둔다. 첫 태그 전에 바뀐 엣지 모양(`link_id` 필수, `transport` 세 값)은 같은 이름으로 낸다(예외, [버전·호환](versioning.md#와이어-버전과-크레이트-버전)). 그래서 이 이름은 이 레포의 같은 판끼리만 맞는다고 본다. tasty는 모르는 event를 조용히 버리므로(`tasty:crates/tasty-ipc/src/stream_hub.rs` `collect_other_control`) 보내 봐야 답이 오지 않는다.
 - 결과 프레임 하나의 JSON은 `MAX_FRAME_LEN / 2` 이하다(tasty 원격 읽기 결과 규칙, `tasty:docs/dev-guide/attach-behavior.md` "mirror 터미널 읽기"). 넘으면 `part`로 나누고 마지막 조각에 `last: true`. 조각은 `(branch, from, part)`로 구별한다. 그래서 여러 기기가 같은 `request_id`로 보내도, 한 기기가 더 큰 남은 depth로 다시 방문돼 두 번 답해도 섞이지 않는다. 전달한 기기는 자기가 보낸 `branch`마다 `done`·`suppressed`를 기다리므로 같은 이웃에게 보낸 두 전달을 구별한다. `branch`는 전달 추적용이고, 노드 상태와 엣지의 합치기는 계속 요청자가 노드·엣지 기준으로 한다.
 - 모든 메시지가 `MAX_FRAME_LEN / 2` 이하다. 받는 쪽은 그보다 긴 JSON을 읽기 전에 거절한다(`MessageError::TooLarge`). `done`의 `timed_out`이 한 메시지에 들어가지 않으면 `more`로 나눈다(`split_done`). 헤더(`return_path` 등)만으로 넘는 결과·`done`은 보내지 않는다. 한 응답(`(branch, from)`)의 결과 조각 수와 `done` 수는 각각 `MAX_PARTS`(1,024) 이하다. `part`가 `MAX_PARTS` 이상인 결과·`done`은 형식 오류(`MessageError::Malformed`)로 버리고, 그보다 많은 조각이 필요한 응답은 보내지 않는다(`TooLarge`). 받은 조각 수는 32비트 대상에서도 넘치지 않게 센다.
 - 항목 하나(노드나 엣지)가 혼자서도 한 메시지에 들어가지 않으면 그 항목을 빼고 보내되, 자기 노드를 `timed_out` + 사유 `incomplete`로 바꿔 싣는다. 요청자는 그런 노드가 있으면 `final` `done`을 받아도 탐색 상태를 `Finished`가 아니라 `Incomplete`로 둔다.
@@ -84,13 +84,12 @@
 - 알려진 한계: 원격 기준 머신 탐색에서 요청자 자기 엣지의 로컬 사본은 탐색을 시작할 때의 `local_view`다. 탐색 중 요청자의 링크가 바뀌면(재연결로 `connected_at`·`rtt_ms`가 바뀜) 결과의 자기 엣지는 시작 때 값이다. 다시 탐색하면 풀린다.
 - 알려진 한계: 결과는 있고 `done`이 없는 응답을 요청자 마감에서도 누락으로 보므로, 마감으로 끝난 탐색은 대부분 `TimedOut`이 아니라 `Incomplete`다. 마감 때 `done`을 기다리던 부모(자기 응답은 온전함)도 `incomplete`가 되기 때문이다. `TimedOut`은 전체 마감 때 불완전으로 판정된 응답이 하나도 없을 때만 남는다. 결과를 받았어도 그럴 수 있다. 예를 들어 `hop_reserve`가 0이고 응답하지 않는 이웃의 첫 응답 마감이 요청자 전체 마감과 같으면, `poll`은 전체 마감을 먼저 처리한다. 그 시점에 받은 응답이 모두 온전하고 미응답 보고는 아직 없으므로 받은 결과를 둔 채 `TimedOut`으로 끝난다. tasty 화면 문구를 정할 때 알아 둘 점이다.
 - 알려진 한계: 같은 부모가 같은 기기를 다시 보고하면(예: 한 부모의 두 분기가 둘 다 그 기기의 응답을 중계하지 못함) 그 노드의 `explored_at`이 뒤 보고의 시각으로 바뀐다. 보고자는 같고 도착 순서와 상관없는 결과라는 점도 그대로다.
-- 알려진 한계: 시험은 원격 쪽 workspace 목록이 로컬보다 늦은 경우(원격 사본은 W1만 싣고 로컬에는 W1·W2가 있음)의 workspace ID 짝짓기를 고정하지 않는다. 지금 시험은 원격 사본이 로컬 사본을 모두 덮는 경우만 본다.
 
 ## 공개 범위
 
 사용자 결정: 공개 범위는 기기 단위 설정 하나다. 설정이 없으면 제공한다. 끄면 질의에 자기 자신만 답하는 말단 노드가 된다.
 
 - 원격 질의 응답: 공개 꺼짐이면 자기 노드 하나(`sharing_off`)만 답하고 전달하지 않는다. `route`의 중간 hop이어도 같다. 공개 꺼짐이 중계보다 우선하므로, 자기 노드를 답한 뒤 사유 `route_sharing_off`로 위 "탐색 규칙"처럼 끝낸다(`done`, `final: true`). 공개 켜짐이어도 `workspace` 메타데이터는 소비자가 정한 범위(이름·ID 중 무엇을 내보내는가)만 싣는다.
-- 로컬 조회(자기 화면): 공개 설정과 관계없이 자기 엣지를 모두 보여 준다. 요청자의 탐색 결과에서 자기 엣지는 `local_view` 사본이 이긴다. 자기 `local_view`를 합칠 때 먼저 와 있던 원격 사본(다른 기기가 보낸, 자기에 닿는 엣지)을 지우고, 그 뒤에 오는 원격 사본은 합치지 않는다. 도착 순서와 상관없이 같은 결과다. 원격 기준 머신 탐색이 요청자를 다시 방문하지 않아도 같다. 요청자는 원격 탐색을 시작할 때의 자기 `local_view` 엣지를 보관해 두고, 같은 링크(`dialer`·`acceptor`·`holder`·`transport`가 같음)의 원격 사본이 오면 그 링크의 로컬 사본으로 합친다. 같은 링크라도 workspace가 다른 attach는 엣지가 따로이므로(위 "엣지 목록 입력") 원격 사본 하나가 로컬 사본 여럿에 맞을 수 있다. 원격 사본에 workspace ID가 실려 있으면 그 ID의 로컬 사본을, ID가 없거나 그 ID의 로컬 사본이 없으면 그 링크의 로컬 사본을 모두 넣는다. 같은 링크의 로컬 사본이 하나도 없으면(탐색 시작 뒤 생긴 링크 등) 원격 사본을 그대로 둔다. 그래서 탐색 중이든 끝난 뒤든 결과를 조회하면, 자기 엣지 가운데 탐색 시작 때 로컬에 있던 링크의 것은 로컬 사본이다.
+- 로컬 조회(자기 화면): 공개 설정과 관계없이 자기 엣지를 모두 보여 준다. 요청자의 탐색 결과에서 자기 엣지는 `local_view` 사본이 이긴다. 자기 `local_view`를 합칠 때 먼저 와 있던 원격 사본(다른 기기가 보낸, 자기에 닿는 엣지)을 지우고, 그 뒤에 오는 원격 사본은 합치지 않는다. 도착 순서와 상관없이 같은 결과다. 원격 기준 머신 탐색이 요청자를 다시 방문하지 않아도 같다. 요청자는 원격 탐색을 시작할 때의 자기 `local_view` 엣지를 보관해 두고, 같은 `link_id`의 원격 사본이 오면 그 로컬 사본으로 합친다. 같은 `link_id`의 로컬 사본이 없으면(탐색 시작 뒤 생긴 링크 등) 원격 사본을 그대로 둔다. 그래서 탐색 중이든 끝난 뒤든 결과를 조회하면, 자기 엣지 가운데 탐색 시작 때 로컬에 있던 링크의 것은 로컬 사본이다.
 - 두 범위를 함수로 나눈다: `local_view`와 `remote_answer`(인자는 위 "엣지 목록 입력"). `Sharing`이 없으면(`Sharing::default()`) 공개 켜짐이고 workspace 필드는 하나도 싣지 않는다. 무엇을 실을지(`WorkspaceExposure`)는 tasty가 정한다([설계 목차](index.md) "남은 결정"). 설정을 저장하는 일은 tasty 몫이다.
 - 응답 측 공통 함수 `answer_query`(`Agent::answer_query`)가 질의를 받아 자기 엣지를 답하고 다음 hop으로 전달한다. GUI·headless 배선은 tasty가 한다.
