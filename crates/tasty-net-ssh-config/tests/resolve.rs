@@ -38,12 +38,25 @@ fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
     p
 }
 
+/// The owner of the files this test writes: the `CHECKPERM` of included files compares the
+/// owner with the local uid.
+#[cfg(unix)]
+fn file_owner() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    Some(std::fs::metadata(folder()).expect("test folder").uid())
+}
+
+#[cfg(not(unix))]
+fn file_owner() -> Option<u32> {
+    None
+}
+
 fn context(command_line: Vec<CommandLineValue>) -> ResolveContext {
     ResolveContext {
         command_line,
         local_user: Some("tester".to_string()),
         home: Some("/home/tester".to_string()),
-        local_uid: Some(1000),
+        local_uid: file_owner(),
         local_hostname: Some("client.example.com".to_string()),
         ..ResolveContext::default()
     }
