@@ -1301,16 +1301,21 @@ impl KnownHosts {
     /// (`sshconnect.c:1181`-`:1193`), so that call also checks the address without its port
     /// (`sshconnect.c:1036`-`:1037`, `:1058`-`:1068`) and fails when the address names the host with
     /// another key (`HOST_CHANGED`, `sshconnect.c:1429`-`:1454`). Here the [`HostKeyVerdict::Match`]
-    /// of the look-up without the port is taken only when the address without its port does
-    /// not give [`HostKeyVerdict::Mismatch`]; otherwise the first verdict stays. `ssh` passes
-    /// that case when `StrictHostKeyChecking` is `no` (it only warns), so this rejects more
-    /// there. A certificate is checked by address as its plain key. `ssh` loads no address
-    /// lines for a certificate (`sshconnect.c:1058`), but when it drops to the plain key (a
-    /// certificate with no trusted CA or out of its validity, `sshconnect.c:1473`-`:1486`)
-    /// the look-up without the port starts with the plain key and checks the address. This
-    /// crate does not read the validity of a certificate, so it takes the case that rejects
-    /// more. The address check of the name with the port is the caller's, with
-    /// [`HostKeyQuery::for_address`].
+    /// of the look-up without the port is taken only when the address without its port gives
+    /// [`HostKeyVerdict::NotFound`], [`HostKeyVerdict::DistrustedCaLine`] or
+    /// [`HostKeyVerdict::Match`]; on [`HostKeyVerdict::Mismatch`] or [`HostKeyVerdict::Revoked`]
+    /// the first verdict stays. A revoked line at the address can hide another key there (a
+    /// cut `@revoked` line that Darwin `ssh` does not read), so it fails the retry too.
+    /// `ssh` passes a `HOST_CHANGED` address when `StrictHostKeyChecking` is `no` (it only
+    /// warns) and does not judge revocation by address, so this rejects more in those cases.
+    /// The address is judged by the plain key only. `ssh` loads no address lines for a
+    /// certificate (`sshconnect.c:1058`), but when it drops to the plain key (a certificate
+    /// with no trusted CA or out of its validity, `sshconnect.c:1473`-`:1486`) the look-up
+    /// without the port starts with the plain key and checks the address, and the plain key
+    /// has no CA key, so an `@revoked` line with the CA key revokes nothing by address
+    /// (`hostfile.c:315`-`:332`). This crate does not read the validity of a certificate, so
+    /// it takes the case that rejects more. The address check of the name with the port is
+    /// the caller's, with [`HostKeyQuery::for_address`].
     pub fn check_with_address(
         &self,
         query: &HostKeyQuery,
@@ -1322,14 +1327,19 @@ impl KnownHosts {
             (&verdict, &query.without_port)
         {
             let again = self.check_name(name, key_blob);
-            // `check_name` judges a certificate as its plain key.
-            let address_differs = address.is_some_and(|a| {
+            // `sshkey_drop_cert`: the address is judged by the plain key, without its CA key.
+            let plain = parse_blob(key_blob).map(|k| Key {
+                cert: false,
+                ca: None,
+                ..k
+            });
+            let address_fails = address.is_some_and(|a| {
                 matches!(
-                    self.check_name(&put_host_port(a, u16::MIN), key_blob),
-                    HostKeyVerdict::Mismatch { .. }
+                    self.check_key(&put_host_port(a, u16::MIN), plain),
+                    HostKeyVerdict::Mismatch { .. } | HostKeyVerdict::Revoked { .. }
                 )
             });
-            if matches!(again, HostKeyVerdict::Match { .. }) && !address_differs {
+            if matches!(again, HostKeyVerdict::Match { .. }) && !address_fails {
                 return again;
             }
         }
@@ -1338,6 +1348,11 @@ impl KnownHosts {
 
     /// [`KnownHosts::check`] for one name.
     fn check_name(&self, name: &str, key_blob: &[u8]) -> HostKeyVerdict {
+        self.check_key(name, parse_blob(key_blob))
+    }
+
+    /// [`KnownHosts::check_name`] for a read key (`None`: the blob is not a key).
+    fn check_key(&self, name: &str, key: Option<Key>) -> HostKeyVerdict {
         let query = HostKeyQuery {
             name: name.to_string(),
             without_port: None,
@@ -1348,7 +1363,6 @@ impl KnownHosts {
             .into_iter()
             .filter_map(|(e, k, cut)| k.map(|k| (e, k, cut)))
             .collect();
-        let key = parse_blob(key_blob);
         // `sshkey_drop_cert`: a certificate without its certificate part.
         let plain = key.as_ref().map(|k| Key {
             cert: false,
@@ -1789,11 +1803,15 @@ mod tests {
         // Without the address (no `CheckHostIP`) the retry takes the line.
         assert_eq!(kh.check(&web, &a), matched);
         assert_eq!(kh.check_with_address(&web, None, &a), matched);
-        // The address without the port has the key, has no line, or revokes it: the retry
-        // takes the line (`ssh` fails only on `HOST_CHANGED`).
+        // The address without the port has the key or has no line: the retry takes the line.
         assert_eq!(kh.check_with_address(&web, Some("10.0.0.8"), &a), matched);
         assert_eq!(kh.check_with_address(&web, Some("10.0.0.10"), &a), matched);
-        assert_eq!(kh.check_with_address(&web, Some("10.0.0.9"), &a), matched);
+        // A complete `@revoked` line with the key at the address only: the retry fails too
+        // (a revoked address can hide another key; this rejects more than `ssh`).
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.9"), &a),
+            HostKeyVerdict::NotFound
+        );
         // A certificate is checked by address as its plain key: another key at the address
         // without the port fails the retry, the same key passes.
         let (dir, kh) = hosts(&format!(
@@ -2103,6 +2121,61 @@ mod tests {
         let mut buf = [0u8; 8];
         assert!(std::io::Read::read(&mut r, &mut buf).is_err());
         assert_eq!(std::io::Read::read(&mut r, &mut buf).unwrap(), 5);
+    }
+
+    #[test]
+    fn a_revoked_address_does_not_hide_another_key() {
+        let a = ed25519_blob(41);
+        let b = ed25519_blob(42);
+        let (ka, kb) = (line("ssh-ed25519", &a), line("ssh-ed25519", &b));
+        let web = HostKeyQuery::for_host("web.example", 2222, None);
+        // Another key at the address and a cut `@revoked` line with the key: Darwin `ssh`
+        // does not read the cut line and sees `HOST_CHANGED`, so the retry fails.
+        let (path, kh) = cut_hosts(&format!(
+            "web.example {ka}\n10.0.0.7 {kb}\n@revoked 10.0.0.7 {ka}"
+        ));
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.7"), &a),
+            HostKeyVerdict::NotFound
+        );
+        assert_eq!(
+            kh.check(&web, &a),
+            HostKeyVerdict::Match {
+                file: path,
+                line: 1
+            },
+            "without the address the retry takes the line"
+        );
+        // A certificate: another key at the address and an `@revoked` line with its CA key.
+        // The plain key has no CA key, so the address is `HOST_CHANGED` for `ssh`.
+        let plain = line("ssh-ed25519", &ed25519_blob(4));
+        let ca = line("ssh-ed25519", &ed25519_blob(0xca));
+        let (_dir, kh) = hosts(&format!(
+            "web.example {plain}\n10.0.0.7 {kb}\n@revoked 10.0.0.7 {ca}\n"
+        ));
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.7"), &cert(4)),
+            HostKeyVerdict::NotFound
+        );
+        // The CA `@revoked` line at the address alone revokes nothing there: the retry
+        // takes the line. On the host name the CA key still revokes.
+        let (dir2, kh2) = hosts(&format!(
+            "web.example {plain}\n@revoked 10.0.0.7 {ca}\n@revoked other.example {ca}\n"
+        ));
+        assert_eq!(
+            kh2.check_with_address(&web, Some("10.0.0.7"), &cert(4)),
+            HostKeyVerdict::Match {
+                file: dir2.0.join("known_hosts"),
+                line: 1
+            }
+        );
+        assert_eq!(
+            kh2.check(&q("other.example"), &cert(4)),
+            HostKeyVerdict::Revoked {
+                file: dir2.0.join("known_hosts"),
+                line: 3
+            }
+        );
     }
 
     #[test]
