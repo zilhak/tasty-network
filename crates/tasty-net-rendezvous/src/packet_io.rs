@@ -329,3 +329,29 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
         self.io.may_fragment()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_coalesced_receive_splits_into_stride_sized_datagrams() {
+        let from: SocketAddr = "192.0.2.1:4000".parse().unwrap();
+        // Two full segments of 4 bytes and a short last one of 2.
+        let mut held = Held {
+            buf: (0..10).collect(),
+            from,
+            len: 10,
+            stride: 4,
+            pos: 0,
+        };
+        let mut out = [0u8; 8];
+        let mut got = Vec::new();
+        while let Some((n, addr)) = held.next(&mut out) {
+            assert_eq!(addr, from);
+            got.push(out[..n].to_vec());
+        }
+        assert_eq!(got, [vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9]]);
+        assert!(held.next(&mut out).is_none());
+    }
+}
