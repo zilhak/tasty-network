@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// tests, but the evidence lines (`sshd=`, PIDs) must reach the CI log of a passing test too.
 pub fn log(line: &str) {
     let mut err = std::io::stderr().lock();
-    let _written = writeln!(err, "[ssh_attach] {line}").is_ok();
+    let _written = writeln!(err, "[{}] {line}", env!("CARGO_CRATE_NAME")).is_ok();
 }
 
 /// The lines a process printed so far, its stderr included, for failure messages.

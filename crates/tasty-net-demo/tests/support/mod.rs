@@ -3,6 +3,9 @@
 
 pub mod process;
 mod russh_server;
+// Each test file uses its own part of the scene; the rest would be dead code there.
+#[allow(dead_code)]
+pub mod scene;
 pub mod sshd;
 
 use std::path::{Path, PathBuf};
