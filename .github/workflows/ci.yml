@@ -88,6 +88,11 @@ jobs:
         run: bash scripts/prepare-test-sshd.sh
       - name: test
         run: scripts/check.sh test --no-fail-fast
+      # The SSH feature contract (docs/design/ssh-backends.md): tasty-net-transport
+      # builds, passes clippy and its tests without default features, and that build
+      # has no tasty-net-ssh in its dependency graph.
+      - name: transport without ssh
+        run: scripts/check.sh transport-no-ssh
       # Criterion D8 of docs/design/done-criteria.md: the P2P crates pass their tests
       # built alone, without the features other workspace members turn on.
       - name: test tasty-net-rendezvous alone

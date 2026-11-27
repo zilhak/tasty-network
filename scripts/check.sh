@@ -2,11 +2,14 @@
 # 이 레포의 검사 진입점. git 훅, CI, 원격 빌드가 모두 이 스크립트의 단계를 부른다.
 #
 #   scripts/check.sh [all]          fmt + shell + no-tasty-deps + p2p-isolation + no-hidden-constants
-#                                   + lint + test
+#                                   + lint + test + transport-no-ssh
 #   scripts/check.sh fmt            cargo fmt --all --check
 #   scripts/check.sh lint           cargo clippy (workspace, 모든 target, -D warnings)
 #   scripts/check.sh test [ARGS]    cargo test --workspace. ARGS는 cargo test에 그대로 넘긴다
 #   scripts/check.sh check          cargo check --workspace --all-targets
+#   scripts/check.sh transport-no-ssh
+#                                   tasty-net-transport를 SSH 없이(--no-default-features) clippy·시험하고,
+#                                   그 의존 그래프에 tasty-net-ssh가 없는지 본다
 #   scripts/check.sh shell          추적된 셸 자산 전체의 shellcheck (scripts/check-shell-assets.sh)
 #   scripts/check.sh no-tasty-deps  판정 자체 시험 뒤 tasty 레포 크레이트 의존 없음 (scripts/check-no-tasty-deps.sh)
 #   scripts/check.sh p2p-isolation  판정 자체 시험 뒤 P2P 크레이트의 workspace 안 의존 범위 (scripts/check-p2p-isolation.sh)
@@ -18,7 +21,7 @@
 #                                   (scripts/check-p2p-example-pair.sh). all에 없고 CI의 clippy·test 잡이 부른다
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
 #
-# 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
+# 의존을 해석하는 cargo 명령(clippy·test·check·tree·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
 # cargo fmt는 의존을 해석하지 않아 --locked가 없다.
 # Linux·macOS의 bash와 Windows의 Git Bash에서 돈다.
 # fmt·lint·test·check·all은 이 clone에서 .githooks가 돌지 않으면 stderr에 경고한다.
@@ -36,6 +39,36 @@ cmd_lint() { run cargo clippy --workspace --all-targets --locked -- -D warnings;
 cmd_test() { run cargo test --workspace --locked "$@"; }
 cmd_check() { run cargo check --workspace --all-targets --locked; }
 cmd_shell() { run bash scripts/check-shell-assets.sh; }
+# transport의 의존 그래프(모든 target, 일반·빌드·dev 의존)에 tasty-net-ssh가 있으면 yes, 없으면 no.
+transport_tree_has_ssh() {
+    local tree
+    tree=$(run cargo tree --locked -p tasty-net-transport "$@" --target all -e normal,build,dev \
+        --prefix none -f '{p}')
+    if ! grep -q '^tasty-net-transport v' <<<"$tree"; then
+        echo "cargo tree 출력에 tasty-net-transport가 없다" >&2
+        return 1
+    fi
+    if grep -q '^tasty-net-ssh v' <<<"$tree"; then echo yes; else echo no; fi
+}
+# SSH feature 계약 1단계(docs/design/ssh-backends.md "feature 계약"): SSH 없는 transport가 서고,
+# 그 그래프에 tasty-net-ssh가 없다. 기본 feature의 그래프에 tasty-net-ssh가 보이는지 먼저 확인해
+# 판정이 그 줄을 찾을 수 있는지 대조한다.
+cmd_transport_no_ssh() {
+    local got
+    got=$(transport_tree_has_ssh)
+    if [[ "$got" != yes ]]; then
+        echo "대조 실패: 기본 feature의 transport 그래프에서 tasty-net-ssh를 찾지 못했다" >&2
+        return 1
+    fi
+    got=$(transport_tree_has_ssh --no-default-features)
+    if [[ "$got" != no ]]; then
+        echo "실패: --no-default-features의 transport 그래프에 tasty-net-ssh가 있다" >&2
+        return 1
+    fi
+    echo "transport --no-default-features 그래프에 tasty-net-ssh 없음(대조: 기본 feature에는 있음)" >&2
+    run cargo clippy --locked -p tasty-net-transport --no-default-features --all-targets -- -D warnings
+    run cargo test --locked -p tasty-net-transport --no-default-features
+}
 cmd_no_tasty_deps() {
     run bash scripts/check-no-tasty-deps.sh --self-test
     run bash scripts/check-no-tasty-deps.sh
@@ -100,11 +133,13 @@ case "$sub" in
         cmd_no_hidden_constants
         cmd_lint
         cmd_test
+        cmd_transport_no_ssh
         ;;
     fmt) cmd_fmt ;;
     lint) cmd_lint ;;
     test) cmd_test "$@" ;;
     check) cmd_check ;;
+    transport-no-ssh) cmd_transport_no_ssh ;;
     shell) cmd_shell ;;
     no-tasty-deps) cmd_no_tasty_deps ;;
     p2p-isolation) cmd_p2p_isolation ;;
@@ -112,7 +147,7 @@ case "$sub" in
     p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
     -h | --help | help)
-        sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

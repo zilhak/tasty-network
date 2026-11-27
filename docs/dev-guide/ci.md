@@ -7,7 +7,7 @@
 | 잡 | 러너 | 단계 |
 |---|---|---|
 | `fmt` | `ubuntu-latest` | `scripts/check.sh fmt` |
-| `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `scripts/check.sh test --no-fail-fast`, `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
+| `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`), `p2p-isolation`(`scripts/check.sh p2p-isolation`), `no-hidden-constants`(`scripts/check.sh no-hidden-constants`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
 | `relay-config-check` (`relay.yml`) | `ubuntu-latest` | `bash relay/check-config.sh --self-test`, `bash relay/check-config.sh` |
@@ -17,6 +17,10 @@
 - push와 수동 실행은 브랜치와 커밋마다 다른 concurrency 그룹을 쓴다. 그래서 서로 다른 커밋의 push는 각자 실행이 남는다. 같은 ref·같은 커밋의 push와 수동 실행은 그룹을 함께 쓰므로, 그 그룹에서 대기 중인 앞 실행은 같은 ref·커밋의 새 요청에 밀려 취소될 수 있다.
 - PR은 PR마다 그룹 하나를 쓰고, 새 커밋이 오면 앞 커밋의 실행을 취소한다.
 - Windows 잡은 Git Bash(`shell: bash`)로 돈다.
+
+## SSH 없는 transport
+
+`clippy-test` 세 잡의 `transport without ssh` 단계가 `scripts/check.sh transport-no-ssh`를 부른다. `tasty-net-transport`를 `--no-default-features`(SSH 없음)로 clippy(`-D warnings`)와 시험을 돌리고, 그 빌드의 `cargo tree`(모든 target, 일반·빌드·dev 의존)에 `tasty-net-ssh`가 없는지 본다. 같은 `cargo tree`를 기본 feature로 먼저 읽어 `tasty-net-ssh`가 보이는지 확인하므로, 판정이 그 줄을 찾지 못하는 고장은 실패로 드러난다. 조합의 정본은 [SSH 백엔드](../design/ssh-backends.md#feature-계약)다. 세 OS에서 도는 것은 `cfg(windows)` 코드도 SSH 없이 컴파일되는지 보기 위해서다.
 
 ## SSH 통합 시험의 sshd
 
