@@ -889,6 +889,26 @@ fn paths_under_an_unknown_home() {
 }
 
 #[test]
+fn a_line_ends_at_its_first_nul() {
+    // OpenSSH handles each line as a C string: what follows a NUL is not in the line.
+    let r = resolve("User nulled\0Port 2201\nHostName after.example\n", "web");
+    assert_eq!(refusal_kind(&r), None);
+    assert_eq!(r.options.user.as_deref(), Some("nulled"));
+    assert_ne!(r.options.port, Some(2201));
+    assert_eq!(r.options.hostname.as_deref(), Some("after.example"));
+    // The line numbers stay: the bad line after a cut line is still line 2.
+    let dir = folder();
+    let top = write(&dir, "config", "User nulled\0Port 2201\nNoSuchKeyword x\n");
+    let bad = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(top.clone()),
+    })
+    .expect("load")
+    .resolve("web", &context(Vec::new()));
+    let f = bad.refusal.expect("a refusal");
+    assert_eq!(f.origin, Some(Origin::File { path: top, line: 2 }));
+}
+
+#[test]
 fn include_of_another_users_home() {
     let r = resolve("Include ~root/.ssh/extra.conf\n", "web");
     let f = r.refusal.expect("a refusal");

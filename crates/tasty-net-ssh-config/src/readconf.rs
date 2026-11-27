@@ -926,6 +926,10 @@ impl<'a> Reader<'a> {
         let mut bad_options = 0usize;
         let mut first_bad: Option<(Origin, String, RefusalKind, Option<String>)> = None;
         for (i, line) in text.split_inclusive('\n').enumerate() {
+            // `getline` keeps a NUL, but `process_config_line_depth` handles the line as a C
+            // string (`strlen` at `readconf.c:1175`, then `strdelim` and `argv_split`), so
+            // nothing after the first NUL is in the line. The line number stays.
+            let line = line.split_once('\0').map_or(line, |(head, _)| head);
             let origin = Origin::File {
                 path: path.to_path_buf(),
                 line: i + 1,

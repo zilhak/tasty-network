@@ -1164,4 +1164,37 @@ mod tests {
         assert_eq!(f.keyword.as_deref(), Some("include"));
         std::fs::remove_dir_all(&dir).expect("remove the folder");
     }
+
+    #[test]
+    fn an_include_cut_at_a_nul_is_judged_by_its_head() {
+        // Only the part before the NUL is the line, so a short `~user` Include with a long
+        // tail after a NUL needs the home of the user like the same line without the tail.
+        let dir = std::env::temp_dir().join(format!(
+            "tasty-net-ssh-config-nul-include-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let top = dir.join("config");
+        let ctx = ResolveContext {
+            local_user: Some("tester".to_string()),
+            home: Some("/home/tester".to_string()),
+            ..ResolveContext::default()
+        };
+        let tail = "a".repeat(crate::glob::PATH_MAX);
+        std::fs::write(
+            &top,
+            format!("Include ~nosuchaccount/extra.conf\0{tail}\nPort 2222\n"),
+        )
+        .expect("write");
+        let r = ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Only(top.clone()),
+        })
+        .expect("load")
+        .resolve("web", &ctx);
+        let f = r.refusal.expect("a refusal");
+        assert_eq!(f.kind, RefusalKind::Undeterminable);
+        assert_eq!(f.keyword.as_deref(), Some("include"));
+        assert_eq!(f.origin, Some(Origin::File { path: top, line: 1 }));
+        std::fs::remove_dir_all(&dir).expect("remove the folder");
+    }
 }
