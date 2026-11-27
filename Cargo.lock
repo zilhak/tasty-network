@@ -1723,6 +1723,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tasty-net-ssh-config"
+version = "0.1.0"
+dependencies = [
+ "sha1",
+]
+
+[[package]]
 name = "tasty-net-topology"
 version = "0.1.0"
 dependencies = [

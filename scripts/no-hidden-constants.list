@@ -296,3 +296,78 @@ allow	crates/tasty-net-p2p/src/server.rs	saturating_add(1)	후보 수에 서버 
 allow	crates/tasty-net-p2p/src/socket.rs	v4.port(), 0, 0)	IPv4-mapped IPv6 주소의 flowinfo·scope_id 0
 allow	crates/tasty-net-p2p/src/socket.rs	u16::MIN	포트 0: 소켓은 [::]:0 또는 0.0.0.0:0으로 연다 (p2p.md 소켓 하나와 패킷 나누기)
 allow	crates/tasty-net-p2p/src/socket.rs	fetch_add(1,	세기: 패킷 하나
+# tasty-net-ssh-config: OpenSSH 10.6p2 ssh_config 해석 이식(docs/design/ssh-backends.md). 고정값은 settings.rs.
+target	crates/tasty-net-ssh-config/src/
+settings	crates/tasty-net-ssh-config/src/settings.rs
+table	crates/tasty-net-ssh-config/src/settings.rs	ssh-backends.md	고정값
+allow	crates/tasty-net-ssh-config/src/glob.rs	0	첫 바이트·빈 길이
+allow	crates/tasty-net-ssh-config/src/glob.rs	1	다음 바이트로 한 칸
+allow	crates/tasty-net-ssh-config/src/glob.rs	2	두 바이트 건너뛰기(이스케이프, [!·[^)
+allow	crates/tasty-net-ssh-config/src/matching.rs	const SUBPATTERN_BUFFER: usize = 1024	OpenSSH match.c match_pattern_list의 부분 패턴 버퍼 char sub[1024]
+allow	crates/tasty-net-ssh-config/src/matching.rs	const MAX_PROPOSALS: usize = 40	OpenSSH match.c match_list의 MAX_PROP 40
+allow	crates/tasty-net-ssh-config/src/matching.rs	0	빈 목록·첫 위치
+allow	crates/tasty-net-ssh-config/src/matching.rs	1	다음 글자로 한 칸
+allow	crates/tasty-net-ssh-config/src/misc.rs	const PORT_MAX: i64 = 65535	포트 상한 65535(misc.c a2port)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const TUNID_ANY: i32 = 0x7fff_ffff	OpenSSH misc.h SSH_TUNID_ANY 0x7fffffff
+allow	crates/tasty-net-ssh-config/src/misc.rs	const TUNID_MAX: i64 = 0x7fff_fffd	OpenSSH misc.h SSH_TUNID_MAX 0x7ffffffd
+allow	crates/tasty-net-ssh-config/src/misc.rs	const SECS_PER_MINUTE: f64 = 60.0	시간 단위 m(misc.c convtime)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const SECS_PER_HOUR: f64 = 3600.0	시간 단위 h(misc.c convtime)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const SECS_PER_DAY: f64 = 86400.0	시간 단위 d(misc.c convtime)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const SECS_PER_WEEK: f64 = 604_800.0	시간 단위 w(misc.c convtime)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPQOS_NONE: i32 = i32::MAX	OpenSSH misc.h INT_MAX(IPQoS none)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPQOS_DEPRECATED: i32 = i32::MIN	OpenSSH misc.h INT_MIN(폐기된 IPQoS 이름)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPQOS_MAX: i64 = 255	IPQoS 숫자 값 상한 255(misc.c parse_ipqos)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPQOS: &[(&str, i32)] = &[ ("none", IPQOS_NONE), ("af11", 0x28), ("af12", 0x30), ("af13", 0x38), ("af21", 0x48), ("af22", 0x50), ("af23", 0x58), ("af31", 0x68), ("af32", 0x70), ("af33", 0x78), ("af41", 0x88), ("af42", 0x90), ("af43", 0x98), ("cs0", 0x00), ("cs1", 0x20), ("cs2", 0x40), ("cs3", 0x60), ("cs4", 0x80), ("cs5", 0xa0), ("cs6", 0xc0), ("cs7", 0xe0), ("ef", 0xb8), ("le", 0x04), ("va", 0xb0), ("lowdelay", IPQOS_DEPRECATED), ("throughput", IPQOS_DEPRECATED), ("reliability", IPQOS_DEPRECATED), ]	OpenSSH misc.c ipqos[] 표의 DSCP 값
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPTOS_DSCP_EF: i32 = 0xb8	IPTOS_DSCP_EF 0xb8(defines.h, readconf.c 기본 IPQoS)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const IPTOS_DSCP_CS0: i32 = 0x00	IPTOS_DSCP_CS0 0x00(defines.h, readconf.c 기본 IPQoS)
+allow	crates/tasty-net-ssh-config/src/misc.rs	0	첫 위치·빈 값
+allow	crates/tasty-net-ssh-config/src/misc.rs	1	다음 글자로 한 칸
+allow	crates/tasty-net-ssh-config/src/misc.rs	2	두 글자 접두(${·%%)
+allow	crates/tasty-net-ssh-config/src/misc.rs	3	urldecode의 %XX 세 글자(misc.c urldecode)
+allow	crates/tasty-net-ssh-config/src/misc.rs	i32::MAX	C int 상한(misc.c atoi_err·convtime)
+allow	crates/tasty-net-ssh-config/src/misc.rs	const HEX_RADIX: u32 = 16	urldecode의 16진수 기수
+allow	crates/tasty-net-ssh-config/src/options.rs	const FORWARD_X11_TIMEOUT: i32 = 1200	readconf.c fill_default_options ForwardX11Timeout 기본 1200초
+allow	crates/tasty-net-ssh-config/src/options.rs	const STREAMLOCAL_BIND_MASK: u32 = 0o177	readconf.c fill_default_options StreamLocalBindMask 기본 0177
+allow	crates/tasty-net-ssh-config/src/options.rs	const CONNECTION_ATTEMPTS: i32 = 1	readconf.c fill_default_options ConnectionAttempts 기본 1
+allow	crates/tasty-net-ssh-config/src/options.rs	const NUMBER_OF_PASSWORD_PROMPTS: i32 = 3	readconf.c fill_default_options NumberOfPasswordPrompts 기본 3
+allow	crates/tasty-net-ssh-config/src/options.rs	const SERVER_ALIVE_COUNT_MAX: i32 = 3	readconf.c fill_default_options ServerAliveCountMax 기본 3
+allow	crates/tasty-net-ssh-config/src/options.rs	const CANONICALIZE_MAX_DOTS: i32 = 1	readconf.c fill_default_options CanonicalizeMaxDots 기본 1
+allow	crates/tasty-net-ssh-config/src/options.rs	const REQUIRED_RSA_SIZE: i32 = 1024	readconf.c fill_default_options RequiredRSASize 기본 1024(SSH_RSA_MINIMUM_MODULUS_SIZE)
+allow	crates/tasty-net-ssh-config/src/options.rs	const KEYSTROKE_DEFAULT_INTERVAL_MS: i32 = 20	readconf.c SSH_KEYSTROKE_DEFAULT_INTERVAL_MS 20
+allow	crates/tasty-net-ssh-config/src/options.rs	const META: u8 = 0x80	vis(3) 메타 비트 0x80
+allow	crates/tasty-net-ssh-config/src/options.rs	const DEL: u8 = 0x7f	ASCII DEL 0x7f(vis(3))
+allow	crates/tasty-net-ssh-config/src/options.rs	0	C 값 0(끔·없음)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const DEFAULT_SSH_PORT: u16 = 22	SSH 기본 포트 22(readconf.c default_ssh_port)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const MAX_IDENTITY_FILES: usize = 100	OpenSSH readconf.h SSH_MAX_IDENTITY_FILES 100
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const MAX_HOSTS_FILES: usize = 32	OpenSSH readconf.h SSH_MAX_HOSTS_FILES 32
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const REKEY_LIMIT_MIN: i64 = 16	readconf.c RekeyLimit 최솟값 16
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const KEYSTROKE_INTERVAL_MAX: i32 = 1000	readconf.c ObscureKeystrokeTiming 간격 상한 1000 ms
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const BIND_MASK_MAX: u32 = 0o777	readconf.c StreamLocalBindMask 상한 0777
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const OCTAL_RADIX: u32 = 8	StreamLocalBindMask 8진수(strtol 기수 8)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const FWDARG_MAX: usize = 255	readconf.c parse_forward의 fwdarg 길이 상한
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const NI_MAXHOST: usize = 1025	netdb.h NI_MAXHOST 1025(readconf.c parse_forward)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const PATH_MAX_SUN: usize = if cfg!(any( target_os = "macos", target_os = "ios", target_os = "freebsd" )) { 104 } else { 108 }	sun_path 크기(OpenSSH PATH_MAX_SUN, BSD 104·그 밖 108)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const CIDR_ENTRY_MAX: usize = 49	INET6_ADDRSTRLEN + 3 = 49(misc.c addr_match_cidr_list)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const IPV4_BITS: u32 = 32	IPv4 주소 비트 수(CIDR 접두 길이 상한)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const IPV6_BITS: u32 = 128	IPv6 주소 비트 수(CIDR 접두 길이 상한)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const CTRL_FIRST: u8 = 64	EscapeChar ^X의 둘째 바이트 하한 64(readconf.c)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const CTRL_END: u8 = 128	EscapeChar ^X의 둘째 바이트 상한 128(readconf.c)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const CTRL_MASK: u8 = 31	EscapeChar ^X의 하위 5비트(readconf.c)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const GROUP_OTHER_WRITE: u32 = 0o022	CHECKPERM이 거부하는 group·other 쓰기 비트 022(readconf.c)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	0	첫 위치·0 값(C의 0)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	1	다음 글자로 한 칸
+allow	crates/tasty-net-ssh-config/src/readconf.rs	2	두 글자 접두·인자 두 개
+allow	crates/tasty-net-ssh-config/src/readconf.rs	3	parse_forward 필드 수 3(readconf.c)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	4	parse_forward 필드 수 4(readconf.c fwdargs[4])
+allow	crates/tasty-net-ssh-config/src/readconf.rs	5	ssh_connection_hash의 다섯 필드
+allow	crates/tasty-net-ssh-config/src/readconf.rs	i32::MAX	C int 상한(readconf.c parse_int)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	i64::MAX	C long long 상한(strtonum)
+allow	crates/tasty-net-ssh-config/src/resolve.rs	0	포트 0은 미정(ssh.c)
+allow	crates/tasty-net-ssh-config/src/resolve.rs	1	다음 글자로 한 칸
+allow	crates/tasty-net-ssh-config/src/scaled.rs	const UNIT_BASE: i64 = 1024	scan_scaled 단위의 밑 1024
+allow	crates/tasty-net-ssh-config/src/scaled.rs	const TEN: i64 = 10	10진수 밑
+allow	crates/tasty-net-ssh-config/src/scaled.rs	const MAX_DIGITS: usize = 21	scan_scaled 자릿수 상한 21(MAX_DIGITS)
+allow	crates/tasty-net-ssh-config/src/scaled.rs	0	0으로 시작
+allow	crates/tasty-net-ssh-config/src/scaled.rs	1	다음 글자로 한 칸
+allow	crates/tasty-net-ssh-config/src/scaled.rs	0x0b	isspace의 수직 탭
+allow	crates/tasty-net-ssh-config/src/scaled.rs	i64::MAX	i64 범위 안에서만 곱한다

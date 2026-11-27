@@ -1,0 +1,165 @@
+Lines 178-325 of readconf.c of OpenSSH portable 10.6p2 (commit d449e662b6b8b8cb20e852d8084c269af1c5e8f1),
+copied unchanged for the keyword table test. The notice of readconf.c:
+
+/*
+ * Author: Tatu Ylonen <ylo@cs.hut.fi>
+ * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
+ *                    All rights reserved
+ * Functions for reading the configuration files.
+ *
+ * As far as I am concerned, the code I have written for this software
+ * can be used freely for any purpose.  Any derived versions of this
+ * software must be clearly marked as such, and if the derived work is
+ * incompatible with the protocol description in the RFC file, it must be
+ * called by a name other than "ssh" or "Secure Shell".
+ */
+
+---
+} keywords[] = {
+	/* Deprecated options */
+	{ "protocol", oIgnore }, /* NB. silently ignored */
+	{ "cipher", oDeprecated },
+	{ "fallbacktorsh", oDeprecated },
+	{ "globalknownhostsfile2", oDeprecated },
+	{ "rhostsauthentication", oDeprecated },
+	{ "userknownhostsfile2", oDeprecated },
+	{ "useroaming", oDeprecated },
+	{ "usersh", oDeprecated },
+	{ "useprivilegedport", oDeprecated },
+
+	/* Unsupported options */
+	{ "afstokenpassing", oUnsupported },
+	{ "kerberosauthentication", oUnsupported },
+	{ "kerberostgtpassing", oUnsupported },
+	{ "rsaauthentication", oUnsupported },
+	{ "rhostsrsaauthentication", oUnsupported },
+	{ "compressionlevel", oUnsupported },
+
+	/* Sometimes-unsupported options */
+#if defined(GSSAPI)
+	{ "gssapiauthentication", oGssAuthentication },
+	{ "gssapidelegatecredentials", oGssDelegateCreds },
+# else
+	{ "gssapiauthentication", oUnsupported },
+	{ "gssapidelegatecredentials", oUnsupported },
+#endif
+#ifdef ENABLE_PKCS11
+	{ "pkcs11provider", oPKCS11Provider },
+	{ "smartcarddevice", oPKCS11Provider },
+# else
+	{ "smartcarddevice", oUnsupported },
+	{ "pkcs11provider", oUnsupported },
+#endif
+
+	{ "forwardagent", oForwardAgent },
+	{ "forwardx11", oForwardX11 },
+	{ "forwardx11trusted", oForwardX11Trusted },
+	{ "forwardx11timeout", oForwardX11Timeout },
+	{ "exitonforwardfailure", oExitOnForwardFailure },
+	{ "xauthlocation", oXAuthLocation },
+	{ "gatewayports", oGatewayPorts },
+	{ "passwordauthentication", oPasswordAuthentication },
+	{ "kbdinteractiveauthentication", oKbdInteractiveAuthentication },
+	{ "kbdinteractivedevices", oKbdInteractiveDevices },
+	{ "challengeresponseauthentication", oKbdInteractiveAuthentication }, /* alias */
+	{ "skeyauthentication", oKbdInteractiveAuthentication }, /* alias */
+	{ "tisauthentication", oKbdInteractiveAuthentication },  /* alias */
+	{ "pubkeyauthentication", oPubkeyAuthentication },
+	{ "dsaauthentication", oPubkeyAuthentication },		    /* alias */
+	{ "hostbasedauthentication", oHostbasedAuthentication },
+	{ "identityfile", oIdentityFile },
+	{ "identityfile2", oIdentityFile },			/* obsolete */
+	{ "identitiesonly", oIdentitiesOnly },
+	{ "certificatefile", oCertificateFile },
+	{ "addkeystoagent", oAddKeysToAgent },
+	{ "identityagent", oIdentityAgent },
+	{ "hostname", oHostname },
+	{ "hostkeyalias", oHostKeyAlias },
+	{ "proxycommand", oProxyCommand },
+	{ "port", oPort },
+	{ "ciphers", oCiphers },
+	{ "macs", oMacs },
+	{ "remoteforward", oRemoteForward },
+	{ "localforward", oLocalForward },
+	{ "permitremoteopen", oPermitRemoteOpen },
+	{ "user", oUser },
+	{ "host", oHost },
+	{ "match", oMatch },
+	{ "tag", oTag },
+	{ "escapechar", oEscapeChar },
+	{ "globalknownhostsfile", oGlobalKnownHostsFile },
+	{ "userknownhostsfile", oUserKnownHostsFile },
+	{ "connectionattempts", oConnectionAttempts },
+	{ "batchmode", oBatchMode },
+	{ "checkhostip", oCheckHostIP },
+	{ "stricthostkeychecking", oStrictHostKeyChecking },
+	{ "compression", oCompression },
+	{ "tcpkeepalive", oTCPKeepAlive },
+	{ "keepalive", oTCPKeepAlive },				/* obsolete */
+	{ "numberofpasswordprompts", oNumberOfPasswordPrompts },
+	{ "syslogfacility", oLogFacility },
+	{ "loglevel", oLogLevel },
+	{ "logverbose", oLogVerbose },
+	{ "dynamicforward", oDynamicForward },
+	{ "preferredauthentications", oPreferredAuthentications },
+	{ "hostkeyalgorithms", oHostKeyAlgorithms },
+	{ "casignaturealgorithms", oCASignatureAlgorithms },
+	{ "bindaddress", oBindAddress },
+	{ "bindinterface", oBindInterface },
+	{ "clearallforwardings", oClearAllForwardings },
+	{ "enablesshkeysign", oEnableSSHKeysign },
+	{ "verifyhostkeydns", oVerifyHostKeyDNS },
+	{ "nohostauthenticationforlocalhost", oNoHostAuthenticationForLocalhost },
+	{ "rekeylimit", oRekeyLimit },
+	{ "connecttimeout", oConnectTimeout },
+	{ "addressfamily", oAddressFamily },
+	{ "serveraliveinterval", oServerAliveInterval },
+	{ "serveralivecountmax", oServerAliveCountMax },
+	{ "sendenv", oSendEnv },
+	{ "setenv", oSetEnv },
+	{ "controlpath", oControlPath },
+	{ "controlmaster", oControlMaster },
+	{ "controlpersist", oControlPersist },
+	{ "hashknownhosts", oHashKnownHosts },
+	{ "include", oInclude },
+	{ "tunnel", oTunnel },
+	{ "tunneldevice", oTunnelDevice },
+	{ "localcommand", oLocalCommand },
+	{ "permitlocalcommand", oPermitLocalCommand },
+	{ "remotecommand", oRemoteCommand },
+	{ "visualhostkey", oVisualHostKey },
+	{ "kexalgorithms", oKexAlgorithms },
+	{ "ipqos", oIPQoS },
+	{ "requesttty", oRequestTTY },
+	{ "sessiontype", oSessionType },
+	{ "stdinnull", oStdinNull },
+	{ "forkafterauthentication", oForkAfterAuthentication },
+	{ "proxyusefdpass", oProxyUseFdpass },
+	{ "canonicaldomains", oCanonicalDomains },
+	{ "canonicalizefallbacklocal", oCanonicalizeFallbackLocal },
+	{ "canonicalizehostname", oCanonicalizeHostname },
+	{ "canonicalizemaxdots", oCanonicalizeMaxDots },
+	{ "canonicalizepermittedcnames", oCanonicalizePermittedCNAMEs },
+	{ "streamlocalbindmask", oStreamLocalBindMask },
+	{ "streamlocalbindunlink", oStreamLocalBindUnlink },
+	{ "revokedhostkeys", oRevokedHostKeys },
+	{ "fingerprinthash", oFingerprintHash },
+	{ "updatehostkeys", oUpdateHostkeys },
+	{ "hostbasedacceptedalgorithms", oHostbasedAcceptedAlgorithms },
+	{ "hostbasedkeytypes", oHostbasedAcceptedAlgorithms }, /* obsolete */
+	{ "pubkeyacceptedalgorithms", oPubkeyAcceptedAlgorithms },
+	{ "pubkeyacceptedkeytypes", oPubkeyAcceptedAlgorithms }, /* obsolete */
+	{ "ignoreunknown", oIgnoreUnknown },
+	{ "proxyjump", oProxyJump },
+	{ "securitykeyprovider", oSecurityKeyProvider },
+	{ "knownhostscommand", oKnownHostsCommand },
+	{ "requiredrsasize", oRequiredRSASize },
+	{ "enableescapecommandline", oEnableEscapeCommandline },
+	{ "obscurekeystroketiming", oObscureKeystrokeTiming },
+	{ "channeltimeout", oChannelTimeout },
+	{ "versionaddendum", oVersionAddendum },
+	{ "refuseconnection", oRefuseConnection },
+	{ "warnweakcrypto", oWarnWeakCrypto },
+
+	{ NULL, oBadOption }
+};
