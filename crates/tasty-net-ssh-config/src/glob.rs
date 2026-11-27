@@ -355,9 +355,13 @@ fn glob3(
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(());
     };
-    // `readdir` also gives `.` and `..`.
-    let mut names: Vec<Vec<u8>> = vec![b".".to_vec(), b"..".to_vec()];
-    names.extend(entries.flatten().map(|e| name_bytes(&e.file_name())));
+    // `readdir` also gives `.` and `..`. Each name is judged as it is read; a read error
+    // ends the folder as it ends `readdir`.
+    let names = [b".".to_vec(), b"..".to_vec()].into_iter().chain(
+        entries
+            .map_while(Result::ok)
+            .map(|e| name_bytes(&e.file_name())),
+    );
     let base = path.len();
     for name in names {
         // An initial `.` must be matched literally.
