@@ -304,11 +304,13 @@ impl Attempts {
             .find(|id| !self.others.contains(id) && self.reported.is_none_or(|r| *id > r))
     }
 
-    /// The attempt of connection `id` stood and has its line; its events for the line. The
-    /// number comes from `P2pConnection::id`, which stays after the record left the list
-    /// (`info()` is `None` then).
-    fn stood(&mut self, id: u64) -> Vec<P2pEvent> {
-        self.close(Some(id))
+    /// The line of the connection `id` that stood, with its information if its record is
+    /// still on the list. The dial and the listen call this. The attempt is marked by the
+    /// number from `P2pConnection::id`, which stays after the record left the list, so the
+    /// next failure does not measure it again.
+    fn stood(&mut self, n: u64, id: u64, info: Option<P2pConnectionInfo>) -> Json {
+        let events = self.close(Some(id));
+        line(n, &events, info, None, None)
     }
 
     /// The line of a failure (`error`): the attempt measured, its events and the NAT
@@ -365,11 +367,7 @@ fn dial(a: &Args, peer: DeviceId, end: Instant) -> Result<(u64, u64), String> {
         let events = ep.events();
         attempts.take(&events);
         let out = match &r {
-            Ok(c) => {
-                // By its number, not its information: the record may have left the list.
-                let events = attempts.stood(c.id());
-                line(n, &events, c.info(), None, None)
-            }
+            Ok(c) => attempts.stood(n, c.id(), c.info()),
             // The attempt this connect started: the first Requesting without a line.
             Err(e) => attempts.failed(n, e.to_string()),
         };
@@ -419,8 +417,7 @@ fn listen(a: &Args, end: Instant) -> Result<(u64, u64), String> {
         let left = end.saturating_duration_since(Instant::now());
         let _closed = conn.wait_closed(left);
         attempts.take(&ep.events());
-        let events = attempts.stood(conn.id());
-        println!("{}", line(n, &events, info, None, None));
+        println!("{}", attempts.stood(n, conn.id(), info));
         taken += 1;
     }
     ep.close();
@@ -643,9 +640,9 @@ mod tests {
         assert_eq!(out["punch_retries"], json!(0));
     }
 
-    /// A connection that stood marks its attempt by its number, also when its record has left
-    /// the list (`info()` is `None`): its line reads its own events, and the next failure does
-    /// not take that connection's NAT values.
+    /// A connection that stood marks its attempt by its number through the path the dial and
+    /// the listen use, also when its record has left the list (`info()` is `None`): its line
+    /// reads its own events, and the next failure does not take that connection's NAT values.
     #[test]
     fn a_failure_after_a_connection_does_not_take_its_nat_combination() {
         use AttemptPhase::{Closed, Connected, Handshaking, Requesting};
@@ -663,7 +660,7 @@ mod tests {
             ),
         ]);
         // The connection's number, as P2pConnection::id gives it, and no record left.
-        let out = line(1, &attempts.stood(1), None, None, None);
+        let out = attempts.stood(1, 1, None);
         assert_eq!(out["ok"], json!(true));
         assert_eq!(out["request_to_punched_ms"], json!(400.0));
         assert_eq!(out["punched_to_connected_ms"], json!(100.0));
