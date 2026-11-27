@@ -293,6 +293,13 @@ def path_attr_lines(toks):
     return out
 
 
+def include_lines(toks):
+    """제품 코드의 include!(…) 줄 목록(std::include!처럼 경로로 부른 것 포함). include_str!·
+    include_bytes!는 코드를 들이지 않으므로 아니다."""
+    return [toks[i][2] for i in range(len(toks) - 1)
+            if toks[i][:2] == ("ident", "include") and toks[i + 1][1] == "!"]
+
+
 def crate_files(crate, listing):
     """금지 크레이트에서 볼 파일 목록. listing(crate) -> src 아래 .rs 상대 경로 목록(crates/<c>/src/…)."""
     src = f"crates/{crate}/src/"
@@ -327,9 +334,15 @@ def collect(read, listing, exists):
         for f in checked:
             # #[path]는 모듈 파일을 폴더 규칙 밖에서 고른다. 그러면 src/system/ 제외와 시험 모듈 파일
             # 판정이 실제로 컴파일되는 파일과 맞는지 말할 수 없다.
-            lines = path_attr_lines(strip_cfg_test(tokenize(read(f))))
+            product = strip_cfg_test(tokenize(read(f)))
+            lines = path_attr_lines(product)
             if lines:
                 raise ScanError(f"{f}:{lines[0]}: #[path]·#[cfg_attr(…, path = …)] 모듈 선언은 판정하지 않는다")
+            # include!는 다른 파일의 코드를 그 자리에 들인다. 그 파일이 이 검사가 보는 파일인지
+            # (src/system/ 제외, 시험 모듈 파일) 말할 수 없다.
+            lines = include_lines(product)
+            if lines:
+                raise ScanError(f"{f}:{lines[0]}: include!는 판정하지 않는다")
             try:
                 hits, uses = judge_source(read(f))
             except ScanError as e:
@@ -546,6 +559,12 @@ def self_test():
     nested["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg_attr(unix, cfg_attr(all(), path = \"s.rs\"))]\nmod s;\n"
     nested["crates/tasty-net-rendezvous/src/s.rs"] = "\n"
     crate_case("겹친 cfg_attr 안의 path(다른 금지 크레이트)", nested, "읽기 오류")
+    included = dict(tree)
+    included["crates/tasty-net-ssh/src/lib.rs"] = guarded + "include!(\"system/spawn.rs\");\n"
+    crate_case("include!로 src/system/ 파일을 들이는 입력", included, "읽기 오류")
+    included_path = dict(tree)
+    included_path["crates/tasty-net-rendezvous/src/lib.rs"] = "std::include!(concat!(\"x\", \".rs\"));\n"
+    crate_case("경로로 부른 std::include!(다른 금지 크레이트)", included_path, "읽기 오류")
     test_path = dict(tree)
     test_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\n"
     test_path["crates/tasty-net-rendezvous/src/t.rs"] = "use std::process::Command;\n"
