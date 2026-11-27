@@ -132,7 +132,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 - 공유 키에 발견 결과가 들어가므로, 재발견한 원격 포트나 `instance_id`가 바뀌면 옛 터널은 남은 참조가 있어도 새 연결에 쓰지 않는다. 옛 터널은 남은 참조가 놓일 때 회수된다.
 - 공유 터널에서 채널이 응답 없이 끊겼을 때 "원격 리스너 없음"인지는 채널마다 가린다. 채널을 열기 직전에 `SshTunnel::listener_verdict()`로 받은 판정 핸들로 그 채널의 실패를 판정한다. 그래서 같은 터널에서 이미 세어진 앞선 거절은 뒤에 연 채널의 판정에 섞이지 않는다. 실패 줄은 stderr 중계가 센 시점 기준이라, 중계가 늦으면 앞 채널의 거절이 뒤 채널 판정 핸들을 받은 뒤에 세어져 섞일 수 있다([레포 경계](repo-boundary.md) "포트 발견의 tasty 관례").
 - 부모 링크가 끝나면(정상 종료든 강제 종료든) 그 링크의 진행 중 bulk 채널은 이 레포가 닫는다. 터널은 다른 채널이 쓰고 있으면 남는다. P2P도 같게 맞춘다(위 표). bulk가 부모보다 오래 살지 않는다는 규칙은 두 전송에 같다([handshake v2](handshake.md) "bulk 자격").
-- 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum만 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
+- 언제 다시 거는지(backoff 간격, 포기 조건, 거절 사유별 재시도 여부)는 소비자가 정한다. 이 레포는 `tasty-net-ssh`의 `Backoff`와 거절 사유 enum, 그리고 그 결정을 설정값으로 맡길 수 있는 선택지 `Redialer`(아래 "보관 상한과 재연결 도우미")를 준다. 인증 거절(`TokenInvalid` 등)은 다시 걸어도 같은 결과이므로 소비자가 재시도하지 않게 거절 사유에 `is_retryable()`을 둔다.
 - 다시 걸 때는 포트 발견부터 새로 하고, 발견 결과로 공유 키를 다시 만든다. 원격 인스턴스가 다시 시작하면 포트가 바뀌기 때문이다(`tasty:src/app/auto_attach.rs` `resolve_endpoint`).
 
 ## 동기·비동기 경계
@@ -223,19 +223,19 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 | 필드 | 뜻 | SSH를 띄운 쪽(정방향·역할 반전) | SSH 받는 쪽(루프백 listener) | P2P |
 |---|---|---|---|---|
 | `id`, `previous`, `parent` | 위 "항목의 단위와 ID" | 터널 항목 | TCP 연결 항목. bulk면 `parent` | QUIC 연결 항목 |
-| `peer` | 상대 기기 ID, 인스턴스 ID(handshake 뒤), 소비자가 준 표시 이름 | handshake가 확인한 값 | handshake가 확인한 값 | QUIC가 확인한 기기 ID + handshake의 인스턴스 ID |
+| `peer` | 상대 기기 ID, 인스턴스 ID(handshake 뒤), 소비자가 준 표시 이름. `instance_verified`는 인스턴스 ID를 handshake가 확인했는지다 | handshake가 확인한 값. handshake 전에는 발견 레코드의 인스턴스 ID를 `instance_verified = false`로 싣고, handshake 전에 끝난 연결은 그 값으로 남는다 | handshake가 확인한 값 | QUIC가 확인한 기기 ID + handshake의 인스턴스 ID |
 | `path` | `PathKind`(관측한 자리) | `ssh_forward` · `ssh_role_reversed`(프로필이 고른 방향. 터널 위 각 링크의 실제 방향은 `links`의 holder와 `direction`에 있다) | `ssh_inbound`(루프백으로 받은 연결. 이 쪽은 SSH인지 알 수 없고 루프백 포트가 SSH 포워딩 전용이라는 tasty의 전제를 따른다, [위협 모델](threat-model.md) T2·T3) | `p2p_udp` |
 | `direction` | 항목 위 attach 링크들의 방향 요약. 링크가 하나면(또는 모두 같으면) 그 방향 `forward`(holder = dialer) · `role_reversed`(holder = acceptor), 방향이 다른 링크가 섞이면 `mixed`, attach 링크가 없으면 `none`. 엣지 값은 이 요약이 아니라 링크마다 정한다(아래 "토폴로지와의 관계") | 위 규칙 | 받는 쪽 항목은 채널 하나라 그 링크의 holder | 위 규칙 |
 | `local_side` | 이 기기가 물리 연결을 열었는지 받았는지(`dialer` · `acceptor`) | `dialer` | `acceptor` | P2P `side` |
-| `segments` | 주소 구간 목록. 구간마다 `{name, local, remote}` | `local_forward`: 로컬 포워딩 종단(`127.0.0.1:<포트>`) ↔ 그 포트에 연 채널들. `ssh`: 프로필의 SSH 대상(`<호스트>:<포트>`, 프로필 값 그대로. 실제 IP는 `ssh`가 정하고 이 레포는 모른다). `remote_listener`: 원격 쪽 루프백 리스너 포트(발견한 값) | `loopback`: 루프백 listener 주소 ↔ 루프백 상대 주소(sshd 쪽 포트). 이 쪽은 SSH 구간을 볼 수 없다 | `udp`: `local_bind`·`local_ip`(모르면 `unknown`)·`local_reflexive`(서버가 알린 이 기기의 반사 주소) ↔ `remote_addr`(관측된 원격 주소 변화 뒤에는 새 주소). 구간의 `local` 쪽이 이 세 값을 담는다. A(QUIC 클라이언트)는 `local_ip`가 늘 `unknown`이라 `local_bind`의 포트와 `local_reflexive`로 로컬 쪽을 보인다 |
+| `segments` | 주소 구간 목록. 구간마다 `{name, local, remote}` | `local_forward`: 로컬 포워딩 종단(`127.0.0.1:<포트>`) ↔ 그 포트에 연 채널들(지금 열린 채널의 로컬 소켓 주소를 `FORWARDED_SEPARATOR`로 이은 목록. 채널이 열리고 닫힐 때 바뀐다). `ssh`: 프로필의 SSH 대상(`<호스트>:<포트>`, 프로필 값 그대로. 실제 IP는 `ssh`가 정하고 이 레포는 모른다). `remote_listener`: 원격 쪽 루프백 리스너 포트(발견한 값) | `loopback`: 루프백 listener 주소 ↔ 루프백 상대 주소(sshd 쪽 포트). 이 쪽은 SSH 구간을 볼 수 없다 | `udp`: `local_bind`·`local_ip`(모르면 `unknown`)·`local_reflexive`(서버가 알린 이 기기의 반사 주소) ↔ `remote_addr`(관측된 원격 주소 변화 뒤에는 새 주소). 구간의 `local` 쪽이 이 세 값을 담는다. A(QUIC 클라이언트)는 `local_ip`가 늘 `unknown`이라 `local_bind`의 포트와 `local_reflexive`로 로컬 쪽을 보인다 |
 | `via` | 소개·경유 | `ssh{target, remote_port}` | `loopback` | `rendezvous{server_addr, server_key}`와 성공 후보 종류, 양쪽 `NatMapping`. SSH 항목에는 rendezvous가 없다 |
 | `state` | `connecting` · `connected` · `reconnecting` · `disconnected` | 터널 준비·handshake 중 / 링크 성립 / 재연결로 만든 항목의 성립 전 / 끝 | handshake 중 / 성립 / (받는 쪽은 재연결하지 않는다) / 끝 | P2P의 `Requesting`·`Offered`·`Scheduled`·`Punching`·`Handshaking`·`RetryWait`(재연결 항목이면 `reconnecting`) / `Connected` / `Closed` |
 | `phase` | 세부 단계 | 터널 준비, 포트 발견, handshake | handshake | P2P 상태 기계의 상태 이름과 값 |
 | `last_cause` | 마지막 전이 원인 | 터널 종료, 원격 리스너 없음, 거절 사유, heartbeat 만료 등 | 거절 사유, 상대 닫음 등 | P2P 전이 원인(종료 코드 포함) |
 | `history` | 전이와 주소 변화 이력 | 상태 전이 | 상태 전이 | 상태 전이, `remote_address_observed_change`(관측된 원격 주소 변화, [P2P](p2p.md#주소-바뀜-quic-경로-이동)) |
-| `links` | 그 위의 링크·채널 | attach 링크(링크마다 `link_id`([handshake v2](handshake.md#bulk-자격)), holder, 연 시각), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
+| `links` | 그 위의 링크·채널 | attach 링크(링크마다 `link_id`([handshake v2](handshake.md#bulk-자격)), holder, 연 시각, 그 링크에 적용된 `link.*` 값 `applied`), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
 | `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
-| `applied` | 이 연결에 적용된 설정값과 진행 값. 항목마다 `{key, value, source}` | 재연결 시도 번호, 다음 시도까지 남은 시간, 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`) | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로 |
+| `applied` | 이 연결에 적용된 설정값. 항목마다 `{key, value, source}`. 재연결 시도 번호와 다음 시도까지 남은 시간은 `redial` 필드에 있다 | 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`). 한 터널 위 링크·채널은 시간 값이 서로 다를 수 있어, 항목의 `link.*`는 항목을 처음 `connected`로 만든 채널의 값이고 링크마다의 값은 `links`의 `applied`에 있다 | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로 |
 
 - 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 `link_id`로 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
 
@@ -244,7 +244,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 - 이력 상한: 항목마다 `connections.history_limit`(기본 32)개다. 넘치면 오래된 것부터 버리고 버린 수를 센다. 근거: 재연결 몇 번 분량의 상태 전이와 주소 변화를 담는다. P2P의 `history.limit`과 같은 값이다.
 - 끝난 항목: `disconnected` 항목은 `connections.keep_closed`(기본 16)개까지 최근 것만 남기고 지운다. 근거: 끊긴 이유를 사용자가 볼 수 있게 하되 목록이 끝없이 자라지 않게 한다. 재연결 사슬(`previous`)이 지워진 항목을 가리키면 조회에 `previous_dropped`로 보인다.
 - 이벤트 큐: `connections.event_queue_limit`(기본 256). 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 하나를 남긴다. 근거: P2P의 `events.queue_limit`과 같다. 이벤트를 읽지 않는 소비자 때문에 메모리가 늘지 않게 한다.
-- 재연결 도우미 `Redialer`: 소비자가 고르는 선택지다. `reconnecting` 항목을 만들고 아래 값으로 backoff를 한다. 거절 사유의 `is_retryable()`이 false면 멈춘다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 소비자가 `Redialer`를 쓰지 않고 직접 다시 걸 때도 새 연결은 `previous`를 줄 수 있다(`Transport::connect_with`에 `ConnectOptions::after(previous)`를 준다. `connect`의 서명은 그대로다). "언제 다시 거는지는 소비자가 정한다"(위 "터널 수명과 재연결")는 규칙은 그대로이고, `Redialer`는 그 결정을 설정값으로 맡길 수 있게 한다.
+- 재연결 도우미 `Redialer`: 소비자가 고르는 선택지다. `reconnecting` 항목을 만들고 아래 값으로 backoff를 한다. 거절 사유의 `is_retryable()`이 false면 멈춘다. 끊김의 원인은 `Redialer::redial`에 소비자가 본 원인(항목의 마지막 전이 이벤트의 원인)으로 넘기고, 그 원인이나 항목에 남은 원인의 `Cause::is_retryable()`이 false면 첫 시도 전에 `NotRedialed`로 끝낸다. 그래서 `connections.keep_closed`가 옛 항목을 이미 지웠어도 다시 걸지 않을 끊김은 다시 걸지 않는다. `redial.initial`·`redial.max_delay`·`redial.give_up_after`가 지금 시각에 더할 수 없을 만큼 크면 `Redialer::new`가 거절한다. 포기 판정은 다음 대기가 끝날 때와 시도 직전 실제 경과 시간을 함께 본다. n번째 대기는 `min(max_delay, initial × multiplier^(n−1))`에 `1 + u`(u는 `[−jitter, +jitter]`의 균등 난수)를 곱한 뒤 `[0, max_delay]`로 자른 값이다. 소비자가 `Redialer`를 쓰지 않고 직접 다시 걸 때도 새 연결은 `previous`를 줄 수 있다(`Transport::connect_with`에 `ConnectOptions::after(previous)`를 준다. `connect`의 서명은 그대로다). "언제 다시 거는지는 소비자가 정한다"(위 "터널 수명과 재연결")는 규칙은 그대로이고, `Redialer`는 그 결정을 설정값으로 맡길 수 있게 한다.
 
 | 키 | 기본 | 근거 |
 |---|---|---|
