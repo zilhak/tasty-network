@@ -274,6 +274,9 @@ pub(crate) struct Reader<'a> {
     pub(crate) session_type_values: Vec<(SessionType, Origin)>,
     /// The keyword of the line being read (lower-cased), for the refusal of a bad line.
     line_keyword: Option<String>,
+    /// Why the `Match localnetwork` list of the line being read has addresses that depend on
+    /// the C library, for the refusal when the block cannot be evaluated.
+    match_note: Option<String>,
 }
 
 fn starts_with_ci(s: &str, prefix: &str) -> bool {
@@ -473,7 +476,8 @@ fn parse_forward(
 /// What `addr_match_cidr_list(NULL, list)` gives for a `Match localnetwork` list.
 #[derive(Debug, PartialEq, Eq)]
 enum CidrList {
-    Valid,
+    /// Valid; why the libraries put an entry at different addresses, if they do.
+    Valid(Option<String>),
     /// `Invalid network list`.
     Invalid,
     /// Valid for one C library and invalid for another, or an entry depends on the
@@ -524,14 +528,14 @@ fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
     if verdicts.iter().all(|v| *v == Some(false)) {
         return CidrList::Invalid;
     }
-    if verdicts.iter().all(|v| *v == Some(true)) {
-        return CidrList::Valid;
-    }
     let why: Vec<String> = entries
         .iter()
         .filter(|(_, _, r)| misc::settled(r).is_none())
         .map(|(addr, _, r)| misc::unsettled(addr, r))
         .collect();
+    if verdicts.iter().all(|v| *v == Some(true)) {
+        return CidrList::Valid((!why.is_empty()).then(|| why.join("; ")));
+    }
     CidrList::Unknown(why.join("; "))
 }
 
@@ -631,6 +635,7 @@ impl<'a> Reader<'a> {
             localhost_values: Vec::new(),
             session_type_values: Vec::new(),
             line_keyword: None,
+            match_note: None,
         }
     }
 
@@ -769,6 +774,7 @@ impl<'a> Reader<'a> {
             .clone()
             .or_else(|| self.env.account.user.clone());
         let host = self.match_host(final_pass, origin)?;
+        self.match_note = None;
         let mut result = true;
         let mut unknown: Option<&'static str> = None;
         let mut attributes = 0usize;
@@ -864,7 +870,11 @@ impl<'a> Reader<'a> {
                 }
             } else if is("localnetwork") {
                 match valid_cidr_list(&arg) {
-                    CidrList::Valid => {}
+                    CidrList::Valid(note) => {
+                        if self.match_note.is_none() {
+                            self.match_note = note;
+                        }
+                    }
                     CidrList::Invalid => return bad(format!("Invalid network list \"{arg}\"")),
                     // `ssh` stops on an invalid list whatever the other criteria give
                     // (`readconf.c:829`-`:833`), so a list this crate cannot judge is refused
@@ -1659,14 +1669,22 @@ impl<'a> Reader<'a> {
                     MatchOutcome::True => true,
                     MatchOutcome::False => false,
                     MatchOutcome::Undeterminable(criterion) => {
+                        let mut message = format!(
+                            "Match {criterion} decides whether the block applies and cannot \
+                             be evaluated"
+                        );
+                        // A list whose addresses depend on the C library says so as well.
+                        if criterion == "localnetwork"
+                            && let Some(note) = self.match_note.take()
+                        {
+                            message.push_str("; ");
+                            message.push_str(&note);
+                        }
                         self.refuse(Refusal {
                             kind: RefusalKind::Undeterminable,
                             keyword: Some(format!("match {criterion}")),
                             origin: Some(origin.clone()),
-                            message: format!(
-                                "Match {criterion} decides whether the block applies and \
-                                 cannot be evaluated"
-                            ),
+                            message,
                         });
                         self.note(
                             "match",
@@ -2363,7 +2381,7 @@ mod tests {
     #[test]
     fn cidr_lists() {
         let cidr = |l: &str| match valid_cidr_list(l) {
-            CidrList::Valid => true,
+            CidrList::Valid(_) => true,
             CidrList::Invalid => false,
             CidrList::Unknown(m) => panic!("read alike by every C library: {l}: {m}"),
         };
@@ -2403,7 +2421,7 @@ mod tests {
             ("fe80::/10", ['V'; 4]),
         ];
         let letter = |c: CidrList| match c {
-            CidrList::Valid => 'V',
+            CidrList::Valid(_) => 'V',
             CidrList::Invalid => 'I',
             CidrList::Unknown(m) => {
                 assert!(!m.is_empty());

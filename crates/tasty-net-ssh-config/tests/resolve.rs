@@ -1049,3 +1049,23 @@ fn a_localnetwork_list_is_judged_whatever_the_match_gives() {
         r.refusal
     );
 }
+
+#[test]
+fn a_localnetwork_refusal_names_the_c_library_readings() {
+    let r = resolve("Match localnetwork 010.0.0.0/8\n    Port 2222\n", "example");
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::Undeterminable);
+    assert_eq!(f.keyword.as_deref(), Some("match localnetwork"));
+    let readings = f
+        .message
+        .contains("glibc 8.0.0.0, bionic 10.0.0.0, Darwin 10.0.0.0");
+    // Only an OS without a rule reads the list by all three libraries.
+    let no_rule = !(cfg!(all(target_os = "linux", target_env = "gnu"))
+        || cfg!(target_os = "android")
+        || cfg!(target_vendor = "apple"));
+    assert_eq!(readings, no_rule, "{}", f.message);
+    // The same list read alike says only that the interfaces are not known.
+    let r = resolve("Match localnetwork 10.0.0.0/8\n    Port 2222\n", "example");
+    let f = r.refusal.expect("a refusal");
+    assert!(!f.message.contains("C libraries"), "{}", f.message);
+}
