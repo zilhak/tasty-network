@@ -202,10 +202,13 @@ fn retries_and_cause(events: &[P2pEvent]) -> (usize, Json) {
     (retries, cause.unwrap_or(Json::Null))
 }
 
+/// One line: `info` of a connection that stands, or `ended` (the NAT combination of the end
+/// record of the attempt measured) of one that failed.
 fn line(
     n: u64,
     events: &[P2pEvent],
     info: Option<P2pConnectionInfo>,
+    ended: Option<NatInfo>,
     error: Option<String>,
 ) -> Json {
     let (requested, _) = entered(events, AttemptPhase::Requesting);
@@ -215,10 +218,7 @@ fn line(
     let (retries, cause) = retries_and_cause(events);
     let cause = if error.is_none() { Json::Null } else { cause };
     // An attempt that failed left the connection list; its end record carries the NAT values.
-    let nat = info
-        .as_ref()
-        .and_then(|i| i.nat)
-        .or_else(|| ended_nat(events));
+    let nat = info.as_ref().and_then(|i| i.nat).or(ended);
     let candidate = info.as_ref().and_then(|i| i.remote_candidate);
     json!({
         "n": n,
@@ -236,27 +236,62 @@ fn line(
     })
 }
 
-/// The NAT combination in the end record of the attempt last started in `events`: the
-/// `Closed` transition of that attempt's number. `None` when it ended before `punch_go` or did
-/// not end.
-fn ended_nat(events: &[P2pEvent]) -> Option<NatInfo> {
-    let id = events.iter().rev().find_map(|e| match e {
-        P2pEvent::Transition {
-            subject: Subject::Connection(id),
-            from: None,
-            ..
-        } => Some(*id),
-        _ => None,
-    })?;
-    events.iter().find_map(|e| match e {
-        P2pEvent::Transition {
-            subject: Subject::Connection(n),
-            to: Phase::Attempt(AttemptPhase::Closed),
-            nat,
-            ..
-        } if *n == id => *nat,
-        _ => None,
-    })
+/// The attempts of one side, read from the events as they come, so the attempt a line
+/// measures keeps its number across reads: its start may be read before the wait and its end
+/// after, and attempts of the other side or later ones may come in between.
+#[derive(Default)]
+struct Attempts {
+    /// The attempts that started in the measured phase, in order.
+    started: Vec<u64>,
+    /// The end records: attempt number to its NAT combination.
+    ended: std::collections::HashMap<u64, Option<NatInfo>>,
+    /// Every attempt up to this number has its line.
+    reported: Option<u64>,
+}
+
+impl Attempts {
+    /// Take in `events`; attempts that start in `start` are the ones this side measures
+    /// (`Requesting` for the dialer, `Offered` for the listener).
+    fn take(&mut self, events: &[P2pEvent], start: AttemptPhase) {
+        for e in events {
+            let P2pEvent::Transition {
+                subject: Subject::Connection(id),
+                from,
+                to: Phase::Attempt(to),
+                nat,
+                ..
+            } = e
+            else {
+                continue;
+            };
+            if from.is_none() && *to == start {
+                self.started.push(*id);
+            }
+            if *to == AttemptPhase::Closed {
+                self.ended.insert(*id, *nat);
+            }
+        }
+    }
+
+    /// The attempt a line measures: the first one that started and has no line yet.
+    fn measured(&self) -> Option<u64> {
+        self.started
+            .iter()
+            .copied()
+            .find(|id| self.reported.is_none_or(|r| *id > r))
+    }
+
+    /// The NAT combination in the end record of attempt `id`.
+    fn ended_nat(&self, id: Option<u64>) -> Option<NatInfo> {
+        id.and_then(|id| self.ended.get(&id).copied().flatten())
+    }
+
+    /// Attempt `id` and every one before it have their line.
+    fn report(&mut self, id: Option<u64>) {
+        if let Some(id) = id {
+            self.reported = Some(self.reported.map_or(id, |r| r.max(id)));
+        }
+    }
 }
 
 /// The middle and the largest value.
@@ -274,16 +309,33 @@ fn dial(a: &Args, peer: DeviceId, end: Instant) -> Result<(u64, u64), String> {
     let pause = a.pause.unwrap_or(DEFAULT_PAUSE);
     let mut ok = 0;
     let mut times = Vec::new();
+    let mut attempts = Attempts::default();
     for n in 1..=count {
         if Instant::now() >= end {
             break;
         }
-        let _old = ep.events();
+        attempts.take(&ep.events(), AttemptPhase::Requesting);
         let r = ep.connect(peer);
         let events = ep.events();
+        attempts.take(&events, AttemptPhase::Requesting);
         let out = match &r {
-            Ok(c) => line(n, &events, c.info(), None),
-            Err(e) => line(n, &events, None, Some(e.to_string())),
+            Ok(c) => {
+                let info = c.info();
+                attempts.report(info.as_ref().map(|i| i.id));
+                line(n, &events, info, None, None)
+            }
+            Err(e) => {
+                // The attempt this connect started: the first Requesting without a line.
+                let id = attempts.measured();
+                attempts.report(id);
+                line(
+                    n,
+                    &events,
+                    None,
+                    attempts.ended_nat(id),
+                    Some(e.to_string()),
+                )
+            }
         };
         if let (Some(ms), true) = (out["request_to_punched_ms"].as_f64(), r.is_ok()) {
             times.push(ms);
@@ -311,26 +363,41 @@ fn listen(a: &Args, end: Instant) -> Result<(u64, u64), String> {
     let ep = endpoint(a, peer)?;
     let count = a.count.unwrap_or(DEFAULT_COUNT);
     let mut taken = 0;
+    let mut attempts = Attempts::default();
     for n in 1..=count {
         let left = end.saturating_duration_since(Instant::now());
-        let _old = ep.events();
+        // The events before the wait still count: an offer may have started already.
+        attempts.take(&ep.events(), AttemptPhase::Offered);
         let conn = match ep.accept_timeout(Some(left)) {
             Ok(c) => c,
             Err(e) => {
-                // The measurement counts the failure too, with the NAT values of the last
-                // punch that reached this side.
+                // The measurement counts the failure too, with the NAT values of the offer it
+                // measures: the first one that started and has no line.
+                let events = ep.events();
+                attempts.take(&events, AttemptPhase::Offered);
+                let id = attempts.measured();
+                attempts.report(id);
                 println!(
                     "{}",
-                    line(n, &ep.events(), None, Some(format!("accept: {e}")))
+                    line(
+                        n,
+                        &events,
+                        None,
+                        attempts.ended_nat(id),
+                        Some(format!("accept: {e}"))
+                    )
                 );
                 break;
             }
         };
         // Read the information while the connection is up; the dialer closes it soon.
         let info = conn.info();
+        attempts.report(info.as_ref().map(|i| i.id));
         let left = end.saturating_duration_since(Instant::now());
         let _closed = conn.wait_closed(left);
-        println!("{}", line(n, &ep.events(), info, None));
+        let events = ep.events();
+        attempts.take(&events, AttemptPhase::Offered);
+        println!("{}", line(n, &events, info, None, None));
         taken += 1;
     }
     ep.close();
@@ -393,12 +460,15 @@ mod tests {
         mode: PunchMode::All,
     };
 
-    /// A failed attempt's line carries the NAT combination of its end record, found by the
-    /// attempt's number without watching the connection list.
+    /// A failed dial's line carries the NAT combination of the end record of the attempt it
+    /// started, also when an offer of another device starts and ends in between with none.
     #[test]
-    fn a_failed_attempt_reports_its_nat_combination() {
+    fn a_failed_dial_reports_the_nat_combination_of_its_own_attempt() {
+        let mut attempts = Attempts::default();
         let events = [
             moved(1, None, AttemptPhase::Requesting, None),
+            moved(2, None, AttemptPhase::Offered, None),
+            moved(2, Some(AttemptPhase::Offered), AttemptPhase::Closed, None),
             moved(
                 1,
                 Some(AttemptPhase::Requesting),
@@ -406,43 +476,86 @@ mod tests {
                 Some(NAT),
             ),
         ];
+        attempts.take(&events, AttemptPhase::Requesting);
+        let id = attempts.measured();
+        assert_eq!(id, Some(1));
         let out = line(
             1,
             &events,
             None,
+            attempts.ended_nat(id),
             Some(P2pConnectError::PunchFailed.to_string()),
         );
         assert_eq!(out["ok"], json!(false));
         assert_eq!(out["local_nat"], json!("Independent"));
         assert_eq!(out["peer_nat"], json!("Dependent"));
         assert_eq!(out["mode"], json!("All"));
-        // An attempt that ended before punch_go has none.
-        let before = [
-            moved(2, None, AttemptPhase::Requesting, None),
-            moved(
-                2,
-                Some(AttemptPhase::Requesting),
-                AttemptPhase::Closed,
-                None,
-            ),
-        ];
-        assert_eq!(
-            line(1, &before, None, Some(String::new()))["mode"],
-            Json::Null
+        attempts.report(id);
+        // The next dial measures its own attempt, not the reported one.
+        attempts.take(
+            &[
+                moved(3, None, AttemptPhase::Requesting, None),
+                moved(
+                    3,
+                    Some(AttemptPhase::Requesting),
+                    AttemptPhase::Closed,
+                    None,
+                ),
+            ],
+            AttemptPhase::Requesting,
         );
-        // The record of the attempt last started is taken, not one of an earlier attempt.
-        let later = [
-            moved(3, None, AttemptPhase::Offered, None),
+        assert_eq!(attempts.measured(), Some(3));
+        assert_eq!(attempts.ended_nat(Some(3)), None);
+    }
+
+    /// A failed listen's line carries the NAT combination of the offer it measures, when the
+    /// offer's start was read before the wait and its end after it, and when a later offer
+    /// starts in between.
+    #[test]
+    fn a_failed_listen_reports_the_nat_combination_of_the_offer_it_measures() {
+        let mut attempts = Attempts::default();
+        // Read before the wait: the offer started.
+        attempts.take(
+            &[moved(4, None, AttemptPhase::Offered, None)],
+            AttemptPhase::Offered,
+        );
+        // Read after the wait: a later offer started, then the measured one ended.
+        let after = [
+            moved(5, None, AttemptPhase::Offered, None),
             moved(
-                3,
+                4,
                 Some(AttemptPhase::Offered),
                 AttemptPhase::Closed,
                 Some(NAT),
             ),
-            moved(4, None, AttemptPhase::Offered, None),
-            moved(4, Some(AttemptPhase::Offered), AttemptPhase::Closed, None),
         ];
-        assert_eq!(ended_nat(&later), None);
-        assert_eq!(ended_nat(&later[..2]), Some(NAT));
+        attempts.take(&after, AttemptPhase::Offered);
+        let id = attempts.measured();
+        assert_eq!(id, Some(4));
+        let out = line(1, &after, None, attempts.ended_nat(id), Some(String::new()));
+        assert_eq!(out["mode"], json!("All"));
+        assert_eq!(out["local_nat"], json!("Independent"));
+        // An offer that ended before punch_go has none.
+        attempts.report(id);
+        attempts.take(
+            &[moved(
+                5,
+                Some(AttemptPhase::Offered),
+                AttemptPhase::Closed,
+                None,
+            )],
+            AttemptPhase::Offered,
+        );
+        assert_eq!(attempts.measured(), Some(5));
+        assert_eq!(
+            line(
+                2,
+                &[],
+                None,
+                attempts.ended_nat(Some(5)),
+                Some(String::new())
+            )["mode"],
+            Json::Null
+        );
     }
 }
