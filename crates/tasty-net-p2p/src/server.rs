@@ -350,9 +350,7 @@ async fn registered(
         tokio::select! {
             m = rx.recv() => {
                 let Some(m) = m else { break End::Retry(Cause::named("server_closed")) };
-                match m.to_json().map_err(|e| e.to_string()).and_then(|b| {
-                    encode_frame(&b, server_limit).map_err(|e| e.to_string())
-                }) {
+                match coordination_frame(&m, server_limit) {
                     Ok(f) => {
                         if let Err(e) = send.write_all(&f).await {
                             debug!(error = %e, "coordination write failed");
@@ -541,6 +539,15 @@ pub(crate) fn dispatch(
     }
 }
 
+/// The frame of a coordination message within the registration's message limit
+/// (`welcome.limits.max_message_bytes`): the writer sends only what this makes, and a
+/// judgement shows only when its report makes one.
+fn coordination_frame(m: &DeviceMessage, limit: u32) -> Result<Vec<u8>, String> {
+    m.to_json()
+        .map_err(|e| e.to_string())
+        .and_then(|b| encode_frame(&b, limit).map_err(|e| e.to_string()))
+}
+
 /// Judge the NAT again and report it (after registering, after `reflexive_changed`, before a
 /// punch retry), for registration `generation`: the one that scheduled the judgement.
 ///
@@ -589,6 +596,17 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
         // the shutdown dropped the judgement under this lock when it reported it.
         if r.phase == Some(EndpointPhase::Off) && core.is_shutting_down() {
             debug!("a judgement ending after the shutdown dropped");
+            return;
+        }
+        // A report over the registration's limit would be dropped by the writer: the
+        // judgement goes with it. The limit is this registration's: its welcome set it before
+        // its link opened, and the link is still current.
+        if let Err(e) = r
+            .limits
+            .ok_or_else(|| "no limits".to_owned())
+            .and_then(|l| coordination_frame(&report, l.max_message_bytes))
+        {
+            debug!(error = %e, "a judgement whose report cannot be sent dropped");
             return;
         }
         // The report goes into the link's queue before the judgement shows in the status:

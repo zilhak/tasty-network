@@ -1827,7 +1827,10 @@ mod tests {
             .block_on(crate::server::rejudge(core.clone(), generation));
         assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
         assert!(!ep.status().nat_answers.is_empty(), "the first one judged");
+        let limits = lock(&core.reg).limits;
         crate::server::clear_registration(&core);
+        // The next registration's welcome sets its limits before its link opens.
+        lock(&core.reg).limits = limits;
         let (tx, mut again) = mpsc::unbounded_channel();
         let next = core.open_link(tx);
         let s = ep.status();
@@ -1969,6 +1972,7 @@ mod tests {
             .block_on(crate::server::rejudge(core.clone(), generation));
         assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
         let judged = lock(&core.reg).nat.clone().expect("judged");
+        let limits = lock(&core.reg).limits;
         // The shutdown begins; the server loop ends its registration.
         core.shutdown.send_replace(true);
         let until = Instant::now() + Duration::from_secs(10);
@@ -1980,7 +1984,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
-        // A link opened while the shutdown began, and its judgement ending after `Off`.
+        // A link opened while the shutdown began (its welcome set its limits), and its
+        // judgement ending after `Off`.
+        lock(&core.reg).limits = limits;
         let (tx, mut late) = mpsc::unbounded_channel();
         let next = core.open_link(tx);
         core.handle
@@ -2000,6 +2006,52 @@ mod tests {
             s.nat_answers.is_empty() && s.nat == NatMapping::Unknown,
             "the shutdown left the judgement: {s:?}"
         );
+    }
+
+    /// A judgement whose report does not fit the registration's message limit stays out of
+    /// the status: the writer would drop that report, so the server would keep `unknown`
+    /// while the device showed the judgement. The control: within the limit it shows.
+    #[test]
+    fn a_judgement_whose_report_exceeds_the_limit_stays_out_of_the_status() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([49; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            48,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        let nat_changed = |events: Vec<P2pEvent>| {
+            events.iter().any(
+                |e| matches!(e, P2pEvent::Transition { cause, .. } if cause.name == "nat_changed"),
+            )
+        };
+        let set_limit = |bytes: u32| {
+            if let Some(l) = lock(&core.reg).limits.as_mut() {
+                l.max_message_bytes = bytes;
+            }
+        };
+        let _before = ep.events();
+        set_limit(64);
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert!(rx.try_recv().is_err(), "a report over the limit queued");
+        assert!(lock(&core.reg).nat.is_none(), "its judgement shows");
+        assert!(!nat_changed(ep.events()), "no nat_changed for it");
+        set_limit(65_536);
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
+        assert!(!ep.status().nat_answers.is_empty());
+        assert!(nat_changed(ep.events()), "the control reports nat_changed");
+        ep.close();
     }
 
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
