@@ -9,8 +9,8 @@
 # 사용: bash scripts/check-p2p-isolation.sh
 #       bash scripts/check-p2p-isolation.sh --metadata <파일>   cargo metadata 출력 JSON 파일로 판정한다
 #       bash scripts/check-p2p-isolation.sh --self-test         판정 함수를 고정 사례로 시험한다
-# 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·metadata 실패·대상 크레이트 0개·
-# resolve 그래프가 없거나 대상 크레이트의 노드가 그래프에 없음) 2.
+# 종료 코드: 통과 0, 위반(또는 자체 시험 실패) 1, 판정 불가(도구 없음·metadata 실패·두 대상 크레이트 중 하나라도
+# workspace에 없음·resolve 그래프가 없거나 대상 크레이트의 노드가 그래프에 없음) 2.
 
 set -euo pipefail
 
@@ -57,6 +57,8 @@ ALLOWED = {
     "tasty-net-rendezvous": {"tasty-net-identity"},
     "tasty-net-p2p": {"tasty-net-identity", "tasty-net-rendezvous"},
 }
+# 둘 다 workspace에 있어야 한다. 하나라도 빠지면 판정 불가다(검사가 조용히 대상을 줄이지 않는다).
+REQUIRED = sorted(ALLOWED)
 
 
 class Undecidable(Exception):
@@ -64,8 +66,9 @@ class Undecidable(Exception):
 
 
 def judge(meta):
-    """(위반 목록, 대상 수, 요약). 대상 크레이트가 0개면 대상 수 0. resolve 그래프가 없거나
-    (cargo metadata --no-deps 출력 등) 대상 크레이트의 노드가 그래프에 없으면 Undecidable.
+    """(위반 목록, 대상 수, 요약). 필수 대상 크레이트(REQUIRED)가 workspace에 없거나, resolve
+    그래프가 없거나(cargo metadata --no-deps 출력 등) 대상 크레이트의 노드가 그래프에 없으면
+    Undecidable.
 
     workspace 소속은 이름이 아니라 package ID(workspace_members)로 정하고, 의존은 resolve
     그래프의 package ID로 따라간다. 그래서 workspace 크레이트와 이름이 같은 다른 출처의
@@ -87,6 +90,9 @@ def judge(meta):
 
     violations = []
     by_name = {name_of[m]: m for m in members if m in name_of}
+    absent = [t for t in REQUIRED if t not in by_name]
+    if absent:
+        raise Undecidable(f"필수 대상 크레이트가 workspace에 없다: {', '.join(absent)}")
     targets = sorted(n for n in ALLOWED if n in by_name)
     missing = [t for t in targets if by_name[t] not in nodes]
     if missing:
@@ -148,18 +154,19 @@ def self_test():
     serde = pid("serde", "registry+https://github.com/rust-lang/crates.io-index")
     other_frame = pid("tasty-net-frame", "registry+https://github.com/rust-lang/crates.io-index")
     helper = pid("helper", "registry+https://github.com/rust-lang/crates.io-index")
-    ws = ["tasty-net-rendezvous", "tasty-net-identity", "tasty-net-frame", "tasty-net-ssh", "tasty-net-transport"]
+    ws = ["tasty-net-rendezvous", "tasty-net-p2p", "tasty-net-identity", "tasty-net-frame", "tasty-net-ssh",
+          "tasty-net-transport"]
     cases = [
         ("rendezvous → identity만", meta(ws, {rv: [(ident, "tasty-net-identity", None), (serde, "serde", None)],
                                            ident: [(serde, "serde", None)]}), 0),
-        ("p2p → rendezvous·identity", meta(ws + ["tasty-net-p2p"], {p2p: [(rv, "tasty-net-rendezvous", None),
+        ("p2p → rendezvous·identity", meta(ws, {p2p: [(rv, "tasty-net-rendezvous", None),
                                                                         (ident, "tasty-net-identity", "dev")],
                                                                   rv: [(ident, "tasty-net-identity", None)]}), 0),
         ("rendezvous → ssh 일반 의존", meta(ws, {rv: [(ssh, "tasty-net-ssh", None)]}), 1),
         ("rendezvous → frame dev 의존", meta(ws, {rv: [(frame, "tasty-net-frame", "dev")]}), 1),
         ("rendezvous → transport build 의존", meta(ws, {rv: [(transport, "tasty-net-transport", "build")],
                                                         transport: [(frame, "tasty-net-frame", None)]}), 1),
-        ("rendezvous → p2p(방향이 거꾸로)", meta(ws + ["tasty-net-p2p"], {rv: [(p2p, "tasty-net-p2p", "dev")],
+        ("rendezvous → p2p(방향이 거꾸로)", meta(ws, {rv: [(p2p, "tasty-net-p2p", "dev")],
                                                                         p2p: [(rv, "tasty-net-rendezvous", None)]}), 1),
         ("identity를 거쳐 frame", meta(ws, {rv: [(ident, "tasty-net-identity", None)],
                                           ident: [(frame, "tasty-net-frame", None)]}), 1),
@@ -178,6 +185,12 @@ def self_test():
     cases += [
         ("resolve가 null이면(--no-deps 출력) 판정 불가", no_resolve, "판정 불가"),
         ("대상 크레이트의 노드가 그래프에 없으면 판정 불가", no_node, "판정 불가"),
+        ("p2p가 workspace에 없으면 판정 불가",
+         meta([m for m in ws if m != "tasty-net-p2p"], {rv: [(ident, "tasty-net-identity", None)]}), "판정 불가"),
+        ("rendezvous가 workspace에 없으면 판정 불가",
+         meta([m for m in ws if m != "tasty-net-rendezvous"], {p2p: [(ident, "tasty-net-identity", None)]}),
+         "판정 불가"),
+        ("대상 크레이트가 없으면 판정 불가", meta(["tasty-net-identity", "tasty-net-frame"], {ident: []}), "판정 불가"),
     ]
     failed = 0
     for title, m, want in cases:
@@ -189,11 +202,7 @@ def self_test():
         if got != want:
             print(f"  ✘ {title}: 결과 {got} {violations}, 기대 {want}", file=sys.stderr)
             failed += 1
-    _, targets, _ = judge(meta(["tasty-net-identity", "tasty-net-frame"], {ident: []}))
-    if targets != 0:
-        print("  ✘ 대상 크레이트가 없으면 대상 0개여야 한다", file=sys.stderr)
-        failed += 1
-    total = len(cases) + 1
+    total = len(cases)
     if failed:
         print(f"[p2p-isolation] 자체 시험 실패 — 사례 {total}개 중 {failed}개", file=sys.stderr)
         sys.exit(1)
@@ -208,12 +217,9 @@ if mode == "self-test":
 with open(os.path.join(tmp, "metadata.json"), encoding="utf-8") as f:
     meta = json.load(f)
 try:
-    violations, targets, summary = judge(meta)
+    violations, _, summary = judge(meta)
 except Undecidable as e:
     print(f"[p2p-isolation] 판정 불가: {e}", file=sys.stderr)
-    sys.exit(2)
-if targets == 0:
-    print(f"[p2p-isolation] 판정 불가: 대상 크레이트가 0개다({', '.join(sorted(ALLOWED))}).", file=sys.stderr)
     sys.exit(2)
 if violations:
     for v in violations:
