@@ -329,10 +329,34 @@ def _cfg_item_end(toks, start):
     raise ScanError(f"{toks[j][2]}행: 시험 cfg가 붙은 요소의 끝을 찾지 못했다")
 
 
+def _macro_tokens_end(toks, i):
+    """toks[i]에서 매크로 호출(이름!(…)·이름![…]·이름!{…})이나 macro_rules! 이름 {…} 정의가 시작하면
+    그 괄호의 끝 위치, 아니면 None. 그 안의 토큰은 매크로가 마음대로 읽는 토큰 나무라 #[cfg(test)]
+    모양이 있어도 속성이 아니다."""
+    n = len(toks)
+    if toks[i][0] != "ident" or toks[i][1].startswith("'") or i + 2 >= n or toks[i + 1][1] != "!":
+        return None
+    k = i + 2
+    if toks[i][1] == "macro_rules" and toks[k][0] == "ident" and k + 1 < n:
+        k += 1
+    elif toks[i][1] in KEYWORDS:
+        return None
+    if toks[k][1] in ("(", "[", "{"):
+        return matching_close(toks, k)
+    return None
+
+
 def strip_cfg_test(toks):
-    """시험 cfg(is_test_cfg)가 붙은 항목·요소를 뺀 토큰 목록. 끝을 정할 수 없으면 ScanError."""
+    """시험 cfg(is_test_cfg)가 붙은 항목·요소를 뺀 토큰 목록. 끝을 정할 수 없으면 ScanError. 매크로
+    호출의 인자와 macro_rules! 정의의 본문은 그대로 둔다(그 안의 #[cfg(test)] 모양은 속성이 아니므로 그
+    안을 제품 코드로 본다)."""
     out, i = [], 0
     while i < len(toks):
+        end = _macro_tokens_end(toks, i)
+        if end is not None:
+            out.extend(toks[i:end + 1])
+            i = end + 1
+            continue
         if (toks[i][1] == "#" and i + 1 < len(toks) and toks[i + 1][1] == "["):
             close = matching_close(toks, i + 1)
             inner = [t[1] for t in toks[i + 2:close]]

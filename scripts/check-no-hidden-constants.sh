@@ -508,6 +508,8 @@ def self_test():
     case("항목이 아닌 자리(필드·변형)의 시험 cfg는 그 요소만 지운다", "target\tsrc\n", {"src/field.rs"}, 3)
     files["src/label.rs"] = "fn f() -> u8 { #[cfg(test)] 'a: loop { break 'a; } 7 }\n"
     case("시험 cfg 이름표 반복은 그 블록까지만 지운다", "target\tsrc\n", {"src/label.rs"}, 1)
+    files["src/macroarg.rs"] = "fn f() -> u8 { m!(#[cfg(test)] 5) }\n"
+    case("매크로 호출 인자 안의 #[cfg(test)] 모양은 지우지 않는다", "target\tsrc\n", {"src/macroarg.rs"}, 1)
     files["src/compare.rs"] = "fn f() -> [bool; 2] { [#[cfg(test)] a < b, 9 > c] }\n"
     case("시험 cfg 원소의 비교 a < b 뒤 다른 원소의 > (판정 불가)", "target\tsrc\n", {"src/compare.rs"}, "판정 불가")
     files["src/settings.rs"] = settings_mod + "/* entry(\"removed\", 1) */\n// fixed(\"gone\", \"x\", \"x\")\n"

@@ -430,6 +430,11 @@ def self_test():
         ("cfg(all(test, unix)) 마지막 필드 뒤의 금지 경로", "struct S { b: u8, #[cfg(all(test, unix))] a: u8 }\nfn g() { std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg if 문장 뒤 같은 블록의 금지 경로", "fn f(x: bool) { #[cfg(test)] if x { a(); } else { b(); } std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg 매크로 문장 m! { } 뒤의 금지 경로", "fn f() { #[cfg(test)] m! { 1 } std::process::Command::new(\"x\"); }\n"),
+        ("매크로 호출 인자 안의 #[cfg(test)] 모양 뒤 금지 경로",
+         "macro_rules! evaluate { (#[cfg(test)] $e:expr) => { $e }; }\n"
+         "fn f() { evaluate!(#[cfg(test)] std::process::Command::new(\"x\")); }\n"),
+        ("매크로 호출 인자 [ ]·{ } 안의 #[cfg(test)] 모양 뒤 금지 경로",
+         "fn f() { m![#[cfg(test)] std::process::Command::new(\"x\")]; n::k! { #[cfg(test)] std::process::Child } }\n"),
         ("시험 cfg 이름표 반복 'a: loop { } 뒤의 금지 경로",
          "fn f() { #[cfg(test)] 'a: loop { break 'a; } std::process::Command::new(\"x\").spawn(); }\n"),
         ("시험 cfg 이름표 블록 'b: { } 뒤의 금지 경로",
