@@ -24,6 +24,11 @@
 #                                   자체 시험 뒤 서버와 p2p_peer 예제 두 개를 루프백에 띄워 펀칭·연결·echo
 #                                   (scripts/check-p2p-example-pair.sh). all에 없고 CI의 clippy·test 잡이 부른다
 #   scripts/check.sh deny           cargo deny의 licenses·bans·sources (deny.toml). cargo-deny가 필요하고 all에 없다
+#   scripts/check.sh mobile-check <target>…
+#                                   의존 쪽 검사 자체 시험 뒤 target마다 scripts/mobile-crates.list의 조합을
+#                                   cargo check --lib하고 의존 쪽 검사(scripts/check-mobile-deps.sh)를 돌린다.
+#                                   target·NDK·Xcode가 없으면 건너뛰고 한 줄로 알린다(MOBILE_CHECK_REQUIRE=1이면
+#                                   실패). Android는 ANDROID_NDK_ROOT(또는 ANDROID_NDK_HOME)의 NDK를 쓴다. all에 없다
 #
 # 의존을 해석하는 cargo 명령(clippy·test·check·tree·doc·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
 # cargo fmt는 의존을 해석하지 않아 --locked가 없다.
@@ -151,6 +156,104 @@ cmd_no_process_spawn() {
     run bash scripts/check-no-process-spawn.sh --self-test
     run bash scripts/check-no-process-spawn.sh
 }
+# 모바일 cross check(docs/design/mobile.md "모바일 cross check"). target 목록과 Android API 수준은
+# 그 문서의 "대상 target" 표다.
+MOBILE_TARGETS=(aarch64-linux-android x86_64-linux-android aarch64-apple-ios aarch64-apple-ios-sim)
+MOBILE_ANDROID_API=29
+# target의 std가 지금 툴체인에 있으면 0.
+mobile_target_installed() {
+    local sysroot
+    sysroot=$(rustc --print sysroot) || return 1
+    [[ -d "$sysroot/lib/rustlib/$1/lib" ]]
+}
+# Android target의 C 컴파일러·아카이버·링커를 NDK로 맞춘다(설계 "대상 target"의 환경 변수 표).
+mobile_android_env() {
+    local t=$1 ndk=$2 host bin ext="" var
+    case "$(uname -s)" in
+        Linux) host=linux-x86_64 ;;
+        Darwin) host=darwin-x86_64 ;;
+        MINGW* | MSYS* | CYGWIN*) host=windows-x86_64 ext=.cmd ;;
+        *) echo "mobile-check: NDK 호스트를 모르는 OS다: $(uname -s)" >&2; return 1 ;;
+    esac
+    bin="$ndk/toolchains/llvm/prebuilt/$host/bin"
+    if [[ ! -e "$bin/$t$MOBILE_ANDROID_API-clang$ext" || ! -e "$bin/llvm-ar" && ! -e "$bin/llvm-ar.exe" ]]; then
+        echo "mobile-check: NDK($ndk)에 $t$MOBILE_ANDROID_API-clang$ext·llvm-ar가 없다" >&2
+        return 1
+    fi
+    var=${t//-/_}
+    local cc="$bin/$t$MOBILE_ANDROID_API-clang$ext" up
+    up=$(tr '[:lower:]' '[:upper:]' <<<"$var")
+    export "CC_$var=$cc" "AR_$var=$bin/llvm-ar" "CARGO_TARGET_${up}_LINKER=$cc"
+    echo "mobile-check: NDK $ndk (Pkg.Revision $(sed -n 's/^Pkg\.Revision *= *//p' "$ndk/source.properties" 2>/dev/null | tr -d '\r'))," \
+        "CC_$var=$cc AR_$var=$bin/llvm-ar CARGO_TARGET_${up}_LINKER=$cc" >&2
+}
+# scripts/mobile-crates.list의 조합을 한 줄씩 "크레이트 feature 인자…"로 찍는다.
+mobile_combos() {
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' scripts/mobile-crates.list
+}
+# target 하나의 조합 전부. 실패해도 남은 조합을 돌리고 끝에 실패를 알린다.
+mobile_check_target() {
+    local t=$1 line crate failed=0
+    local -a feats
+    while IFS= read -r -u 3 line; do
+        read -r -a feats <<<"$line"
+        crate=${feats[0]}
+        feats=("${feats[@]:1}")
+        run cargo check --locked --target "$t" -p "$crate" --lib ${feats[@]+"${feats[@]}"} || failed=1
+        run bash scripts/check-mobile-deps.sh --target "$t" -p "$crate" -- ${feats[@]+"${feats[@]}"} || failed=1
+    done 3< <(mobile_combos)
+    return "$failed"
+}
+cmd_mobile_check() {
+    local t k ndk skipped=() failed=0 known
+    if [[ $# -eq 0 ]]; then
+        echo "사용: scripts/check.sh mobile-check <target>… (target: ${MOBILE_TARGETS[*]})" >&2
+        return 2
+    fi
+    for t in "$@"; do
+        known=0
+        for k in "${MOBILE_TARGETS[@]}"; do [[ "$k" == "$t" ]] && known=1; done
+        if [[ $known -eq 0 ]]; then
+            echo "mobile-check: 모바일 target이 아니다: $t (target: ${MOBILE_TARGETS[*]})" >&2
+            return 2
+        fi
+    done
+    [[ -n "$(mobile_combos)" ]] || { echo "mobile-check: scripts/mobile-crates.list에 조합이 없다" >&2; return 2; }
+    run bash scripts/check-mobile-deps.sh --self-test
+    for t in "$@"; do
+        if ! mobile_target_installed "$t"; then
+            skipped+=("$t(rustup target add $t)")
+            continue
+        fi
+        case "$t" in
+            *-linux-android)
+                ndk=${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}
+                if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+                    skipped+=("$t(NDK 없음: ANDROID_NDK_ROOT)")
+                    continue
+                fi
+                ( mobile_android_env "$t" "$ndk" && mobile_check_target "$t" ) || failed=1
+                ;;
+            *-apple-ios*)
+                if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+                    skipped+=("$t(Xcode iOS SDK 없음)")
+                    continue
+                fi
+                echo "mobile-check: iOS SDK $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null)," \
+                    "$(xcrun clang --version 2>/dev/null | head -n 1)" >&2
+                mobile_check_target "$t" || failed=1
+                ;;
+        esac
+    done
+    if [[ ${#skipped[@]} -gt 0 ]]; then
+        echo "mobile-check: target 없음 — 건너뛴 target: ${skipped[*]}" >&2
+        if [[ "${MOBILE_CHECK_REQUIRE:-}" == 1 ]]; then
+            echo "mobile-check: MOBILE_CHECK_REQUIRE=1이라 건너뛰기를 실패로 본다" >&2
+            failed=1
+        fi
+    fi
+    return "$failed"
+}
 cmd_p2p_example_pair() {
     run bash scripts/check-p2p-example-pair.sh --self-test
     run bash scripts/check-p2p-example-pair.sh
@@ -218,8 +321,9 @@ case "$sub" in
     no-process-spawn) cmd_no_process_spawn ;;
     p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
+    mobile-check) cmd_mobile_check "$@" ;;
     -h | --help | help)
-        sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

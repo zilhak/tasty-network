@@ -29,6 +29,7 @@
 | `bash scripts/check.sh no-process-spawn` | 모바일 대상 라이브러리 코드에 다른 프로그램 실행(`std::process`의 실행 항목, `CommandExt`, `tokio::process`) 없음(자체 시험 포함) |
 | `bash scripts/check.sh p2p-example-pair` | 서버와 `p2p_peer` 예제 두 개를 루프백에 띄워 펀칭·echo와 세 프로세스 종료를 상한 안에서 확인(자체 시험 포함, `all`에 없고 CI의 clippy·test 잡이 부른다) |
 | `bash scripts/check.sh deny` | cargo deny의 licenses·bans·sources (`deny.toml`) |
+| `bash scripts/check.sh mobile-check <target>…` | (의존 쪽 검사 자체 시험 포함) 모바일 target마다 `scripts/mobile-crates.list`의 조합을 `cargo check --lib`하고 의존 쪽 검사(`scripts/check-mobile-deps.sh`). target·NDK·Xcode가 없으면 건너뛰고 알린다(`MOBILE_CHECK_REQUIRE=1`이면 실패, `all`에 없고 CI의 `mobile-android`·`mobile-ios` 잡이 부른다) |
 
 단계 목록의 정본은 `bash scripts/check.sh help`다. `Cargo.lock`은 커밋한다. 의존을 해석하는 cargo 명령(clippy·test·check·tree·doc·metadata·deny·fetch)은 `--locked`로 돌린다. `cargo fmt`는 의존을 해석하지 않아 그 옵션이 없다.
 

@@ -1,0 +1,12 @@
+# 모바일 cross check의 크레이트·feature 조합(docs/design/mobile.md "모바일 cross check" 표의
+# "목록에 드는 때"를 채운 행). scripts/check.sh mobile-check가 target마다 줄마다
+#   cargo check --locked --target <t> -p <크레이트> --lib <feature 인자>
+# 와 같은 인자의 의존 쪽 검사(scripts/check-mobile-deps.sh)를 돌린다.
+# 한 줄에 한 조합: <크레이트> [cargo feature 인자…]. #으로 시작하는 줄과 빈 줄은 건너뛴다.
+# 표의 행이 목록에 들 때(크레이트나 조합이 생긴 커밋) 그 행을 한 줄로 더한다.
+tasty-net-frame
+tasty-net-identity
+tasty-net-topology
+tasty-net-transport --no-default-features
+tasty-net-rendezvous
+tasty-net-p2p
