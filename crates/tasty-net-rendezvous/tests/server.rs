@@ -705,6 +705,30 @@ async fn reset_coordination_stream_removes_the_registration() {
     assert_eq!(server.status().busy_max_devices, 0);
 }
 
+#[tokio::test]
+async fn request_rate_survives_a_new_registration() {
+    let mut s = local_settings();
+    s.set("punch_requests_per_minute", Value::Count(2)).unwrap();
+    let server = start(s).await;
+    let unknown = key(9).id();
+    let request = |request_id| {
+        DeviceMessage::PunchRequest(PunchRequest {
+            request_id,
+            peer: unknown,
+        })
+    };
+    let (mut d, _) = Device::register(&server, &key(1), &[]).await;
+    for request_id in 0..2 {
+        d.send(&request(request_id)).await;
+        assert_eq!(refused(&mut d).await, RefuseReason::NotFound);
+    }
+    // The same device ID on a new connection is still within the minute.
+    let (mut d, _) = Device::register(&server, &key(1), &[]).await;
+    d.send(&request(2)).await;
+    assert_eq!(refused(&mut d).await, RefuseReason::Busy);
+    assert_eq!(server.status().busy_request_rate, 1);
+}
+
 async fn refused(d: &mut Device) -> RefuseReason {
     match d.recv().await {
         ServerMessage::PunchRefused(r) => r.reason,

@@ -184,7 +184,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `max_pending_connections` | 1000 | 아직 등록되지 않은 연결(TLS handshake 중이거나 `hello`를 기다림)의 동시 수. 넘으면 새 연결 시도를 accept 단계에서 거절한다(QUIC `CONNECTION_REFUSED`, 태스크를 만들지 않는다). 하나하나는 `hello_timeout` 안에 끝나므로 정상 기기의 재연결이 몰려도 이 수면 남는다. quinn `max_incoming`은 accept하기 전의 연결만 센다 |
 | `max_punches` | 1000 | 동시 펀칭 전체 상한 |
 | `max_punches_per_device` | 4 | 한 기기가 다른 기기들에게 거는 동시 시도 |
-| `punch_requests_per_minute` | 20 | 기기마다. 남의 주소를 훑는 요청을 늦춘다 |
+| `punch_requests_per_minute` | 20 | 기기 ID마다. 남의 주소를 훑는 요청을 늦춘다. 요청 시각은 등록이 아니라 기기 ID에 묶여 같은 ID가 다시 등록해도 이어지고, 창 밖의 시각은 지우며, 표는 `max_devices`개 ID를 넘지 않는다 |
 | `max_host_candidates` | 4 | 사설 IPv4 하나둘과 전역 IPv6 고정·임시 주소면 보통의 기기를 덮는다. 기기 기본 `punch.max_candidates`(8)에서 서버 반사 1과 보고 반사 3을 뺀 값이다([후보 주소 규칙](#후보-주소-규칙)의 관계) |
 | `max_reported_reflexive` | 3 | 보조 STUN 주소 수(보조 포트, 두 번째 IP의 두 포트) |
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |

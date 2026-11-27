@@ -7,7 +7,7 @@
 
 mod state;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
@@ -753,7 +753,6 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
             host,
             nat: Default::default(),
             registered_at: now,
-            request_times: VecDeque::new(),
         };
         state
             .register(p, &inner.counters, device, reg)

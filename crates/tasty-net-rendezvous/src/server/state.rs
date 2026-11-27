@@ -71,7 +71,6 @@ pub(crate) struct Registration {
     pub host: Vec<SocketAddr>,
     pub nat: NatMapping,
     pub registered_at: Instant,
-    pub request_times: VecDeque<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +112,9 @@ pub(crate) enum After {
 pub(crate) struct State {
     pub devices: HashMap<DeviceId, Registration>,
     pub punches: HashMap<u64, Punch>,
+    /// The `punch_request` times of each device ID within `punch_request_window`. Kept across
+    /// registrations of the same ID, so a new connection does not reset the rate.
+    request_times: HashMap<DeviceId, VecDeque<Instant>>,
     next_punch_id: u64,
     next_conn_id: u64,
 }
@@ -184,6 +186,7 @@ impl State {
         State {
             devices: HashMap::new(),
             punches: HashMap::new(),
+            request_times: HashMap::new(),
             next_punch_id: 1,
             next_conn_id: 1,
         }
@@ -306,21 +309,13 @@ impl State {
             info!(device = %a, peer = %req.peer, reason = ?reason, "punch request refused");
             After::Nothing
         };
-        let Some(reg) = self.devices.get_mut(&a) else {
+        if !self.devices.contains_key(&a) {
             return After::Nothing;
-        };
-        while reg
-            .request_times
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= p.punch_request_window)
-        {
-            reg.request_times.pop_front();
         }
-        if reg.request_times.len() >= p.punch_requests_per_minute {
+        if !self.request_allowed(p, a, now) {
             bump(&counters.busy_request_rate);
             return refuse(self, RefuseReason::Busy);
         }
-        reg.request_times.push_back(now);
         let b = req.peer;
         if b == a {
             return refuse(self, RefuseReason::SelfPeer);
@@ -397,6 +392,31 @@ impl State {
         }
         info!(device = %a, peer = %b, punch_id, mode = ?mode, "punch offered");
         timer(punch_id, Stage::Offered, expires)
+    }
+
+    /// Count a `punch_request` of `device` at `now` against `punch_requests_per_minute`:
+    /// false when the window is full. Times out of the window are dropped, and the table holds
+    /// at most `max_devices` device IDs: when it is full, IDs with no time left in the window
+    /// go first, then IDs that are not registered.
+    fn request_allowed(&mut self, p: &ServerParams, device: DeviceId, now: Instant) -> bool {
+        let in_window = |t: &Instant| now.duration_since(*t) < p.punch_request_window;
+        if !self.request_times.contains_key(&device) && self.request_times.len() >= p.max_devices {
+            self.request_times
+                .retain(|_, times| times.back().is_some_and(in_window));
+            if self.request_times.len() >= p.max_devices {
+                let devices = &self.devices;
+                self.request_times.retain(|id, _| devices.contains_key(id));
+            }
+        }
+        let times = self.request_times.entry(device).or_default();
+        while times.front().is_some_and(|t| !in_window(t)) {
+            times.pop_front();
+        }
+        if times.len() >= p.punch_requests_per_minute {
+            return false;
+        }
+        times.push_back(now);
+        true
     }
 
     /// `punch_answer` from `b`.
