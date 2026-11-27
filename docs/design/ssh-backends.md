@@ -214,9 +214,11 @@ OpenSSH의 `Match command`·`Match sessiontype`은 용도와 명령에 따라 �
 
 용도마다 해석하므로 포트 발견과 터널이 `Match command`·`Match sessiontype`으로 다른 대상에 갈 수 있다. 발견한 레코드에는 토큰이 있고, handshake v2는 상대 기기 서명을 확인하기 전에 첫 메시지로 토큰을 보낸다([handshake v2](handshake.md)). 그래서 레코드는 발견과 같은 유효 대상으로 가는 터널에만 쓴다(android 요구 #7+).
 
-- 비교하는 값: 실제 호스트·포트·사용자와 `ProxyJump` 홉마다의 같은 세 값. 세션 키의 첫 두 묶음과 같다(위).
+- 비교하는 값: 실제 호스트·포트·사용자와 `ProxyJump` 홉마다의 같은 세 값(시스템 백엔드는 아래처럼 홉 명세 문자열까지). 세션 키의 첫 두 묶음과 같다(위).
 - 비교하는 자리: 발견 결과로 터널을 만들거나 공유 터널을 다시 쓰고 레코드의 토큰을 넣는 transport 경로(`tasty-net-transport/src/ssh.rs`). 터널을 열거나 다시 쓰기 전, 토큰을 보내기 전에 비교한다. 다시 쓰는 공유 터널은 그 터널을 열 때의 해석 결과와 비교한다. 연결 전 설정 조회(`inspect`)의 결과로는 비교하지 않는다. 실제로 쓴 해석이 아니기 때문이다.
-- 내장 백엔드는 두 용도의 해석 결과를 그대로 비교한다. 시스템 백엔드는 OpenSSH가 용도마다 해석한 값을 이 레포가 보지 못한다. 얻는 방법은 판단을 올렸다([후속 작업](#후속-작업과-미정)).
+- 내장 백엔드는 두 용도의 해석 결과를 그대로 비교한다. 홉마다의 값도 이 레포가 해석하므로 홉별로 비교한다.
+- 시스템 백엔드(director 2937): 용도마다 실제 자식과 같은 인자로 `ssh -G`를 돌려 그 해석의 `hostname`·`port`·`user`와 `proxyjump`를 비교한다. 다르면 토큰을 보내기 전에 `TargetMismatch`로 끝낸다. `proxyjump`는 설정에 적힌 홉 명세를 다시 짠 문자열이다(`readconf.c:3943`–`:3965`). 각 홉의 설정은 그 홉을 여는 `ssh` 프로세스가 따로 해석하므로(`ssh.c:1307`–`:1325`) 최종 목적지의 `ssh -G`(`ssh.c:1612`–`:1615`)로는 홉마다의 유효 호스트·포트·사용자를 얻지 못한다. 그래서 시스템 백엔드의 홉 비교는 홉 명세 문자열 비교까지다.
+- 시스템 백엔드의 한계: 사용자 설정의 `Match exec` 명령이 `ssh -G` 때 한 번 더 실행된다. 두 `ssh -G`와 실제 자식 사이에 설정 파일이 바뀌면 판정이 늦을 수 있다(바뀐 설정은 그다음 시도에서 걸린다).
 - 다르면 연결 시도는 `ConnectError::TargetMismatch`로 끝난다(transport의 새 변형, `ConnectError`는 `#[non_exhaustive]`). 설정이 같으면 다시 걸어도 결과가 같으므로 재시도하지 않는다: `HandshakeError::is_retryable`이 `Connect`에 싸인 이 변형도 `Cancelled`·`PeerTooOld`처럼 false로 본다(`reject.rs:259`). FFI는 같은 이름의 변형으로 넘긴다([모바일 바인딩 층](mobile.md#android-요구의-자리) #7+).
 
 ### 내장 백엔드: 세션 하나에 채널 여럿
@@ -663,10 +665,10 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | `ChannelTimeout` 구현 | 후속 작업(내장 SSH 백엔드). 기준판 규칙대로의 종류 패턴(예: `sess*`) 비교와 `0`을 포함한 첫 일치, `global` 타이머의 뜻, 용도마다 다른 `global` 값을 고른 경우의 세션 공유, 시험 |
 | 터널 자식 stderr의 출처 | 후속 작업(내장 SSH 백엔드). 시스템 터널의 `ForkAfterAuthentication` 재시도는 자식 stderr의 문구로 정하는데, 그 stderr에는 로컬 `Match exec` 명령의 출력과 서버의 인증 전 Banner도 섞일 수 있다. 원격 출력과 무관한 증거(8.7 미만 판정과 같은 `ssh -G` 확인 등)로 바꿀지 |
 | 8.7 미만 판정의 기억 수명 | 후속 작업(내장 SSH 백엔드). 같은 경로의 `ssh`가 갱신으로 판이 바뀐 경우, 기억을 프로세스 동안 둘지와 파일이 같은지를 경로만으로 볼지(수정 시각 등도 볼지) |
-| 포트 발견과 터널의 대상 일치 | 후속 작업(내장 SSH 백엔드). 판단필요: 시스템 백엔드가 OpenSSH의 용도별 해석 값을 얻는 방법. (가) 실제 자식과 같은 인자로 용도마다 `ssh -G`를 한 번 더 돌려 `hostname`·`port`·`user`·`proxyjump`를 비교한다. 사용자 설정의 `Match exec`가 한 번 더 돈다. (나) 시스템 백엔드는 비교하지 않고 알려진 한계로 둔다(모바일은 시스템 백엔드가 없다). 추천: (가). OpenSSH가 실제로 해석한 값의 증거는 `ssh -G`뿐이고, 토큰이 다른 대상에 가는 것을 막는 쪽이 `Match exec`가 한 번 더 도는 비용보다 크다. 그 밖에 연결 목록 원인 이름과 시험 |
+| 포트 발견과 터널의 대상 일치 | 후속 작업(내장 SSH 백엔드). 시스템 백엔드의 비교 방법은 결정됨(director 2937, 위 [포트 발견과 터널의 대상 일치](#포트-발견과-터널의-대상-일치)). 남은 것: `TargetMismatch`의 연결 목록 원인 이름과 그 재시도 분류, `ssh -G`를 부르는 때와 기한, 시험 |
 | 메모리 키와 `IdentityFile` 이름 | 후속 작업(내장 SSH 백엔드). 앱 제안(감싼 키 이름이 `IdentityFile ~/.ssh/<이름>`이나 기본 키 자리 이름과 같으면 그 자리의 키로 쓰기)을 대상 옵션과 따로 더할지. `ProxyJump` 홉에 메모리 키를 내밀지(OpenSSH는 점프 홉의 `ssh`에 `-i`를 넘기지 않는다, `ssh.c:1307`–`:1325`). 기본 키 목록을 채우지 않는 것과 `IdentitiesOnly`의 시험 |
 | 메모리 키를 넣는 해석 입구 | 후속 작업(OpenSSH 해석 이식). 메모리 키를 `-i`처럼 명령행 identity로 넣어 기본 키 채움(`readconf.c:2930`–`:2941`)을 OpenSSH와 같게 하는 입구, 결과 API가 사용자가 적은 `IdentityFile`과 기본 키 자리를 구별해 내는지 |
-| 지역망 판정과 차단 사유 | 후속 작업(내장 SSH 백엔드). 지역망으로 볼 주소 범위(사설·링크 로컬 등)를 Android 정의로 확인해 정하기, `.local` 판정을 유효 `HostName`에 하는지, `LocalNetworkDenied`·`LocalNetworkBlocked`를 싣는 오류 타입과 연결 목록 원인 이름, 시험. 판단필요: 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한))은 `unsafe`인데 `tasty-net-ssh`는 `forbid(unsafe_code)`다([크레이트 구성](crates.md#unsafe-규칙)). (가) `tasty-net-ssh`를 identity·transport처럼 `deny(unsafe_code)`로 바꾸고 Android OS 호출 모듈에서만 허용한다. (나) 앱 Rust 크레이트가 소켓 진단 훅을 주고 이 레포는 FD를 넘긴다. 추천: (가). 소켓을 가진 코드가 닫기 전에 읽어야 하고, 훅을 두면 FD의 수명을 앱 코드에 넘기게 된다 |
+| 지역망 판정과 차단 사유 | 후속 작업(내장 SSH 백엔드). 지역망으로 볼 주소 범위(사설·링크 로컬 등)를 Android 정의로 확인해 정하기, `.local` 판정을 유효 `HostName`에 하는지, `LocalNetworkDenied`·`LocalNetworkBlocked`를 싣는 오류 타입과 연결 목록 원인 이름, 시험. 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한))의 자리는 결정됨(director 2937): `tasty-net-ssh`를 `deny(unsafe_code)`로 바꾸고 `cfg(target_os = "android")` 모듈 하나에서만 허용한다([크레이트 구성](crates.md#unsafe-규칙)). 그 모듈 밖에 `unsafe`가 없는지 보는 검사(grep 또는 clippy 설정)의 모양 |
 | E1을 판정할 CI 조합 | 후속 작업(내장 SSH 백엔드). [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준) E1의 시험은 두 백엔드를 함께 켠 빌드에서만 `auto`가 `not_found`로 내장을 고른다(내장만 켜면 이유가 `system_not_built`). 그 전 기본 조합(`system-ssh`만)으로는 돌지 않는다. 두 백엔드를 켠 시험 단계의 이름과 자리(D1과 같은 CI 실행인지), 세 OS 배치 |
 | 비교 시험의 로컬 계정 읽기 | 후속 작업(OpenSSH 해석 이식). 실행 계정의 passwd 항목(이름·홈)을 시험이 읽는 방법(Linux·macOS) |
 | 터널 채널이 세션 수신 루프를 멈추는 경우 | 알려진 한계. 로컬 쪽이 읽지 않는 터널 채널은 russh 큐를 채워 같은 세션 전체를 멈춘다. 링크 읽기가 늘 읽으므로 막는 장치를 두지 않는다 |

@@ -109,9 +109,10 @@ frame, ssh-config, identity ─> (없음)
 
 ## unsafe 규칙
 
-- `tasty-net-frame`·`tasty-net-ssh`·`tasty-net-ssh-config`·`tasty-net-topology`는 `#![forbid(unsafe_code)]`다.
+- `tasty-net-frame`·`tasty-net-ssh`·`tasty-net-ssh-config`·`tasty-net-topology`는 `#![forbid(unsafe_code)]`다. `tasty-net-ssh`는 내장 백엔드 작업부터 예외다(아래).
 - `tasty-net-ffi`는 크레이트 루트에 `#![deny(unsafe_code)]`를 둔다. UniFFI 매크로가 만드는 `extern "C"` 함수가 그 규칙에 걸리면 매크로 호출 자리(`uniffi::setup_scaffolding!`)에만 허용을 둔다. 손으로 쓰는 `unsafe`는 없다.
 - OS API를 불러야 하는 크레이트(identity의 Windows ACL, transport의 Windows 소켓 I/O 취소)는 크레이트 루트에 `#![deny(unsafe_code)]`를 두고 OS 호출 모듈에서만 허용한다. 모든 `unsafe` 블록에 `SAFETY:` 주석을 단다.
+- `tasty-net-ssh`(내장 백엔드 작업부터, director 2937): Android 지역망 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한)) 때문에 크레이트 루트를 `#![deny(unsafe_code)]`로 바꾸고, `cfg(target_os = "android")` 모듈 하나에서만 허용한다. 블록마다 `SAFETY:` 주석을 단다. 그 모듈 밖의 `unsafe`가 0건인지는 검사(grep 또는 clippy 설정)로 보인다.
 
 ## 시험의 자리
 
