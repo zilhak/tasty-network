@@ -111,8 +111,8 @@ use crate::options::{
     SessionType, StrictHostKey, YesNoAsk, clear_or_none,
 };
 use crate::readconf::{
-    DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, Reader, connection_hash, owner_mode,
-    parse_ssh_uri, valid_hostname, valid_ruser,
+    DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, Reader, connection_hash, parse_ssh_uri,
+    read_text, valid_hostname, valid_ruser,
 };
 use crate::result::{ConfigNote, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource};
 use crate::settings;
@@ -268,17 +268,12 @@ impl Resolution {
 }
 
 fn load_one(path: &Path) -> Result<LoadedFile, std::io::Error> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let meta = std::fs::metadata(path)?;
-            Ok(LoadedFile {
-                path: path.to_path_buf(),
-                text: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                owner_mode: owner_mode(&meta),
-            })
-        }
-        Err(e) => Err(e),
-    }
+    let (text, owner_mode) = read_text(path)?;
+    Ok(LoadedFile {
+        path: path.to_path_buf(),
+        text: Some(text),
+        owner_mode,
+    })
 }
 
 fn missing(path: &Path) -> LoadedFile {

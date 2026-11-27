@@ -563,6 +563,34 @@ fn host_key_algorithms_that_do_not_assemble() {
     assert_eq!(refusal_kind(&ok), None);
 }
 
+// Unix only: a folder opens and reads as an empty file there, as in OpenSSH.
+#[cfg(unix)]
+#[test]
+fn include_of_a_folder_reads_nothing() {
+    let dir = folder();
+    std::fs::create_dir_all(dir.join("sub")).expect("a folder");
+    // The permission check also applies to the folder; a umask of 002 would refuse it.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        const MODE: u32 = 0o755;
+        std::fs::set_permissions(dir.join("sub"), std::fs::Permissions::from_mode(MODE))
+            .expect("folder mode");
+    }
+    write(&dir, "sub/inner", "Port 1\n");
+    let top = write(
+        &dir,
+        "config",
+        &format!("Include {}\nPort 2222\n", dir.join("sub").display()),
+    );
+    let r = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::Only(top),
+    })
+    .expect("load")
+    .resolve("web", &context(Vec::new()));
+    assert_eq!(refusal_kind(&r), None);
+    assert_eq!(r.options.port, Some(2222));
+}
+
 #[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());

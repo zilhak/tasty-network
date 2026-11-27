@@ -2095,10 +2095,17 @@ fn outcome(result: bool, unknown: Option<&'static str>) -> MatchOutcome {
     }
 }
 
-/// The text of a file and its owner and mode (Unix).
-fn read_text(path: &Path) -> std::io::Result<(String, Option<(u32, u32)>)> {
-    let bytes = std::fs::read(path)?;
-    let meta = std::fs::metadata(path)?;
+/// The text of a file and its owner and mode (Unix), from one open handle: `fopen`, `fstat`
+/// and `getline` of `read_config_file_depth` (`readconf.c:2644`-`:2664`). A read error ends
+/// the text as `getline` does, so a folder (which opens on Unix) reads as an empty file.
+pub(crate) fn read_text(path: &Path) -> std::io::Result<(String, Option<(u32, u32)>)> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    let mut bytes = Vec::new();
+    // `read_to_end` keeps what it read before an error, and the error ends the text as it
+    // ends `getline`.
+    let _ended = file.read_to_end(&mut bytes);
     Ok((
         String::from_utf8_lossy(&bytes).into_owned(),
         owner_mode(&meta),
