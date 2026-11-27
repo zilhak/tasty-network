@@ -205,6 +205,44 @@ fn include_refusal_names_its_own_line() {
     assert_eq!(f.origin, Some(Origin::File { path: top, line: 2 }));
 }
 
+// The owner is judged by `resolve` with the local uid: a user file whose mode passes but whose
+// owner is neither root nor the local user is refused (docs/design/ssh-backends.md "파일 읽기").
+#[cfg(unix)]
+#[test]
+fn a_user_file_of_another_owner_is_refused() {
+    let dir = folder();
+    let path = write(&dir, "config", "Port 2201\n");
+    let owner = file_owner().expect("the file owner");
+    // A file owned by root passes for every local uid.
+    if owner == 0 {
+        return;
+    }
+    let run = |uid: u32| {
+        let mut ctx = context(Vec::new());
+        ctx.local_uid = Some(uid);
+        ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Default {
+                user: Some(path.clone()),
+                system: None,
+            },
+        })
+        .expect("load")
+        .resolve("web", &ctx)
+    };
+    let own = run(owner);
+    assert_eq!(refusal_kind(&own), None);
+    assert_eq!(own.options.port, Some(2201));
+    let other = run(owner.wrapping_add(1).max(1));
+    let f = other.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert!(
+        f.message.contains("Bad owner or permissions"),
+        "{}",
+        f.message
+    );
+    assert_eq!(other.options.port, None);
+}
+
 // Linux only: a FIFO opened for reading and writing does not block there.
 #[cfg(target_os = "linux")]
 #[test]
