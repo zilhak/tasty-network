@@ -18,9 +18,9 @@ use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionState,
-    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, HandshakeError, Holder,
-    PathKind, Phase, RedialError, Redialer, RedialerConfig, RejectReason, Side, SshTransport,
-    TooOldEvidence, Transport, TransportKind, Via, dial_handshake, dial_request,
+    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, Finish, HandshakeError,
+    Holder, PathKind, Phase, RedialError, Redialer, RedialerConfig, RejectReason, Side,
+    SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake, dial_request,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
@@ -940,4 +940,26 @@ fn a_parent_end_uncounts_a_bulk_channel_still_held() {
     );
     assert_eq!(entry.links.len(), 1);
     drop((bulk, second));
+}
+
+#[test]
+fn a_drain_cap_that_runs_out_ends_the_link_row_of_a_link_still_held() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("drain-cap");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let mut link =
+        dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let id = table.connections()[0].id;
+    assert_eq!(table.connection(id).map(|e| e.links.len()), Some(1));
+    // The reader is kept and never read, so it does not end within the drain cap.
+    let (reader, mut writer) = link.take_ordered().expect("the ordered channel");
+    assert_eq!(writer.finish(), Finish::DrainCapReached { settled: true });
+    let entry = table.connection(id).expect("the entry");
+    assert!(entry.links.is_empty(), "{:?}", entry.links);
+    assert_eq!(entry.last_cause, Some(Cause::Lost));
+    drop((reader, writer, link));
 }

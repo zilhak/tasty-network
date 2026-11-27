@@ -753,7 +753,9 @@ impl ChannelWriter {
         }
         self.closer.raise(EndReason::Lost);
         let settled = self.closer.settle();
-        self.closer.wake();
+        // The forced close also runs the link's end hooks (its connection table record),
+        // though the consumer may still hold the link.
+        self.closer.force_close(EndReason::Lost);
         Finish::DrainCapReached { settled }
     }
 
