@@ -793,6 +793,7 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
             host,
             nat: Default::default(),
             registered_at: now,
+            last_frame_at: now,
         };
         let registered = state
             .register(p, &inner.counters, device, reg)
@@ -894,13 +895,12 @@ async fn reader(
             let mut state = inner.state();
             // A connection that a new registration of the same device replaced is being
             // closed: what it still sends does not touch the new registration.
-            if state
-                .devices
-                .get(&device)
-                .is_none_or(|r| r.conn_id != conn_id)
-            {
-                debug!(device = %device, "message of a replaced connection dropped");
-                continue;
+            match state.devices.get_mut(&device) {
+                Some(reg) if reg.conn_id == conn_id => reg.last_frame_at = now,
+                _ => {
+                    debug!(device = %device, "message of a replaced connection dropped");
+                    continue;
+                }
             }
             match msg {
                 DeviceMessage::Hello(_) => After::Nothing,

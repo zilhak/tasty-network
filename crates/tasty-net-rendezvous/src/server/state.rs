@@ -71,6 +71,9 @@ pub(crate) struct Registration {
     pub host: Vec<SocketAddr>,
     pub nat: NatMapping,
     pub registered_at: Instant,
+    /// When the last valid frame of the coordination stream arrived (the `hello` at first).
+    /// QUIC keepalives are not frames: `idle_timeout` ends a silent connection.
+    pub last_frame_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +238,7 @@ impl State {
         info!(
             device = %device,
             registered_ms = millis(reg.registered_at.elapsed()),
+            since_last_frame_ms = millis(reg.last_frame_at.elapsed()),
             "registration removed"
         );
         let ids: Vec<u64> = self

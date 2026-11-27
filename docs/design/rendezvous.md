@@ -142,9 +142,10 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 
 | 상태 | 담는 것 | 지우는 때 |
 |---|---|---|
-| 등록 | 기기 ID, 조정 연결, 반사 주소(조정 연결의 원격 주소), 보고된 보조 반사 주소, 호스트 후보, `NatMapping`, 등록 시각, 마지막 수신 시각(keepalive 포함) | 연결이 닫힘, idle timeout(`idle_timeout`), 같은 기기 ID의 새 등록(옛 연결을 `superseded`로 닫는다), 서버 종료 |
+| 등록 | 기기 ID, 조정 연결, 반사 주소(조정 연결의 원격 주소), 보고된 보조 반사 주소, 호스트 후보, `NatMapping`, 등록 시각, 마지막 유효 프레임 수신 시각 | 연결이 닫힘, idle timeout(`idle_timeout`), 같은 기기 ID의 새 등록(옛 연결을 `superseded`로 닫는다), 서버 종료 |
 | 진행 중 펀칭 | `punch_id`, A·B 기기 ID, 상태(`offered`·`go_sent`), 두 토큰, 만든 시각, `punch_go`를 보낸 시각, 만료 시각, 받은 `punch_result` | 두 기기의 `punch_result`를 모두 받음, `punch_refused`, 같은 A의 새 요청(B에게 `punch_cancel{superseded}`), `offer_timeout`, 아래 TTL 만료(남은 쪽에 `punch_cancel{expired}`), `limits_invalid` 보고(상대에게 `punch_cancel{peer_limits_invalid}`), A나 B의 등록이 지워짐(남은 쪽에 `punch_cancel{peer_gone}`) |
 
+- 마지막 유효 프레임 수신 시각은 조정 스트림에서 형식이 맞는 프레임을 받을 때마다 고친다(처음 값은 `hello`). QUIC keepalive 자체는 idle timeout이 맡는다(`idle_timeout` 동안 아무것도 오지 않으면 QUIC이 연결을 닫고 등록이 지워진다).
 - 세션 TTL: 두 단계로 잰다.
   - `offered`: `punch_request`를 받은 때부터 `offer_timeout`. 지나면 A에게 `not_found`.
   - `go_sent`: 서버가 `punch_go`를 보낸 때(두 기기에 같은 때 보낸다)부터 `start_delay_max + punch_window + 2 × quic_handshake_timeout + punch_session_grace`. 기본 1 + 5 + 10 + 5 = 21 s다. 앞의 세 항은 B의 기한 전체다: 시작 지연 뒤 창 동안 프로브, 그 뒤 `handshake_ms`까지 새 Initial을 받고, 마감 직전에 받은 handshake에 다시 `handshake_ms`([P2P](p2p.md#펀칭-절차) 10). `punch_session_grace`는 서버에서 각 기기까지의 한쪽 통지 지연(기기의 기한은 `punch_go`를 받은 때부터 재므로 늦게 받은 기기는 그만큼 늦게 끝난다)과 `punch_result`가 서버로 오는 시간을 덮는다. 그래서 통지 지연이 grace보다 짧으면 기기가 자기 기한 안에 `punch_cancel{expired}`를 받지 않는다. 받더라도 QUIC handshake 중이면 무시한다.
