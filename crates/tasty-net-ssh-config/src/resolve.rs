@@ -235,8 +235,10 @@ pub struct ResolveContext {
     pub command: Option<String>,
 }
 
-/// The result of [`ConfigSet::resolve`].
+/// The result of [`ConfigSet::resolve`]. Only the crate makes it; fields may be added, so it
+/// is not built or matched whole outside the crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Resolution {
     /// The options as OpenSSH resolves them (up to the refusal if there is one).
     pub options: Options,
