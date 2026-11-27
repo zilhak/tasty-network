@@ -19,7 +19,8 @@
 #
 # 검사 순서:
 #   1. build: p2p_peer 예제를 빌드하고(P2P_PEER를 주면 그 파일), 이미지를 빌드한다(CONTAINER_CHECK_IMAGE를
-#      주면 그 이미지). 실행 sha를 적는다.
+#      주면 그 이미지). 실행 sha(git HEAD)를 적는다. 읽지 못하면 판정 불가다. build 줄과 result 줄에
+#      image=built|given, peer=built|given을 적는다. D5 (b)의 증거는 image=built peer=built인 실행이다.
 #   2. config: 예시 설정의 광고 두 줄을 바꾼 사본을 이미지의 settings --config로 읽어 두 값이 configured인지 본다.
 #   3. keygen: 임시 볼륨에 서버 키를 만들고 공개키를 얻는다.
 #   4. start: 컨테이너를 띄워 시작 줄(같은 공개키)을 기다리고, 서버 쪽 수신 카운터(컨테이너 eth0의
@@ -44,8 +45,8 @@
 # 종료 코드: 0 통과, 1 실패, 2 판정 불가(도구 없음, 빌드 실패, 사설 IPv4 없음, 인자 오류).
 #
 # 환경 변수:
-#   P2P_PEER                          p2p_peer 예제 실행 파일. 주면 빌드하지 않는다
-#   CONTAINER_CHECK_IMAGE             서버 이미지. 주면 빌드하지 않고 지우지도 않는다
+#   P2P_PEER                          p2p_peer 예제 실행 파일. 주면 빌드하지 않는다(peer=given)
+#   CONTAINER_CHECK_IMAGE             서버 이미지. 주면 빌드하지 않고 지우지도 않는다(image=given)
 #   CONTAINER_CHECK_HOST_IP           기기가 알릴 호스트 IP(사설 IPv4). 기본은 192.0.2.1로 가는 경로의 출발 IP
 #   CONTAINER_CHECK_START_SECONDS     서버 시작 줄을 기다리는 시간(초, 1–3600). 기본 30
 #   CONTAINER_CHECK_PEER_TIMEOUT      예제의 --timeout(초, 1–3600). 기본 60
@@ -363,7 +364,7 @@ server_logs() { docker logs "$CONTAINER" 2>&1; }
 server_started() { server_logs | grep -qF "rendezvous server started public_key=$1 "; }
 
 main_check() {
-    local tool json peer image sha host_ip ports primary_port alternate_port cfg out keyout pub
+    local tool json peer peer_from image image_from sha host_ip ports primary_port alternate_port cfg out keyout pub
     local before after rx0 rx1 pk0 pk1 message listener_id dialer_id dial_rc listen_rc
     local dial_line listen_line dial_path listen_path dial_remote listen_remote reflexive nat mode state rc
 
@@ -383,11 +384,14 @@ main_check() {
     TMP=$(mktemp -d) || unsure "임시 폴더를 만들지 못했다"
     TOKEN=$(new_token)
     [[ "$TOKEN" =~ ^[0-9a-f]{12}$ ]] || unsure "/dev/urandom에서 이름 조각을 얻지 못했다: '$TOKEN'"
-    sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || sha=unknown
+    sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || sha=""
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || unsure "실행 sha(git HEAD)를 읽지 못했다: '$sha'"
     if [[ -n "${P2P_PEER:-}" ]]; then
         [[ -x "$P2P_PEER" ]] || unsure "P2P_PEER가 실행 파일이 아니다: $P2P_PEER"
         peer=$P2P_PEER
+        peer_from=given
     else
+        peer_from=built
         log "빌드: ${PEER_BUILD_CMD[*]}"
         json=$(cd "$ROOT" && ${PEER_BUILD_CMD[@]+"${PEER_BUILD_CMD[@]}"}) || unsure "p2p_peer 빌드 실패"
         # 실행 파일 경로는 cargo 출력의 executable 값에서 얻는다(target 폴더 위치를 짐작하지 않는다).
@@ -397,7 +401,9 @@ main_check() {
     if [[ -n "${CONTAINER_CHECK_IMAGE:-}" ]]; then
         image=$CONTAINER_CHECK_IMAGE
         docker image inspect "$image" >/dev/null 2>&1 || unsure "이미지가 없다: $image"
+        image_from=given
     else
+        image_from=built
         image="tasty-rendezvous:container-check-$TOKEN"
         exists image "$image" && unsure "같은 이름의 이미지가 이미 있다: $image"
         log "빌드: docker build -f rendezvous/Dockerfile --label $LABEL=$TOKEN -t $image ."
@@ -408,7 +414,7 @@ main_check() {
         }
         BUILT_IMAGE=$image
     fi
-    step_ok "sha=$sha image=$(docker image inspect -f '{{.Id}}' "$image")"
+    step_ok "sha=$sha image=$image_from peer=$peer_from image_id=$(docker image inspect -f '{{.Id}}' "$image")"
 
     STEP=config
     if [[ -n "${CONTAINER_CHECK_HOST_IP:-}" ]]; then
@@ -539,7 +545,7 @@ main_check() {
     release || { echo "rendezvous-check result=fail step=$STEP"; exit 1; }
     step_ok
 
-    echo "rendezvous-check result=ok devices=same-host-processes path=host sha=$sha"
+    echo "rendezvous-check result=ok devices=same-host-processes path=host image=$image_from peer=$peer_from sha=$sha"
 }
 
 case "${1:-}" in
