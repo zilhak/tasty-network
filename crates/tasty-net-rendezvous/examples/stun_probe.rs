@@ -48,7 +48,12 @@ enum Outcome {
     Oversize { len: usize },
 }
 
-fn probe(server: SocketAddr, timeout: Duration) -> Result<Outcome, String> {
+/// The deadline `timeout` from now, or `None` when it does not fit the clock.
+fn deadline_after(timeout: Duration) -> Option<Instant> {
+    Instant::now().checked_add(timeout)
+}
+
+fn probe(server: SocketAddr, deadline: Instant) -> Result<Outcome, String> {
     let bind: SocketAddr = if server.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -67,7 +72,6 @@ fn probe(server: SocketAddr, timeout: Duration) -> Result<Outcome, String> {
     socket
         .send(&stun::binding_request(&txid, None))
         .map_err(|e| format!("send to {server}: {e}"))?;
-    let deadline = Instant::now() + timeout;
     let mut skipped = 0_u32;
     let mut buf = [0_u8; RECV_BUFFER];
     loop {
@@ -114,6 +118,10 @@ fn main() -> ExitCode {
         eprintln!("stun_probe: timeout must be a number of milliseconds\n{USAGE}");
         return ExitCode::from(2);
     };
+    let Some(deadline) = deadline_after(Duration::from_millis(timeout_ms)) else {
+        eprintln!("stun_probe: timeout {timeout_ms} ms does not fit the clock\n{USAGE}");
+        return ExitCode::from(2);
+    };
     let server = match target.to_socket_addrs().map(|mut a| a.next()) {
         Ok(Some(addr)) => addr,
         Ok(None) => {
@@ -125,7 +133,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match probe(server, Duration::from_millis(timeout_ms)) {
+    match probe(server, deadline) {
         Ok(Outcome::Answer { local, mapped }) => {
             println!("stun-probe server={server} local={local} mapped={mapped}");
             ExitCode::SUCCESS
@@ -164,8 +172,8 @@ mod tests {
         addr
     }
 
-    fn soon() -> Duration {
-        Duration::from_secs(5)
+    fn soon() -> Instant {
+        deadline_after(Duration::from_secs(5)).unwrap()
     }
 
     #[test]
@@ -231,7 +239,14 @@ mod tests {
             other[0] ^= 0xff;
             stun::binding_success(&other, "127.0.0.1:4000".parse().unwrap(), None)
         });
-        let outcome = probe(server, Duration::from_millis(300)).unwrap();
+        let deadline = deadline_after(Duration::from_millis(300)).unwrap();
+        let outcome = probe(server, deadline).unwrap();
         assert_eq!(outcome, Outcome::Timeout { skipped: 1 });
+    }
+
+    #[test]
+    fn a_timeout_past_the_clock_is_refused() {
+        assert!(deadline_after(Duration::MAX).is_none());
+        assert!(deadline_after(Duration::from_millis(1)).is_some());
     }
 }
