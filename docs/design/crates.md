@@ -25,8 +25,8 @@
 
 | 바이너리 | 하는 일 |
 |---|---|
-| `demo-server` | workspace 제공 쪽 흉내. handshake v2를 받고 Data를 그대로 돌려준다(echo). 시작 때 Control로 snapshot 흉내 한 번 |
-| `demo-dialer` | SSH 정방향 또는 역할 반전으로 연결하고 입력을 보내 echo를 받는다. 끊기면 backoff 뒤 다시 연결 |
+| `demo-server` | handshake v2를 받는 쪽. 정방향이면 workspace 제공 쪽 흉내로 링크 시작 때 Control로 snapshot 흉내를 한 번 보내고 Data를 그대로 돌려준다(echo). 역할 반전 제안은 옵션에 따라 수락·거절하고, 수락한 링크에서는 holder로서 dialer의 descriptor를 받고 입력을 보내 echo를 받는다 |
+| `demo-dialer` | SSH 정방향 또는 역할 반전으로 연결한다. 정방향은 입력을 보내 echo를 받고, 역할 반전은 workspace 제공 쪽으로 descriptor를 보낸 뒤 받은 Data를 돌려준다. 끊기면 backoff 뒤 다시 연결 |
 | `p2p-link` | transport 위 P2P 링크 하나. `--listen` 또는 `--dial <기기 ID>`로 동작을 고르고 rendezvous 서버 주소·공개키를 받는다. `tests/p2p_attach.rs`가 띄운다 |
 
 ## 의존 방향
