@@ -17,10 +17,10 @@ use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionState, ConnectionTable,
-    Direction, EdgeTransport, HandshakeError, Holder, PathKind, Phase, Redialer, RedialerConfig,
-    RejectReason, Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via,
-    dial_handshake,
+    AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionState,
+    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, HandshakeError, Holder,
+    PathKind, Phase, Redialer, RedialerConfig, RejectReason, Side, SshTransport, TooOldEvidence,
+    Transport, TransportKind, Via, dial_handshake, dial_request,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
@@ -609,7 +609,8 @@ fn a_tunnel_is_one_entry_with_its_links_and_channels() {
 }
 
 /// A refused handshake ends both entries with its reason: the near one as the peer's
-/// refusal, the far one as this end's.
+/// refusal, the far one as this end's. The near entry's last transition and its event carry
+/// the same cause, also for a request channel and when the table keeps no closed entry.
 #[test]
 fn a_refused_handshake_ends_both_entries_with_the_reason() {
     let far = ConnectionTable::default();
@@ -621,16 +622,17 @@ fn a_refused_handshake_ends_both_entries_with_the_reason() {
     let cancel = AttemptCancel::new();
     let conn = transport.connect(&target(), &cancel).expect("connect");
     assert!(dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).is_err());
-    wait_until("the near entry to end", || {
-        table
-            .connections()
-            .first()
-            .is_some_and(|e| e.state == ConnectionState::Disconnected)
-    });
+    let rejected = Some(Cause::Rejected(RejectReason::TokenInvalid));
+    // The tunnel's entry ended when the failed attempt let go of it.
+    let entry = table.connections().pop().expect("the entry");
+    assert_eq!(entry.state, ConnectionState::Disconnected);
+    assert_eq!(entry.last_cause, rejected);
+    let last = entry.history.last().expect("history");
     assert_eq!(
-        table.connections()[0].last_cause,
-        Some(Cause::Rejected(RejectReason::TokenInvalid))
+        (last.state, last.cause.clone()),
+        (ConnectionState::Disconnected, rejected.clone())
     );
+    assert_eq!(ended_causes(&table), std::slice::from_ref(&rejected));
     wait_until("the far entry to end", || {
         far.connections()
             .first()
@@ -640,6 +642,30 @@ fn a_refused_handshake_ends_both_entries_with_the_reason() {
         far.connections()[0].last_cause,
         Some(Cause::Refused(RejectReason::TokenInvalid))
     );
+
+    // A request channel, with no closed entry kept: only the event tells the end.
+    let table = ConnectionTable::new(ConnectionTableConfig::new().with_keep_closed(0));
+    let transport = fake.transport().with_connections(table.clone());
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    assert!(dial_request(conn, &client(), &cancel).is_err());
+    assert!(table.connections().is_empty(), "no closed entry kept");
+    assert_eq!(ended_causes(&table), [rejected]);
+}
+
+/// The causes of the `disconnected` transitions among the table's events.
+fn ended_causes(table: &ConnectionTable) -> Vec<Option<Cause>> {
+    table
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ConnectionEvent::Transition { entry, .. }
+                if entry.state == ConnectionState::Disconnected =>
+            {
+                Some(entry.cause)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The entry of a redialed SSH connection shows the settings applied to it: the link

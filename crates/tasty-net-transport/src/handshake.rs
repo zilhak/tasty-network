@@ -825,6 +825,9 @@ pub fn dial_handshake(
     cancel: &AttemptCancel,
 ) -> Result<Link, HandshakeError> {
     let entry = conn.channel.entry().cloned();
+    // Holds the endpoint (and an SSH tunnel's entry) until a failure's cause is noted, so the
+    // entry ends with that cause and not before it.
+    let endpoint = conn.endpoint.clone();
     let link = dial_link(conn, config, holder, ext, cancel);
     match (&link, &entry) {
         (Ok(link), Some(entry)) => {
@@ -834,6 +837,7 @@ pub fn dial_handshake(
         (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
         (_, None) => {}
     }
+    drop(endpoint);
     link
 }
 
@@ -897,6 +901,8 @@ pub fn dial_request(
     cancel: &AttemptCancel,
 ) -> Result<RequestClient, HandshakeError> {
     let entry = conn.channel.entry().cloned();
+    // As in `dial_handshake`: the cause is noted before the endpoint goes.
+    let endpoint = conn.endpoint.clone();
     let client = dial_request_on(conn, config, cancel);
     match (&client, &entry) {
         (Ok((_, closer, peer)), Some(entry)) => {
@@ -905,6 +911,7 @@ pub fn dial_request(
         (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
         (_, None) => {}
     }
+    drop(endpoint);
     client.map(|(client, _, _)| client)
 }
 
