@@ -96,8 +96,42 @@ pub(crate) enum RequestOutcome {
     Go(
         tasty_net_rendezvous::wire::message::PunchGo,
         mpsc::UnboundedReceiver<PunchSignal>,
+        PunchHold,
     ),
     Refused(tasty_net_rendezvous::wire::message::RefuseReason),
+}
+
+/// The owner of a punch's server channel in [`Core::punches`]: dropping it removes the entry.
+/// The dialer's channel rides in its `punch_go` answer, so the entry has an owner from the
+/// moment it is made, also when the dialer gives the request up after the answer was queued
+/// and drops it unread.
+#[derive(Debug)]
+pub(crate) struct PunchHold {
+    core: std::sync::Weak<Core>,
+    key: PunchKey,
+}
+
+impl PunchHold {
+    /// Put the channel of punch `key` in the table, owned by the returned hold.
+    pub(crate) fn insert(
+        core: &Arc<Core>,
+        key: PunchKey,
+        tx: mpsc::UnboundedSender<PunchSignal>,
+    ) -> Self {
+        lock(&core.punches).insert(key, tx);
+        PunchHold {
+            core: Arc::downgrade(core),
+            key,
+        }
+    }
+}
+
+impl Drop for PunchHold {
+    fn drop(&mut self) {
+        if let Some(core) = self.core.upgrade() {
+            lock(&core.punches).remove(&self.key);
+        }
+    }
 }
 
 /// What the server tells a punch in progress.
@@ -1425,6 +1459,43 @@ mod tests {
             generation,
             ServerMessage::PunchGo(punch_go(7, Some(request_id), peer)),
         );
+        assert!(lock(&core.punches).is_empty());
+        drop(_enter);
+        ep.close();
+    }
+
+    /// A `punch_go` answer that was queued for the dialer and then given up unread, or taken
+    /// and dropped before the punch began, leaves no punch channel behind: the channel's hold
+    /// rides in the answer.
+    #[test]
+    fn a_punch_go_queued_and_then_given_up_leaves_no_channel() {
+        let peer = DeviceKey::from_seed([27; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            rx: _rx,
+        } = stand_in(26, peer, &[]);
+        let _enter = core.handle.enter();
+        let ask = |request_id: u64| {
+            let (tx, rx) = oneshot::channel();
+            lock(&core.requests).insert(request_id, tx);
+            crate::server::dispatch(
+                &core,
+                generation,
+                ServerMessage::PunchGo(punch_go(request_id, Some(request_id), peer)),
+            );
+            assert!(lock(&core.requests).is_empty());
+            assert_eq!(lock(&core.punches).len(), 1, "the answer is queued");
+            rx
+        };
+        // Queued, then the receiver is dropped unread (a cancel or the request timeout).
+        drop(ask(8));
+        assert!(lock(&core.punches).is_empty());
+        // Taken, then dropped before the punch's own cleanup existed.
+        let taken = ask(9).try_recv().expect("answer");
+        assert_eq!(lock(&core.punches).len(), 1);
+        drop(taken);
         assert!(lock(&core.punches).is_empty());
         drop(_enter);
         ep.close();

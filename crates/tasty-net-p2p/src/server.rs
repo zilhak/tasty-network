@@ -16,7 +16,7 @@ use tasty_net_rendezvous::wire::message::{
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::endpoint::{Core, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
+use crate::endpoint::{Core, PunchHold, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
 use crate::error::StopCause;
 use crate::events::{Cause, CauseDetail, EndpointPhase};
 use crate::nat::{self, NatJudgement};
@@ -485,13 +485,11 @@ pub(crate) fn dispatch(core: &Arc<Core>, generation: u64, m: ServerMessage) {
                 if let Some(tx) = lock(&core.requests).remove(&id) {
                     // The punch's channel exists before the dialer wakes, so a cancel that
                     // follows at once is not lost.
+                    // The answer carries the channel's hold: a dialer that gives the request
+                    // up, before or after the answer is queued, drops it and the channel.
                     let (sig_tx, sig_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let punch_id = go.punch_id;
-                    lock(&core.punches).insert((generation, punch_id), sig_tx);
-                    if tx.send(RequestOutcome::Go(go, sig_rx)).is_err() {
-                        // The dialer gave the request up: nothing will remove the channel.
-                        lock(&core.punches).remove(&(generation, punch_id));
-                    }
+                    let hold = PunchHold::insert(core, (generation, go.punch_id), sig_tx);
+                    let _sent = tx.send(RequestOutcome::Go(go, sig_rx, hold)).is_ok();
                 }
             }
             None => {

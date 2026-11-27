@@ -17,7 +17,9 @@ use tokio::time::Instant;
 
 use crate::close::P2pCloseReason;
 use crate::conn::{ConnInner, P2pCancel};
-use crate::endpoint::{AcceptSession, Core, Incoming, PunchKey, PunchSignal, RequestOutcome, lock};
+use crate::endpoint::{
+    AcceptSession, Core, Incoming, PunchHold, PunchKey, PunchSignal, RequestOutcome, lock,
+};
 use crate::error::P2pConnectError;
 use crate::events::{AttemptPhase, Cause, CauseDetail, EndpointPhase};
 use crate::info::{AddressPair, AppliedSetting, NatInfo, Side, Tracked};
@@ -156,15 +158,13 @@ impl Fail {
 /// also when its future is dropped (cancel).
 struct Cleanup {
     core: Arc<Core>,
-    punch: Option<PunchKey>,
+    /// Removes the punch's server channel when it drops, after the body below.
+    _punch: Option<PunchHold>,
     session: Option<Arc<ProbeSession>>,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Some(key) = self.punch {
-            lock(&self.core.punches).remove(&key);
-        }
         if let Some(s) = &self.session {
             self.core.router.remove_session(s);
             lock(&self.core.accepting).retain(|a| !Arc::ptr_eq(&a.probe, s));
@@ -435,7 +435,7 @@ async fn punch_once(
             "rendezvous_lost",
         )));
     }
-    let (go, mut signals) = match tokio::time::timeout(p.request_timeout, rx).await {
+    let (go, mut signals, hold) = match tokio::time::timeout(p.request_timeout, rx).await {
         Err(_) => {
             return Err(fail(Fail::new(
                 P2pConnectError::RequestTimeout,
@@ -449,13 +449,13 @@ async fn punch_once(
             )));
         }
         Ok(Ok(RequestOutcome::Refused(reason))) => return Err(fail(refused(reason))),
-        Ok(Ok(RequestOutcome::Go(go, signals))) => (go, signals),
+        Ok(Ok(RequestOutcome::Go(go, signals, hold))) => (go, signals, hold),
     };
     drop(asked);
     let mode = Some(go.mode);
     let mut cleanup = Cleanup {
         core: core.clone(),
-        punch: Some((generation, go.punch_id)),
+        _punch: Some(hold),
         session: None,
     };
     t.update(|r| {
@@ -616,10 +616,9 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
     let p = &core.params;
     let key: PunchKey = (generation, punch_id);
     let (sig_tx, mut signals) = mpsc::unbounded_channel();
-    lock(&core.punches).insert(key, sig_tx);
     let mut cleanup = Cleanup {
         core: core.clone(),
-        punch: Some(key),
+        _punch: Some(PunchHold::insert(&core, key, sig_tx)),
         session: None,
     };
     let (mismatch, limits, local_nat, reflexive) = {
