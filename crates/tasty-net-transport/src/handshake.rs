@@ -18,7 +18,7 @@ use tasty_net_identity::{
 
 use crate::bulk::{BulkParent, BulkRegistry};
 use crate::cancel::{AttemptCancel, Registration};
-use crate::channel::RawChannel;
+use crate::channel::{ChannelControl, RawChannel};
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
 use crate::end::{EndReason, GuardSlot, LinkCloser, shutdown_quietly};
 use crate::heartbeat::HeartbeatPolicy;
@@ -440,11 +440,8 @@ impl Io<'_> {
         otherwise
     }
 
-    /// What a failed I/O call on the channel means, setting a socket timeout included: the
-    /// cancel and the P2P close shut the channel, and a call after that fails with what the
-    /// OS says about a shut socket. On macOS that is `EINVAL` from `setsockopt` (XNU refuses
-    /// options on a socket shut in both directions; Linux takes them), so a cancel between
-    /// the cancel check and the next timeout must still come out as `Cancelled`.
+    /// What a failed frame read or write on the channel means: the cancel first, then the P2P
+    /// close code, then the kind of the I/O error.
     fn fail(&self, error: io::Error) -> HandshakeError {
         if self.cancel.is_cancelled() {
             return HandshakeError::Cancelled;
@@ -463,6 +460,11 @@ impl Io<'_> {
         }
     }
 
+    /// What a failed socket timeout call means ([`option_failed`]).
+    fn option_failed(&self, error: io::Error) -> HandshakeError {
+        option_failed(self.cancel, &*self.ch.control(), error)
+    }
+
     /// Reads the next Control frame. The socket timeout is set to the time left before each
     /// frame, and a frame that completes after the deadline is not taken: the handshake ends
     /// with [`HandshakeError::TimedOut`].
@@ -472,7 +474,7 @@ impl Io<'_> {
             self.ch
                 .control()
                 .set_read_timeout(Some(left))
-                .map_err(|e| self.fail(e))?;
+                .map_err(|e| self.option_failed(e))?;
             match read_frame(&mut *self.ch) {
                 Ok(frame) if frame.tag == StreamTag::Control => {
                     self.left()?;
@@ -490,7 +492,7 @@ impl Io<'_> {
         self.ch
             .control()
             .set_write_timeout(Some(left))
-            .map_err(|e| self.fail(e))?;
+            .map_err(|e| self.option_failed(e))?;
         write_frame(&mut *self.ch, StreamTag::Control, payload).map_err(|e| self.fail(e))?;
         // A frame whose partial writes ran past the deadline is not taken as sent in time: the
         // handshake ends with `TimedOut` (an accepting attach then revokes its credential).
@@ -502,7 +504,7 @@ impl Io<'_> {
         self.ch
             .control()
             .set_write_timeout(Some(left))
-            .map_err(|e| self.fail(e))?;
+            .map_err(|e| self.option_failed(e))?;
         self.ch
             .write_all(line)
             .and_then(|()| self.ch.flush())
@@ -1106,7 +1108,7 @@ fn accept_on(
         let (parent, guard, ext) = accept_bulk(&mut io, open, path, config)?;
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
-            .map_err(|e| handover_failed(cancel, e))?;
+            .map_err(|e| option_failed(cancel, &*control, e))?;
         return Ok(Accepted::Bulk(BulkChannel {
             reader: framed.reader,
             writer: framed.writer,
@@ -1174,7 +1176,7 @@ fn accept_on(
         io.write_control(&ack.encode())?;
         let framed = ch
             .framed(&config.timeouts.channel(config.heartbeat))
-            .map_err(|e| handover_failed(cancel, e))?;
+            .map_err(|e| option_failed(cancel, &*control, e))?;
         return Ok(Accepted::Request(RequestServer {
             reader: framed.reader,
             writer: framed.writer,
@@ -1264,7 +1266,7 @@ fn accept_on(
             // The ACK is out but no link stands: end it so the credential is revoked and the
             // socket closes (the dialer sees the channel close).
             closer.force_close(EndReason::Forced);
-            return Err(handover_failed(cancel, e));
+            return Err(option_failed(cancel, &*control, e));
         }
     };
     let normal = closer.clone();
@@ -1283,14 +1285,26 @@ fn accept_on(
     })))
 }
 
-/// The error of an accepting handshake whose channel could not be handed on after the ACK
-/// (setting the link's socket timeouts failed). The attempt is still registered then, so a
-/// cancel may have shut the socket, and on macOS the timeouts then fail with `EINVAL`: a
-/// cancel that came first makes it `Cancelled`, even with the ACK out. No channel reaches the
-/// caller either way, and the peer sees the channel close.
-fn handover_failed(cancel: &AttemptCancel, error: io::Error) -> HandshakeError {
+/// What a failed socket timeout call of a handshake means: before a frame read or write, and
+/// when the accepting side hands the channel on after the ACK (the attempt is still
+/// registered then).
+///
+/// A cancel or a P2P close shuts the channel, and a timeout call after that fails with what
+/// the OS says about a shut socket. On macOS that is `EINVAL` from `setsockopt` (XNU refuses
+/// options on a socket shut in both directions; Linux takes them). So a cancel that came
+/// first is `Cancelled` (also with the ACK out: no channel reaches the caller, and the peer
+/// sees the channel close), a close code is `Closed`, and otherwise the error is the call's
+/// own, kept as [`HandshakeError::Io`]: no frame was read or written, so its kind says
+/// nothing about the peer's bytes.
+fn option_failed(
+    cancel: &AttemptCancel,
+    control: &dyn ChannelControl,
+    error: io::Error,
+) -> HandshakeError {
     if cancel.is_cancelled() {
         HandshakeError::Cancelled
+    } else if let Some(reason) = control.close_reason() {
+        HandshakeError::Closed(reason)
     } else {
         HandshakeError::Io(error)
     }
@@ -1426,7 +1440,7 @@ fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeErro
     io.ch
         .control()
         .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
-        .map_err(|e| io.fail(e))?;
+        .map_err(|e| io.option_failed(e))?;
     let mut byte = [0u8; 1];
     match io.ch.read(&mut byte) {
         Ok(0) => Err(io.ended_by(HandshakeError::PeerClosed)),
@@ -1501,8 +1515,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use tasty_net_identity::DeviceKey;
-
-    use crate::channel::ChannelControl;
 
     /// An approval given inside the last channel watch, before the approval deadline, counts
     /// although the wait takes it only when that watch returns after the deadline. The hook
@@ -1651,6 +1663,72 @@ mod tests {
                 matches!(result, Err(HandshakeError::Cancelled)),
                 "{what}: {result:?}"
             );
+        }
+    }
+
+    /// A channel control whose socket timeout calls fail with `kind`, and nothing else.
+    struct FailingOptions(io::ErrorKind);
+
+    impl ChannelControl for FailingOptions {
+        fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(self.0, "the option failed"))
+        }
+        fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(self.0, "the option failed"))
+        }
+        fn shutdown_write(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn shutdown_and_wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Without a cancel or a close code, a failed socket timeout call keeps its own error as
+    /// Io, whatever its kind: InvalidData there is not bytes that are not a frame (no frame
+    /// was read), so it does not become a protocol error.
+    #[test]
+    fn a_failed_socket_option_without_a_cancel_stays_io() {
+        let peer = PeerInfo {
+            device_id: DeviceKey::from_seed([1; 32]).id(),
+            instance_id: "peer".into(),
+            holder: Some(Holder::Acceptor),
+            caps: Vec::new(),
+            transport: TransportKind::Tcp,
+            local_side: Side::Acceptor,
+        };
+        type Step = fn(&mut Io<'_>, &PeerInfo) -> Result<(), HandshakeError>;
+        let steps: [(&str, Step); 3] = [
+            ("approval wait", |io, peer| {
+                let kept: Arc<Mutex<Vec<RoleProposal>>> = Arc::default();
+                let keep = Arc::clone(&kept);
+                let open: ProposalHandler =
+                    Arc::new(move |proposal| keep.lock().expect("lock").push(proposal));
+                await_proposal(io, &open, peer, Duration::from_secs(5)).map(drop)
+            }),
+            ("control read", |io, _| io.read_control().map(drop)),
+            ("control write", |io, _| io.write_control(b"{}")),
+        ];
+        for kind in [io::ErrorKind::InvalidData, io::ErrorKind::InvalidInput] {
+            for (what, step) in steps {
+                let mut ch = RawChannel::new(
+                    Box::new(io::empty()),
+                    Box::new(io::sink()),
+                    Arc::new(FailingOptions(kind)),
+                    TransportKind::Tcp,
+                );
+                let cancel = AttemptCancel::new();
+                let mut io = Io {
+                    ch: &mut ch,
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancel: &cancel,
+                };
+                let result = step(&mut io, &peer);
+                assert!(
+                    matches!(&result, Err(HandshakeError::Io(e)) if e.kind() == kind),
+                    "{what}, {kind:?}: {result:?}"
+                );
+            }
         }
     }
 
