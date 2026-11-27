@@ -17,7 +17,7 @@ use tasty_net_frame::{
 
 use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
 
-use crate::connection_table::EntryRef;
+use crate::connection_table::{EntryRef, Joined};
 use crate::end::{EndReason, LinkCloser};
 use crate::heartbeat::{Heartbeat, HeartbeatPolicy};
 use crate::lock::lock;
@@ -66,6 +66,8 @@ pub struct RawChannel {
     entry: Option<EntryRef>,
     /// The local and the peer address of a TCP channel.
     addrs: Option<(SocketAddr, SocketAddr)>,
+    /// The reconnection entry waiting for this channel's handshake on a shared tunnel.
+    joined: Option<Joined>,
 }
 
 impl fmt::Debug for RawChannel {
@@ -93,6 +95,7 @@ impl RawChannel {
             verdict: None,
             entry: None,
             addrs: None,
+            joined: None,
         }
     }
 
@@ -131,6 +134,16 @@ impl RawChannel {
     /// The connection table entry of the channel's physical connection.
     pub(crate) fn entry(&self) -> Option<&EntryRef> {
         self.entry.as_ref()
+    }
+
+    pub(crate) fn with_joined(mut self, joined: Joined) -> Self {
+        self.joined = Some(joined);
+        self
+    }
+
+    /// The reconnection entry waiting for this channel's handshake.
+    pub(crate) fn joined(&self) -> Option<&Joined> {
+        self.joined.as_ref()
     }
 
     /// The local and the peer address of a TCP channel.

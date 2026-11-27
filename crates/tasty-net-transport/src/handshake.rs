@@ -20,8 +20,8 @@ use crate::bulk::{BulkParent, BulkRegistry};
 use crate::cancel::{AttemptCancel, Registration};
 use crate::channel::{ChannelControl, RawChannel};
 use crate::connection_table::{
-    Cause, ConnectionPeer, ConnectionState, ConnectionTable, Counted, EntryRef, NewEntry, PathKind,
-    Phase, Segment, Via,
+    Cause, ConnectionPeer, ConnectionState, ConnectionTable, Counted, EntryRef, Joined, NewEntry,
+    PathKind, Phase, Segment, Via,
 };
 use crate::domain::{AttachRequest, BulkRequest, DomainAccept, DomainPolicy};
 use crate::end::{EndReason, GuardSlot, LinkCloser, shutdown_quietly};
@@ -825,6 +825,7 @@ pub fn dial_handshake(
     cancel: &AttemptCancel,
 ) -> Result<Link, HandshakeError> {
     let entry = conn.channel.entry().cloned();
+    let joined = conn.channel.joined().cloned();
     // Holds the endpoint (and an SSH tunnel's entry) until a failure's cause is noted, so the
     // entry ends with that cause and not before it.
     let endpoint = conn.endpoint.clone();
@@ -837,8 +838,21 @@ pub fn dial_handshake(
         (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
         (_, None) => {}
     }
+    settle_join(joined.as_ref(), link.as_ref().err());
     drop(endpoint);
     link
+}
+
+/// A reconnection that joined a shared tunnel ends naming it once the handshake succeeded;
+/// a failure ends it with the failure (a redialer's entry only keeps the cause).
+fn settle_join(joined: Option<&Joined>, failed: Option<&HandshakeError>) {
+    let Some(joined) = joined else {
+        return;
+    };
+    match failed {
+        None => joined.succeeded(),
+        Some(error) => joined.pending.end(Cause::of_handshake(error)),
+    }
 }
 
 fn dial_link(
@@ -901,6 +915,7 @@ pub fn dial_request(
     cancel: &AttemptCancel,
 ) -> Result<RequestClient, HandshakeError> {
     let entry = conn.channel.entry().cloned();
+    let joined = conn.channel.joined().cloned();
     // As in `dial_handshake`: the cause is noted before the endpoint goes.
     let endpoint = conn.endpoint.clone();
     let client = dial_request_on(conn, config, cancel);
@@ -911,6 +926,7 @@ pub fn dial_request(
         (Err(error), Some(entry)) => entry.note_cause(Cause::of_handshake(error)),
         (_, None) => {}
     }
+    settle_join(joined.as_ref(), client.as_ref().err());
     drop(endpoint);
     client.map(|(client, _, _)| client)
 }

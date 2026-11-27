@@ -358,6 +358,26 @@ pub(crate) struct NewEntry {
     pub path_fixed: bool,
 }
 
+/// A reconnection that found a live shared tunnel: its own entry (`pending`) waits for the
+/// handshake on the shared tunnel and then ends naming the entry it joined (`into`). A
+/// failed handshake leaves `pending` to the redialer (or ends it with the failure).
+#[derive(Clone, Debug)]
+pub(crate) struct Joined {
+    pub pending: EntryRef,
+    pub into: ConnectionId,
+}
+
+impl Joined {
+    /// The handshake on the shared tunnel succeeded.
+    pub(crate) fn succeeded(&self) {
+        self.pending.transition(
+            ConnectionState::Disconnected,
+            None,
+            Some(Cause::SharedTunnel(self.into)),
+        );
+    }
+}
+
 /// Which counted channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Counted {

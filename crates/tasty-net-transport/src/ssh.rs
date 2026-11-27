@@ -18,8 +18,8 @@ use tasty_net_ssh::{
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 use crate::channel::RawChannel;
 use crate::connection_table::{
-    Cause, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, NewEntry, PathKind, Phase,
-    Segment, Via,
+    Cause, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, Joined, NewEntry, PathKind,
+    Phase, Segment, Via,
 };
 use crate::lock::lock;
 use crate::reject::TooOldEvidence;
@@ -270,6 +270,7 @@ impl SshTransport {
             });
         }
         let key = TunnelKey::new(target, &record);
+        let mut joined = None;
         let (hold, owned) = match self.shared_tunnel(&key) {
             Some(hold) => {
                 if let Some(entry) = entry {
@@ -277,12 +278,15 @@ impl SshTransport {
                         &hold.entry,
                         options.previous.is_some() || options.pending.is_some(),
                     ) {
-                        // A reconnection stays visible: it ends naming the entry it joined.
-                        (Some(joined), true) => entry.transition(
-                            ConnectionState::Disconnected,
-                            None,
-                            Some(Cause::SharedTunnel(joined.id())),
-                        ),
+                        // A reconnection stays visible: once its handshake on the shared
+                        // tunnel succeeds it ends naming the entry it joined; until then it
+                        // stays `reconnecting`.
+                        (Some(shared), true) => {
+                            joined = Some(Joined {
+                                pending: entry.clone(),
+                                into: shared.id(),
+                            });
+                        }
                         _ => entry.remove(),
                     }
                 }
@@ -334,6 +338,10 @@ impl SshTransport {
                 entry.note_cause(Cause::of_connect(error));
             }
         })?;
+        let channel = match &joined {
+            Some(joined) => channel.with_joined(joined.clone()),
+            None => channel,
+        };
         Ok(Connection {
             channel,
             endpoint: Endpoint::new(Arc::new(SshEndpoint {
@@ -342,6 +350,7 @@ impl SshTransport {
                 token: record.token,
                 published: Arc::clone(&self.published),
                 owned: Mutex::new(owned),
+                _joined: joined.map(JoinGuard),
             })),
         })
     }
@@ -428,6 +437,18 @@ struct SshEndpoint {
     published: Published,
     /// The attempt's hold on a new tunnel, released when the tunnel is published.
     owned: Mutex<Option<Registration>>,
+    /// A reconnection waiting on a shared tunnel, ended if the attempt is dropped unfinished.
+    _joined: Option<JoinGuard>,
+}
+
+/// Ends a reconnection entry whose attempt on a shared tunnel was dropped without a
+/// handshake result (a redialer's entry only keeps the cause).
+struct JoinGuard(Joined);
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        self.0.pending.end(Cause::Ended);
+    }
 }
 
 impl EndpointHandle for SshEndpoint {
