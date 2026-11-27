@@ -27,8 +27,8 @@ services:
     ports:
       # 주 포트: QUIC 조정 연결과 STUN. 보조 포트: STUN(NAT 판별).
       # 바깥 포트를 다르게 게시하면 보조 포트는 advertise.alternate_port에 그 바깥 포트를 적는다.
-      # 두 번째 IP를 쓰면 이 두 줄 대신 IP마다 두 포트를 게시하거나 network_mode: host를 쓴다
-      # (README "두 번째 IP"). 컨테이너 안에는 호스트 IP가 없어 listen.*에 호스트 IP를 적을 수 없다.
+      # 브리지 네트워크는 IP 하나 구성만 된다. 두 번째 IP를 쓰면 ports를 지우고 network_mode: host로
+      # 띄운다(Linux Docker Engine. README "두 번째 IP"). 브리지 컨테이너 안에는 호스트 IP가 없다.
       - "3478:3478/udp"
       - "3479:3479/udp"
 

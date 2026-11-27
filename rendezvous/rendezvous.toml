@@ -25,7 +25,8 @@ key_dir = "/var/lib/tasty-rendezvous"
 primary_ip = "203.0.113.10"
 # 보조 포트를 다른 바깥 포트로 게시할 때만 준다.
 # alternate_port = 3479
-# 두 번째 공인 IP. listen.alternate_ip와 함께 준다.
+# 두 번째 IP를 알릴 주소. 두 번째 IP는 listen.alternate_ip로 듣는다(호스트에서 직접, 또는 컨테이너의
+# host 네트워크. README "두 번째 IP"). 그 IP가 바깥 주소와 다를 때(NAT 뒤 호스트)만 여기에 바깥 주소를 준다.
 # alternate_ip = "none"
 
 # 접근 정책. 기본은 모든 기기를 받는다.

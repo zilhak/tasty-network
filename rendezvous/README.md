@@ -110,20 +110,14 @@ NAT 판별은 같은 IP의 두 포트로 포트 의존까지 본다. 주소 의�
 
 ### 컨테이너로 띄울 때
 
-기본 브리지 네트워크의 컨테이너에는 호스트의 공인 IP가 없다. `ports`에 IP를 붙여 게시해도 그 IP가 컨테이너 안에 생기지 않는다. 그래서 `listen.primary`나 `listen.alternate_ip`에 호스트 IP를 적으면 서버가 `server socket could not be bound: Cannot assign requested address`로 시작하지 않는다. 방법은 둘이다.
+두 번째 IP는 호스트 네트워크로만 띄운다. `compose.yaml`에서 `ports`를 지우고 `network_mode: host`를 둔다. 컨테이너가 호스트의 주소를 그대로 쓰므로 위 "호스트에서 직접 띄울 때"의 `listen.primary`·`listen.alternate_ip` 설정이 그대로 되고, 서버가 두 번째 IP의 두 포트에 STUN만 받는 소켓을 연다. 응답은 질의받은 IP의 소켓에서 나간다. 이것은 Linux의 Docker Engine 기준이다. Docker Desktop(macOS·Windows)의 호스트 네트워크는 켜도 컨테이너가 호스트 인터페이스의 IP에 바인딩하지 못하므로 이 방법이 되지 않는다.
 
-- 호스트 네트워크: `compose.yaml`에서 `ports`를 지우고 `network_mode: host`를 둔다. 컨테이너가 호스트의 주소를 그대로 쓰므로 위 "호스트에서 직접 띄울 때"의 `listen.*` 설정이 그대로 된다. 서버가 응답의 출발 IP를 질의 대상 IP와 같게 낸다. 두 IP를 쓸 때 추천하는 방법이다.
-- 브리지 그대로: 컨테이너는 wildcard(기본 `listen.primary`)로 듣고, `listen.alternate_ip`는 두지 않는다. `advertise.primary_ip`에 첫 IP를, `advertise.alternate_ip`에 두 번째 IP를 적고, `ports`는 IP 없는 게시 대신 두 IP의 두 포트를 하나씩 게시한다. IP 없는 게시(`"3478:3478/udp"`)는 모든 호스트 주소의 그 포트를 잡으므로 IP를 붙인 게시와 함께 둘 수 없다. 두 IP로 온 질의는 컨테이너의 같은 소켓으로 들어가고, 응답은 Docker의 주소 변환을 거쳐 질의받은 IP에서 나간다.
+기본 브리지 네트워크는 IP 하나 구성만 된다(`compose.yaml` 그대로, `advertise.primary_ip`만 준다).
 
-  ```yaml
-      ports:
-        - "203.0.113.10:3478:3478/udp"
-        - "203.0.113.10:3479:3479/udp"
-        - "198.51.100.20:3478:3478/udp"
-        - "198.51.100.20:3479:3479/udp"
-  ```
+- 브리지 컨테이너에는 호스트의 IP가 없다. `ports`에 IP를 붙여 게시해도 그 IP가 컨테이너 안에 생기지 않는다. 그래서 `listen.primary`나 `listen.alternate_ip`에 호스트 IP를 적으면 서버가 `server socket could not be bound: Cannot assign requested address`로 시작하지 않는다.
+- 두 IP의 포트를 브리지 컨테이너의 같은 소켓으로 게시하는 방법도 쓰지 않는다. 두 번째 IP의 3478이 주 소켓으로 들어가 QUIC 조정 연결까지 받게 되어, 두 번째 IP의 두 포트는 STUN만 받는다는 설계([rendezvous](../docs/design/rendezvous.md#포트와-전송))와 어긋난다.
 
-확인한 것과 하지 않은 것: 사설 IP 두 개가 있는 Linux 호스트(Docker 29.6)에서 세 경우를 띄우고, 같은 호스트에서 네 주소(두 IP × 두 포트)로 STUN Binding을 보냈다. 브리지에서 `listen.primary`에 호스트 IP를 적으면 위 오류로 시작하지 않았다. 호스트 네트워크와 `listen.alternate_ip`는 네 주소 모두 답했고 반사 주소가 보낸 소켓 주소와 같았다. 브리지에서 IP별 게시와 `advertise.alternate_ip`도 네 주소 모두 답했다. 공인 IP 두 개와 다른 망의 기기에서 본 반사 주소(브리지의 주소 변환 뒤에도 기기의 바깥 주소가 보이는지)는 확인하지 않았다. 같은 호스트에서 보낸 질의는 Docker가 출발 주소를 바꿔 이 확인에 쓸 수 없었다.
+확인한 것과 하지 않은 것: 사설 IP 두 개가 있는 Linux 호스트(Docker Engine 29.6)에서, 호스트 네트워크와 `listen.alternate_ip`로 띄운 서버가 같은 호스트에서 보낸 네 주소(두 IP × 두 포트)의 STUN Binding에 모두 답했고 반사 주소가 보낸 소켓 주소와 같았다. 브리지에서 `listen.primary`에 호스트 IP를 적으면 위 오류로 시작하지 않았다. 공인 IP 두 개, 다른 망의 기기에서 본 반사 주소, Docker Desktop은 확인하지 않았다.
 
 ## 설정 검사
 
