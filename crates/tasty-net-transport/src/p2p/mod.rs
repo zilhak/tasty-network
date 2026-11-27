@@ -32,7 +32,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use tasty_net_identity::DeviceId;
-use tasty_net_p2p::settings::Value;
+use tasty_net_p2p::settings::{DEFAULTS, Value};
 use tasty_net_p2p::{
     AttemptPhase, P2pCancel, P2pConnectError, P2pConnection, P2pConnectionInfo, P2pEndpoint,
     P2pError,
@@ -54,21 +54,30 @@ pub use listener::{P2pInbound, P2pListener};
 use conn::{ChannelSlot, ConnSide, ConnState, OwnedConn, PunchCancel, watch};
 use table::{Followed, follow, open_entry, take_pending};
 
-/// How often a connection's thread looks at its connection when the endpoint does not show
-/// `path.poll_interval` (its default there).
-const FALLBACK_POLL: Duration = Duration::from_secs(1);
+/// The key of the interval a connection's thread wakes at.
+const POLL_KEY: &str = "path.poll_interval";
 
-/// The interval a connection's thread wakes at: the endpoint's `path.poll_interval`, the
-/// interval it reads the peer address at too.
+/// The interval a connection's thread wakes at: the endpoint's `path.poll_interval` in effect
+/// (the interval it reads the peer address at too), or that setting's default in the settings
+/// table of `tasty-net-p2p` when the endpoint shows no settings. The value and its source are
+/// the ones `P2pEndpoint::settings` shows; the adapter has no value of its own.
 pub(crate) fn poll_interval(endpoint: &P2pEndpoint) -> Duration {
+    let duration = |value: Value| match value {
+        Value::Duration(d) => Some(d),
+        _ => None,
+    };
     endpoint
         .settings()
         .into_iter()
-        .find_map(|entry| match (entry.key, entry.value) {
-            ("path.poll_interval", Value::Duration(d)) if !d.is_zero() => Some(d),
-            _ => None,
+        .find(|entry| entry.key == POLL_KEY)
+        .and_then(|entry| duration(entry.value))
+        .or_else(|| {
+            DEFAULTS
+                .iter()
+                .find(|setting| setting.key == POLL_KEY)
+                .and_then(|setting| duration(setting.default))
         })
-        .unwrap_or(FALLBACK_POLL)
+        .expect("tasty-net-p2p's settings table has path.poll_interval as a duration")
 }
 
 /// The shared connections, by peer device.
@@ -482,5 +491,26 @@ impl EndpointHandle for P2pEndpointHandle {
             Arc::downgrade(&self.state),
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_poll_interval_comes_from_the_p2p_settings_table() {
+        let default = DEFAULTS
+            .iter()
+            .find(|setting| setting.key == POLL_KEY)
+            .expect("the key is in the table");
+        assert!(matches!(default.default, Value::Duration(_)));
+        // An endpoint that is off shows the settings it was given, defaults included.
+        let off = P2pEndpoint::bind(tasty_net_p2p::P2pConfig::new(
+            tasty_net_identity::DeviceKey::from_seed([3; 32]),
+            Arc::new(tasty_net_p2p::PairingList::new()),
+        ))
+        .expect("an endpoint that is off");
+        assert_eq!(Value::Duration(poll_interval(&off)), default.default);
     }
 }
