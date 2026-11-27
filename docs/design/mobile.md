@@ -219,7 +219,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 
 - 의존(`Cargo.toml`):
   - `tasty-net-transport = { path, default-features = false, features = ["embedded-ssh"] }`
-  - `tasty-net-ssh = { path, default-features = false, features = ["embedded-ssh"] }`(`SshConnector`·`SshSettings`·`SshTarget`·`SshPrompt`·`SshSession`·exec·SFTP 타입을 직접 쓴다)
+  - `tasty-net-ssh = { path, default-features = false, features = ["embedded-ssh"] }`(`SshConnector`·`SshSettings`·`SshTarget`·`SshPrompt`·`SshInspection`·exec·SFTP 타입을 직접 쓴다)
   - `tasty-net-p2p`, `tasty-net-identity`, `tasty-net-topology`
   - `uniffi`(정확한 판)
 
@@ -246,7 +246,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 | 연결 | 연결 열기·닫기, 연결 목록 조회, `EventStream` | [전송 추상화](transport.md#연결-목록) |
 | SSH exec | 명령 실행, 표준 입력 쓰기, stdout·stderr 읽기, 종료 상태 | [터널·exec·SFTP](ssh-backends.md#터널execsftp) |
 | SFTP | 열기·읽기·쓰기·목록·정보·이름 바꾸기·지우기 | 같다 |
-| 설정 | 설정값 쓰기·조회(`{key, value, source}`) | 각 크레이트의 설정값 표 |
+| 설정 | 설정값 쓰기·조회(`{key, value, source}`), SSH 설정 조회(`SshConnector::inspect`: 백엔드와 선택 이유, 읽은 파일, 거부·미지원 지시어) | 각 크레이트의 설정값 표, [설정 조회](ssh-backends.md#설정-조회) |
 
 ## 모바일 cross check
 
