@@ -3,11 +3,15 @@
 //! Each attempt reads the server's connection record over SSH (`cat`, then `type`, of
 //! `--record` on the SSH host), opens or reuses the `-L` tunnel to the record's port and runs
 //! handshake v2 with the record's token. While a link is up, every stdin line `send <text>`
-//! goes out as a Data frame and the echo is printed. When the link is lost the dialer waits
-//! with backoff and connects again from discovery. A refusal that connecting again cannot
-//! change (a wrong token, for example) ends the dialer with exit code 3. `quit` or the end of
-//! stdin detaches and ends with exit code 0. The stdin line `table` prints the connection
-//! table (one entry per tunnel) in the lines of `tasty_net_demo::table`.
+//! goes out as a Data frame and the echo is printed. When the link is lost (or the first
+//! attempt fails in a way connecting again can change) the dialer connects again from
+//! discovery through the transport's `Redialer` with its default settings
+//! (docs/design/transport.md "보관 상한과 재연결 도우미"): the new connection's entry in the
+//! connection table names the lost one. A refusal that connecting again cannot change (a
+//! wrong token, for example) ends the dialer with exit code 3; when the redialer gives up
+//! (`redial.give_up_after`), or the loss is not one to redial, it ends with exit code 4.
+//! `quit` or the end of stdin detaches and ends with exit code 0. The stdin line `table`
+//! prints the connection table in the lines of `tasty_net_demo::table`.
 //!
 //! `--holder acceptor` proposes the role reversal (docs/design/transport.md "역할" (b)): the
 //! server holds and this end provides the workspace over the same `-L` tunnel, and this end
@@ -51,6 +55,7 @@
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
 //! | `dialer rejected reason=<reason or -> error=<text>` | it did not; the dialer ends. The reason is the peer's wire reason, or `self_attach` when the peer turned out to be this instance |
+//! | `dialer gave-up error=<text>` | the redialer gave up, or the loss was not one to redial; the dialer ends |
 //! | `dialer table ...` · `dialer conn ...` · `dialer link ...` · `dialer table-end ...` | the stdin line `table` (`tasty_net_demo::table`) |
 //! | `dialer stdin-thread-late limit_ms=<ms>` | after `quit`, the stdin thread's Detach did not end in time |
 //! | `dialer stdin-thread-panicked` | after `quit`, the stdin thread had panicked |
@@ -60,7 +65,6 @@
 use std::io::BufRead;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -68,10 +72,11 @@ use tasty_net_demo::table::table_lines;
 use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
-use tasty_net_ssh::{Backoff, PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
+use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, ChannelReader, ChannelWriter, ConnectionTable, DialConfig, EndReason,
-    HandshakeError, Holder, LinkCloser, Side, SshTransport, Transport, dial_handshake,
+    AttemptCancel, ChannelReader, ChannelWriter, ConnectOptions, ConnectionId, ConnectionTable,
+    DialConfig, EndReason, HandshakeError, Holder, LinkCloser, LinkId, RedialError, Redialer,
+    RedialerConfig, Side, SshTransport, Transport, dial_handshake,
 };
 
 const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remote path> \
@@ -80,6 +85,9 @@ const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remo
 
 /// Exit code when a refusal ends the dialer without another attempt.
 const EXIT_REJECTED: u8 = 3;
+
+/// Exit code when the redialer gave up or the loss was not one to redial.
+const EXIT_GAVE_UP: u8 = 4;
 
 /// Added to the write timeout and the drain cap when waiting for the stdin thread to finish
 /// its Detach after `quit`: the time to drop the writer and end the tunnel `ssh`.
@@ -107,7 +115,8 @@ struct Shared {
     hold_writer: Duration,
     /// The writer and closer of the link that is up.
     link: Mutex<Option<(ChannelWriter, LinkCloser)>>,
-    /// The attempt in progress, so `quit` can cancel it.
+    /// The attempt in progress, or the redial waiting for its next one, so `quit` can cancel
+    /// it.
     attempt: Mutex<Option<AttemptCancel>>,
     /// The connection table the transport reports in, for the `table` line.
     connections: ConnectionTable,
@@ -117,6 +126,21 @@ struct Shared {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Why no link came up.
+enum NoLink {
+    /// The first attempt (no lost entry yet) failed.
+    Attempt(HandshakeError),
+    /// The redial of a lost entry ended.
+    Redial(RedialError),
+}
+
+/// What reaches the server and what every attempt dials with.
+struct Dial {
+    transport: SshTransport,
+    target: SshTarget,
+    config: DialConfig,
 }
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -172,13 +196,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let connections = ConnectionTable::default();
     let transport = SshTransport::new(launcher, discovery, PortMode::FileUnix)
         .with_connections(connections.clone());
+    let redialer = Redialer::new(&connections, RedialerConfig::new())?;
     let instance_id = match args.value("instance-id") {
         Some(id) => id.to_string(),
         None => format!("demo-dialer-{}", std::process::id()),
     };
     let key = DeviceKey::generate()?;
     let device = key.id().to_string();
-    let config = DialConfig::new(key, instance_id.clone()).with_timeouts(timeouts);
+    let dial = Dial {
+        transport,
+        target,
+        config: DialConfig::new(key, instance_id.clone()).with_timeouts(timeouts),
+    };
 
     emit(&format!("dialer pid={}", std::process::id()));
     let hold_writer = match std::env::var(HOLD_WRITER_ENV) {
@@ -194,84 +223,70 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .saturating_add(DETACH_END_MARGIN);
     let shared = Arc::new(Shared {
         hold_writer,
-        connections,
+        connections: connections.clone(),
         device,
         ..Shared::default()
     });
-    let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let stdin_thread = {
         let shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("stdin".into())
-            .spawn(move || read_stdin(&shared, &wake_tx))?
+            .spawn(move || read_stdin(&shared))?
     };
 
-    let mut backoff = Backoff::new();
+    let options = ConnectOptions::new().with_holder(holder);
     let mut attempt = 0u32;
+    // The entry of the loss to redial; none before the first attempt.
+    let mut lost: Option<ConnectionId> = None;
     while !shared.quit.load(Ordering::SeqCst) {
-        attempt += 1;
-        emit(&format!("dialer attempt n={attempt}"));
         let cancel = AttemptCancel::new();
         *lock(&shared.attempt) = Some(cancel.clone());
         if shared.quit.load(Ordering::SeqCst) {
             cancel.cancel();
         }
-        let result = transport
-            .connect(&target, &cancel)
-            .map_err(HandshakeError::Connect)
-            .and_then(|conn| dial_handshake(conn, &config, holder, None, &cancel));
-        lock(&shared.attempt).take();
-        match result {
-            Ok(mut link) => {
-                backoff.reset();
-                let Some((reader, writer)) = link.take_ordered() else {
-                    return Err("a new link has no ordered channel".into());
-                };
-                let Some(roles) = link.peer().roles() else {
-                    return Err("an attach link has no roles".into());
-                };
-                emit(&format!(
-                    "dialer connected attempt={attempt} instance={} tunnel_pid={}",
-                    link.peer().instance_id(),
-                    tunnel_pid.load(Ordering::SeqCst)
-                ));
-                emit(&format!(
-                    "dialer roles local=dialer launcher={} dialer={} provider={} holder={} \
-                     redialer={}",
-                    roles.ssh_launcher.map_or("none", side_name),
-                    side_name(roles.dialer),
-                    side_name(roles.provider),
-                    side_name(roles.holder),
-                    side_name(roles.redialer)
-                ));
-                let provides = roles.provider == Side::Dialer;
-                // The provider sends the descriptor first (O2), before any stdin line can.
-                if provides {
-                    let descriptor = Snapshot {
-                        instance_id: instance_id.clone(),
-                        client_id: link.client_id().unwrap_or(0),
-                    }
-                    .to_json();
-                    if let Err(error) =
-                        writer.write_frame(StreamTag::Control, descriptor.as_bytes())
-                    {
-                        emit(&format!("dialer send-failed error={error}"));
-                    }
-                }
-                *lock(&shared.link) = Some((writer, link.closer()));
-                if shared.quit.load(Ordering::SeqCst) {
-                    detach(&shared, Duration::ZERO);
-                }
-                let end = read_link(reader, provides.then_some(&*shared));
-                lock(&shared.link).take();
-                drop(link);
-                if shared.quit.load(Ordering::SeqCst) {
-                    break;
-                }
-                emit(&format!("dialer lost failure={end}"));
+        let mut once = |options: &ConnectOptions| {
+            attempt += 1;
+            emit(&format!("dialer attempt n={attempt}"));
+            let result = dial
+                .transport
+                .connect_with(&dial.target, &cancel, options)
+                .map_err(HandshakeError::Connect)
+                .and_then(|conn| dial_handshake(conn, &dial.config, holder, None, &cancel));
+            if let Err(error) = &result
+                && error.is_retryable()
+            {
+                emit(&format!("dialer retry error={}", error_chain(error)));
             }
-            Err(HandshakeError::Cancelled) if shared.quit.load(Ordering::SeqCst) => break,
-            Err(error) if !error.is_retryable() => {
+            result
+        };
+        let result = match lost.take() {
+            None => once(&options).map_err(NoLink::Attempt),
+            Some(entry) => redialer
+                .redial(entry, None, &cancel, &mut once)
+                .map_err(NoLink::Redial),
+        };
+        lock(&shared.attempt).take();
+        let quitting = shared.quit.load(Ordering::SeqCst);
+        let mut link = match result {
+            Ok(link) => link,
+            Err(
+                NoLink::Attempt(HandshakeError::Cancelled)
+                | NoLink::Redial(
+                    RedialError::Cancelled | RedialError::Failed(HandshakeError::Cancelled),
+                ),
+            ) if quitting => break,
+            Err(NoLink::Attempt(error)) if error.is_retryable() => {
+                // The failed attempt's entry is the newest one; the redialer names it.
+                lost = Some(
+                    connections
+                        .connections()
+                        .last()
+                        .map(|entry| entry.id)
+                        .ok_or("a failed attempt left no entry in the connection table")?,
+                );
+                continue;
+            }
+            Err(NoLink::Attempt(error) | NoLink::Redial(RedialError::Failed(error))) => {
                 let reason = match &error {
                     HandshakeError::Rejected { reason, .. } => reason.as_str().to_string(),
                     HandshakeError::SelfAttach => "self_attach".into(),
@@ -286,14 +301,60 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 // in this thread, with the transport, so the tunnel `ssh` ends before exit.
                 drop(error);
                 drop(lock(&shared.link).take());
-                drop(transport);
+                drop(dial);
                 return Ok(ExitCode::from(EXIT_REJECTED));
             }
-            Err(error) => emit(&format!("dialer retry error={}", error_chain(&error))),
+            Err(NoLink::Redial(error)) => {
+                emit(&format!("dialer gave-up error={}", error_chain(&error)));
+                drop(error);
+                drop(dial);
+                return Ok(ExitCode::from(EXIT_GAVE_UP));
+            }
+        };
+        let entry = entry_of(&connections, link.link_id());
+        let Some((reader, writer)) = link.take_ordered() else {
+            return Err("a new link has no ordered channel".into());
+        };
+        let Some(roles) = link.peer().roles() else {
+            return Err("an attach link has no roles".into());
+        };
+        emit(&format!(
+            "dialer connected attempt={attempt} instance={} tunnel_pid={}",
+            link.peer().instance_id(),
+            tunnel_pid.load(Ordering::SeqCst)
+        ));
+        emit(&format!(
+            "dialer roles local=dialer launcher={} dialer={} provider={} holder={} redialer={}",
+            roles.ssh_launcher.map_or("none", side_name),
+            side_name(roles.dialer),
+            side_name(roles.provider),
+            side_name(roles.holder),
+            side_name(roles.redialer)
+        ));
+        let provides = roles.provider == Side::Dialer;
+        // The provider sends the descriptor first (O2), before any stdin line can.
+        if provides {
+            let descriptor = Snapshot {
+                instance_id: instance_id.clone(),
+                client_id: link.client_id().unwrap_or(0),
+            }
+            .to_json();
+            if let Err(error) = writer.write_frame(StreamTag::Control, descriptor.as_bytes()) {
+                emit(&format!("dialer send-failed error={error}"));
+            }
         }
-        // Wait out the backoff; `quit` wakes the wait.
-        let _woken = wake_rx.recv_timeout(backoff.current()).is_ok();
-        backoff.advance();
+        *lock(&shared.link) = Some((writer, link.closer()));
+        if shared.quit.load(Ordering::SeqCst) {
+            detach(&shared, Duration::ZERO);
+        }
+        let end = read_link(reader, provides.then_some(&*shared));
+        lock(&shared.link).take();
+        drop(link);
+        if shared.quit.load(Ordering::SeqCst) {
+            break;
+        }
+        emit(&format!("dialer lost failure={end}"));
+        lost = Some(entry.ok_or("the lost link has no entry in the connection table")?);
     }
     // `quit` or the end of stdin: the stdin thread sets `quit` and then detaches, holding the
     // writer, which keeps the tunnel. Its end means the writer is gone.
@@ -301,9 +362,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if stdin_thread.is_finished() && stdin_thread.join().is_err() {
         emit("dialer stdin-thread-panicked");
     }
-    drop(transport);
+    drop(dial);
     emit("dialer bye");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The entry of the connection table that carries the attach link `link`.
+fn entry_of(table: &ConnectionTable, link: LinkId) -> Option<ConnectionId> {
+    table
+        .connections()
+        .into_iter()
+        .find(|entry| entry.links.iter().any(|l| l.link_id == link))
+        .map(|entry| entry.id)
 }
 
 /// Waits up to `limit` for the stdin thread to end. Says so on stdout when it does not.
@@ -387,7 +457,7 @@ fn read_link(mut reader: ChannelReader, provider: Option<&Shared>) -> &'static s
 }
 
 /// Reads stdin commands: `send <text>`, `table` and `quit`. The end of stdin is `quit`.
-fn read_stdin(shared: &Shared, wake: &mpsc::Sender<()>) {
+fn read_stdin(shared: &Shared) {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -418,12 +488,11 @@ fn read_stdin(shared: &Shared, wake: &mpsc::Sender<()>) {
         }
     }
     shared.quit.store(true, Ordering::SeqCst);
+    // Cancels the attempt in progress, or wakes the redialer's wait.
     if let Some(cancel) = lock(&shared.attempt).as_ref() {
         cancel.cancel();
     }
     detach(shared, shared.hold_writer);
-    // The loop may be waiting out a backoff. A failed send means it already ended.
-    let _sent = wake.send(()).is_ok();
 }
 
 /// Sends Detach on the link that is up and ends its writer; the server answers by ending its
