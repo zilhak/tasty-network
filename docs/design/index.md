@@ -46,7 +46,7 @@
 | CI | GitHub 호스트 러너 세 OS | [CI와 시험 환경](testing.md) |
 | 버전 | workspace 버전 하나, 태그 `v<semver>`(main), tasty는 git + `rev` 고정, `CHANGELOG.md` | [버전·호환](versioning.md) |
 | 모바일 | target 4개(Android 기기·에뮬레이터, iOS 기기·시뮬레이터). iOS는 빌드 검사와 Swift 바인딩 생성 구조까지. 모바일에서 컴파일되는 코드는 다른 프로그램을 실행하지 않는다. 바인딩은 새 크레이트 `tasty-net-ffi`(UniFFI) | [모바일](mobile.md) |
-| SSH 백엔드 | 시스템 ssh와 내장(russh) 둘. `ssh.backend` `auto`(기본, OpenSSH를 찾으면 시스템, 못 찾으면 내장)·`system`·`embedded`. OS로 나누지 않음. 내장은 OpenSSH 파일을 같은 뜻으로 읽고, 구현하지 않은 지시어는 보이며 보안에 걸린 것은 거부. feature `system-ssh`·`embedded-ssh`(두 단계). 내장 = russh + OpenSSH 10.6p2 해석 이식(`tasty-net-ssh-config`, `BSD-2-Clause AND ISC`). 모르는 지시어는 거부. exec·SFTP 포함 | [SSH 백엔드](ssh-backends.md) |
+| SSH 백엔드 | 시스템 ssh와 내장(russh) 둘. `ssh.backend` `auto`(기본, OpenSSH를 찾으면 시스템, 못 찾으면 내장)·`system`·`embedded`. OS로 나누지 않음. 내장은 OpenSSH 파일을 같은 뜻으로 읽고, 구현하지 않은 지시어는 보이며 보안에 걸린 것은 거부. feature `system-ssh`·`embedded-ssh`(두 단계). 내장 = russh + OpenSSH 10.6p2 해석 이식(`tasty-net-ssh-config`, `BSD-2-Clause AND ISC AND SSH-short`). 모르는 지시어는 거부. exec·SFTP 포함 | [SSH 백엔드](ssh-backends.md) |
 | 동작 수준 | D1~D10(세 OS CI, SSH 정방향·역할 반전, P2P, rendezvous 서버, 원격 전체 시험, tasty 의존 없음, P2P 격리, 연결 목록, 설정값 노출). 다른 망 펀칭 실험은 넣지 않음(P1) | [동작 수준 기준](done-criteria.md) |
 
 ## 남은 결정

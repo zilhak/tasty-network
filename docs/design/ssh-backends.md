@@ -12,6 +12,7 @@
 | 2026-11-27 | 추가 결정 4: 내장 SSH는 "russh + OpenSSH 해석 이식", 모르는 키워드는 "OpenSSH처럼 거부 + 구분", 라이선스는 "별도 크레이트로 분리" | 연결과 암호는 russh가 맡는다. 설정 해석과 known_hosts 해석은 OpenSSH 코드를 옮긴 [이식 크레이트](#openssh-해석-이식-크레이트)가 맡는다. [지시어 분류](#지시어-분류), [호스트 키 판정](#호스트-키-판정), [알고리즘](#알고리즘) |
 | 2026-11-27 | 추가 결정 4의 기술 판단(director): russh 보안 패치를 따라가고 CI에 cargo-audit를 둔다. `@cert-authority` 줄은 1단계에서 믿지 않는다. ppk처럼 OpenSSH가 읽지 못하는 키 형식은 읽지 않는다. 모바일은 앱 저장소의 `ssh/` 폴더를 `~/.ssh`로 본다. 암호 백엔드는 ring이다. `ssh-key =0.7.0-rc.12` 고정을 위험으로 적는다 | 아래 각 절 |
 | 2026-11-27 | director 2852: tasty-android는 원격 파일을 SFTP로, Git 정보를 원격 git 명령(exec 채널)으로 가져온다 | [터널·exec·SFTP](#터널execsftp) |
+| 2026-11-27 | director 2881: 이식 크레이트 라이선스는 `BSD-2-Clause AND ISC AND SSH-short`. 거부는 무시하면 보안이 약해지는 지시어에만, 제공하지 않는 인증 방법을 켜는 지시어는 표시하고 다음 인증으로 진행 | [라이선스](#라이선스), [지시어 분류](#지시어-분류) |
 
 ## 백엔드
 
@@ -309,7 +310,7 @@ struct SshInspection {
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
-- 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`·`LocalCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다.
+- 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
 ### 결과 API
 
@@ -327,9 +328,18 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
 
 ### 라이선스
 
-- `Cargo.toml`: `license = "BSD-2-Clause AND ISC"`. 크레이트 폴더에 `LICENSE-OpenSSH`(원본 `LICENCE` 전문, 412줄)를 둔다.
-- 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는다. 원본 파일과 함수를 모듈 문서에 적는다.
-- 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`가 이미 있다.
+- `Cargo.toml`: `license = "BSD-2-Clause AND ISC AND SSH-short"`(director 2881). 크레이트 폴더에 `LICENSE-OpenSSH`(원본 `LICENCE` 전문, 412줄)를 둔다.
+- 표기는 옮기는 파일의 실제 조항을 따른다(기준 커밋의 머리 고지):
+
+  | 조항 | 파일 | SPDX |
+  |---|---|---|
+  | Tatu Ylonen 조항만 | `readconf.c`, `readconf.h`, `sshconnect.c`, `hostfile.h` | `SSH-short` |
+  | Tatu Ylonen 조항과 BSD | `ssh.c`, `hostfile.c`, `match.c` | `SSH-short`, `BSD-2-Clause` |
+  | ISC | `misc.c` | `ISC` |
+  | BSD | `kex-names.c`, `myproposal.h`, `sshconnect2.c` | `BSD-2-Clause` |
+
+- Tatu Ylonen 조항은 파생물을 그렇게 표시하라고 요구한다("Any derived versions of this software must be clearly marked as such"). 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는 것으로 이 요구를 지킨다. 원본 파일과 함수를 모듈 문서에 적는다.
+- 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`는 이미 있고, `SSH-short`는 이식 크레이트 작업이 더한다. cargo-deny가 `SSH-short`를 받지 못하면(라이선스 식을 해석하지 못하거나 허용 목록에 넣지 못하면) 그 작업은 다른 표기나 예외 설정으로 돌아가지 않고 보고한다.
 - Tasty·Android 앱의 라이선스 고지에 OpenSSH 고지를 넣는 일은 앱 쪽 전환 작업이다.
 
 ## 내장 백엔드가 읽는 파일
@@ -362,12 +372,16 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | OpenSSH가 버린 지시어 | OpenSSH도 적용하지 않는다(`oDeprecated`·`oUnsupported`·`oIgnore`, `readconf.c:2579`–`:2589`) | `shown`(`oIgnore`는 `ignored`) |
 | 모르는 지시어 | 파일 전체를 거부한다(아래) | `refused` / `ignored` |
 
-보안 관련으로 보는 기준(추가 결정 4의 "보안 관련"을 이렇게 읽는다): 이 연결을 믿는 근거(호스트 키 판정), 클라이언트가 내미는 신원과 인증 방법(키 소스, 인증 방법), 연결 대상과 경로, 다른 프로그램 실행에 쓰이는 지시어다. 이 지시어를 구현하지 않은 채 기본값이 아닌 값이 적용되면 거부한다. 상대에게 기능을 넘기는 지시어(agent·X11·포워딩)와 표시·로그 값은 보안 관련으로 보지 않는다. 구현하지 않으면 넘기지 않거나 보이지 않을 뿐이기 때문이다.
+거부와 표시를 가르는 기준(director 2881이 추가 결정 4의 "보안 관련"을 다듬었다): 묻는 것은 "그 값을 구현하지 않고 무시하면 무엇이 되는가"다.
+
+- 거부: 무시하면 보안이 약해지는 값. 호스트 키 확인과 그 근거(known_hosts, 폐기 목록, DNS 지문), 알고리즘 허용 범위, 인증서 신뢰, 사용자가 요구한 인증 방식의 강도다. 또 무시하면 다른 호스트나 다른 경로로 연결되는 값(대상 이름 바꾸기, 프록시, 나가는 인터페이스, 블록 적용을 판정할 수 없는 `Match`)도 거부한다. 사용자가 정하지 않은 상대에게 연결하고 인증 정보를 내밀게 되기 때문이다.
+- 표시하고 계속: 무시하면 그 기능을 쓰지 않을 뿐인 값. 제공하지 않는 인증 방법이나 키 소스를 켜는 값(GSSAPI, hostbased, PKCS#11, 보안 키 제공자)은 그 방법을 시도하지 않고 다음 인증 방법으로 넘어간다. OpenSSH도 그 방법이 실패하면 다음으로 넘어가므로 결과는 그 방법이 실패한 OpenSSH와 같다. 상대에게 기능을 넘기는 값(agent·X11·포워딩·자격 위임), 연결 뒤 로컬 명령, 표시·로그 값도 같다.
+- 근거 사례: Fedora·RHEL 계열은 시스템 설정 `/etc/ssh/ssh_config.d/50-redhat.conf`에서 `GSSAPIAuthentication yes`를 켠다. 이것을 거부하면 그런 호스트에서 내장 백엔드의 모든 연결이 막힌다.
 
 ### 모르는 지시어
 
-- OpenSSH는 모르는 이름을 만나면 그 줄이 어느 블록에 있든(적용되지 않는 `Host` 블록 안이어도) 오류로 센다. 이름 찾기(`parse_token`, `readconf.c:959`–`:973`)가 블록 적용 판정보다 먼저이기 때문이다. 그 파일을 다 읽은 뒤 `terminating, N bad configuration options`로 끝낸다(`readconf.c:2672`–`:2681`). 내장 백엔드도 같다: 모르는 이름이 하나라도 있으면 그 파일을 읽는 모든 연결을 거부하고, 파일 단위 `ConfigNote`(`unknown_keyword`, 파일·줄)를 남긴다.
-- 예외는 `IgnoreUnknown`뿐이다. OpenSSH는 그 줄을 읽는 때에 이미 정해진 `IgnoreUnknown` 값의 패턴과 맞는 모르는 이름만 무시한다(`oIgnoredUnknownOption`). `IgnoreUnknown` 자체는 첫 값 우선이고 적용되는 블록에서만 정해진다(`readconf.c:2211`–`:2213`, `parse_string`). 그래서 그 줄보다 앞에 있거나 적용되지 않는 블록에 있는 `IgnoreUnknown`은 무시를 만들지 않는다. 내장 백엔드도 같은 순서로 판정한다.
+- OpenSSH는 모르는 이름을 만나면 그 줄이 어느 블록에 있든(적용되지 않는 `Host` 블록 안이어도) 오류로 센다. 이름 찾기(`parse_token`, `readconf.c:959`–`:973`)가 블록 적용 판정보다 먼저이기 때문이다. 그 파일을 다 읽은 뒤 `terminating, N bad configuration options`로 끝낸다(`readconf.c:2672`–`:2681`). 적용되지 않는 블록 안의 `Include`도 OpenSSH는 "parse only"로 읽으므로(`readconf.c:2125`–`:2140`, `SSHCONF_NEVERMATCH`) 그 파일의 모르는 이름도 같다. 내장 백엔드도 같다: 모르는 이름이 하나라도 있으면 그 파일을 읽는 모든 연결을 거부하고, 파일 단위 `ConfigNote`(`unknown_keyword`, 파일·줄)를 남긴다.
+- 예외는 `IgnoreUnknown`뿐이다. OpenSSH는 그 줄을 읽는 때에 이미 정해진 `IgnoreUnknown` 값의 패턴과 맞는 모르는 이름만 무시한다(`oIgnoredUnknownOption`). `IgnoreUnknown` 자체는 첫 값 우선이고 적용되는 블록에서만 정해진다(`readconf.c:2211`–`:2213`, `parse_string`). 그래서 그 줄보다 뒤에 있거나 적용되지 않는 블록에 있는 `IgnoreUnknown`은 무시를 만들지 않는다. 내장 백엔드도 같은 순서로 판정한다.
 - `IgnoreUnknown`은 아는 이름에는 효과가 없다. 그래서 보안 관련 미구현 지시어의 거부를 무를 수 없다.
 
 ### 아는 지시어의 판정 때
@@ -396,35 +410,27 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `ProxyCommand none` | 프로세스를 시작하지 않는다. `none`이 아닌 값은 거부 |
 | `SendEnv`, `SetEnv` | exec·포트 발견 채널의 `env` 요청 |
 | `RemoteCommand` | exec·포트 발견에 명령이 있는데 `RemoteCommand`(`none` 아님)도 적용되면 OpenSSH처럼 실패한다(`ssh.c:1363`–`:1364`, `Cannot execute command-line and remote command`). 터널(`-N`, 세션 없음)과 SFTP(`-s`)에는 쓰이지 않는다 |
-| `CanonicalizeHostname no`, `CanonicalDomains`, `CanonicalizeFallbackLocal`, `CanonicalizeMaxDots` | 뒤의 셋은 `CanonicalizeHostname`이 켜졌을 때만 쓰인다(켜는 값은 거부) |
-| `CanonicalizePermittedCNAMEs none` | `none`이 아닌 값은 거부(아래) |
+| `CanonicalizeHostname no`, `CanonicalDomains`, `CanonicalizeFallbackLocal`, `CanonicalizeMaxDots`, `CanonicalizePermittedCNAMEs` | 뒤의 넷은 `CanonicalizeHostname`이 켜졌을 때만 이름을 바꾼다(켜는 값은 거부). `CanonicalizePermittedCNAMEs`가 있으면 OpenSSH는 프록시 없는 연결에서 이름을 먼저 풀지만 `CanonicalizeHostname no`면 CNAME을 따라가지 않는다(`ssh.c:1229`–`:1240`이 부르는 `check_follow_cname`의 `:383`). 풀지 못하면 OpenSSH는 255로 끝나고, 내장 백엔드는 같은 이름으로 연결하다 같은 이름 풀기 실패로 끝난다 |
 | `NoHostAuthenticationForLocalhost no` | `yes`는 거부 |
 | `VerifyHostKeyDNS no` | `yes`·`ask`는 거부 |
-| `PermitLocalCommand no` | `yes`이고 `LocalCommand`가 있으면 거부 |
-| `GSSAPIAuthentication no`, `GSSAPIDelegateCredentials no`, `HostbasedAuthentication no` | `yes`는 거부 |
-| `PKCS11Provider none`(`SmartcardDevice`), `SecurityKeyProvider internal` | 다른 값은 거부 |
+| `SessionType` | 두 백엔드 모두 용도가 첫 값으로 정하므로 설정 파일의 값은 이기지 못한다([용도마다 해석](#용도마다-해석하고-같을-때만-세션을-나눈다)). 설정에 적힌 값과 용도의 값이 다르면 `shown`을 남긴다 |
 | `RefuseConnection` | OpenSSH처럼 그 메시지로 연결을 끝낸다 |
 
 ### 보안 관련 미구현 (적용되면 거부)
 
 | 지시어·값 | 이유 |
 |---|---|
-| `StrictHostKeyChecking no`·`off` | 호스트 키 확인을 건너뛰는 동작은 두지 않는다(사용자 결정) |
-| `NoHostAuthenticationForLocalhost yes` | localhost의 호스트 키 확인을 건너뛴다(`sshconnect.c:1013`) |
-| `VerifyHostKeyDNS yes`·`ask` | 호스트 키를 믿는 근거(DNS SSHFP)를 바꾸는 지시어다. 구현하지 않았다 |
+| `StrictHostKeyChecking no`·`off` | 호스트 키 확인을 건너뛰는 동작은 두지 않는다(사용자 결정). 무시하고 확인하면 사용자가 적은 값과 다르게 동작하므로 조용히 바꾸지 않고 거부로 알린다 |
+| `NoHostAuthenticationForLocalhost yes` | localhost의 호스트 키 확인을 건너뛴다(`sshconnect.c:1013`). 위와 같은 이유 |
+| `VerifyHostKeyDNS yes`·`ask` | 호스트 키를 믿는 근거(DNS SSHFP)다. 무시하면 DNS 지문과 맞지 않는 키를 `accept-new`가 받을 수 있다 |
 | `KnownHostsCommand` | 다른 프로그램을 실행해야 하고, 빠지면 `accept-new`가 다른 키를 받을 수 있다 |
 | `RevokedHostKeys`가 KRL 파일 | 폐기 목록을 읽지 못하면 폐기된 키를 받을 수 있다 |
 | `ProxyCommand`(`none` 아님), `ProxyJump` 뒤에 온 `ProxyCommand`(`none` 아님) | 다른 프로그램 실행이다. 뒤의 경우는 OpenSSH도 `inconsistent options: ProxyCommand+ProxyJump`로 끝낸다(`ssh.c:1300`–`:1303`). `ProxyCommand`가 먼저면 `ProxyJump`는 OpenSSH에서도 쓰이지 않는다(`parse_jump`의 `active &= proxy_command == NULL && jump_host == NULL`, `readconf.c:3493`) |
-| `PermitLocalCommand yes`와 `LocalCommand` | 다른 프로그램 실행이다. `PermitLocalCommand`가 `no`(기본)면 `LocalCommand`는 쓰이지 않으므로 `shown`이다 |
 | `Match exec` | 다른 프로그램을 실행해야 블록 적용을 판정한다. 판정하지 못한 블록의 `Hostname`·`ProxyJump`가 빠지면 고르는 대상이 달라진다 |
 | `Match localnetwork` | 블록 적용을 판정하지 못한다(같은 이유) |
-| `CanonicalizeHostname yes`·`always` | 고르는 호스트가 달라진다 |
-| `CanonicalizePermittedCNAMEs`(`none` 아님) | `CanonicalizeHostname no`여도 프록시 없는 연결이면 OpenSSH가 이름을 풀어 CNAME을 따라가 호스트를 바꾼다(`ssh.c:1229`–`:1240`, `config_has_permitted_cnames`). 내장 백엔드는 따라가지 않으므로 고르는 호스트가 달라진다 |
-| `BindInterface` | 나가는 경로가 달라진다(사용자가 정한 경로를 벗어나 연결할 수 있다) |
-| `PubkeyAuthentication host-bound` | 사용자가 요구한 인증 방식을 지킬 수 없다 |
-| `GSSAPIAuthentication yes`, `GSSAPIDelegateCredentials yes` | 인증 방법과 자격 위임이다. russh에 GSSAPI 구현이 없다 |
-| `HostbasedAuthentication yes` | 인증 방법이다. `ssh-keysign` 프로그램이 필요하다 |
-| `PKCS11Provider`(`SmartcardDevice`, `none` 아님), `SecurityKeyProvider`(`internal` 아님) | 내미는 키의 소스다. 건너뛰면 OpenSSH와 다른 키를 내민다 |
+| `CanonicalizeHostname yes`·`always` | 무시하면 OpenSSH와 다른 호스트로 연결한다 |
+| `BindInterface` | 무시하면 사용자가 정한 인터페이스(예: VPN)가 아닌 경로로 나간다 |
+| `PubkeyAuthentication host-bound` | 사용자가 요구한 인증 방식의 강도다. 무시하면 host-bound가 막는 서명 재사용을 막지 못한다 |
 | 알고리즘 지시어의 교집합이 빔 | [알고리즘](#알고리즘) |
 | 모르는 지시어 | 위 "모르는 지시어" |
 
@@ -436,11 +442,14 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `ControlMaster`, `ControlPath`, `ControlPersist` | 세션을 프로세스 밖과 공유하지 않는다 |
 | `ForwardAgent`, `AddKeysToAgent` | agent를 넘기지 않고 키를 넣지 않는다 |
 | `ForwardX11`, `ForwardX11Trusted`, `ForwardX11Timeout`, `XAuthLocation`, `Tunnel`, `TunnelDevice`, `StreamLocalBindMask`, `StreamLocalBindUnlink` | 해당 기능이 없다 |
-| `RequestTTY`, `SessionType`, `StdinNull`, `ForkAfterAuthentication`, `EscapeChar`, `EnableEscapeCommandline`, `ObscureKeystrokeTiming`, `ChannelTimeout` | 대화형 세션이 없다. 세션 종류는 용도가 명령행 자리(첫 값)에서 정하므로 설정의 `SessionType`은 쓰이지 않는다 |
-| `LocalCommand`(`PermitLocalCommand no`일 때) | OpenSSH도 실행하지 않는다 |
+| `RequestTTY`, `StdinNull`, `ForkAfterAuthentication`, `EscapeChar`, `EnableEscapeCommandline`, `ObscureKeystrokeTiming`, `ChannelTimeout` | 대화형 세션이 없다 |
+| `PermitLocalCommand`, `LocalCommand` | 연결 뒤 로컬 명령을 실행하지 않는다. 무시해도 보안이 약해지지 않는다 |
+| `GSSAPIAuthentication`, `GSSAPIDelegateCredentials` | GSSAPI 인증을 시도하지 않고 다음 인증 방법으로 넘어간다. russh에 GSSAPI 구현이 없다. `yes`일 때만 표시한다 |
+| `HostbasedAuthentication` | hostbased 인증을 시도하지 않는다(`ssh-keysign` 프로그램이 필요하다). `yes`일 때만 표시한다 |
+| `PKCS11Provider`(`SmartcardDevice`), `SecurityKeyProvider` | 그 키 소스의 키를 내밀지 않고 남은 키와 방법으로 인증한다. `none`이 아닌 값일 때만 표시한다. 보안 키(`*-sk`) 개인키 파일은 제공자가 없으므로 건너뛰고 `ConfigNote`(`unsupported_key_format`)로 남긴다 |
 | `ProxyUseFdpass` | `ProxyCommand`가 거부되므로 쓰일 곳이 없다 |
 | `Compression yes` | 압축 없이 연결한다(russh `flate2` feature를 켜지 않는다) |
-| `HostbasedAcceptedAlgorithms`(`HostbasedKeyTypes`), `EnableSSHKeysign` | `HostbasedAuthentication yes`가 거부되므로 쓰일 곳이 없다 |
+| `HostbasedAcceptedAlgorithms`(`HostbasedKeyTypes`), `EnableSSHKeysign` | hostbased 인증을 하지 않으므로 쓰일 곳이 없다 |
 | `UpdateHostKeys` | known_hosts에 새 키를 더하지 않는다. 이 연결의 판정은 바뀌지 않는다 |
 | `LogLevel`, `LogVerbose`, `SyslogFacility`, `VisualHostKey`, `FingerprintHash`, `WarnWeakCrypto`, `VersionAddendum`, `IPQoS` | 출력·표시·패킷 표시 값이다 |
 
