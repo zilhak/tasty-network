@@ -47,6 +47,7 @@
 #   CONTAINER_CHECK_STOP_SECONDS      docker stop이 SIGINT 뒤 기다리는 시간(초, 1–3600). 넘으면 SIGKILL하고 실패. 기본 15
 #   CONTAINER_CHECK_MESSAGE_BYTES     echo할 메시지 크기(바이트, 1–120000). 기본 98304
 set -uo pipefail
+# 배열은 ${A[@]+"${A[@]}"}로 펼친다. bash 4.4 전(macOS의 3.2)은 set -u에서 빈 배열 "${A[@]}"를 오류로 본다.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -208,7 +209,7 @@ BUILT_IMAGE=""
 PEER_PIDS=()
 cleanup() {
     local p
-    for p in "${PEER_PIDS[@]}"; do
+    for p in ${PEER_PIDS[@]+"${PEER_PIDS[@]}"}; do
         kill "$p" 2>/dev/null || true
     done
     if [[ -n "$CONTAINER" ]]; then
@@ -323,7 +324,7 @@ main_check() {
         peer=$P2P_PEER
     else
         log "빌드: ${PEER_BUILD_CMD[*]}"
-        json=$(cd "$ROOT" && "${PEER_BUILD_CMD[@]}") || unsure "p2p_peer 빌드 실패"
+        json=$(cd "$ROOT" && ${PEER_BUILD_CMD[@]+"${PEER_BUILD_CMD[@]}"}) || unsure "p2p_peer 빌드 실패"
         # 실행 파일 경로는 cargo 출력의 executable 값에서 얻는다(target 폴더 위치를 짐작하지 않는다).
         peer=$(executable_of "$json" p2p_peer)
         [[ -x "$peer" ]] || unsure "빌드 출력에서 p2p_peer 실행 파일을 찾지 못했다: $peer"
@@ -402,13 +403,13 @@ main_check() {
     message=$(printf '%*s' "$MESSAGE_BYTES" '' | tr ' ' x)
     local common=(--server "127.0.0.1:$primary_port" --server-key "$pub" --timeout "$PEER_TIMEOUT"
         --host-ip "$host_ip")
-    "$peer" --listen --key-dir "$TMP/listener" --peer "$dialer_id" "${common[@]}" \
+    "$peer" --listen --key-dir "$TMP/listener" --peer "$dialer_id" ${common[@]+"${common[@]}"} \
         >"$TMP/listener.out" 2>"$TMP/listener.log" &
     PEER_PIDS+=($!)
-    "$peer" --dial "$listener_id" --key-dir "$TMP/dialer" --message "$message" "${common[@]}" \
+    "$peer" --dial "$listener_id" --key-dir "$TMP/dialer" --message "$message" ${common[@]+"${common[@]}"} \
         >"$TMP/dialer.out" 2>"$TMP/dialer.log" &
     PEER_PIDS+=($!)
-    wait_until "$PEER_WAIT_SECONDS" all_ended "${PEER_PIDS[@]}" \
+    wait_until "$PEER_WAIT_SECONDS" all_ended ${PEER_PIDS[@]+"${PEER_PIDS[@]}"} \
         || fail_at "예제가 ${PEER_WAIT_SECONDS}s 안에 끝나지 않았다"
     listen_rc=0
     wait "${PEER_PIDS[0]}" || listen_rc=$?
