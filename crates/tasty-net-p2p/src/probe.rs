@@ -60,7 +60,7 @@ pub(crate) async fn run(
     let mut sent = sock::Waiting::new(router.clone(), tx);
     let mut tick = tokio::time::interval(interval);
     let mut next = usize::MIN;
-    let found = loop {
+    loop {
         tokio::select! {
             _ = tokio::time::sleep_until(until) => break None,
             _ = tick.tick() => {
@@ -88,8 +88,7 @@ pub(crate) async fn run(
                 }
             }
         }
-    };
-    found
+    }
 }
 
 #[cfg(test)]
@@ -215,15 +214,14 @@ mod tests {
             8,
         ));
         let until = Instant::now() + Duration::from_secs(60);
-        let run = run(
+        let mut run = Box::pin(run(
             &router,
             &io,
             &session,
             Duration::from_millis(5),
             until,
             true,
-        );
-        tokio::pin!(run);
+        ));
         let cut = tokio::time::timeout(Duration::from_millis(50), &mut run).await;
         assert!(cut.is_err(), "no answers, so it runs on");
         assert!(router.waiting() > 0);

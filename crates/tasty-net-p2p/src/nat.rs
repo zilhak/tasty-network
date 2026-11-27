@@ -214,8 +214,13 @@ mod tests {
         let router = Arc::new(StunRouter::default());
         let io: Arc<dyn PacketIo> = Arc::new(crate::probe::tests_support::Sink);
         let targets = [a("198.51.100.1:3478"), a("198.51.100.2:3478")];
-        let detect = detect(&router, &io, &targets, Duration::from_millis(10), 100);
-        tokio::pin!(detect);
+        let mut detect = Box::pin(detect(
+            &router,
+            &io,
+            &targets,
+            Duration::from_millis(10),
+            100,
+        ));
         let cut = tokio::time::timeout(Duration::from_millis(50), &mut detect).await;
         assert!(cut.is_err(), "no answers, so it runs on");
         assert_eq!(router.waiting(), 2);
