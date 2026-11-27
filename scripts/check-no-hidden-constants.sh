@@ -255,8 +255,9 @@ def strip_cfg_test(toks):
 
 
 def duration_names(toks):
-    """Duration과 그 별칭(use … X as Y, type Y = … X;에서 X가 이미 찾은 이름). 별칭의 별칭도
-    따라가도록 새 이름이 없을 때까지 되풀이한다."""
+    """Duration과 그 별칭(use … X as Y, type Y = … X;에서 X가 이미 찾은 이름). 타입 우변을 감싼
+    괄호는 벗겨 본다(type Y = (X);). 별칭의 별칭도 따라가도록 새 이름이 없을 때까지 되풀이한다.
+    이름은 파일 전체에서 하나로 본다(모듈별 범위를 따지지 않는다)."""
     names = {"Duration"}
     while True:
         found = set()
@@ -265,8 +266,10 @@ def duration_names(toks):
                     and toks[i + 2][0] == "ident"):
                 found.add(toks[i + 2][1])
             if t == "type" and i + 2 < len(toks) and toks[i + 2][1] == "=":
-                end = item_end(toks, i)
-                if end > 0 and toks[end - 1][1] in names:
+                rhs = toks[i + 3:item_end(toks, i)]
+                while len(rhs) >= 2 and rhs[0][1] == "(" and rhs[-1][1] == ")":
+                    rhs = rhs[1:-1]
+                if rhs and rhs[-1][1] in names:
                     found.add(toks[i + 1][1])
         if found <= names:
             return names
@@ -623,6 +626,9 @@ def self_test():
     files["src/alias.rs"] = ("use std::time::Duration as D;\ntype Dur = std::time::Duration;\n"
                              "fn f() -> (D, Dur) { (D::ZERO, Dur::MAX) }\n")
     case("Duration 별칭의 상수", "target\tsrc\n", {"src/alias.rs"}, 2)
+    files["src/paren.rs"] = ("use std::time::Duration as D;\ntype Delay = (D);\ntype Late = ((Delay));\n"
+                             "fn f() -> (Delay, Late) { (Delay::ZERO, Late::MAX) }\n")
+    case("괄호로 감싼 별칭(type Delay = (D))의 상수", "target\tsrc\n", {"src/paren.rs"}, 2)
     files["src/intconst.rs"] = "fn f() -> (usize, u16, u8) { (usize::MIN, u16::MAX, u8::MAX) }\n"
     case("정수 타입의 MIN·MAX는 리터럴이고 허용 줄을 따른다(u16::MAX만 허용)",
          "target\tsrc\nallow\tsrc/intconst.rs\tu16::MAX\t길이 상한\n", {"src/intconst.rs"}, 2)
