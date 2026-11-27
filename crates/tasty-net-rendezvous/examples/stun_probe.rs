@@ -16,7 +16,8 @@
 //! and exits 1. A datagram longer than the largest answer of this subset is not read as an
 //! answer: it prints `stun-probe server=<addr> result=oversize` and exits 1, on every OS (Linux
 //! and macOS cut such a datagram to the buffer, Windows reports `WSAEMSGSIZE`). A wrong
-//! argument exits 2. Packets that are not the answer to this request (another transaction ID,
+//! argument (a target without an address, a timeout that does not fit the clock) exits 2. The
+//! timeout counts from the moment the request is sent, not from the name lookup. Packets that are not the answer to this request (another transaction ID,
 //! not STUN, a request) are skipped and counted in the timeout line.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -65,25 +66,69 @@ fn deadline_after(timeout: Duration) -> Option<Instant> {
     Instant::now().checked_add(timeout)
 }
 
-fn probe(server: SocketAddr, deadline: Instant) -> Result<Outcome, String> {
+/// Why a probe could not run.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeError {
+    /// A wrong argument (exit 2): the target has no address, or the timeout does not fit the
+    /// clock.
+    Argument(String),
+    /// A socket error (exit 1).
+    Io(String),
+}
+
+/// Resolve `target` with `resolve` and probe it. The timeout is checked before the name lookup
+/// and counts from the moment the request is sent, so the lookup time is not part of it.
+fn run(
+    target: &str,
+    timeout: Duration,
+    resolve: impl FnOnce(&str) -> Result<SocketAddr, String>,
+) -> Result<(SocketAddr, Outcome), ProbeError> {
+    let too_long = || {
+        ProbeError::Argument(format!(
+            "timeout {} ms does not fit the clock",
+            timeout.as_millis()
+        ))
+    };
+    deadline_after(timeout).ok_or_else(too_long)?;
+    let server = resolve(target).map_err(ProbeError::Argument)?;
+    probe(server, timeout, too_long).map(|outcome| (server, outcome))
+}
+
+/// The first address of `host:port`.
+fn resolve(target: &str) -> Result<SocketAddr, String> {
+    match target.to_socket_addrs().map(|mut a| a.next()) {
+        Ok(Some(addr)) => Ok(addr),
+        Ok(None) => Err(format!("{target} has no address")),
+        Err(e) => Err(format!("{target}: {e}")),
+    }
+}
+
+/// Send one request to `server` and wait `timeout` from the send for its answer.
+fn probe(
+    server: SocketAddr,
+    timeout: Duration,
+    too_long: impl Fn() -> ProbeError,
+) -> Result<Outcome, ProbeError> {
     let bind: SocketAddr = if server.is_ipv4() {
         "0.0.0.0:0"
     } else {
         "[::]:0"
     }
     .parse()
-    .map_err(|e| format!("bind address: {e}"))?;
-    let socket = UdpSocket::bind(bind).map_err(|e| format!("bind {bind}: {e}"))?;
+    .map_err(|e| ProbeError::Io(format!("bind address: {e}")))?;
+    let socket = UdpSocket::bind(bind).map_err(|e| ProbeError::Io(format!("bind {bind}: {e}")))?;
     socket
         .connect(server)
-        .map_err(|e| format!("connect {server}: {e}"))?;
+        .map_err(|e| ProbeError::Io(format!("connect {server}: {e}")))?;
     let local = socket
         .local_addr()
-        .map_err(|e| format!("local address: {e}"))?;
-    let txid = stun::random_transaction_id().map_err(|e| format!("transaction ID: {e}"))?;
+        .map_err(|e| ProbeError::Io(format!("local address: {e}")))?;
+    let txid = stun::random_transaction_id()
+        .map_err(|e| ProbeError::Io(format!("transaction ID: {e}")))?;
     socket
         .send(&stun::binding_request(&txid, None))
-        .map_err(|e| format!("send to {server}: {e}"))?;
+        .map_err(|e| ProbeError::Io(format!("send to {server}: {e}")))?;
+    let deadline = deadline_after(timeout).ok_or_else(too_long)?;
     let mut skipped = 0_u32;
     let mut buf = [0_u8; RECV_BUFFER];
     loop {
@@ -93,7 +138,7 @@ fn probe(server: SocketAddr, deadline: Instant) -> Result<Outcome, String> {
         }
         socket
             .set_read_timeout(Some(left))
-            .map_err(|e| format!("read timeout: {e}"))?;
+            .map_err(|e| ProbeError::Io(format!("read timeout: {e}")))?;
         let n = match socket.recv(&mut buf) {
             Ok(n) => n,
             Err(e)
@@ -105,7 +150,7 @@ fn probe(server: SocketAddr, deadline: Instant) -> Result<Outcome, String> {
                 continue;
             }
             Err(e) if receive_error_is_oversize(&e) => return Ok(Outcome::Oversize),
-            Err(e) => return Err(format!("receive from {server}: {e}")),
+            Err(e) => return Err(ProbeError::Io(format!("receive from {server}: {e}"))),
         };
         if n > MAX_ANSWER {
             return Ok(Outcome::Oversize);
@@ -131,35 +176,24 @@ fn main() -> ExitCode {
         eprintln!("stun_probe: timeout must be a number of milliseconds\n{USAGE}");
         return ExitCode::from(2);
     };
-    let Some(deadline) = deadline_after(Duration::from_millis(timeout_ms)) else {
-        eprintln!("stun_probe: timeout {timeout_ms} ms does not fit the clock\n{USAGE}");
-        return ExitCode::from(2);
-    };
-    let server = match target.to_socket_addrs().map(|mut a| a.next()) {
-        Ok(Some(addr)) => addr,
-        Ok(None) => {
-            eprintln!("stun_probe: {target} has no address");
-            return ExitCode::from(2);
-        }
-        Err(e) => {
-            eprintln!("stun_probe: {target}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    match probe(server, deadline) {
-        Ok(Outcome::Answer { local, mapped }) => {
+    match run(target, Duration::from_millis(timeout_ms), resolve) {
+        Ok((server, Outcome::Answer { local, mapped })) => {
             println!("stun-probe server={server} local={local} mapped={mapped}");
             ExitCode::SUCCESS
         }
-        Ok(Outcome::Timeout { skipped }) => {
+        Ok((server, Outcome::Timeout { skipped })) => {
             println!("stun-probe server={server} result=timeout skipped={skipped}");
             ExitCode::FAILURE
         }
-        Ok(Outcome::Oversize) => {
+        Ok((server, Outcome::Oversize)) => {
             println!("stun-probe server={server} result=oversize");
             ExitCode::FAILURE
         }
-        Err(e) => {
+        Err(ProbeError::Argument(e)) => {
+            eprintln!("stun_probe: {e}\n{USAGE}");
+            ExitCode::from(2)
+        }
+        Err(ProbeError::Io(e)) => {
             eprintln!("stun_probe: {e}");
             ExitCode::FAILURE
         }
@@ -185,8 +219,12 @@ mod tests {
         addr
     }
 
-    fn soon() -> Instant {
-        deadline_after(Duration::from_secs(5)).unwrap()
+    fn soon() -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn no_clock_check() -> ProbeError {
+        ProbeError::Argument("clock".into())
     }
 
     #[test]
@@ -194,7 +232,7 @@ mod tests {
         let server = fake_server(|txid| {
             stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None)
         });
-        let outcome = probe(server, soon()).unwrap();
+        let outcome = probe(server, soon(), no_clock_check).unwrap();
         let want: SocketAddr = "127.0.0.1:4000".parse().unwrap();
         assert!(
             matches!(outcome, Outcome::Answer { mapped, .. } if mapped == want),
@@ -209,7 +247,7 @@ mod tests {
             assert_eq!(answer.len(), MAX_ANSWER);
             answer
         });
-        let outcome = probe(server, soon()).unwrap();
+        let outcome = probe(server, soon(), no_clock_check).unwrap();
         assert!(matches!(outcome, Outcome::Answer { .. }), "{outcome:?}");
     }
 
@@ -223,7 +261,7 @@ mod tests {
             answer.resize(RECV_BUFFER + 100, 0);
             answer
         });
-        let outcome = probe(server, soon()).unwrap();
+        let outcome = probe(server, soon(), no_clock_check).unwrap();
         assert_eq!(outcome, Outcome::Oversize);
     }
 
@@ -234,7 +272,7 @@ mod tests {
             answer.resize(MAX_ANSWER + 1, 0);
             answer
         });
-        let outcome = probe(server, soon()).unwrap();
+        let outcome = probe(server, soon(), no_clock_check).unwrap();
         assert_eq!(outcome, Outcome::Oversize);
     }
 
@@ -245,8 +283,7 @@ mod tests {
             other[0] ^= 0xff;
             stun::binding_success(&other, "127.0.0.1:4000".parse().unwrap(), None)
         });
-        let deadline = deadline_after(Duration::from_millis(300)).unwrap();
-        let outcome = probe(server, deadline).unwrap();
+        let outcome = probe(server, Duration::from_millis(300), no_clock_check).unwrap();
         assert_eq!(outcome, Outcome::Timeout { skipped: 1 });
     }
 
@@ -254,5 +291,33 @@ mod tests {
     fn a_timeout_past_the_clock_is_refused() {
         assert!(deadline_after(Duration::MAX).is_none());
         assert!(deadline_after(Duration::from_millis(1)).is_some());
+        // Refused before the name lookup, as an argument error.
+        let result = run("127.0.0.1:9", Duration::MAX, |_| {
+            panic!("the lookup must not run for a timeout past the clock")
+        });
+        assert!(matches!(result, Err(ProbeError::Argument(_))), "{result:?}");
+    }
+
+    #[test]
+    fn the_name_lookup_is_not_part_of_the_timeout() {
+        // The lookup takes longer than the whole timeout; the answer still counts because the
+        // timeout starts when the request is sent.
+        let server = fake_server(|txid| {
+            stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None)
+        });
+        let result = run("slow.example:3478", Duration::from_millis(300), |_| {
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(server)
+        });
+        assert!(
+            matches!(result, Ok((s, Outcome::Answer { .. })) if s == server),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_target_without_an_address_is_an_argument_error() {
+        let result = run("nowhere", soon(), |t| Err(format!("{t} has no address")));
+        assert!(matches!(result, Err(ProbeError::Argument(_))), "{result:?}");
     }
 }
