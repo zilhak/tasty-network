@@ -7,14 +7,15 @@
 | 크레이트 | 경로 | 가안 → 확정 | 맡는 것 | 이 레포 안 의존 |
 |---|---|---|---|---|
 | `tasty-net-frame` | `crates/tasty-net-frame` | 가안 그대로 | 프레임 코덱(`write_frame`·`read_frame`), `StreamTag`, 프레임 상한, heartbeat 상수, 읽기 실패 분류(`ReadFailure`), mesh 청크 분할·재조립, bulk 청크·mux 바이트 형식 | 없음 |
-| `tasty-net-ssh` | `crates/tasty-net-ssh` | 가안 그대로 | 시스템 `ssh` 실행, `-L` 터널, 원격 포트 발견, 셸 감지, 취소, backoff, 리스너 판정, 자식 생성 훅 | 없음 |
+| `tasty-net-ssh` | `crates/tasty-net-ssh` | 가안 그대로 | 시스템 `ssh` 실행, `-L` 터널, 원격 포트 발견, 셸 감지, 취소, backoff, 리스너 판정, 자식 생성 훅. 후속 작업으로 내장(russh) 백엔드, 백엔드 선택, exec, SFTP가 더해진다([SSH 백엔드](ssh-backends.md)) | `embedded-ssh` feature에서만 ssh-config |
+| `tasty-net-ssh-config` | `crates/tasty-net-ssh-config` | 새로 정함(2026-11-27, 후속 작업이 만든다) | OpenSSH 10.6p2의 `ssh_config` 해석과 known_hosts 해석을 옮긴 코드, 지시어 분류, 호스트 키 판정. 라이선스가 다른 유일한 크레이트다(아래 "라이선스", [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트)) | 없음 |
 | `tasty-net-identity` | `crates/tasty-net-identity` | 가안 그대로 | 기기 키·기기 ID, 서명·검증, 연결 토큰, 권한 걸린 비밀 파일, TOFU 판정 | 없음 |
 | `tasty-net-transport` | `crates/tasty-net-transport` | 가안 그대로 | 전송 trait, 논리 채널, handshake v2, 역할, bulk 자격, 요청 채널, heartbeat 송수신, SSH 정방향·역할 반전 전송, 메모리 전송, P2P 어댑터(`tasty-net-p2p`의 스트림 → `RawChannel`, 연결 공유), 세 경로를 모은 연결 목록([전송 추상화](transport.md#연결-목록)). `P2pCloseReason`은 p2p의 것을 다시 내보낸다 | frame, ssh, identity, p2p |
 | `tasty-net-p2p` | `crates/tasty-net-p2p` | 다시 정함(2026-11-27, iroh 제거) | P2P 소켓과 패킷 나누기, NAT 판별, 펀칭, quinn 연결과 스트림, 기기 키 인증, 페어링 허용 목록, 상태 기계·연결 정보·설정값 조회, `P2pCloseReason`과 QUIC 종료 코드 표, 소유 런타임과 동기 API | identity, rendezvous |
 | `tasty-net-rendezvous` | `crates/tasty-net-rendezvous` | 새로 정함(2026-11-27) | 라이브러리: 조정 메시지 형식, STUN 부분 집합 코덱, 펀칭 프로브 형식, raw public key TLS 설정, 서버 본체(상태·상한·접근 정책). 실행 파일 `tasty-rendezvous` | identity |
 | `tasty-net-topology` | `crates/tasty-net-topology` | 가안 그대로 | 노드·엣지 모델, 질의·결과 메시지, 탐색 상태 기계 | frame, identity |
 | `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 전송 계층 두 프로세스 통합 시험(SSH, transport 위 P2P), 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, rendezvous, ssh, identity, frame |
-| `tasty-net-ffi` | `crates/tasty-net-ffi` | 새로 정함(2026-11-27, 후속 작업이 만든다) | UniFFI로 Kotlin·Swift 바인딩을 만드는 경계, FFI용 레코드·오류 enum, 이벤트 끌어오기, 앱 수명 이벤트 전달([모바일](mobile.md#바인딩-층)) | transport, p2p, identity, topology |
+| `tasty-net-ffi` | `crates/tasty-net-ffi` | 새로 정함(2026-11-27, 후속 작업이 만든다) | UniFFI로 Kotlin·Swift 바인딩을 만드는 경계, FFI용 레코드·오류 enum, 이벤트 끌어오기, 앱 수명 이벤트 전달, SSH exec·SFTP 노출([모바일](mobile.md#바인딩-층)) | transport, ssh, p2p, identity, topology |
 | (크레이트 아님) | `rendezvous/`(지금의 `relay/`를 바꾼다) | 다시 정함(2026-11-27) | rendezvous 서버 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사 스크립트, 자체 운영 안내([rendezvous](rendezvous.md#배포-형태)) | 없음 |
 
 각 크레이트가 모바일 target의 대상인지와 그 근거는 [모바일](mobile.md#크레이트별-판정)에 있다. 모바일 대상이 아닌 것은 `tasty-net-demo`와 rendezvous 실행 파일이다.
@@ -42,15 +43,16 @@ p2p        ─> rendezvous, identity
 rendezvous ─> identity
 topology   ─> frame, identity
 demo       ─> transport, p2p, rendezvous, ssh, identity, frame
-ffi        ─> transport, p2p, identity, topology
-frame, ssh, identity ─> (없음)
+ffi        ─> transport, ssh, p2p, identity, topology
+ssh        ─> ssh-config   (embedded-ssh feature에서만)
+frame, ssh-config, identity ─> (없음)
 ```
 
 - 이 그림에 없는 의존은 만들지 않는다. 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
 - tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
 - feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다.
-- 위 규칙의 예외는 SSH 백엔드 feature 하나다. `tasty-net-ssh`의 `system-ssh`·`embedded-ssh`와 transport의 `ssh`·`system-ssh`·`embedded-ssh`(기본 모두 켬)이고, 계약은 [모바일](mobile.md#feature-계약)에 있다. 모바일 빌드가 다른 프로그램 실행 코드를 빼기 위해서다.
-- 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`·`tasty-net-ssh`를 직접 쓰면 이 의존이 들어오지 않는다.
+- 위 규칙의 예외는 SSH 백엔드 feature 하나다. `tasty-net-ssh`의 `system-ssh`·`embedded-ssh`와 transport의 내부 feature `ssh`와 `system-ssh`·`embedded-ssh`이고, 두 단계로 들어간다. 계약(단계별 기본값, 꺼진 빌드에서 사라지는 API)은 [SSH 백엔드](ssh-backends.md#feature-계약)에 있다. 모바일 빌드가 다른 프로그램 실행 코드를 빼기 위해서다. `tasty-net-ssh-config`에는 feature가 없다.
+- 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`과 `tasty-net-ssh`(`default-features = false, features = ["system-ssh"]`)를 직접 쓰면 이 의존이 들어오지 않는다. `tasty-net-ssh`의 기본 feature는 내장 백엔드 작업 뒤 `embedded-ssh`를 포함하므로 russh·ring·tokio를 들인다.
 
 ## P2P 크레이트 격리
 
@@ -69,7 +71,7 @@ frame, ssh, identity ─> (없음)
 ## 외부 의존 원칙
 
 - 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(identity의 연결 레코드와 그 파서, transport·topology·rendezvous·p2p), `ed25519-dalek`(identity, 아래), `quinn`·`rustls`·`tokio`(p2p·rendezvous, 정확한 판 고정, [P2P](p2p.md#외부-의존과-고정)·[버전·호환](versioning.md)), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기, rendezvous의 보내기 오류 번호). transport는 서명 대상 해시 `sha2`와 nonce·bulk 자격용 OS 난수 `getrandom`을 쓴다. topology는 질의의 `request_id`·`branch`용 OS 난수 `getrandom`을 쓴다. identity는 이 밖에 OS 난수 `getrandom`(기기 키 seed와 토큰), 상수 시간 비교 `subtle`, Unix의 `libc`(유효 사용자 ID와 `O_NOFOLLOW`)를 쓴다. rendezvous는 펀칭 토큰에 `getrandom`을, 서버 설정 파일(TOML) 파싱에 `toml`을, 작은 차수 공개키 거절에 `ed25519-dalek`(identity와 같은 판)의 `VerifyingKey::is_weak`를, 경로보다 큰 보내기의 오류 번호(`EMSGSIZE`)에 Unix의 `libc`를, IPv6 소켓의 `IPV6_V6ONLY`에 `socket2`를 쓴다. p2p는 페어링 메시지에 `serde`·`serde_json`을, 재연결 지연의 무작위 폭에 `getrandom`을, P2P 소켓의 `IPV6_V6ONLY`와 버퍼 크기에 `socket2`를 쓴다.
-- 모바일 작업에서 더할 예정: `russh`(ssh의 `embedded-ssh`, `default-features = false`, `ring`·`rsa`), `uniffi`(ffi). 판·라이선스와 근거는 [모바일](mobile.md#russh-사실)·[모바일](mobile.md#바인딩-층). `russh-config`는 쓰지 않는다.
+- 모바일 작업에서 더할 예정: `russh`(ssh의 `embedded-ssh`, `default-features = false`, `ring`·`rsa`), `russh-sftp`(ssh의 `embedded-ssh`), `hmac`·`sha1`·`base64`(ssh-config, known_hosts 해시 호스트와 키 blob), `uniffi`(ffi). 판·라이선스와 근거는 [SSH 백엔드](ssh-backends.md#의존-사실)·[모바일](mobile.md#바인딩-층). `russh-config`는 쓰지 않는다. CI에 `cargo audit` 단계를 둔다(내장 백엔드 작업).
 - iroh 계열 의존(`iroh`, `iroh-relay`, `iroh-base`)은 두지 않는다(사용자 결정 2026-11-27, iroh 제거).
 - 기기 키의 ed25519 구현은 `ed25519-dalek`을 직접 쓴다. identity는 `ed25519-dalek` 3.0.0을 정확한 판으로 직접 선언하고 기본 feature와 같은 `fast`·`zeroize`만 켠다. 전에 거치던 `iroh-base` 1.5.0(`key` feature)과 같은 판이라 키 바이트·서명·기기 ID 문자열은 바뀌지 않았다. `iroh-base`의 `relay` feature 몫으로 들어오던 `url`·`idna`·`icu_*`는 빠졌다([기기 키·토큰](identity.md)).
 
@@ -100,9 +102,15 @@ frame, ssh, identity ─> (없음)
 
 확인: 설정 항목 목록과 조회 결과가 같은지 보는 시험, 코드 기본값을 설계 표와 값까지 비교하는 시험, 설정 모듈 밖의 리터럴을 허용 목록(0·1도 전역 예외가 아니다)과 대조하는 정적 검사([CI와 시험 환경](testing.md#설정값-시험), [동작 수준 기준](done-criteria.md) D10).
 
+## 라이선스
+
+- 모든 크레이트는 MIT다. 예외는 `tasty-net-ssh-config` 하나다: `license = "BSD-2-Clause AND ISC"`, 크레이트 폴더의 `LICENSE-OpenSSH`(OpenSSH `LICENCE` 전문), 옮긴 파일마다 원본 고지와 `derived from OpenSSH, modified`(사용자 결정 2026-11-27, 추가 결정 4). 두 라이선스는 `deny.toml` 허용 목록에 이미 있다.
+- 이 크레이트를 담는 앱(tasty, Android 앱)은 라이선스 고지에 OpenSSH 고지를 넣는다. 앱 쪽 작업은 전환 때 한다.
+
 ## unsafe 규칙
 
-- `tasty-net-frame`·`tasty-net-ssh`·`tasty-net-topology`는 `#![forbid(unsafe_code)]`다.
+- `tasty-net-frame`·`tasty-net-ssh`·`tasty-net-ssh-config`·`tasty-net-topology`는 `#![forbid(unsafe_code)]`다.
+- `tasty-net-ffi`는 크레이트 루트에 `#![deny(unsafe_code)]`를 둔다. UniFFI 매크로가 만드는 `extern "C"` 함수가 그 규칙에 걸리면 매크로 호출 자리(`uniffi::setup_scaffolding!`)에만 허용을 둔다. 손으로 쓰는 `unsafe`는 없다.
 - OS API를 불러야 하는 크레이트(identity의 Windows ACL, transport의 Windows 소켓 I/O 취소)는 크레이트 루트에 `#![deny(unsafe_code)]`를 두고 OS 호출 모듈에서만 허용한다. 모든 `unsafe` 블록에 `SAFETY:` 주석을 단다.
 
 ## 시험의 자리
