@@ -907,12 +907,12 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
             core.tracker.close_attempts(&off);
             // `Off` ends the registration in the same section: the server loop may not have
             // cleared it yet (or never will, when the runtime ends its task first), and the
-            // state shows no link and no judgement of it from `Off` on. A judgement still
-            // running sees `Off` under this lock and does not show (`server::rejudge`).
+            // state shows no link, no judgement and no value of it from `Off` on. A judgement
+            // still running or a welcome still being applied sees `Off` under this lock and
+            // does not show (`server::rejudge`, `server::open_registration`).
             let moved = {
                 let mut r = lock(&core.reg);
-                r.nat = None;
-                *lock(&core.link) = None;
+                crate::server::drop_registration(&core, &mut r);
                 core.endpoint_to_in(&mut r, EndpointPhase::Off, Cause::named("disabled"))
             };
             if moved {
@@ -2052,6 +2052,62 @@ mod tests {
         assert!(!ep.status().nat_answers.is_empty());
         assert!(nat_changed(ep.events()), "the control reports nat_changed");
         ep.close();
+    }
+
+    /// From `Off` on the status shows no registration: a welcome the server loop applies after
+    /// the shutdown reported `Off` writes nothing, opens no link and ends its session, and the
+    /// shutdown drops every value of a registration the server loop did not clear.
+    #[test]
+    fn off_shows_no_registration() {
+        let peer = DeviceKey::from_seed([51; 32]).id();
+        let StandIn { ep, core, .. } = stand_in(50, peer, &[]);
+        let limits = lock(&core.reg).limits.expect("limits");
+        let none_shows = |what: &str| {
+            let s = ep.status();
+            assert!(
+                s.limits.is_none()
+                    && s.limits_mismatch.is_none()
+                    && s.registered_at.is_none()
+                    && s.attempt_bound.is_none()
+                    && s.nat_answers.is_empty(),
+                "{what}: {s:?}"
+            );
+            assert!(core.generation().is_none(), "{what}: a link is open");
+        };
+        // The shutdown begins; the server loop ends its registration; `Off`.
+        core.shutdown.send_replace(true);
+        let until = Instant::now() + Duration::from_secs(10);
+        while core.generation().is_some() || lock(&core.reg).limits.is_some() {
+            assert!(
+                Instant::now() < until,
+                "the server loop cleared the registration"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
+        // A welcome the server loop applies now.
+        let welcome = tasty_net_rendezvous::wire::message::Welcome {
+            reflexive: "198.51.100.7:40000".parse().unwrap(),
+            stun: vec!["192.0.2.11:3478".parse().unwrap()],
+            limits,
+        };
+        let (tx, _queue) = mpsc::unbounded_channel();
+        let opened =
+            crate::server::open_registration(&core, &welcome, Some("punch.window_max"), tx);
+        assert_eq!(opened, None, "a registration opened after Off");
+        none_shows("a welcome after Off");
+        // A registration the server loop never cleared: the shutdown drops all of it.
+        {
+            let mut r = lock(&core.reg);
+            r.limits = Some(limits);
+            r.mismatch = Some("punch.window_max");
+            r.registered_at = Some(SystemTime::now());
+            r.registered_since = Some(Instant::now());
+        }
+        let (tx, _queue) = mpsc::unbounded_channel();
+        let _left = core.open_link(tx);
+        ep.close();
+        none_shows("the shutdown left the registration");
     }
 
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT

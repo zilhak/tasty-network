@@ -17,7 +17,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::debug;
 
-use crate::endpoint::{Core, PunchHold, PunchSignal, RENDEZVOUS_ALPN, RequestOutcome, lock};
+use crate::endpoint::{
+    Core, PunchHold, PunchSignal, RENDEZVOUS_ALPN, Registration, RequestOutcome, lock,
+};
 use crate::error::StopCause;
 use crate::events::{Cause, CauseDetail, EndpointPhase};
 use crate::nat;
@@ -189,24 +191,27 @@ pub(crate) async fn run(core: Arc<Core>) {
 }
 
 pub(crate) fn clear_registration(core: &Core) {
-    {
-        // The judgement belongs to the registration that reported it: it leaves the status with
-        // the link, so the next registration shows none until its own report is queued.
-        let mut r = lock(&core.reg);
-        r.nat = None;
-        *lock(&core.link) = None;
-    }
+    drop_registration(core, &mut lock(&core.reg));
     // Attempts still waiting for the server lose it.
     lock(&core.requests).clear();
     for tx in lock(&core.punches).values() {
         let _sent = tx.send(PunchSignal::Lost).is_ok();
     }
-    let mut r = lock(&core.reg);
+}
+
+/// Drop what belongs to the registration, in the caller's section of the state lock: its link,
+/// its judgement and the values its welcome set. The judgement belongs to the registration that
+/// reported it, so the next registration shows none until its own report is queued. Both ends
+/// of a registration drop it through this: the server loop's (`clear_registration`) and the
+/// shutdown's, which reports `Off` in the same section.
+pub(crate) fn drop_registration(core: &Core, r: &mut Registration) {
+    r.nat = None;
     r.limits = None;
     r.mismatch = None;
     r.registered_at = None;
     r.registered_since = None;
     r.stun.clear();
+    *lock(&core.link) = None;
 }
 
 /// One coordination connection from connect to end.
@@ -305,18 +310,13 @@ async fn registered(
         }
         Err(e) => return close_malformed(conn, e),
     };
-    on_welcome(core, &welcome);
     // The mismatch is in place before anything can see the registration: an attempt that sees
     // `Registered` also sees it and ends with ServerLimitsInvalid.
     let mismatch = limits_mismatch(core, &welcome.limits);
-    {
-        let mut r = lock(&core.reg);
-        r.mismatch = mismatch;
-        r.registered_at = Some(SystemTime::now());
-        r.registered_since = Some(Instant::now());
-    }
     let (tx, mut rx) = mpsc::unbounded_channel::<DeviceMessage>();
-    let generation = core.open_link(tx);
+    let Some(generation) = open_registration(core, &welcome, mismatch, tx) else {
+        return End::Shutdown;
+    };
     let server_limit = welcome.limits.max_message_bytes;
     core.endpoint_to(EndpointPhase::Registered, Cause::named("registered"));
     if let Some(key) = mismatch {
@@ -409,8 +409,29 @@ fn close_malformed(conn: &quinn::Connection, what: impl ToString) -> End {
     End::Retry(malformed(what))
 }
 
-fn on_welcome(core: &Core, w: &Welcome) {
+/// Apply `w`, note the registration's start and open its link with `tx`, all in one section of
+/// the state lock: the one the shutdown reports `Off` in. The registration's number, or none
+/// once the shutdown reported `Off`: then nothing of the welcome is written, no link opens and
+/// the session ends (no judgement starts), so `Off` shows no registration.
+pub(crate) fn open_registration(
+    core: &Core,
+    w: &Welcome,
+    mismatch: Option<&'static str>,
+    tx: mpsc::UnboundedSender<DeviceMessage>,
+) -> Option<u64> {
     let mut r = lock(&core.reg);
+    if r.phase == Some(EndpointPhase::Off) && core.is_shutting_down() {
+        debug!("a welcome after the shutdown dropped");
+        return None;
+    }
+    on_welcome(&mut r, w);
+    r.mismatch = mismatch;
+    r.registered_at = Some(SystemTime::now());
+    r.registered_since = Some(Instant::now());
+    Some(core.open_link(tx))
+}
+
+fn on_welcome(r: &mut Registration, w: &Welcome) {
     r.reflexive = Some(crate::socket::canonical(w.reflexive));
     r.stun = w
         .stun
