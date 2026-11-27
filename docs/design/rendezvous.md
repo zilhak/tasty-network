@@ -149,7 +149,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
   - TTL은 계산값이고 `welcome.limits.punch_session_ttl_ms`(`go_sent` 단계 값)와 조회(이름 `punch_session_ttl`, 출처 `computed`)에 보인다. 설정 파일로 정하는 키가 아니다.
 - 설정 관계 검사: 서버는 시작할 때 `start_delay_margin ≤ start_delay_max`, `punch_session_grace ≥ 1 s`, `offer_timeout ≥ 100 ms`, `frame_timeout < idle_timeout`, `keepalive_interval < idle_timeout`, `1 + max_reported_reflexive + max_host_candidates ≤ 64`, 서버가 만들 수 있는 가장 큰 `punch_go`(그 수만큼의 후보가 모두 가장 긴 주소 글자인 IPv6·scope ID·포트 65535이고, 숫자는 가장 크고, 열거값은 가장 긴 이름)가 `max_message_bytes` 안에 드는지를 본다. 값의 범위도 본다: 시간 값은 모두 2^32 − 1 s 이하이고 현재 시각에 더해 시계 범위 안이어야 하며(세션 TTL 합도 같다), `quic.max_bidi_streams`는 1 이상 2^60 이하(조정 스트림 하나가 열려야 한다), `quic.max_uni_streams`는 2^60 이하다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §4.6). 어긋나면 어긋난 키와 값을 찍고 시작하지 않는다. 실행 중 기한은 검사한 덧셈으로 만든다.
 - 반사 주소 바뀜: 서버는 `reflexive_poll_interval`마다 조정 연결의 원격 주소(quinn `Connection::remote_address`)를 읽고, 바뀌었으면 등록을 고치고 `reflexive_changed`를 보낸다. 기기가 QUIC 클라이언트라 이 연결에서는 기기 쪽 NAT 재매핑이 QUIC 경로 이동으로 이어진다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9). 폴링 간격 안에 바뀌었다 돌아온 경우는 놓친다.
-- STUN 반사는 상태를 남기지 않는다(출발 주소별 속도 상한의 계수만 둔다).
+- STUN 반사는 상태를 남기지 않는다(출발 주소별 속도 상한의 계수만 두고, 그 계수표의 크기는 `max_stun_sources`로 막는다).
 - 서버가 절대 갖지 않는 것: 기기 사이 데이터(중계 경로가 없다), 연결 토큰 원문(SSH 경로의 토큰이며 P2P와 서버에는 보내지 않는다, [기기 키·토큰](identity.md)), 페어링 목록, 기기 개인키, handshake v2 내용.
 - 로그: 기본 수준에서 기기 ID와 사건 종류(등록, 펀칭 요청·결과, 종료 코드)를 남기고 IP 주소와 후보 주소는 남기지 않는다. 주소는 디버그 수준에서만 찍는다.
 
@@ -189,6 +189,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |
 | `max_queued_messages` | 64 | 연결마다 서버가 보낼 메시지를 쌓아 두는 수(1–2^20). 정상 기기에는 펀칭 몇 개의 메시지만 쌓인다. 넘치면 기기가 받지 않는 것이므로 그 연결을 `busy`로 닫고 등록을 지운다. 상한이 없으면 수신 창을 열지 않는 기기 하나가 서버 메모리를 끝없이 쓴다 |
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
+| `max_stun_sources` | 65536 | 한 창(1초)에 세는 출발 주소의 수. 항목 하나가 수십 바이트라 몇 MiB 안이다. 넘으면 새 출발 주소의 요청은 답하지 않고 센다(`Server::status()`·주기 로그의 `stun_sources_full`). 창이 바뀌면 계수표를 새로 만들어 메모리를 돌려준다 |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
 | `quic.max_bidi_streams` | 2 | 기기가 여는 조정 스트림 하나와, 둘째 스트림을 받아 `malformed`로 닫을 자리 하나. 1이면 둘째 스트림이 열리지 못하고 기기 쪽에서 막혀 서버가 규칙 위반을 볼 수 없다(quinn `max_concurrent_bidi_streams`) |
 | `quic.max_uni_streams` | 0 | 단방향 스트림을 쓰지 않는다(quinn `max_concurrent_uni_streams`) |

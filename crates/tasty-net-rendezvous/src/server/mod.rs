@@ -144,6 +144,9 @@ pub struct ServerStatus {
     pub stun_answered: u64,
     /// STUN requests not answered because of `stun_per_source_per_second`.
     pub stun_rate_limited: u64,
+    /// STUN requests not answered because the window already counts `max_stun_sources`
+    /// other source addresses.
+    pub stun_sources_full: u64,
     /// STUN packets dropped (not a plain Binding Request, or not STUN on a STUN-only port).
     pub stun_dropped: u64,
     /// Packets on the primary port of no known first-byte class.
@@ -202,6 +205,7 @@ impl Inner {
             busy_pair: get(&c.busy_pair),
             stun_answered: get(&c.stun_answered),
             stun_rate_limited: get(&c.stun_rate_limited),
+            stun_sources_full: get(&c.stun_sources_full),
             stun_dropped: get(&c.stun_dropped),
             packets_dropped: get(&self.demux.dropped),
             candidates_rejected: get(&c.candidates_rejected),
@@ -288,10 +292,21 @@ impl StunSink for Inner {
             let mut w = self.stun_window.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             if now.duration_since(w.start) >= self.params.stun_rate_window {
+                // A new map gives the memory of a full window back.
                 w.start = now;
-                w.counts.clear();
+                w.counts = HashMap::new();
             }
-            let n = w.counts.entry(from).or_default();
+            let sources = w.counts.len();
+            let n = match w.counts.get_mut(&from) {
+                Some(n) => n,
+                None if sources >= self.params.max_stun_sources => {
+                    self.counters
+                        .stun_sources_full
+                        .fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                None => w.counts.entry(from).or_default(),
+            };
             *n += 1;
             if *n > self.params.stun_per_source_per_second {
                 self.counters
@@ -574,6 +589,7 @@ async fn status_loop(inner: Arc<Inner>) {
             busy_pair = s.busy_pair,
             stun_answered = s.stun_answered,
             stun_rate_limited = s.stun_rate_limited,
+            stun_sources_full = s.stun_sources_full,
             stun_dropped = s.stun_dropped,
             packets_dropped = s.packets_dropped,
             queue_full = s.queue_full,

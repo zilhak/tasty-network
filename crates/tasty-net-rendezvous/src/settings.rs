@@ -274,6 +274,7 @@ pub static DEFAULTS: &[Setting] = &[
     entry("max_message_bytes", Kind::Bytes, Value::Bytes(16 * KIB)),
     entry("max_queued_messages", Kind::Count, Value::Count(64)),
     entry("stun_per_source_per_second", Kind::Count, Value::Count(50)),
+    entry("max_stun_sources", Kind::Count, Value::Count(65_536)),
     entry("status_log_interval", Kind::Duration, secs(60)),
     entry("quic.max_bidi_streams", Kind::Count, Value::Count(2)),
     entry("quic.max_uni_streams", Kind::Count, Value::Count(0)),
@@ -762,6 +763,8 @@ pub struct ServerParams {
     pub max_queued_messages: usize,
     /// `stun_per_source_per_second`.
     pub stun_per_source_per_second: u64,
+    /// `max_stun_sources`.
+    pub max_stun_sources: usize,
     /// `status_log_interval`.
     pub status_log_interval: Duration,
     /// The window of `punch_requests_per_minute`.
@@ -1153,6 +1156,7 @@ impl Resolver<'_> {
             )?)
             .expect("checked against 2^20"),
             stun_per_source_per_second: self.number("stun_per_source_per_second"),
+            max_stun_sources: self.fits("max_stun_sources")?,
             status_log_interval: self.nonzero("status_log_interval")?,
             punch_request_window: ONE_MINUTE,
             stun_rate_window: ONE_SECOND,

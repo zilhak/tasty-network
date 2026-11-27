@@ -38,6 +38,7 @@ pub(crate) struct Counters {
     pub busy_pair: AtomicU64,
     pub stun_answered: AtomicU64,
     pub stun_rate_limited: AtomicU64,
+    pub stun_sources_full: AtomicU64,
     pub stun_dropped: AtomicU64,
     pub candidates_rejected: AtomicU64,
     pub candidates_truncated: AtomicU64,

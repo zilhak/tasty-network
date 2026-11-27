@@ -510,6 +510,46 @@ async fn stun_rate_limit_per_source() {
 }
 
 #[tokio::test]
+async fn stun_sources_per_window_are_capped() {
+    let mut s = local_settings();
+    s.set("max_stun_sources", Value::Count(2)).unwrap();
+    let server = start(s).await;
+    let to = server.addrs().primary;
+    let x = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let y = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let z = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    // x and y fill the window; z, a third source in the same window, is not answered. The
+    // window may turn over between two sends (then another socket is the third), so the
+    // rounds repeat and every unanswered request must be a counted drop.
+    let mut dropped = 0;
+    for round in 0..3u8 {
+        let request = stun::binding_request(&[round; 12], None);
+        for socket in [&x, &y, &z] {
+            socket.send_to(&request, to).await.unwrap();
+        }
+        let mut buf = [0u8; 256];
+        for socket in [&x, &y, &z] {
+            if tokio::time::timeout(Duration::from_millis(300), socket.recv_from(&mut buf))
+                .await
+                .is_err()
+            {
+                dropped += 1;
+            }
+        }
+    }
+    assert!(dropped >= 1, "{:?}", server.status());
+    assert_eq!(server.status().stun_sources_full, dropped);
+    assert_eq!(server.status().stun_rate_limited, 0);
+    // In a later window z is counted again.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(
+        stun_request(&z, to, &stun::binding_request(&[9; 12], None))
+            .await
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn access_policy_rejects() {
     let allowed = key(1);
     let mut config = ServerConfig::new(key(100));
