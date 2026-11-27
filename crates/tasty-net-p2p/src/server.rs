@@ -585,6 +585,12 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
             debug!("a judgement of an earlier registration dropped");
             return;
         }
+        // After the shutdown reported `Off` no judgement shows: `Off` is the last state and
+        // the shutdown dropped the judgement under this lock when it reported it.
+        if r.phase == Some(EndpointPhase::Off) && core.is_shutting_down() {
+            debug!("a judgement ending after the shutdown dropped");
+            return;
+        }
         // The report goes into the link's queue before the judgement shows in the status:
         // whatever this device asks after seeing it (a punch_request) reaches the server
         // after the report, on the same stream. A report the link no longer takes (the

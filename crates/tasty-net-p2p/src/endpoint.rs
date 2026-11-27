@@ -905,7 +905,19 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
             drop(lock(&core.key_hold).take());
             // An attempt the server loop began while the shutdown started ends here too.
             core.tracker.close_attempts(&off);
-            core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
+            // `Off` ends the registration in the same section: the server loop may not have
+            // cleared it yet (or never will, when the runtime ends its task first), and the
+            // state shows no link and no judgement of it from `Off` on. A judgement still
+            // running sees `Off` under this lock and does not show (`server::rejudge`).
+            let moved = {
+                let mut r = lock(&core.reg);
+                r.nat = None;
+                *lock(&core.link) = None;
+                core.endpoint_to_in(&mut r, EndpointPhase::Off, Cause::named("disabled"))
+            };
+            if moved {
+                core.reg_moved();
+            }
             core.events.end();
         });
     })
@@ -1931,6 +1943,63 @@ mod tests {
             );
         }
         ep.close();
+    }
+
+    /// From `Off` on the status shows no judgement: the shutdown drops the one of a
+    /// registration the server loop did not clear, and a judgement that ends after `Off` (of
+    /// a link the server loop opened while the shutdown began) does not show.
+    #[test]
+    fn off_shows_no_judgement() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([47; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            46,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), generation));
+        assert!(matches!(rx.try_recv(), Ok(DeviceMessage::NatReport(_))));
+        let judged = lock(&core.reg).nat.clone().expect("judged");
+        // The shutdown begins; the server loop ends its registration.
+        core.shutdown.send_replace(true);
+        let until = Instant::now() + Duration::from_secs(10);
+        while core.generation().is_some() {
+            assert!(
+                Instant::now() < until,
+                "the server loop cleared the registration"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
+        // A link opened while the shutdown began, and its judgement ending after `Off`.
+        let (tx, mut late) = mpsc::unbounded_channel();
+        let next = core.open_link(tx);
+        core.handle
+            .block_on(crate::server::rejudge(core.clone(), next));
+        let s = ep.status();
+        assert_eq!(s.state, EndpointPhase::Off);
+        assert!(
+            s.nat_answers.is_empty() && s.nat == NatMapping::Unknown,
+            "a judgement shows after Off: {s:?}"
+        );
+        assert!(late.try_recv().is_err(), "no report after Off");
+        // A registration the server loop never cleared: the shutdown drops its judgement.
+        lock(&core.reg).nat = Some(judged);
+        ep.close();
+        let s = ep.status();
+        assert!(
+            s.nat_answers.is_empty() && s.nat == NatMapping::Unknown,
+            "the shutdown left the judgement: {s:?}"
+        );
     }
 
     /// The endpoint's end drops a dialer's attempt while it waits in `RetryWait`, and the NAT
