@@ -509,36 +509,119 @@ async fn stun_rate_limit_per_source() {
     );
 }
 
-/// A STUN answer reaches `socket` within the deadline.
-async fn answered(socket: &UdpSocket) {
-    let mut buf = [0u8; 1500];
-    let (n, _) = tokio::time::timeout(DEADLINE, socket.recv_from(&mut buf))
-        .await
-        .expect("an answer in time")
-        .unwrap();
-    stun::parse(&buf[..n]).unwrap();
+/// Datagrams waiting to be received and the waker of the receive that found none.
+type Inbox = (
+    std::collections::VecDeque<(Vec<u8>, SocketAddr)>,
+    Option<std::task::Waker>,
+);
+
+/// Packet I/O in memory: the test puts datagrams in and reads what the server sent. No real
+/// socket, so the test can stop the clock.
+#[derive(Debug)]
+struct MemoryIo {
+    local: SocketAddr,
+    inbox: Mutex<Inbox>,
+    sent: Mutex<Vec<(Vec<u8>, SocketAddr)>>,
 }
 
-#[tokio::test]
+impl MemoryIo {
+    fn new(local: SocketAddr) -> Arc<MemoryIo> {
+        Arc::new(MemoryIo {
+            local,
+            inbox: Mutex::default(),
+            sent: Mutex::default(),
+        })
+    }
+
+    /// Datagrams the server receives together, in one turn of its receive loop.
+    fn put(&self, packets: Vec<(Vec<u8>, SocketAddr)>) {
+        let mut inbox = self.inbox.lock().unwrap();
+        inbox.0.extend(packets);
+        if let Some(w) = inbox.1.take() {
+            w.wake();
+        }
+    }
+
+    /// STUN answers sent to `to`.
+    fn answers_to(&self, to: SocketAddr) -> usize {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(packet, dest)| *dest == to && stun::parse(packet).is_ok())
+            .count()
+    }
+}
+
+#[derive(Debug)]
+struct Shared(Arc<MemoryIo>);
+
+impl PacketIo for Shared {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        let mut inbox = self.0.inbox.lock().unwrap();
+        match inbox.0.pop_front() {
+            Some((packet, from)) => {
+                let n = packet.len().min(buf.len());
+                buf[..n].copy_from_slice(&packet[..n]);
+                std::task::Poll::Ready(Ok((n, from)))
+            }
+            None => {
+                inbox.1 = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        }
+    }
+    fn poll_send_ready(
+        &self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        self.0.sent.lock().unwrap().push((buf.to_vec(), dest));
+        Ok(())
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Ok(self.0.local)
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn stun_sources_per_window_are_capped() {
+    // The clock stands still and the server's STUN window (1 s) follows it, so no window
+    // boundary falls between requests unless the test moves the clock.
     let mut s = local_settings();
     s.set("max_stun_sources", Value::Count(2)).unwrap();
-    let server = start(s).await;
-    let to = server.addrs().primary;
-    let x = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let y = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let z = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    // The window (1 s, fixed) starts again at the first request after it has run out. Let the
-    // window the server started with run out, so the window starts at x's request and holds
-    // all three: x and y fill it and z, the third source, is not answered.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let primary = MemoryIo::new("127.0.0.1:3478".parse().unwrap());
+    let alternate = MemoryIo::new("127.0.0.1:3479".parse().unwrap());
+    let mut config = ServerConfig::new(key(100));
+    config.settings = s;
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(Shared(primary.clone())),
+            alternate_port: Arc::new(Shared(alternate)),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    let [x, y, z]: [SocketAddr; 3] = [
+        "192.0.2.1:40001".parse().unwrap(),
+        "192.0.2.2:40002".parse().unwrap(),
+        "192.0.2.3:40003".parse().unwrap(),
+    ];
+    // x and y fill the window; z, a third source in the same window, is not answered.
     let request = stun::binding_request(&[1; 12], None);
-    for socket in [&x, &y, &z] {
-        socket.send_to(&request, to).await.unwrap();
-    }
-    answered(&x).await;
-    answered(&y).await;
-    // The drop is read from the server's count, not from a wait that ends without an answer.
+    primary.put(vec![
+        (request.clone(), x),
+        (request.clone(), y),
+        (request.clone(), z),
+    ]);
     eventually("the third source is counted as dropped", || {
         server.status().stun_sources_full == 1
     })
@@ -546,12 +629,21 @@ async fn stun_sources_per_window_are_capped() {
     let status = server.status();
     assert_eq!(status.stun_answered, 2, "{status:?}");
     assert_eq!(status.stun_rate_limited, 0, "{status:?}");
-    // In a later window z is counted again.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    z.send_to(&stun::binding_request(&[2; 12], None), to)
-        .await
-        .unwrap();
-    answered(&z).await;
+    assert_eq!(
+        (
+            primary.answers_to(x),
+            primary.answers_to(y),
+            primary.answers_to(z)
+        ),
+        (1, 1, 0)
+    );
+    // A whole window later z is counted again.
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    primary.put(vec![(stun::binding_request(&[2; 12], None), z)]);
+    eventually("z is answered in the next window", || {
+        primary.answers_to(z) == 1
+    })
+    .await;
     assert_eq!(server.status().stun_sources_full, 1);
 }
 
