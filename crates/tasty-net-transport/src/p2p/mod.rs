@@ -455,10 +455,13 @@ impl Transport for P2pTransport {
         if *target == self.endpoint.id() {
             return Err(ConnectError::SelfAttach);
         }
-        let reused = self.reuse(target, cancel)?;
+        let reused = self.reuse(target, cancel);
+        // A cancelled attempt ends `Cancelled`, whatever the reuse's failure was
+        // (docs/design/transport.md "시도 취소, 닫기, 회수").
         if cancel.is_cancelled() {
             return Err(ConnectError::Cancelled);
         }
+        let reused = reused?;
         let (channel, state, owned, joined) = match reused {
             Some((channel, state)) => {
                 // A reconnection stays visible: once its handshake on the shared connection
