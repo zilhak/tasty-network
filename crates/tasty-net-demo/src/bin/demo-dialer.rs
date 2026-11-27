@@ -8,6 +8,14 @@
 //! change (a wrong token, for example) ends the dialer with exit code 3. `quit` or the end of
 //! stdin detaches and ends with exit code 0.
 //!
+//! `--holder acceptor` proposes the role reversal (docs/design/transport.md "역할" (b)): the
+//! server holds and this end provides the workspace over the same `-L` tunnel, and this end
+//! still connects again after a loss. After the ACK it sends one Control descriptor (a
+//! snapshot with its own instance ID), then writes every Data frame back unchanged. A refused
+//! proposal (`role_refused`) ends the dialer with exit code 3 like any other refusal.
+//! `--instance-id` replaces the instance ID (default `demo-dialer-<pid>`); a test gives the
+//! server's to check that a self attach is refused.
+//!
 //! The link's channels hold the `-L` tunnel, and the tunnel's `ssh` child is ended when the
 //! last of them goes. On `quit` the stdin thread holds the writer while it detaches, so the
 //! dialer waits for that thread to finish (bounded by the write timeout and the drain cap)
@@ -23,6 +31,7 @@
 //! demo-dialer --destination <user@host> --record <remote path>
 //!             [--ssh-port <port>] [--identity <file>] [--option Key=Value]...
 //!             [--ssh <program>] [--verify-host-keys] [--read-timeout-ms <ms>]
+//!             [--holder dialer|acceptor] [--instance-id <id>]
 //! ```
 //!
 //! Events on stdout (one per line):
@@ -33,11 +42,14 @@
 //! | `dialer ssh-spawned pid=<pid> role=<tunnel\|discovery>` | an `ssh` child was created |
 //! | `dialer attempt n=<n>` | an attempt starts |
 //! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded |
+//! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
 //! | `dialer control <json>` | a Control frame arrived (the server's snapshot) |
-//! | `dialer echo <text>` | a Data frame arrived |
+//! | `dialer echo <text>` | a Data frame arrived on a link this end holds |
+//! | `dialer served <text>` | a Data frame arrived on a link this end provides, and went back |
+//! | `dialer send-failed error=<text>` | a `send` line found no link, or writing failed |
 //! | `dialer lost failure=<name>` | the link's reader failed |
 //! | `dialer retry error=<text>` | an attempt failed in a way connecting again can change |
-//! | `dialer rejected reason=<wire reason or -> error=<text>` | it did not; the dialer ends |
+//! | `dialer rejected reason=<reason or -> error=<text>` | it did not; the dialer ends. The reason is the peer's wire reason, or `self_attach` when the peer turned out to be this instance |
 //! | `dialer stdin-thread-late limit_ms=<ms>` | after `quit`, the stdin thread's Detach did not end in time |
 //! | `dialer stdin-thread-panicked` | after `quit`, the stdin thread had panicked |
 //! | `dialer bye` | the dialer ends after `quit` |
@@ -56,12 +68,12 @@ use tasty_net_identity::DeviceKey;
 use tasty_net_ssh::{Backoff, PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, ChannelReader, ChannelWriter, DialConfig, EndReason, HandshakeError, Holder,
-    LinkCloser, SshTransport, Transport, dial_handshake,
+    LinkCloser, Side, SshTransport, Transport, dial_handshake,
 };
 
 const USAGE: &str = "usage: demo-dialer --destination <user@host> --record <remote path> \
 [--ssh-port <port>] [--identity <file>] [--option Key=Value]... [--ssh <program>] \
-[--verify-host-keys] [--read-timeout-ms <ms>]";
+[--verify-host-keys] [--read-timeout-ms <ms>] [--holder dialer|acceptor] [--instance-id <id>]";
 
 /// Exit code when a refusal ends the dialer without another attempt.
 const EXIT_REJECTED: u8 = 3;
@@ -111,7 +123,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         "ssh",
         "verify-host-keys",
         "read-timeout-ms",
+        "holder",
+        "instance-id",
     ])?;
+    let holder = match args.value("holder") {
+        None => Holder::Dialer,
+        Some(text) => Holder::parse(text).ok_or_else(|| {
+            tasty_net_demo::UsageError("--holder needs dialer or acceptor".into())
+        })?,
+    };
     let target = SshTarget {
         destination: args.required("destination")?.to_string(),
         ssh_port: args
@@ -143,11 +163,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     .with_verify(args.flag("verify-host-keys"))
     .with_spawn_hook(spawn_hook(Arc::clone(&tunnel_pid)));
     let transport = SshTransport::new(launcher, discovery, PortMode::FileUnix);
-    let config = DialConfig::new(
-        DeviceKey::generate()?,
-        format!("demo-dialer-{}", std::process::id()),
-    )
-    .with_timeouts(timeouts);
+    let instance_id = match args.value("instance-id") {
+        Some(id) => id.to_string(),
+        None => format!("demo-dialer-{}", std::process::id()),
+    };
+    let config =
+        DialConfig::new(DeviceKey::generate()?, instance_id.clone()).with_timeouts(timeouts);
 
     emit(&format!("dialer pid={}", std::process::id()));
     let hold_writer = match std::env::var(HOLD_WRITER_ENV) {
@@ -186,7 +207,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let result = transport
             .connect(&target, &cancel)
             .map_err(HandshakeError::Connect)
-            .and_then(|conn| dial_handshake(conn, &config, Holder::Dialer, None, &cancel));
+            .and_then(|conn| dial_handshake(conn, &config, holder, None, &cancel));
         lock(&shared.attempt).take();
         match result {
             Ok(mut link) => {
@@ -194,16 +215,41 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let Some((reader, writer)) = link.take_ordered() else {
                     return Err("a new link has no ordered channel".into());
                 };
-                *lock(&shared.link) = Some((writer, link.closer()));
+                let Some(roles) = link.peer().roles() else {
+                    return Err("an attach link has no roles".into());
+                };
                 emit(&format!(
                     "dialer connected attempt={attempt} instance={} tunnel_pid={}",
                     link.peer().instance_id(),
                     tunnel_pid.load(Ordering::SeqCst)
                 ));
+                emit(&format!(
+                    "dialer roles local=dialer launcher={} dialer={} provider={} holder={} \
+                     redialer={}",
+                    roles.ssh_launcher.map_or("none", side_name),
+                    side_name(roles.dialer),
+                    side_name(roles.provider),
+                    side_name(roles.holder),
+                    side_name(roles.redialer)
+                ));
+                let provides = roles.provider == Side::Dialer;
+                // The provider sends the descriptor first (O2), before any stdin line can.
+                if provides {
+                    let descriptor = format!(
+                        "{{\"snapshot\":{{\"instance_id\":\"{instance_id}\",\"client_id\":{}}}}}",
+                        link.client_id().unwrap_or(0)
+                    );
+                    if let Err(error) =
+                        writer.write_frame(StreamTag::Control, descriptor.as_bytes())
+                    {
+                        emit(&format!("dialer send-failed error={error}"));
+                    }
+                }
+                *lock(&shared.link) = Some((writer, link.closer()));
                 if shared.quit.load(Ordering::SeqCst) {
                     detach(&shared, Duration::ZERO);
                 }
-                let end = read_link(reader);
+                let end = read_link(reader, provides.then_some(&*shared));
                 lock(&shared.link).take();
                 drop(link);
                 if shared.quit.load(Ordering::SeqCst) {
@@ -215,6 +261,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             Err(error) if !error.is_retryable() => {
                 let reason = match &error {
                     HandshakeError::Rejected { reason, .. } => reason.as_str().to_string(),
+                    HandshakeError::SelfAttach => "self_attach".into(),
                     _ => "-".into(),
                 };
                 emit(&format!(
@@ -279,16 +326,38 @@ fn spawn_hook(tunnel_pid: Arc<AtomicU32>) -> SpawnHook {
     })
 }
 
-/// Prints every frame of the link until it ends. Returns the end's name.
-fn read_link(mut reader: ChannelReader) -> &'static str {
+/// The name of a side in event lines.
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Dialer => "dialer",
+        Side::Acceptor => "acceptor",
+    }
+}
+
+/// Prints every frame of the link until it ends. Returns the end's name. With `provider`
+/// (this end provides the workspace), every Data frame goes back through the link's writer.
+fn read_link(mut reader: ChannelReader, provider: Option<&Shared>) -> &'static str {
     loop {
         match reader.read_frame() {
             Ok(frame) => match frame.tag {
                 StreamTag::Data => {
-                    emit(&format!(
-                        "dialer echo {}",
-                        String::from_utf8_lossy(&frame.payload)
-                    ));
+                    let text = String::from_utf8_lossy(&frame.payload);
+                    match provider {
+                        None => emit(&format!("dialer echo {text}")),
+                        Some(shared) => {
+                            let sent = lock(&shared.link).as_ref().map(|(writer, _)| {
+                                writer.write_frame(StreamTag::Data, &frame.payload)
+                            });
+                            match sent {
+                                Some(Ok(())) => emit(&format!("dialer served {text}")),
+                                Some(Err(error)) => {
+                                    emit(&format!("dialer send-failed error={error}"));
+                                }
+                                // Detaching: the writer is gone.
+                                None => {}
+                            }
+                        }
+                    }
                 }
                 StreamTag::Control => {
                     emit(&format!(

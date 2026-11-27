@@ -8,8 +8,8 @@
 //!
 //! | Binary | Does |
 //! |--------|------|
-//! | `demo-server` | the workspace-providing side: publishes a connection record, accepts handshake v2 on a loopback port, sends one Control snapshot and echoes Data |
-//! | `demo-dialer` | reaches the server over SSH (record discovery, `-L` tunnel), sends input lines and prints the echo; connects again with backoff after a loss |
+//! | `demo-server` | the accepting end: publishes a connection record and accepts handshake v2 on a loopback port. On a forward link it provides the workspace (one Control snapshot, Data echoed); on an accepted role reversal it holds (waits for the dialer's descriptor, sends its stdin lines, prints the echo) |
+//! | `demo-dialer` | reaches the server over SSH (record discovery, `-L` tunnel) as the holder (forward) or, with `--holder acceptor`, as the provider of the role reversal; connects again with backoff after a loss |
 #![forbid(unsafe_code)]
 
 use std::error::Error;
