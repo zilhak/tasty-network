@@ -279,12 +279,21 @@ impl Pair {
     /// [`Pair::start`]; with `gated`, both endpoints run with short QUIC timers and `b` runs on
     /// the returned gate.
     fn start_with(seed: u8, mode: Mode, gated: bool) -> (Self, Option<Arc<Gate>>) {
-        Self::start_full(seed, mode, gated, &[])
+        Self::start_full(seed, mode, gated, &[], timeouts())
     }
 
     /// [`Pair::start`] with these settings on `b`.
     fn start_set(seed: u8, mode: Mode, b_settings: &[(&str, P2pValue)]) -> Self {
-        Self::start_full(seed, mode, false, b_settings).0
+        Self::start_full(seed, mode, false, b_settings, timeouts()).0
+    }
+
+    /// [`Pair::start`] where the accepting side waits up to `drain_cap` for the dialer's end.
+    fn start_draining(seed: u8, mode: Mode, drain_cap: Duration) -> Self {
+        let accept = LinkTimeouts {
+            drain_cap,
+            ..timeouts()
+        };
+        Self::start_full(seed, mode, false, &[], accept).0
     }
 
     fn start_full(
@@ -292,6 +301,7 @@ impl Pair {
         mode: Mode,
         gated: bool,
         b_settings: &[(&str, P2pValue)],
+        accept_timeouts: LinkTimeouts,
     ) -> (Self, Option<Arc<Gate>>) {
         let server = Rendezvous::start();
         let (ka, kb) = (key(seed), key(seed + 1));
@@ -310,7 +320,7 @@ impl Pair {
         let policy = Arc::new(Policy::default());
         let (table_a, table_b) = (ConnectionTable::default(), ConnectionTable::default());
         let accept = AcceptConfig::new(kb, format!("acceptor-{seed}"), None, policy.clone())
-            .with_timeouts(timeouts())
+            .with_timeouts(accept_timeouts)
             .with_connections(table_b.clone());
         let listener = P2pListener::new(b.clone(), accept).expect("listener");
         let stop = Arc::new(AtomicBool::new(false));
@@ -984,6 +994,63 @@ fn a_forced_close_leaves_the_other_links() {
     drop(third);
     second.round_trip(b"after the drop");
     assert_eq!(pair.connections(), (1, 1), "one QUIC connection");
+}
+
+/// A forced close takes the link off its connection at once: the dialer closes the connection
+/// after its last link was closed by force, while the consumer still holds the link's halves.
+/// (Were the link still counted, the accepting side would close the connection at its drain
+/// cap, and the dialer's entry would end with that close's code.)
+#[test]
+fn a_forced_close_of_the_last_link_closes_the_connection_with_its_handles_kept() {
+    let pair = Pair::start(62, Mode::Echo);
+    let mut link = pair.link(None).expect("link");
+    let (reader, writer) = link.take_ordered().expect("halves");
+    let id = live(&pair.table_a)[0].id;
+    link.closer().force_close(EndReason::Forced);
+    wait_until("the connection's close", || pair.connections() == (0, 0));
+    wait_until("the entry's end", || {
+        entry(&pair.table_a, id).state == ConnectionState::Disconnected
+    });
+    let ended = entry(&pair.table_a, id);
+    assert!(
+        !matches!(ended.last_cause, Some(Cause::P2pClosed(_))),
+        "the accepting side closed it: {:?}",
+        ended.last_cause
+    );
+    drop((reader, writer, link));
+}
+
+/// The dialer drops its halves after its last frames without reading the acceptor's end: the
+/// connection's close still waits for that end, so the acceptor's application, which reads
+/// late, reads every frame, also the ones still on their way when the halves were dropped.
+#[test]
+fn a_dialer_that_drops_its_halves_early_loses_no_last_frame() {
+    const FRAMES: usize = 4;
+    // The acceptor's end waits for this side's at most its drain cap (docs/design/transport.md
+    // "연결을 닫는 때"); a long one keeps that wait out of the way of the late reads, below the
+    // dialer's own wait (the default drain cap).
+    let pair = Pair::start_draining(64, Mode::LastFrameFirst, Duration::from_millis(1500));
+    let mut link = pair.link(None).expect("link");
+    let (mut reader, mut writer) = link.take_ordered().expect("halves");
+    let big = vec![7u8; 1 << 20];
+    for _ in 1..FRAMES {
+        writer.write_frame(StreamTag::Data, &big).expect("a frame");
+    }
+    writer
+        .write_frame(StreamTag::Detach, b"dialer-last")
+        .expect("the dialer's last frame");
+    writer.half_close().expect("half close");
+    // Done here: nothing more is read.
+    reader.finish();
+    drop((reader, writer, link));
+    let (frames, ended) = pair
+        .read
+        .recv_timeout(PATIENCE)
+        .expect("the acceptor's reads");
+    assert_eq!(frames.len(), FRAMES, "the acceptor read every frame");
+    assert_eq!(frames[FRAMES - 1].payload, b"dialer-last");
+    assert_eq!(ended, Some(ReadFailure::PeerClosed));
+    wait_until("the connection's close", || pair.connections() == (0, 0));
 }
 
 /// Close scope, fifth row: a connection the accepting side closes with `not_paired` during

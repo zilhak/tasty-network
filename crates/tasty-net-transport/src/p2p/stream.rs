@@ -44,6 +44,9 @@ pub(crate) struct Stream {
     drain_cap: Duration,
     end: Mutex<EndState>,
     end_changed: Condvar,
+    /// The channel's place on its connection, until the channel is closed
+    /// ([`Stream::release_slot`]).
+    slot: Mutex<Option<ChannelSlot>>,
 }
 
 /// Where the sending side is.
@@ -163,6 +166,89 @@ impl Stream {
         if let Err(error) = lock(&self.recv).stop(STREAM_CLOSE_CODE) {
             tracing::debug!(%error, "stopping a P2P stream failed");
         }
+        // Closed: it no longer counts on the connection, whoever still holds its handles.
+        self.release_slot();
+    }
+
+    /// Gives the channel's place on the connection back, once.
+    fn release_slot(&self) {
+        let slot = lock(&self.slot).take();
+        drop(slot);
+    }
+
+    /// Both halves were dropped without a forced close: the sending side ends, and the place
+    /// on the connection goes once the peer's end was read. The dialer closes the connection
+    /// after its last channel, so a channel whose reader did not read the acceptor's end yet
+    /// reads on to it in the background (at most the drain cap): the acceptor's end comes only
+    /// after its application read this side's last frames (docs/design/transport.md "연결을
+    /// 닫는 때").
+    fn halves_dropped(self: &Arc<Self>) {
+        let (aborted, eof_read) = {
+            let end = lock(&self.end);
+            (end.aborted, end.eof_read)
+        };
+        if aborted {
+            return;
+        }
+        let finished = match self.side {
+            ConnSide::Dialer => self.finish_now(),
+            ConnSide::Acceptor => self.request_finish(),
+        };
+        if let Err(error) = finished {
+            tracing::debug!(%error, "ending a dropped P2P stream failed");
+        }
+        if self.side == ConnSide::Acceptor || eof_read {
+            self.release_slot();
+            return;
+        }
+        let stream = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("p2p-drain-read".into())
+            .spawn(move || {
+                stream.read_to_peer_end();
+                stream.release_slot();
+            });
+        if let Err(error) = spawned {
+            tracing::debug!(%error, "no thread to read a dropped P2P stream to its end");
+            self.release_slot();
+        }
+    }
+
+    /// Reads and drops the peer's bytes until its end, an error or the drain cap.
+    fn read_to_peer_end(&self) {
+        let started = Instant::now();
+        let mut sink = [0u8; 4096];
+        let mut recv = lock(&self.recv);
+        loop {
+            let Some(left) = self
+                .drain_cap
+                .checked_sub(started.elapsed())
+                .filter(|d| !d.is_zero())
+            else {
+                tracing::debug!("a dropped P2P stream's peer did not end within the drain cap");
+                return;
+            };
+            recv.set_read_timeout(Some(left));
+            match recv.read(&mut sink) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "reading a dropped P2P stream to its end failed");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Held with the channel's halves; their drop ends the stream ([`Stream::halves_dropped`]).
+struct ChannelHold {
+    stream: Arc<Stream>,
+}
+
+impl Drop for ChannelHold {
+    fn drop(&mut self) {
+        self.stream.halves_dropped();
     }
 }
 
@@ -235,7 +321,7 @@ impl ChannelControl for StreamControl {
 }
 
 /// Wraps `stream` of `conn` as a channel that holds `slot` (its place among the connection's
-/// channels) until both halves are dropped.
+/// channels) until it is closed by force, or its halves are dropped and the peer's end read.
 pub(crate) fn channel(
     stream: P2pStream,
     conn: &P2pConnection,
@@ -256,6 +342,7 @@ pub(crate) fn channel(
         drain_cap,
         end: Mutex::new(EndState::default()),
         end_changed: Condvar::new(),
+        slot: Mutex::new(Some(slot)),
     });
     RawChannel::new(
         Box::new(StreamReader {
@@ -269,8 +356,11 @@ pub(crate) fn channel(
         }),
         TransportKind::P2p,
     )
-    .with_finish_now(Arc::new(move || shared.finish_now()))
-    .keep_alive(Arc::new(slot))
+    .with_finish_now({
+        let shared = Arc::clone(&shared);
+        Arc::new(move || shared.finish_now())
+    })
+    .keep_alive(Arc::new(ChannelHold { stream: shared }))
 }
 
 /// Opens a stream on `conn`, under `cancel`.
