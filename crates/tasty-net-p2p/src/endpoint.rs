@@ -2076,10 +2076,14 @@ mod tests {
         let peer = DeviceKey::from_seed([51; 32]).id();
         let StandIn { ep, core, .. } = stand_in(50, peer, &[]);
         let limits = lock(&core.reg).limits.expect("limits");
+        let reflexive: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        // The registration's reflexive address, as its welcome set it.
+        lock(&core.reg).reflexive = Some(reflexive);
         let none_shows = |what: &str| {
             let s = ep.status();
             assert!(
-                s.limits.is_none()
+                s.reflexive.is_none()
+                    && s.limits.is_none()
                     && s.limits_mismatch.is_none()
                     && s.registered_at.is_none()
                     && s.attempt_bound.is_none()
@@ -2101,7 +2105,7 @@ mod tests {
         core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
         // A welcome the server loop applies now.
         let welcome = tasty_net_rendezvous::wire::message::Welcome {
-            reflexive: "198.51.100.7:40000".parse().unwrap(),
+            reflexive,
             stun: vec!["192.0.2.11:3478".parse().unwrap()],
             limits,
         };
@@ -2113,6 +2117,7 @@ mod tests {
         // A registration the server loop never cleared: the shutdown drops all of it.
         {
             let mut r = lock(&core.reg);
+            r.reflexive = Some(reflexive);
             r.limits = Some(limits);
             r.mismatch = Some("punch.window_max");
             r.registered_at = Some(SystemTime::now());
@@ -2139,6 +2144,41 @@ mod tests {
             matches!(end, Ok(crate::server::End::Shutdown)),
             "the session did not see the shutdown signalled before it subscribed"
         );
+        ep.close();
+    }
+
+    /// A `reflexive_changed` read before its registration ended and handled after does not
+    /// write the address back: the end dropped it, and the message's registration is gone.
+    #[test]
+    fn a_late_reflexive_change_does_not_write_after_the_end() {
+        let peer = DeviceKey::from_seed([55; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            ..
+        } = stand_in(54, peer, &[]);
+        lock(&core.reg).reflexive = Some("198.51.100.7:40000".parse().unwrap());
+        crate::server::clear_registration(&core);
+        assert_eq!(ep.status().reflexive, None, "the end left the address");
+        let _context = core.handle.enter();
+        let mut judging = tokio::task::JoinSet::new();
+        crate::server::dispatch(
+            &core,
+            generation,
+            ServerMessage::ReflexiveChanged(
+                tasty_net_rendezvous::wire::message::ReflexiveChanged {
+                    reflexive: "198.51.100.8:40001".parse().unwrap(),
+                },
+            ),
+            &mut judging,
+        );
+        assert_eq!(
+            ep.status().reflexive,
+            None,
+            "a late reflexive_changed wrote the address back"
+        );
+        drop(judging);
         ep.close();
     }
 

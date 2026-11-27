@@ -205,6 +205,7 @@ pub(crate) fn clear_registration(core: &Core) {
 /// of a registration drop it through this: the server loop's (`clear_registration`) and the
 /// shutdown's, which reports `Off` in the same section.
 pub(crate) fn drop_registration(core: &Core, r: &mut Registration) {
+    r.reflexive = None;
     r.nat = None;
     r.limits = None;
     r.mismatch = None;
@@ -518,7 +519,17 @@ pub(crate) fn dispatch(
     match m {
         ServerMessage::Welcome(_) => debug!("a second welcome ignored"),
         ServerMessage::ReflexiveChanged(c) => {
-            lock(&core.reg).reflexive = Some(crate::socket::canonical(c.reflexive));
+            // The address belongs to the registration it came on: it is written only while
+            // that registration's link is current, in the section of the state lock the ends
+            // of a registration drop it in, so one read before an end does not come back after.
+            {
+                let mut r = lock(&core.reg);
+                if core.generation() != Some(generation) {
+                    debug!("a reflexive_changed of an ended registration dropped");
+                    return;
+                }
+                r.reflexive = Some(crate::socket::canonical(c.reflexive));
+            }
             judging.spawn(rejudge(core.clone(), generation));
         }
         ServerMessage::PunchRefused(r) => {

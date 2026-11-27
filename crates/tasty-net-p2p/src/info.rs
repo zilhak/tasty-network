@@ -158,7 +158,7 @@ pub struct P2pStatus {
     pub server: Option<RendezvousServer>,
     /// The local socket address.
     pub local_addr: Option<SocketAddr>,
-    /// The reflexive address the server saw.
+    /// The reflexive address the server saw on the current registration; none without one.
     pub reflexive: Option<SocketAddr>,
     /// The NAT judgement of the current registration; `Unknown` until its report is queued.
     pub nat: NatMapping,
