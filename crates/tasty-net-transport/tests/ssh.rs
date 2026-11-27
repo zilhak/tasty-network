@@ -1178,6 +1178,110 @@ fn a_cancelled_first_handshake_ends_its_tunnel_entry_as_cancelled() {
     assert!(!attempted);
 }
 
+/// Kills every tunnel child of `fake` and waits until the transport sees no live tunnel.
+fn kill_tunnels(fake: &FakeSsh, transport: &SshTransport) {
+    let pids = fake.tunnel_pids();
+    assert!(!pids.is_empty(), "a tunnel child runs");
+    for pid in pids {
+        let status = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .expect("kill");
+        assert!(status.success(), "kill {pid}: {status}");
+    }
+    wait_until("the tunnel to be seen dead", || {
+        transport.live_tunnels() == 0
+    });
+}
+
+#[test]
+fn a_link_let_go_after_its_tunnel_died_ends_its_entry_as_tunnel_exited() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("dead-tunnel-link");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let id = table.connections()[0].id;
+    assert_eq!(
+        table.connection(id).expect("kept").state,
+        ConnectionState::Connected
+    );
+    // The tunnel dies; the consumer lets the link go before reading a frame, which closes
+    // it here.
+    kill_tunnels(&fake, &transport);
+    drop(link);
+    wait_until("the entry to end", || {
+        table
+            .connection(id)
+            .is_some_and(|e| e.state == ConnectionState::Disconnected)
+    });
+    let entry = table.connection(id).expect("kept");
+    assert_eq!(entry.last_cause, Some(Cause::TunnelExited), "{entry:#?}");
+    let ended = ended_causes(&table);
+    assert_eq!(ended, [Some(Cause::TunnelExited)]);
+
+    // The redialer reads the cause as one to retry.
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new()
+            .with_initial(Duration::from_millis(1))
+            .with_jitter(0.0)
+            .with_max_attempts(1),
+    )
+    .expect("valid");
+    let mut attempts = 0;
+    let result = redialer.redial(id, ended[0].as_ref(), &AttemptCancel::new(), |_| {
+        attempts += 1;
+        Err::<(), _>(HandshakeError::TimedOut)
+    });
+    assert!(
+        matches!(result, Err(RedialError::Exhausted(Some(_)))),
+        "{result:?}"
+    );
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn a_request_channel_left_on_a_tunnel_that_died_ends_its_entry_as_tunnel_exited() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("dead-tunnel-request");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let link = dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let request = dial_request(conn, &client(), &cancel).expect("request");
+    assert_eq!(fake.tunnels_started(), 1, "the request shares the tunnel");
+    let id = table.connections()[0].id;
+    // The attach link closes here first; the request channel keeps the entry connected.
+    drop(link);
+    wait_until("the link's end to be recorded", || {
+        table
+            .connection(id)
+            .is_some_and(|e| e.last_cause == Some(Cause::ClosedHere))
+    });
+    assert_eq!(
+        table.connection(id).expect("kept").state,
+        ConnectionState::Connected
+    );
+    // Then the tunnel dies under the request channel and the consumer lets it go.
+    kill_tunnels(&fake, &transport);
+    drop(request);
+    wait_until("the entry to end", || {
+        table
+            .connection(id)
+            .is_some_and(|e| e.state == ConnectionState::Disconnected)
+    });
+    let entry = table.connection(id).expect("kept");
+    assert_eq!(entry.last_cause, Some(Cause::TunnelExited), "{entry:#?}");
+    assert_eq!(ended_causes(&table), [Some(Cause::TunnelExited)]);
+}
+
 #[test]
 fn a_join_shows_its_handshake_phase_and_keeps_its_failure() {
     let server = echo_server(token('a'));
