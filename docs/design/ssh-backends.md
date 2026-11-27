@@ -614,7 +614,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 - 사례와 기대: `cases`의 한 줄은 `ssh -G`에 줄 인자이고, `=>` 뒤에 기대를 적는다. 적지 않으면 기준 클라이언트가 성공하고 출력이 같으며 이식 크레이트가 거부하지 않아야 한다. `refused <종류> <파일>:<줄> [<지시어>]`(`-o` 값이면 자리 `command-line`)는 기준 클라이언트가 255로 끝나고 오류 출력이 그 파일·줄을 말하며, 이식 크레이트가 같은 종류·파일·줄(·지시어)로 거부해야 한다. 성공하는 사례에서 이식 크레이트만 하는 거부(`security_not_implemented`·`undeterminable`)는 그 사례에 `also-refused <종류>`로 적은 경우만 받는다. 틀린 줄은 fixture 하나에 하나만 둔다.
 - 로컬 계정: OpenSSH는 로컬 사용자 이름과 홈을 환경 변수가 아니라 `getpwuid(getuid())`에서 얻는다(`ssh.c:664`, `~` 펼침 `misc.c:1276`–`:1325`, `%d`·`%u`·`Match localuser`·기본 사용자). 그래서 `HOME`·`USER`를 바꿔도 기준 클라이언트의 값은 고정되지 않는다. 시험은 실행 계정의 passwd 항목(이름·홈)을 읽어 이식 크레이트의 `embedded.local_user`·`embedded.home`에 같은 값을 주고, 기대값도 그 값으로 만든다. 시험은 그 값을 기준 클라이언트에서 얻는다: `UserKnownHostsFile ~/@@%u@@%l@@%i` 한 줄짜리 설정으로 `ssh -F <그 파일> -G probe`를 실행해 출력의 `userknownhostsfile` 값을 나눠 홈·이름·호스트 이름·uid를 읽는다(`tests/matches_openssh.rs`). 이것은 대조 시험이 기대값을 맞추는 방법일 뿐이고, 이식 크레이트와 내장 백엔드의 제품 동작은 그 값을 `embedded.local_user`·`embedded.home`과 호출자에게서 받는다.
 - 상대 `Include`: `-F`로 준 파일의 상대 `Include`는 실제 계정의 `~/.ssh` 아래로 풀린다(`readconf.c:2094`–`:2108`, 사용자 설정으로 읽기 때문). 대조 fixture는 절대 경로 `Include`만 쓰고, 그 경로는 환경 변수로 적는다(예: `Include ${TASTY_FIXTURE_DIR}/sub.conf`). OpenSSH는 `Include` 인자의 토큰과 환경 변수를 경로 판정 전에 펼치므로(`readconf.c:2085`–`:2093`) fixture 파일을 고치지 않고 checkout 위치와 관계없이 같은 파일을 읽는다. 시험은 같은 값을 기준 클라이언트의 환경과 이식 크레이트에 준다. 상대 경로 규칙은 주어진 홈으로 하는 단위 시험이 원본 규칙대로 본다. 실제 계정의 `~/.ssh`를 시험이 건드리지 않는다.
-- 원격 빌드 머신에서 이 스크립트가 도는지는 이식 크레이트 작업이 처음 확인한다(빌드 도구: C 컴파일러, `make`, `autoreconf`, zlib·libcrypto 헤더).
+- 원격 빌드 머신에서 이 스크립트가 돌고, 빌드한 `ssh -V`가 `OpenSSH_10.6p2`로 시작한다(이식 크레이트 1단계에서 확인). 빌드 도구는 C 컴파일러, `make`, `autoreconf`(autoconf), zlib·libcrypto 헤더, Kerberos 개발 파일(Debian 계열 `libkrb5-dev`)이다. Kerberos 개발 파일이 없으면 GSSAPI가 꺼진 빌드가 되고 스크립트가 그 빌드를 놓지 않는다.
 
 ### exec·SFTP 시험 서버
 
@@ -673,11 +673,11 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 항목 | 상태 |
 |---|---|
 | 1단계 feature 분리 | 들어갔다(transport ssh feature 분리). 검사 단계 `scripts/check.sh transport-no-ssh` |
-| 이식 크레이트 `tasty-net-ssh-config` | 후속 작업(OpenSSH 해석 이식) |
+| 이식 크레이트 `tasty-net-ssh-config` | 1단계가 만들었다: `ssh_config` 해석(`readconf.c`, `ssh.c` 설정 단계, `dump_client_config`)과 결과 API, 기준 클라이언트 `ssh -G` 대조 시험. 2단계(내장 SSH 백엔드)에 남은 것: known_hosts 판정과 `ssh-keygen -F` 대조, `IdentityFile` 펼침, 메모리 키 입구 |
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
-| 비교 시험의 기준 클라이언트 빌드 | 후속 작업(OpenSSH 해석 이식). 원격 빌드 머신에서 `scripts/install-openssh-ref.sh`가 도는지 처음 확인한다 |
+| 비교 시험의 기준 클라이언트 빌드 | 원격 빌드 머신에서 확인했다. `scripts/install-openssh-ref.sh`가 기준 커밋을 빌드하고 `ssh -G` 대조가 돈다([비교 시험의 기준 클라이언트](#비교-시험의-기준-클라이언트)의 빌드 도구) |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |
 | SSH 세션 목록의 필드와 보관 상한 | 후속 작업(내장 SSH 백엔드). [SSH 세션 목록](#ssh-세션-목록)의 경계 안에서 필드 표, 닫힌 세션의 보관 상한, 이벤트 종류 |
