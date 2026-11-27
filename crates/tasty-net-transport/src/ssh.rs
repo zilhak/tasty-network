@@ -72,15 +72,23 @@ impl Drop for TunnelHold {
         let Some(entry) = &self.entry else {
             return;
         };
-        // The cause the entry keeps (the last link's end, or why the attempt failed), unless
-        // the tunnel itself exited.
-        let cause = if self.tunnel.is_alive() {
-            entry
-                .status()
-                .and_then(|(_, cause)| cause)
-                .unwrap_or(Cause::Ended)
-        } else {
-            Cause::TunnelExited
+        // The cause the entry keeps (the last link's end, or why the attempt failed). A tunnel
+        // that exited names the end instead, unless the cause was recorded before the entry
+        // was connected (the attempt's own failure, such as a cancel that reaped the tunnel)
+        // or is one that is not retried: those stay, so the redialer reads them.
+        let (state, recorded) = entry
+            .status()
+            .unwrap_or((ConnectionState::Disconnected, None));
+        let cause = match recorded {
+            Some(cause)
+                if self.tunnel.is_alive()
+                    || state != ConnectionState::Connected
+                    || !cause.is_retryable() =>
+            {
+                cause
+            }
+            _ if !self.tunnel.is_alive() => Cause::TunnelExited,
+            _ => Cause::Ended,
         };
         entry.end(cause);
     }

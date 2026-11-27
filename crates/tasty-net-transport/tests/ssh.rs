@@ -1108,3 +1108,48 @@ fn forwarded_channels(table: &ConnectionTable, id: ConnectionId) -> usize {
         .and_then(|s| s.remote)
         .map_or(0, |r| r.split(FORWARDED_SEPARATOR).count())
 }
+
+#[test]
+fn a_cancelled_first_handshake_ends_its_tunnel_entry_as_cancelled() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("cancel-first");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let id = table.connections()[0].id;
+    // The cancel reaps the unpublished tunnel before the handshake runs.
+    cancel.cancel();
+    assert!(matches!(
+        dial_handshake(conn, &client(), Holder::Dialer, None, &cancel),
+        Err(HandshakeError::Cancelled)
+    ));
+    wait_until("the ssh child to exit", || fake.tunnel_pids().is_empty());
+    let entry = table.connection(id).expect("kept");
+    assert_eq!(entry.state, ConnectionState::Disconnected);
+    assert_eq!(entry.last_cause, Some(Cause::Cancelled));
+    assert_eq!(
+        entry.history.last().and_then(|h| h.cause.clone()),
+        Some(Cause::Cancelled)
+    );
+    let ended = ended_causes(&table);
+    assert_eq!(ended, [Some(Cause::Cancelled)]);
+
+    // The cause the consumer saw stops the redialer before any attempt.
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new().with_initial(Duration::from_millis(1)),
+    )
+    .expect("valid");
+    let mut attempted = false;
+    let result = redialer.redial(id, ended[0].as_ref(), &AttemptCancel::new(), |_| {
+        attempted = true;
+        Err::<(), _>(HandshakeError::TimedOut)
+    });
+    assert!(
+        matches!(result, Err(RedialError::NotRedialed)),
+        "{result:?}"
+    );
+    assert!(!attempted);
+}
