@@ -244,7 +244,10 @@ async fn registered(
             conn.close(CloseCode::Closed.var_int(), CloseCode::Closed.reason());
             return End::Retry(Cause::named("hello_timeout"));
         }
-        Ok(None) | Err(FrameError::Io(_)) | Err(FrameError::Truncated) => {
+        // A frame the stream ended in the middle of is malformed (docs/design/rendezvous.md
+        // "프레임"), whatever closes the connection after it.
+        Err(FrameError::Truncated) => return close_malformed(conn, FrameError::Truncated),
+        Ok(None) | Err(FrameError::Io(_)) => {
             return match conn.close_reason() {
                 Some(c) => lost(&c),
                 None => match tokio::time::timeout(p.frame_timeout, conn.closed()).await {
@@ -306,7 +309,7 @@ async fn registered(
                     Ok(m) => dispatch(core, m),
                     Err(e) => break close_malformed(conn, e),
                 },
-                Some(Ok(None)) | Some(Err(FrameError::Io(_))) | Some(Err(FrameError::Truncated)) | None => {
+                Some(Ok(None)) | Some(Err(FrameError::Io(_))) | None => {
                     break match tokio::time::timeout(frame_timeout, conn.closed()).await {
                         Ok(c) => lost(&c),
                         Err(_) => close_malformed(conn, "the coordination stream ended"),
@@ -314,12 +317,32 @@ async fn registered(
                 }
                 Some(Err(e)) => break close_malformed(conn, e),
             },
-            e = conn.closed() => break lost(&e),
+            e = conn.closed() => {
+                // The reader may not have handed over what the stream held before the close:
+                // a frame cut in the middle is malformed even when the close is seen first.
+                break match tokio::time::timeout(frame_timeout, cut_frame(&mut msg_rx)).await {
+                    Ok(true) => close_malformed(conn, FrameError::Truncated),
+                    _ => lost(&e),
+                };
+            }
             _ = shutdown.changed() => break End::Shutdown,
         }
     };
     reader.abort();
     end
+}
+
+/// Whether the reader's remaining results end with a frame cut in the middle. The reader ends
+/// at its first result that is not a frame, so this ends with it.
+async fn cut_frame(
+    results: &mut mpsc::UnboundedReceiver<Result<Option<Vec<u8>>, FrameError>>,
+) -> bool {
+    while let Some(r) = results.recv().await {
+        if matches!(r, Err(FrameError::Truncated)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn close_malformed(conn: &quinn::Connection, what: impl ToString) -> End {

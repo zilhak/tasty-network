@@ -1113,3 +1113,42 @@ fn a_second_close_keeps_the_first_reason() {
     a.ep.close();
     b.ep.close();
 }
+
+/// A frame the stream ends in the middle of is malformed at once, before and after the
+/// `welcome`, also when the server closes the connection right after (docs/design/rendezvous.md
+/// "프레임"): not `server_closed`, and not after the frame deadline.
+#[test]
+fn a_frame_cut_by_the_end_of_the_stream_is_malformed() {
+    let mut cut = header(100);
+    cut.extend_from_slice(b"{\"type\":");
+    for script in [
+        Script {
+            first: Some(cut.clone()),
+            finish_after: true,
+            ..Script::default()
+        },
+        Script {
+            after_welcome: vec![cut.clone()],
+            finish_after: true,
+            ..Script::default()
+        },
+    ] {
+        let before = script.first.is_some();
+        let (_w, _fake, d) = on_fake(script, &[]);
+        let start = Instant::now();
+        let (cause, at) = first_backoff(&d, LONG);
+        assert!(at - start < Duration::from_secs(10), "{:?}", at - start);
+        assert_eq!(cause.name, "io", "before welcome {before}: {cause:?}");
+        assert!(
+            matches!(
+                cause.detail,
+                Some(CauseDetail::Io {
+                    kind: std::io::ErrorKind::InvalidData,
+                    ..
+                })
+            ),
+            "before welcome {before}: {cause:?}"
+        );
+        d.ep.close();
+    }
+}

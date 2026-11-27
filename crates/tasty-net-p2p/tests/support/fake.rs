@@ -54,11 +54,14 @@ pub struct Script {
     pub first: Option<Vec<u8>>,
     /// Raw bytes written right after the `welcome`.
     pub after_welcome: Vec<Vec<u8>>,
+    /// End the coordination stream after those bytes, then close the connection with code 0.
+    pub finish_after: bool,
 }
 
 enum Out {
     Msg(ServerMessage),
     Raw(Vec<u8>),
+    Finish,
 }
 
 impl Default for Script {
@@ -71,6 +74,7 @@ impl Default for Script {
             forward_limits_invalid: Some(Duration::ZERO),
             first: None,
             after_welcome: Vec::new(),
+            finish_after: false,
         }
     }
 }
@@ -273,6 +277,9 @@ async fn serve(conn: quinn::Connection, state: Arc<Mutex<State>>, script: Arc<Sc
     for raw in &script.after_welcome {
         let _sent = tx.send(Out::Raw(raw.clone()));
     }
+    if script.finish_after {
+        let _sent = tx.send(Out::Finish);
+    }
     state.lock().unwrap().devices.insert(
         id,
         Dev {
@@ -281,9 +288,17 @@ async fn serve(conn: quinn::Connection, state: Arc<Mutex<State>>, script: Arc<Sc
             host: hello.host_candidates,
         },
     );
+    let writer_conn = conn.clone();
     tokio::spawn(async move {
+        let conn = writer_conn;
         while let Some(m) = rx.recv().await {
             let bytes = match m {
+                Out::Finish => {
+                    let _finished = send.finish().is_ok();
+                    let _sent = send.stopped().await;
+                    conn.close(quinn::VarInt::from_u32(0), b"closed");
+                    break;
+                }
                 Out::Raw(b) => b,
                 Out::Msg(m) => {
                     let Ok(json) = m.to_json() else { continue };
