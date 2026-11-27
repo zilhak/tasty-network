@@ -614,6 +614,25 @@ async fn device_that_does_not_read_is_closed() {
     assert_eq!(server.status().registrations, 1);
 }
 
+#[tokio::test]
+async fn reset_coordination_stream_removes_the_registration() {
+    let mut s = local_settings();
+    s.set("max_devices", Value::Count(1)).unwrap();
+    let server = start(s).await;
+    let (mut d, _) = Device::register(&server, &key(1), &[]).await;
+    assert_eq!(server.status().registrations, 1);
+    d.send.reset(quinn::VarInt::from_u32(0)).unwrap();
+    assert_eq!(d.closed_with().await, code(CloseCode::Malformed));
+    eventually("the registration is removed", || {
+        server.status().registrations == 0
+    })
+    .await;
+    // The max_devices slot is free again.
+    let (_d, _) = Device::register(&server, &key(2), &[]).await;
+    assert_eq!(server.status().registrations, 1);
+    assert_eq!(server.status().busy_max_devices, 0);
+}
+
 async fn refused(d: &mut Device) -> RefuseReason {
     match d.recv().await {
         ServerMessage::PunchRefused(r) => r.reason,

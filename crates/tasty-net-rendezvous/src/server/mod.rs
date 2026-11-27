@@ -777,7 +777,11 @@ async fn reader(
                 return;
             }
             Err(FrameError::Io(e)) => {
-                debug!(device = %device, error = %e, "coordination stream failed");
+                // A reset or failed coordination stream ends the registration: the connection
+                // is closed (a no-op when it already is) and the monitor removes the entry.
+                info!(device = %device, code = CloseCode::Malformed.name(), "coordination stream failed");
+                debug!(device = %device, error = %e, "coordination stream error");
+                close(&conn, CloseCode::Malformed);
                 return;
             }
             Err(e) => {

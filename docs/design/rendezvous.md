@@ -121,7 +121,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | 1 | `access_denied` | 접근 정책 거절 | 멈춤(`Stopped`) |
 | 2 | `superseded` | 같은 기기 ID가 새로 등록함 | 멈춤 |
 | 3 | `unsupported_proto` | 같은 ALPN에서 `hello.proto`를 서버가 모름 | 멈춤 |
-| 4 | `malformed` | 형식 오류, 상한 초과, 프레임 기한 초과, 둘째 스트림 | backoff로 재연결 |
+| 4 | `malformed` | 형식 오류, 상한 초과, 프레임 기한 초과, 둘째 스트림, 등록 뒤 조정 스트림의 RESET·읽기 실패 | backoff로 재연결 |
 | 5 | `busy` | `max_devices` 초과, 송신 큐(`max_queued_messages`)가 가득 참 | backoff로 재연결 |
 | 6 | `hello_timeout` | `hello`가 시간 안에 오지 않음 | backoff로 재연결 |
 | (TLS) | ALPN 불일치 | 서버가 `tasty-rendezvous/<n>`을 모름. QUIC/TLS handshake가 `no_application_protocol` alert로 끝나 앱 종료 코드까지 가지 않는다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) §8.1) | 멈춤(원인 `alpn_mismatch`) |
