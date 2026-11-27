@@ -380,26 +380,6 @@ mod tests {
         assert_eq!(defaults().stderr_max_line(), MAX_LINE);
     }
 
-    /// A smaller `tunnel.stderr_max_line` cuts the judged line sooner.
-    #[test]
-    fn the_line_limit_comes_from_the_settings() {
-        const DIAG: &str =
-            "command-line: line 0: Bad configuration option: forkafterauthentication";
-        let line = format!("{}{DIAG}\n", "x".repeat(300));
-        let judge = |max_line: usize| {
-            let seen = StderrMarks::default();
-            super::relay_stderr(
-                io::Cursor::new(line.clone().into_bytes()),
-                io::sink(),
-                &seen,
-                max_line,
-            );
-            seen.fork_option_refused.load(Ordering::Acquire)
-        };
-        assert!(judge(MAX_LINE));
-        assert!(!judge(256));
-    }
-
     /// An error with a cause, like a context layer of `anyhow`.
     #[derive(Debug)]
     struct Context(&'static str, Box<dyn Error + 'static>);

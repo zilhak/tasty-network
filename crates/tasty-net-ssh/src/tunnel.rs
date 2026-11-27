@@ -1005,6 +1005,45 @@ mod tests {
             }
         }
 
+        /// `tunnel.stderr_max_line` of the launcher reaches the stderr relay of its tunnels: a
+        /// ForkAfterAuthentication refusal of about 370 bytes is judged with the default 1 KiB
+        /// (the tunnel starts again without the option) and not with 256 B (no second start).
+        #[test]
+        fn the_line_limit_comes_from_the_settings() {
+            use crate::settings::Value;
+            let refusal = format!(
+                "{}command-line: line 0: Bad configuration option: forkafterauthentication",
+                "x".repeat(300)
+            );
+            let ssh = Script::new(
+                "long-refusal",
+                &format!(
+                    "#!/bin/sh\ncase \" $* \" in *\" ForkAfterAuthentication=no \"*)\n\
+                     printf '%s\\n' '{refusal}' >&2;;\nesac\nexit 255\n"
+                ),
+            );
+            let starts = |settings: crate::SshSettings| {
+                let (hook, calls, _pids) = counting_hook();
+                let launcher = SshLauncher::new(ssh.path())
+                    .with_spawn_hook(hook)
+                    .with_settings(settings);
+                let result = SshTunnel::establish_relaying_to(
+                    &launcher,
+                    &SshTarget::parse("fake-host"),
+                    45123,
+                    io::sink,
+                );
+                assert!(matches!(result, Err(TunnelError::ExitedBeforeReady { .. })));
+                calls.load(Ordering::SeqCst)
+            };
+            assert_eq!(starts(crate::SshSettings::default()), 2);
+            let mut short = crate::SshSettings::new();
+            short
+                .set("tunnel.stderr_max_line", Value::Bytes(256))
+                .unwrap();
+            assert_eq!(starts(short), 1);
+        }
+
         /// A ready timeout of 100 ms with a poll of 1 s gives up after about 100 ms, and the
         /// error says the time it waited.
         #[test]

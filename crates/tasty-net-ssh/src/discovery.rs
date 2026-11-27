@@ -2713,17 +2713,22 @@ mod tests {
             );
         }
 
-        /// `discovery.step_timeout` and `discovery.total_timeout` of the launcher bound a call.
-        #[test]
-        fn the_discovery_bounds_come_from_the_settings() {
+        /// Runs Auto against a fake that never answers, with the given step and total bounds,
+        /// and returns the remote commands it ran and how long the call took.
+        fn auto_against_silence(name: &str, step: u64, total: u64) -> (Vec<String>, Duration) {
             use crate::settings::Value;
-            let fake = FakeSsh::new("bounds", "sleep 10", "sleep 10");
-            let one = Value::Duration(Duration::from_secs(1));
+            let fake = FakeSsh::new(name, "exec sleep 30", "exec sleep 30");
             let launcher = launcher_with(
                 &fake,
                 &[
-                    ("discovery.step_timeout", one),
-                    ("discovery.total_timeout", one),
+                    (
+                        "discovery.step_timeout",
+                        Value::Duration(Duration::from_secs(step)),
+                    ),
+                    (
+                        "discovery.total_timeout",
+                        Value::Duration(Duration::from_secs(total)),
+                    ),
                 ],
             );
             let started = Instant::now();
@@ -2737,8 +2742,26 @@ mod tests {
                 "{}",
                 err.detail()
             );
-            // One step of 1 s uses up the total of 1 s, so the chain stops there.
-            assert_eq!(fake.calls(), ["netprog port"]);
+            (fake.calls(), took)
+        }
+
+        /// A step bound of 1 s under a total of 1 h ends each of the three Auto steps after
+        /// about a second. With the default step bound (20 s) the call would take far longer.
+        #[test]
+        fn the_step_bound_comes_from_the_settings() {
+            let (calls, took) = auto_against_silence("step-first", 1, 3600);
+            assert_eq!(calls.len(), AUTO_FALLBACK_CHAIN.len(), "{calls:?}");
+            assert!(took >= Duration::from_secs(3), "took {took:?}");
+            assert!(took < Duration::from_secs(10), "took {took:?}");
+        }
+
+        /// A total of 1 s under a step bound of 1 h ends the call after the first step: the
+        /// budget is used up and no other ssh starts.
+        #[test]
+        fn the_total_budget_comes_from_the_settings() {
+            let (calls, took) = auto_against_silence("total-first", 3600, 1);
+            assert_eq!(calls, ["netprog port"]);
+            assert!(took >= Duration::from_secs(1), "took {took:?}");
             assert!(took < Duration::from_secs(5), "took {took:?}");
         }
 
