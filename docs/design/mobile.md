@@ -221,7 +221,7 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 
 1. FFI 레코드와 오류 enum은 코어 크레이트의 공개 타입을 옮긴 것이다. 같은 workspace에 있으면 코어 API가 바뀌는 커밋에서 FFI 변환도 함께 고쳐지고, 고치지 않으면 이 레포의 clippy·test가 바로 막는다. 앱 레포에 두면 그 깨짐을 앱 레포가 다음에 판을 올릴 때에야 안다.
 2. 모바일 cross check와 `no-process-spawn`이 ffi를 포함한 의존 그래프 전체를 이 레포의 CI에서 본다. ffi가 다른 레포에 있으면 ffi가 켜는 feature 조합(`embedded-ssh`만)을 이 레포가 검사할 수 없다.
-3. `uniffi` 판은 Rust 쪽 scaffolding(이 레포)과 생성기(앱 레포), 그리고 앱의 cdylib에 함께 링크되는 다른 UniFFI 크레이트가 모두 같아야 한다. 판을 이 레포가 정확히 고정하고 기록하면 앱 레포는 그 판을 따라가기만 한다(director 2865: 이 레포가 고정하는 최신 안정판을 두 레포가 함께 쓰고, 앱은 지금의 0.32에서 올린다).
+3. `uniffi` 판은 Rust 쪽 scaffolding(이 레포)과 생성기(앱 레포), 그리고 앱의 cdylib에 함께 링크되는 다른 UniFFI 크레이트가 모두 같아야 한다. 두 레포가 같은 판을 쓰고, 이 레포가 그 판을 정확히 고정해 기록한다. 판은 앱과 같은 판이다(director 2931, 아래 "크레이트"의 UniFFI 판).
 4. 생성물(Kotlin·Swift 소스)과 그것을 묶는 빌드(Gradle의 cargo-ndk, AAR, Xcode)는 앱의 빌드 체계에 붙어 있다. 앱 레포가 생성하면 앱 빌드가 쓰는 판과 생성물이 늘 같다.
 5. 이 레포는 공개 레포이고 앱 쪽 구성은 이 레포의 범위가 아니다.
 
@@ -254,9 +254,9 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 - 순서: ffi는 내장 백엔드 작업(2단계 feature) 뒤에 만든다. 그 전에 SSH 없는 ffi를 먼저 내지 않는다. 바인딩의 SSH 모양이 나중에 바뀌지 않게 하기 위해서다.
 - 다른 크레이트는 UniFFI에 의존하지 않는다. FFI용 타입은 이 크레이트가 따로 정의하고 코어 타입에서 옮긴다(코어 크레이트의 공개 API가 FFI 제약을 따르지 않게 한다).
 - unsafe: [크레이트 구성](crates.md#unsafe-규칙)의 `deny(unsafe_code)` 분류다.
-- UniFFI 판: 2026-11-27 crates.io 최신 안정판은 0.33.0(2026-11-25 게시), 그 앞은 0.32.2(2026-09-23). 라이선스 MPL-2.0(`deny.toml` 허용). 바인딩 크레이트 작업이 그때의 최신 안정판을 `=` 판으로 고정하고, 그 판을 앱 레포에 알린다(두 레포 공통, director 2865). 판을 올릴 때도 이 레포가 먼저 올리고 알린다. 0.33.0의 `uniffi-bindgen`은 라이브러리 모드가 기본이고 `--library` 플래그는 남아 있지만 deprecated다. 생성 명령은 고정한 판의 문서로 다시 확인한다. 앱과 같은 판을 쓴다. 앱은 지금 0.32다. 판을 고정할 때 director에게 알린다(판 고정은 바인딩 크레이트 작업, director 2931).
-- Kotlin 패키지 이름(android 요구 #12): UniFFI 0.33.0의 Kotlin 생성기는 `uniffi.toml`의 `[bindings.kotlin] package_name`이 없으면 `uniffi.<네임스페이스>`를 쓴다(`uniffi_bindgen` 0.33.0 `src/bindings/kotlin/mod.rs:94`–`:96`). 그래서 이 크레이트는 기본이면 `uniffi.tasty_net`이다. 라이브러리 모드도 크레이트마다 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/bindgen_paths.rs:141`–`:144`) `tasty-net-ffi`의 이름은 이 레포의 `uniffi.toml`이 정하고, 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.<크레이트>]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:96`–`:121`). 값은 바인딩 크레이트 작업이 정한다.
-- 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(`src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:314`–`:322`). 두면 `tasty-net-ffi`의 Kotlin만 다른 라이브러리를 싣는다.
+- UniFFI 판: 앱과 같은 판을 쓴다. 앱은 지금 0.32다. 판을 고정할 때 director에게 알린다(director 2931). 이 규칙이 director 2865의 "이 레포가 그때의 최신 안정판을 먼저 고정하고 앱이 따라 올린다"를 바꿨다. 판 고정(`=` 판)은 바인딩 크레이트 작업이 한다. 참고로 2026-11-27 crates.io 최신 안정판은 0.33.0(2026-11-25 게시), 그 앞은 0.32.2(2026-09-23)다. 라이선스 MPL-2.0(`deny.toml` 허용). 0.33.0의 `uniffi-bindgen`은 라이브러리 모드가 기본이고 `--library` 플래그는 남아 있지만 deprecated다. 생성 명령은 고정한 판의 문서로 다시 확인한다.
+- Kotlin 패키지 이름(android 요구 #12): UniFFI 0.33.0의 Kotlin 생성기는 `uniffi.toml`의 `[bindings.kotlin] package_name`이 없으면 `uniffi.<네임스페이스>`를 쓴다(`uniffi_bindgen` 0.33.0 `src/bindings/kotlin/mod.rs:94`–`:96`). 그래서 이 크레이트는 기본이면 `uniffi.tasty_net`이다(0.32.2도 같은 동작이다. 아래 줄 번호는 0.33.0의 것이라 판을 고정할 때 그 판으로 다시 적는다). 라이브러리 모드도 크레이트마다 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/bindgen_paths.rs:141`–`:144`) `tasty-net-ffi`의 이름은 이 레포의 `uniffi.toml`이 정하고, 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.<크레이트>]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:96`–`:121`). 값은 바인딩 크레이트 작업이 정한다.
+- 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 병합된 Kotlin 설정(앱 `--config`의 `[defaults]`, 이 레포의 `uniffi.toml`, 앱 `--config`의 `[crates.<크레이트>]` 순으로 뒤가 이긴다)에 `cdylib_name`이 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(`src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:314`–`:322`). 어느 층이든 값을 넣으면 그 값이 쓰이고, 그 값이 앱 라이브러리 이름과 같을 때만 같은 라이브러리를 싣는다. 앱 설정으로 넣는 것은 앱의 몫이다.
 
 ### rlib 링크 계약
 
@@ -302,7 +302,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 5 | SFTP 쓰기 | 앱 쪽 결정 뒤. 보류 |
 | 6b | attach 없는 SSH 세션의 상태 | Rust 쪽은 `tasty-net-ssh`의 [SSH 세션 목록](ssh-backends.md#ssh-세션-목록)이다(transport 연결 목록은 바꾸지 않는다). ffi는 transport 연결 목록과 SSH 세션 목록의 이벤트를 앱에 하나의 `EventStream`으로 합쳐 내고, 이벤트마다 어느 목록의 것인지 종류를 붙인다. 현재 상태를 다시 읽는 조회도 낸다: 연결 목록 조회와 나란히 `SshConnector::sessions()`의 스냅샷을 FFI 조회 API로 낸다. 앱이 이벤트 흐름을 늦게 열었거나 `Lagged{dropped}`를 받은 뒤에는 두 조회로 상태를 다시 맞춘다. 메서드 이름·레코드 필드·보관 상한은 바인딩 크레이트 작업이 정한다 |
 | 7 | 원격 Tasty attach 경로의 노출 범위 | FFI가 내는 것: 대상으로 연결 열기(포트 발견 → `direct-tcpip` → handshake v2는 Rust 안에서 한다), 열린 연결 위 `attach`·`request`·`bulk` 채널 열기, 채널 위 프레임 읽기·쓰기(바이트), 닫기, 연결 레코드의 포트·인스턴스 ID·상대 기기 ID. 프레임의 도메인 해석은 앱·tasty 쪽이다. FFI가 내지 않는 것: 연결 토큰. 토큰은 Rust 안에서 포트 발견 결과에서 handshake로만 간다. FFI 레코드·오류 메시지·`Debug`·이벤트·설정 조회 어디에도 토큰을 싣지 않고, 시험이 그 출력들에 토큰 문자열이 없는지 본다. `PeerTooOld`(숫자 포트만 돌려주는 상대)는 FFI 오류 변형이다 |
-| 7+ | 요청 클라이언트, 상대 `caps`, `ResponseTooLarge`·`PeerTooOld`의 `evidence`, 발견과 터널의 대상 일치 | FFI는 transport의 [요청 클라이언트](transport.md#요청-클라이언트-dialer-쪽)를 객체로 감싸 호출과 닫기를 낸다. 상대 `caps`는 handshake 뒤 그 객체(와 attach 링크)의 조회로 낸다. `dial_request`가 `net.request`를 열기 조건으로 보지 않으므로 첫 호출 전 확인은 앱이 한다. `RequestError`는 변형마다 FFI 변형으로 옮기고 `ResponseTooLarge`를 따로 둔다. `PeerTooOld`는 두 경로(포트 발견의 `ConnectError::PeerTooOld`, handshake의 `HandshakeError::PeerTooOld`. `HandshakeError::Connect`에 싸인 앞의 것도) 모두 같은 FFI 변형에 `evidence`(`PortOnlyDiscovery`·`V1Ack`)를 싣는다. 발견과 터널의 대상이 다르면 [SSH 백엔드](ssh-backends.md#포트-발견과-터널의-대상-일치)의 `TargetMismatch`를 같은 이름의 FFI 변형으로 낸다. 객체·메서드 이름과 값 표현은 바인딩 크레이트 작업이 정한다 |
+| 7+ | 요청 클라이언트, 상대 `caps`, `ResponseTooLarge`·`PeerTooOld`의 `evidence`, 발견과 터널의 대상 일치 | FFI는 transport의 [요청 클라이언트](transport.md#요청-클라이언트-dialer-쪽)를 객체로 감싸 호출과 닫기를 낸다. 상대 `caps`는 handshake 뒤 그 객체의 조회로 낸다(attach 링크 쪽 조회는 후속 작업이 정한다). `dial_request`가 `net.request`를 열기 조건으로 보지 않으므로 첫 호출 전 확인은 앱이 한다. `RequestError`는 변형마다 FFI 변형으로 옮기고 `ResponseTooLarge`를 따로 둔다. `PeerTooOld`는 두 경로(포트 발견의 `ConnectError::PeerTooOld`, handshake의 `HandshakeError::PeerTooOld`. `HandshakeError::Connect`에 싸인 앞의 것도) 모두 같은 FFI 변형에 `evidence`(`PortOnlyDiscovery`·`V1Ack`)를 싣는다. 발견과 터널의 대상이 다르면 [SSH 백엔드](ssh-backends.md#포트-발견과-터널의-대상-일치)의 `TargetMismatch`를 같은 이름의 FFI 변형으로 낸다. 객체·메서드 이름과 값 표현은 바인딩 크레이트 작업이 정한다 |
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
 | 9 | 앱 폴더의 기기 키 | `TastyNet::new`가 키 디렉터리를 받아 `DeviceKey::load_or_create`로 만든다. 비밀키는 FFI로 내지 않고 기기 ID만 낸다. `File::lock`이 Android에서 잠그는지는 연결 레코드 경로의 문제라 따로 확인하고 결과만 기록한다 |
@@ -356,10 +356,10 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | OpenSSH 해석 이식 크레이트 | 후속 작업. [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트) |
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
-| `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 앱 쪽 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
+| `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 director 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
 | hotfix 태그의 판정 순서 | 후속 작업(모바일 cross check). hotfix는 버전 커밋과 태그를 한 번에 push하므로 태그 조건([버전·호환](versioning.md#태그와-브랜치))을 볼 CI가 태그 전에 없다. 태그 없이 `main`을 먼저 push해 CI를 볼지, 다른 ref에서 판정할지 |
 | tasty 전환 뒤 태그의 모바일 조건 | 후속 작업(모바일 cross check). tasty 전환 태그 뒤의 태그에도 모바일 cross check 통과를 요구할지 |
-| FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, 상대 `caps` 조회를 링크와 요청 클라이언트에 함께 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
+| FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, attach 링크 쪽에도 상대 `caps` 조회를 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
 | Kotlin 패키지 이름의 값 | 후속 작업(바인딩 크레이트). #12: `uniffi.toml`의 `package_name` 값, rlib 링크 시험에서 두 네임스페이스의 Kotlin이 모두 `tasty_mobile_core`를 싣는지 볼지 |
 | 지역망 판정 콜백과 두 오류의 FFI 모양 | 후속 작업(바인딩 크레이트, 내장 SSH 백엔드). #14: 콜백 이름과 인자, 두 변형의 필드, 콜백 안에서 앱이 권한을 요청할 때의 대기 상한, 실행 중 심벌을 찾을 라이브러리와 방법 |
 | 앱 그래프의 의존 쪽 검사 스크립트 | 후속 작업(모바일 cross check). #15: 인자 모양(`Cargo.toml` 경로·크레이트·target·feature), `tokio` `process`를 켠 경로 판정의 출력, 앱 레포 CI에서 부르는 방법 |
