@@ -105,8 +105,9 @@ judge_features() {
             if (line == "") { print "unknown " NR ": " $0; next }
             # "<이름> v<판>[ <출처…>]|<feature,…>"가 아니면 모르는 줄이다(앞 공백, | 없음·둘 이상 등).
             # 출처는 로컬 경로에 괄호가 들 수 있어 | 밖의 아무 글자로, feature 이름은 Cargo가 Unicode XID
-            # 글자를 받으므로 | 와 공백 밖의 아무 글자로 본다.
-            if (line !~ /^[A-Za-z0-9_-]+ v[0-9][^ |]*( [^|]*)?\|[^|[:space:]]*$/) {
+            # 글자를 받으므로 | 와 공백 밖의 아무 글자로 본다. 패키지 이름도 Cargo가 Unicode XID 글자를 받으므로
+            # ASCII 영숫자·_·- 와 ASCII 밖의 글자(awk가 글자로 읽든 바이트로 읽든)로 본다.
+            if (line !~ /^([A-Za-z0-9_-]|[^\001-\177])+ v[0-9][^ |]*( [^|]*)?\|[^|[:space:]]*$/) {
                 print "unknown " NR ": " $0
                 next
             }
@@ -152,7 +153,7 @@ judge_inverted() {
             d = substr($0, 1, RLENGTH) + 0
             text = substr($0, RLENGTH + 1)
             sub(/ \(\*\)$/, "", text)
-            if (text !~ /^[A-Za-z0-9_-]+ (v[0-9][^ ]*( .*)?|feature "[^"]*"( \([^()]*\))?)$/ || d > prev + 1) {
+            if (text !~ /^([A-Za-z0-9_-]|[^\001-\177])+ (v[0-9][^ ]*( .*)?|feature "[^"]*"( \([^()]*\))?)$/ || d > prev + 1) {
                 print "unknown " NR ": " $0
                 next
             }
@@ -281,8 +282,11 @@ self_test() {
     local root_uni='app v0.1.0 (/project)|모바일'
     local root_paren='app v0.1.0 (/project (iOS)/app)|default'
     local inv_paren='0tokio v1.54.1;1tokio feature "process";2app feature "모바일";3app v0.1.0 (/project (iOS)/app)'
-    local failed=0 name app want st_tree st_trc st_inv st_irc st_awk got
-    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드#도구 고장
+    local root_unipkg='모바일 v0.1.0 (/w/app)|default'
+    local inv_unipkg='0tokio v1.54.1;1tokio feature "process";2모바일 v0.1.0 (/w/app)'
+    local inv_unipkg_net='0tokio v1.54.1;1tokio feature "process";2tasty-net-transport v0.1.0 (/w/t);3모바일 v0.1.0 (/w/app)'
+    local failed=0 name app want st_tree st_trc st_inv st_irc st_awk st_pkg got
+    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드#도구 고장#-p 이름(기본 app)
     # (나무의 줄은 ;로 나눈다. 도구 고장: fail은 awk가 아무것도 찍지 않고 3으로 끝나고, empty는 0으로 끝나며
     # 아무것도 찍지 않는다. fail-inverted는 거꾸로 본 나무 판정이 3으로 끝난다. fail-sed는 tokio 판을 뽑는
     # sed가, fail-grep은 위반 줄을 찾는 grep이 3·2로 끝난다)
@@ -319,10 +323,14 @@ self_test() {
         "tokio 뿌리 둘 중 하나가 다른 판(앱 기준)#1#2#$root;$tkp#0#$inv_tworoots_bad#0"
         "tokio 판을 뽑는 sed가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-sed"
         "위반 줄을 찾는 grep이 실패한다#0#2#$root;$tkp#0##0#fail-grep"
+        "Unicode 패키지 이름의 뿌리(모바일)#0#0#$root_unipkg;$tk#0##0##모바일"
+        "거꾸로 본 나무의 Unicode 패키지 노드(앱 기준)#1#0#$root_unipkg;$tkp#0#$inv_unipkg#0##모바일"
+        "Unicode 이름 앱까지 tasty-net-transport를 거친 tokio의 process(앱 기준)#1#1#$root_unipkg;$tkp#0#$inv_unipkg_net#0##모바일"
     )
     for c in "${cases[@]}"; do
         st_awk=""
-        IFS='#' read -r name app want st_tree st_trc st_inv st_irc st_awk <<<"$c"
+        st_pkg=""
+        IFS='#' read -r name app want st_tree st_trc st_inv st_irc st_awk st_pkg <<<"$c"
         got=0
         (
             # shellcheck disable=SC2329  # check_target이 부른다
@@ -351,7 +359,7 @@ self_test() {
                     grep() { [[ "$*" == *'^위반: '* ]] && return 2; command grep "$@"; }
                     ;;
             esac
-            PKG=app
+            PKG=${st_pkg:-app}
             APP=$app
             check_target aarch64-linux-android
         ) >/dev/null 2>&1 || got=$?
