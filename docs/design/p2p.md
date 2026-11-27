@@ -30,6 +30,7 @@
 | `tokio` | p2p, rendezvous | 런타임, UDP 소켓, 타이머 |
 | `ed25519-dalek` | identity(간접으로 p2p, rendezvous) | 기기 키 서명·검증 |
 | `serde`·`serde_json` | rendezvous | 조정 메시지 |
+| `toml` | rendezvous | 서버 설정 파일(`default-features = false`, `std`·`parse`·`serde`) |
 
 - 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다, `rust-version = "1.85"`), rustls 0.23.46(`rust-version = "1.71"`)이다. raw public key resolver가 0.23.16부터 있으므로 rustls는 그 이상이어야 한다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
 - crypto provider를 `ring`으로 고르는 근거: rustls 0.23의 기본 provider는 `aws_lc_rs`라 기본 feature를 그대로 두면 두 provider가 함께 들어온다. 하나만 두려면 고르고 기본 feature를 꺼야 한다. 둘 다 C 컴파일러가 필요하다. `aws-lc-rs`는 비 FIPS 빌드에 CMake가 필요 없지만, Windows x86·x86-64에서는 NASM이 필요하다. NASM이 없을 때 쓸 수 있는 미리 빌드한 객체(`prebuilt-nasm`)는 Windows x86-64에만 있고, Windows x86에서는 NASM 없이 빌드되지 않는다([aws-lc-rs 빌드 안내](https://github.com/aws/aws-lc-rs/blob/main/aws-lc-rs/README.md#build)). quinn의 기본 TLS feature도 `rustls-ring`이다. 그래서 OS마다 조건이 갈리지 않는 ring으로 고른다. TLS 1.2는 QUIC에 쓰이지 않으므로 `tls12`를 뺀다.

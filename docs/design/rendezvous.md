@@ -84,6 +84,9 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 - 부분 읽기: 한 번의 읽기에 프레임 일부만 오거나 여러 프레임이 붙어 와도 된다. 읽는 쪽은 프레임 경계로 다시 자른다. 첫 바이트를 받은 뒤 `frame_timeout`(서버 설정, 기본 5 s) 안에 그 프레임이 끝나지 않으면 `malformed`로 닫는다. 프레임 중간에 스트림이 끝나면 `malformed`로 본다.
 - 최상위 키 `type`으로 메시지를 가른다. 모르는 `type`은 `malformed`, 모르는 필드는 버린다.
 - 주소는 `"203.0.113.5:3478"`·`"[2001:db8::1]:3478"` 형식 문자열이다. 시간 값은 밀리초 정수(`*_ms`)다.
+- `request_id`(기기가 정함)와 `punch_id`(서버가 정함)는 부호 없는 64비트 정수다. 기기 ID는 소문자 hex 64자 문자열이다.
+- 목록 원소의 모양: `nat_report.stun_results`는 `{"server": 주소, "reflexive": 주소 또는 null}`의 목록, `punch_go.candidates`는 `{"addr": 주소, "kind": 종류}`의 목록이다. `nat_report.host_candidates`가 없으면 서버는 가진 호스트 주소를 그대로 둔다.
+- 기기가 보낸 주소 문자열이 주소로 파싱되지 않으면 형식 오류가 아니라 버린 후보로 센다(아래 "후보 주소 규칙").
 
 ### 메시지 표
 
@@ -185,8 +188,10 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `max_message_bytes` | 16 KiB | 가장 큰 메시지(`punch_go`)의 몇 배 |
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번) |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
+| `quic.max_bidi_streams` | 2 | 기기가 여는 조정 스트림 하나와, 둘째 스트림을 받아 `malformed`로 닫을 자리 하나. 1이면 둘째 스트림이 열리지 못하고 기기 쪽에서 막혀 서버가 규칙 위반을 볼 수 없다(quinn `max_concurrent_bidi_streams`) |
+| `quic.max_uni_streams` | 0 | 단방향 스트림을 쓰지 않는다(quinn `max_concurrent_uni_streams`) |
 
-quinn·rustls의 값(QUIC 손실 복구, 스트림 상한 등)은 기기 쪽과 같은 항목을 서버 설정에도 둔다. 항목과 기본값, 고정값(세션 재개·0-RTT·티켓 끔, grease 끔 등)과 잘못된 설정의 거절 규칙은 [P2P](p2p.md#설정값)의 "의존성이 노출하는 값"·"고정값" 표를 따른다. 서버가 기기에게 알리는 값(`welcome.limits`, `punch_go`)은 기기 쪽 연결 정보에 출처 `server`로 보인다.
+quinn·rustls의 값(QUIC 손실 복구 등)은 기기 쪽과 같은 항목을 서버 설정에도 둔다. 스트림 수 상한은 기기 쪽 "이 레포가 정하는 값" 표의 항목이라 서버 값을 위 표에 따로 둔다. 항목과 기본값, 고정값(세션 재개·0-RTT·티켓 끔, grease 끔 등)과 잘못된 설정의 거절 규칙은 [P2P](p2p.md#설정값)의 "의존성이 노출하는 값"·"고정값" 표를 따른다. 서버가 기기에게 알리는 값(`welcome.limits`, `punch_go`)은 기기 쪽 연결 정보에 출처 `server`로 보인다.
 
 ## 클라이언트 설정
 
