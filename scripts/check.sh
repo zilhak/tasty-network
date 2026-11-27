@@ -187,9 +187,11 @@ mobile_android_env() {
     echo "mobile-check: NDK $ndk (Pkg.Revision $(sed -n 's/^Pkg\.Revision *= *//p' "$ndk/source.properties" 2>/dev/null | tr -d '\r'))," \
         "CC_$var=$cc AR_$var=$bin/llvm-ar CARGO_TARGET_${up}_LINKER=$cc" >&2
 }
-# scripts/mobile-crates.list의 조합을 한 줄씩 "크레이트 feature 인자…"로 찍는다.
+# 조합 목록 파일. 자체 시험이 가짜 목록으로 바꾼다.
+MOBILE_LIST=scripts/mobile-crates.list
+# 조합 목록의 조합을 한 줄씩 "크레이트 feature 인자…"로 찍는다.
 mobile_combos() {
-    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' scripts/mobile-crates.list
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$MOBILE_LIST"
 }
 # target 하나의 조합 전부. 실패해도 남은 조합을 돌리고 끝에 실패를 알린다.
 mobile_check_target() {
@@ -281,6 +283,49 @@ mobile_check_self_test() {
             failed=1
         fi
     done
+    # 조합 목록: 사전 검사(조합이 있는가)와 target마다의 루프가 같은 조합을 보는지 본다. 마지막 줄에 LF가
+    # 없는 목록을 넣는다.
+    # 이름|목록 내용(printf 형식)|루프가 돌린 조합(;로 나눈다)
+    local tmp list
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/mobile-check-test.XXXXXX")
+    cases=(
+        "마지막 줄에 LF가 없는 목록|tasty-net-frame\\ntasty-net-p2p|tasty-net-frame;tasty-net-p2p"
+        "주석·빈 줄·feature 인자가 있고 마지막 줄에 LF가 없는 목록|# c\\n\\ntasty-net-frame\\n  # x\\ntasty-net-transport --no-default-features|tasty-net-frame;tasty-net-transport --no-default-features"
+        "주석만 있고 마지막 줄에 LF가 없는 목록|# a\\n# b|"
+    )
+    for c in "${cases[@]}"; do
+        IFS='|' read -r name list want <<<"$c"
+        # shellcheck disable=SC2059  # 목록 내용은 printf 형식이다
+        printf "$list" >"$tmp/list"
+        got=$(
+            MOBILE_LIST="$tmp/list"
+            seen=""
+            # shellcheck disable=SC2329  # mobile_check_target이 부른다
+            run() {
+                local a prev="" p="" after=0 rest=""
+                [[ "$1" == cargo ]] || return 0
+                for a in "$@"; do
+                    if [[ $after -eq 1 ]]; then rest+=" $a"; elif [[ "$prev" == -p ]]; then p=$a; fi
+                    [[ "$a" == --lib ]] && after=1
+                    prev=$a
+                done
+                seen+="${seen:+;}$p$rest"
+            }
+            pre=0
+            [[ -n "$(mobile_combos)" ]] && pre=1
+            mobile_check_target aarch64-linux-android >/dev/null 2>&1
+            echo "$pre#$seen"
+        )
+        local want_pre=0
+        [[ -n "$want" ]] && want_pre=1
+        if [[ "$got" == "$want_pre#$want" ]]; then
+            echo "mobile-check: 자체 시험 통과: $name" >&2
+        else
+            echo "mobile-check: 자체 시험 실패: $name (기대 사전 검사#조합 $want_pre#$want, 결과 $got)" >&2
+            failed=1
+        fi
+    done
+    rm -rf "${tmp:?}"
     return "$failed"
 }
 cmd_mobile_check() {
