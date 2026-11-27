@@ -342,7 +342,9 @@ struct SshInspection {
 | `readconf.c`(3968), `readconf.h`(268) | 키워드 표 `keywords[]`(`:178`–`:325`), 줄 해석 `process_config_line_depth`(`:1143`), `Match` 판정 `match_cfg_line`(`:700`), 파일 읽기 `read_config_file_depth`(`:2631`, 상한 `READCONF_MAX_DEPTH` `:2629`), `initialize_options`(`:2714`), `fill_default_options`(`:2860`), `parse_forward`(`:3299`), `parse_jump`(`:3474`), `dump_client_config`(`:3739`, 비교 시험의 출력 형식) |
 | `addrmatch.c`(166)·`addr.c`(510)의 해당 함수 | `Match localnetwork` 목록 검사: `addr_match_cidr_list`(`:106`, 주소 없이 부를 때의 항목 검사), `addr_pton_cidr`(`addr.c:460`)·`masklen_valid`(`:50`)·`addr_host_is_all0s`(`:334`). `addr_pton`의 `getaddrinfo(AI_NUMERICHOST)`는 이 크레이트의 `numeric_host`(아래 라이선스 절)가 대신한다 |
 | `match.c`(406) | `match_pattern`(`:82`), `match_pattern_list`(`:161`), `match_hostname`(`:233`), `match_host_and_ip`(`:250`), `match_user`(`:275`), `match_list`(`:313`), `match_filter_denylist`·`allowlist`(`:393`·`:403`) |
-| `hostfile.c`(982), `hostfile.h`(123) | `extract_salt`(`:69`), `host_hash`(`:116`), `hostfile_read_key`(`:158`), `check_markers`(`:181`), `load_hostkeys_file`(`:266`), `check_key_not_revoked`(`:316`), `check_hostkeys_by_key_or_type`(`:350`), `check_key_in_hostkeys`(`:408`), `lookup_key_in_hostkeys_by_type`(`:417`), `lookup_marker_in_hostkeys`(`:425`), `format_host_entry`(`:437`), `write_host_entry`(`:477`), `add_host_to_hostfile`(`:542`), `match_maybe_hashed`(`:770`), `hostkeys_foreach_file`(`:790`), `hostkeys_foreach`(`:966`). `format_host_entry`·`write_host_entry`는 `add_host_to_hostfile`이, `match_maybe_hashed`·`hostfile_read_key`는 `hostkeys_foreach_file`이 부르는 보조 함수라 판정 순서와 기록 형식을 같게 하려면 함께 옮긴다 |
+| `hostfile.c`(982), `hostfile.h`(123) | `extract_salt`(`:69`), `host_hash`(`:116`), `hostfile_read_key`(`:158`), `check_markers`(`:181`), `load_hostkeys_file`(`:266`), `check_key_not_revoked`(`:316`), `check_hostkeys_by_key_or_type`(`:350`), `check_key_in_hostkeys`(`:408`), `lookup_key_in_hostkeys_by_type`(`:417`), `lookup_marker_in_hostkeys`(`:425`), `format_host_entry`(`:437`), `write_host_entry`(`:477`), `add_host_to_hostfile`(`:542`), `match_maybe_hashed`(`:770`), `hostkeys_foreach_file`(`:790`), `hostkeys_foreach`(`:966`). `format_host_entry`·`write_host_entry`는 `add_host_to_hostfile`이, `match_maybe_hashed`·`hostfile_read_key`는 `hostkeys_foreach_file`이 부르는 보조 함수라 판정 순서와 기록 형식을 같게 하려면 함께 옮긴다. 이식 2단계는 읽기와 판정 쪽(`extract_salt`~`check_hostkeys_by_key_or_type`, `match_maybe_hashed`, `hostkeys_foreach_file`의 `HKF_WANT_MATCH` 갈래)을 옮겼다. 기록 쪽(`format_host_entry`·`write_host_entry`·`add_host_to_hostfile`)은 `accept-new` 기록과 함께 남았다([후속 작업과 미정](#후속-작업과-미정)) |
+| `sshkey.c`의 키 읽기, `ssh-ed25519.c`·`ssh-ed25519-sk.c`·`ssh-mldsa-eddsa.c`·`ssh-ecdsa.c`·`ssh-ecdsa-sk.c`·`ssh-rsa.c`의 공개키 읽기, `sshbuf-getput-basic.c`·`sshbuf-getput-crypto.c`, `sshbuf.h`·`sshkey.h`·`crypto_api.h`의 상수 | known_hosts 줄의 키를 `ssh`처럼 읽고 비교하는 부분: `peek_type_nid`(`sshkey.c:1277`)·`sshkey_read`(`:1298`)·`sshkey_from_blob_internal`(`:2004`, `cert_parse` 없이)·`sshkey_equal_public`·`sshkey_equal`(`:821`·`:834`), 형식마다 `deserialize_public`, `sshbuf_get_string_direct`·`sshbuf_get_cstring`·`sshbuf_get_bignum2_bytes_direct`, `get_ec`의 점 검사. 줄 범위는 크레이트 README의 표다 |
+| `misc.c`의 `put_host_port`(`:801`), `sshconnect.c`의 `get_hostfile_hostname_ipaddr`(`:648`) | 호스트 키를 찾는 이름(`HostKeyAlias`, 아니면 `[호스트]:포트`, 포트 0·22는 호스트만) |
 | `misc.c`(3352)의 해당 함수 | `a2port`(`:592`), `convtime`(`:746`), `parse_user_host_path`(`:914`), `tilde_expand`(`:1276`)·`tilde_expand_filename`(`:1344`), `dollar_expand`(`:1477`), `percent_expand`(`:1496`)·`percent_dollar_expand`(`:1515`), `argv_split`(`:2143`), `valid_env_name`(`:2532`) |
 | `kex-names.c`(334), `myproposal.h`(124) | `kex_assemble_names`(`:241`, `+`·`-`·`^` 연산), 기본 알고리즘 목록 |
 | `sshconnect.c`(1809)·`sshconnect2.c`(2508)의 판정 부분 | `check_host_key`(`:984`)의 known_hosts 판정 순서, `verify_host_key`(`:1499`)의 `RevokedHostKeys` 처리(`:1544`–`:1563`), `order_hostkeyalgs`(`sshconnect2.c:121`–`:216`, known_hosts에 있는 키 형식을 앞으로), RSA 크기 검사 자리(`sshconnect2.c:96`·`:1593`·`:1847`) |
@@ -365,7 +367,7 @@ struct SshInspection {
   - `Match localnetwork`의 주소 목록(`addr_match_cidr_list`, `addr_pton_cidr`)도 같은 규칙으로 판정한다. 기준판처럼 주소를 읽기 전에 정해지는 오류(빈 항목, 길이, 글자, 마스크 숫자)는 모든 OS에서 목록 오류(`ConfigError`)다. 주소를 읽은 뒤의 판정(마스크 길이, 호스트 비트)은 라이브러리마다 하고, 규칙 없는 OS에서는 세 라이브러리가 모두 무효면 목록 오류, 모두 유효면 유효다. Darwin의 위 예외 주소는 `si_addrinfo_v6`가 둘째 워드를 지운 주소로 판정한다(`addr_pton`은 주소와 scope 번호만 옮기므로 인터페이스가 없어도 정해진다, `fe80:1::/16`은 Darwin에서 유효하고 glibc·bionic에서 무효). 멀티캐스트 주소는 둘째 워드를 지우지 않는다. 라이브러리마다 유효·무효가 갈리는 목록은 그 OS의 ssh가 Match 결과와 상관없이 목록 오류로 멈출 수 있으므로, 다른 조건이 거짓이어도 `Undeterminable`(키워드 `match localnetwork`, 사유에 라이브러리별 결과)로 거부한다. 목록은 유효하지만 라이브러리마다 주소가 갈리면(`010.0.0.0/8`) 블록 적용의 판정 불가 사유에 라이브러리별 결과를 덧붙인다.
   - scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다.
   - 시험: 사례마다 glibc·bionic·Darwin·규칙 없는 OS의 결과를 적은 OS별 기대값 표(`src/resolve.rs`의 `NUMERIC_FORMS`)를 두고, 세 라이브러리 열은 모든 OS에서, 실행 OS의 열은 그 OS에서 단언한다. 기준 클라이언트 대조 fixture에는 네 열이 모두 같은 사례만 둔다.
-- 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
+- 키 비교는 형식과 공개 필드로 한다(`sshkey_equal`·`sshkey_equal_public`). known_hosts 줄의 base64를 풀어 blob의 구조(형식 이름, 형식마다 공개 필드의 길이와 형식, 남는 바이트 없음, 줄의 형식과 blob 형식이 같음, ECDSA 곡선 이름)를 `sshkey_read`처럼 검사하고, 서버가 보낸 blob도 같은 방법으로 읽어 비교한다. RSA의 `mpint`는 앞 0 바이트를 떼고 비교하므로 blob 바이트가 달라도 같은 키는 같다. 암호 연산이 드는 검사는 하지 않는다: ECDSA 점이 곡선 위에 있는지(`EC_POINT_oct2point`·`sshkey_ec_validate_public`)와 인증서의 본문·서명(`cert_parse`)이다. 그런 줄은 `ssh`가 무효로 건너뛰고 이 크레이트는 키로 읽으므로 판정이 더 거절하는 쪽으로만 달라진다. 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
 ### 결과 API
@@ -373,8 +375,12 @@ struct SshInspection {
 ```text
 ConfigSet::load(inputs: ConfigInputs) -> Result<ConfigSet, ConfigError>   // 맨 위 설정 파일 읽기
 ConfigSet::resolve(&self, host: &str, ctx: &ResolveContext) -> Resolution  // Include는 여기서 읽는다
-Resolution { options: Options, host: String, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal>, host_key_checking: StrictHostKey, host_key_checking_origin: Origin }
+Resolution { options: Options, host: String, sources: Vec<ValueSource>, notes: Vec<ConfigNote>, refusal: Option<Refusal>, host_key_checking: StrictHostKey, host_key_checking_origin: Origin, identity_files: Vec<KeyFile>, certificate_files: Vec<KeyFile>, known_hosts_files: Vec<PathBuf> }
+Resolution::host_key_query(&self) -> HostKeyQuery
+KeyFile { written: String, path: Option<String>, provided_by: ProvidedBy, origin: Origin }
+HostKeyQuery { name: String }   // HostKeyQuery::for_host(host, port, alias), HostKeyQuery::for_address(addr, port)
 KnownHosts::load(files: &[PathBuf]) -> KnownHosts
+KnownHosts::entries(&self, host: &HostKeyQuery) -> Vec<HostKeyEntry>
 KnownHosts::check(&self, host: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict
 enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { file, line }, NotFound, DistrustedCaLine { file, line } }
 ```
@@ -384,6 +390,9 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
 - `Include`는 `resolve`가 읽는다. OpenSSH는 `Include` 인자의 `%` 토큰과 `${}`를 대상마다 펼치고(`readconf.c:2086`의 `expand_match_exec_or_include_path`), 그 줄에 닿은 블록의 적용 여부에 따라 `NEVERMATCH`로 읽으므로 대상 없이 미리 펼칠 수 없다.
 - 파일 읽기: `load`는 맨 위 파일을 열고, 같은 핸들의 메타데이터로 권한(모드)을 본 뒤 통과한 파일만 그 자리에서 끝까지 읽어 내용을 저장한다(FIFO·파이프도 읽는다). 모드로 거부된 파일은 읽지 않고, 그 거부는 `resolve`의 `Refusal`로 낸다. 소유자는 로컬 uid를 받는 `resolve`가 `load`가 저장한 같은 핸들의 메타데이터로 판정한다. 그래서 모드는 통과하고 소유자만 다른 사용자 기본 파일은 `load`가 읽고 `resolve`가 `Refusal`로 거부한다(내용은 쓰지 않는다). 그 파일이 FIFO면 `load`는 쓰는 쪽이 닫을 때까지 기다린다. 기준판은 `fstat` 직후 소유자와 모드를 함께 보고 줄을 읽기 전에 거부한다(`readconf.c:2644`–`:2664`). `load`에서 소유자까지 볼지는 [후속 작업과 미정](#후속-작업과-미정)의 "설정 파일 소유자의 판정 시점"이다. `Include` 파일은 `resolve`가 같은 순서(열기 → 판정 → 통과하면 읽기)로 읽는다.
 - `Refusal`이 있으면 내장 백엔드는 네트워크에 나가기 전에 `SshBackendError::ConfigRefused`로 끝낸다.
+- `identity_files`는 `ssh`가 인증 전에 읽는 `IdentityFile` 목록이다(`load_public_identity_files`, `ssh.c:2354`–`:2497`). 순서는 `-i`, `-o`, 설정 파일 줄 순서, 그다음 `fill_default_options`가 채운 기본 키 파일이다. 항목마다 적힌 값(`written`, `ssh -G`가 보이는 값), `~`·`%` 토큰·`${}`를 펼친 경로(`path`, 홈을 모르면 없음), 준 쪽(`provided_by`, `0`·`1`·`2`), 적힌 자리(`origin`: 파일 줄, 명령행 라벨, 기본 키 파일이면 `default`)를 싣는다. `none`(대소문자 무관)으로 적힌 항목은 빠진다(`options.identity_files`에는 남는다). `certificate_files`가 비면 `ssh`는 항목마다 `<경로>-cert`도 열어 인증서면 다음에 내민다(`:2425`–`:2451`). 이 크레이트는 파일을 열지 않으므로 그 후보는 내장 백엔드가 만든다. `certificate_files`는 같은 펼침이고 `none`을 빼지 않는다. 펼침이 실패하면(값 없는 `${}` 등) `ssh`가 인증 전에 멈추므로 해석을 `Refusal`로 거부한다. `IdentitiesOnly`는 `options.identities_only`와 `source_of("identitiesonly")`다.
+- `known_hosts_files`는 `UserKnownHostsFile`(펼친 값) 다음 `GlobalKnownHostsFile`(`~` 펼침, `ssh.c:1791`–`:1793`)이고 `KnownHosts::load`에 그대로 준다. 읽지 못하는 파일은 건너뛴다(`load_hostkeys`).
+- `host_key_query`는 `ssh`가 호스트 키를 찾는 이름이다(`HostKeyAlias`, 아니면 `put_host_port(호스트, 포트)`). `CheckHostIP`의 주소 판정은 `HostKeyQuery::for_address`로 따로 한다. `entries`는 그 이름을 가리키는 줄(파일·줄 번호·표식, `ssh-keygen -F`가 보는 키 형식 이름, `ssh`가 읽는 키)을 낸다.
 
 ### 라이선스
 
@@ -399,8 +408,10 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   | Tatu Ylonen 조항과 BSD | `cipher.c`, `log.c` | `SSH-short`, `BSD-2-Clause` |
   | ISC | `digest-openssl.c` | `ISC` |
   | BSD | `kex-names.c`, `myproposal.h`, `sshconnect2.c`, `mac.c`, `sshkey.c`, `sshconnect.h`, `defines.h` | `BSD-2-Clause` |
+  | ISC(이식 2단계, known_hosts 키 읽기) | `ssh-ed25519.c`, `ssh-ed25519-sk.c`, `ssh-mldsa-eddsa.c`, `ssh-rsa.c`, `sshbuf-getput-basic.c`, `sshbuf-getput-crypto.c`, `sshbuf.h` | `ISC` |
+  | BSD(이식 2단계, known_hosts 키 읽기) | `ssh-ecdsa.c`, `ssh-ecdsa-sk.c`, `sshkey.h` | `BSD-2-Clause` |
   | 3조항 BSD | `openbsd-compat/fmt_scaled.c`(Ian F. Darwin), `openbsd-compat/vis.c`·`glob.c`(Regents of the University of California) | `BSD-3-Clause` |
-  | 공개 도메인 | `openbsd-compat/charclass.h`(Todd C. Miller) | 없음(고지만 둔다) |
+  | 공개 도메인 | `openbsd-compat/charclass.h`(Todd C. Miller), `crypto_api.h`(Markus Friedl, 이식 2단계) | 없음(고지만 둔다) |
 
 - `scan_scaled`(`RekeyLimit`, `src/scaled.rs`)와 `vis`(`EscapeChar` 출력, `options.rs`의 `vis_white`)는 원본(`openbsd-compat/fmt_scaled.c:75`–`:229`, `vis.c:61`–`:144`)의 구조·변수·경계 처리를 단계별로 따르므로 파생으로 표시하고 원본 고지를 둔다(director 3000). `glob(3)`(`Include`, `src/glob.rs`)는 Gate 4에서 `openbsd-compat/glob.c`(`glob`·`glob0`~`glob3`·`match`·`g_charclass`)와 `charclass.h`를 그대로 옮겨 다시 썼으므로 같은 기준으로 파생이고 두 파일의 고지를 둔다(glob.c 3조항 BSD, charclass.h 공개 도메인).
 - 숫자 주소의 판정과 표기(`misc.rs`의 `numeric_host`·`numeric_text`, `getaddrinfo(AI_NUMERICHOST)`·`getnameinfo(NI_NUMERICHOST)` 대신)는 옮긴 원본이 없다. glibc·bionic·Apple Libinfo·Libc 소스에서 읽은 규칙(위 [옮기는 원본](#옮기는-원본)의 숫자 주소)을 이 크레이트가 새로 쓴 코드다. 원본의 구조와 변수를 따르지 않으므로(조각으로 나눠 읽는다) director 3000 기준의 파생이 아니다.
@@ -530,14 +541,14 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 ## 호스트 키 판정
 
 - 판정은 이식 크레이트의 `KnownHosts::check`가 한다. russh의 known_hosts 도우미(`check_known_hosts_path`)는 쓰지 않는다. 그 도우미는 `@revoked`를 무시하고 줄을 공백 하나로만 나눈다(근거 보고서).
-- 순서는 OpenSSH `check_host_key`(`sshconnect.c:984`)와 `check_hostkeys_by_key_or_type`(`hostfile.c:350`–`:405`)와 같다.
+- 순서는 OpenSSH `check_host_key`(`sshconnect.c:984`)와 `check_hostkeys_by_key_or_type`(`hostfile.c:349`–`:405`)와 같다.
   1. 그 호스트의 줄 가운데 표식 없는 줄을 차례로 본다. 키가 같으면 `HOST_OK`로 멈춘다.
   2. 같지 않은 키를 만나면 그 키의 형식과 관계없이 `HOST_CHANGED`로 기록하고 계속 본다(`hostfile.c:386`–`:397`). 그래서 known_hosts에 ed25519 키만 있는 호스트가 ecdsa 키를 내면 모르는 호스트가 아니라 바뀐 키다.
   3. 줄을 다 본 뒤 `@revoked` 목록에 그 키가 있으면 `HOST_REVOKED`다(`:398`–`:402`).
   4. 표식 없는 줄이 하나도 없을 때만 `HOST_NEW`(모르는 호스트)다.
 - 결과마다: `HOST_OK`는 통과, `HOST_CHANGED`·`HOST_REVOKED`는 거절(`accept-new`·`ask`에서도 기록하거나 묻지 않는다), `HOST_NEW`는 `StrictHostKeyChecking`에 따라 묻거나(`ask`) 기록하거나(`accept-new`) 거절한다(`yes`). `CheckHostIP yes`면 주소로도 같은 판정을 한다.
 - 알고리즘 순서(`order_hostkeyalgs`)가 known_hosts에 있는 형식을 앞으로 당기므로 보통 서버는 아는 형식의 키를 낸다. 2는 서버가 그 형식을 내지 않게 바뀐 경우다.
-- `@cert-authority` 줄은 1단계에서 믿지 않는다. 그 줄은 판정에서 통과 근거가 되지 않고, `DistrustedCaLine`으로 `ConfigNote`(`cert_authority_distrusted`)에 남는다. 호스트 인증서 알고리즘(`*-cert-v01@openssh.com`)은 제안 목록에서 빼므로 서버는 평문 호스트 키를 낸다. `@cert-authority` 줄은 위 1~4의 "표식 없는 줄"이 아니다.
+- `@cert-authority` 줄은 1단계에서 믿지 않는다. 그 줄은 판정에서 통과 근거가 되지 않고, `DistrustedCaLine`으로 `ConfigNote`(`cert_authority_distrusted`)에 남는다. `DistrustedCaLine`은 4(`HOST_NEW`)이면서 그 호스트를 가리키는 `@cert-authority` 줄이 있을 때이고 자리는 그 첫 줄이다. 호스트 인증서 알고리즘(`*-cert-v01@openssh.com`)은 제안 목록에서 빼므로 서버는 평문 호스트 키를 낸다. 그래도 인증서가 오면 폐기 확인(인증서의 공개키) 뒤 평문 키로 1~4를 다시 본다. `ssh`가 맞는 CA가 없을 때 하는 재시도와 같다(`sshconnect.c:1474`–`:1486`). CA 키 자체의 폐기 확인(`check_key_not_revoked`의 서명 키 갈래)은 인증서 본문을 읽지 않으므로 하지 않는다. `@cert-authority` 줄은 위 1~4의 "표식 없는 줄"이 아니다.
 - `RevokedHostKeys`와 `RequiredRSASize`는 위 [지원](#지원) 표대로 판정에 들어간다.
 - `accept-new`의 기록은 OpenSSH `add_host_to_hostfile`(`hostfile.c:542`)과 같은 형식이고 `HashKnownHosts`를 따른다. 기록할 파일은 `UserKnownHostsFile`의 첫 파일이다.
 
@@ -624,7 +635,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 - CI: 그 폴더를 기준 커밋을 키로 캐시한다. 대조 시험 잡은 Linux·macOS에서 돌고 클라이언트가 없으면 실패한다(필수). Windows는 대조 시험을 돌리지 않는다(이식 크레이트의 단위 시험은 돈다).
 - 경로 주입: 시험은 환경 변수 `TASTY_OPENSSH_REF_DIR`(그 `bin/`이 든 폴더)에서 클라이언트를 찾는다. 변수가 없으면 `target/tools/openssh-10.6p2`를 본다. `PATH`의 `ssh`는 찾지 않는다.
 - 판 확인: 시험이 먼저 `ssh -V`를 실행해 `OpenSSH_10.6p2`로 시작하는지 본다. 다르면 시험 전체가 실패하고 두 판을 찍는다(다른 판끼리의 차이를 이식 결함으로 잘못 보지 않게). 클라이언트가 없는 로컬 실행에서는 미실행으로 남기고 그 사실과 넣는 명령을 찍는다.
-- 고정: 모든 대조는 `ssh -F <fixture>/config -G <대상>`으로 한다. 시스템 설정은 `-F`가 읽지 않는다. known_hosts 대조는 `ssh-keygen -F <호스트> -f <fixture>/known_hosts`다. fixture는 `tasty-net-ssh-config/tests/fixtures/` 아래 파일이다. 시험은 그 폴더를 임시 폴더에 복사하고 복사본에서만 group·other 쓰기 권한을 지운 뒤(OpenSSH가 그런 Include 파일을 `CHECKPERM`으로 거부하고, umask 002 checkout에는 그 권한이 있다) 복사본 경로를 양쪽에 준다. 파일 내용은 바꾸지 않고 checkout도 건드리지 않는다.
+- 고정: 모든 대조는 `ssh -F <fixture>/config -G <대상>`으로 한다. 시스템 설정은 `-F`가 읽지 않는다. known_hosts 대조는 `ssh-keygen -F <호스트> -f <파일>`과 `ssh-keygen -l -E sha1 -F <호스트> -f <파일>`이다. `ssh -G` fixture는 `tasty-net-ssh-config/tests/fixtures/` 아래 파일이다. known_hosts 대조의 틀은 `tests/data/known-hosts/`(`known_hosts.in`, `to_hash.in`, `queries`)이고, 시험이 기준 `ssh-keygen`으로 키를 만들어 틀의 자리 표시(`@ED1@` 등)를 채우고 `to_hash.in`을 `ssh-keygen -H`로 해시해 붙인 파일을 임시 폴더에 쓴다(실제 호스트 키를 레포에 두지 않는다). 시험은 그 폴더를 임시 폴더에 복사하고 복사본에서만 group·other 쓰기 권한을 지운 뒤(OpenSSH가 그런 Include 파일을 `CHECKPERM`으로 거부하고, umask 002 checkout에는 그 권한이 있다) 복사본 경로를 양쪽에 준다. 파일 내용은 바꾸지 않고 checkout도 건드리지 않는다.
 - 사례와 기대: `cases`의 한 줄은 `ssh -G`에 줄 인자이고, `=>` 뒤에 기대를 적는다. 적지 않으면 기준 클라이언트가 성공하고 출력이 같으며 이식 크레이트가 거부하지 않아야 한다. `refused <종류> <파일>:<줄> [<지시어>]`(`-o` 값이면 자리 `command-line`)는 기준 클라이언트가 255로 끝나고 오류 출력이 그 파일·줄을 말하며, 이식 크레이트가 같은 종류·파일·줄(·지시어)로 거부해야 한다. 성공하는 사례에서 이식 크레이트만 하는 거부(`security_not_implemented`·`undeterminable`)는 그 사례에 `also-refused <종류>`로 적은 경우만 받는다. 틀린 줄은 fixture 하나에 하나만 둔다.
 - 로컬 계정: OpenSSH는 로컬 사용자 이름과 홈을 환경 변수가 아니라 `getpwuid(getuid())`에서 얻는다(`ssh.c:664`, `~` 펼침 `misc.c:1276`–`:1325`, `%d`·`%u`·`Match localuser`·기본 사용자). 그래서 `HOME`·`USER`를 바꿔도 기준 클라이언트의 값은 고정되지 않는다. 시험은 실행 계정의 passwd 항목(이름·홈)을 읽어 이식 크레이트의 `embedded.local_user`·`embedded.home`에 같은 값을 주고, 기대값도 그 값으로 만든다. 시험은 그 값을 기준 클라이언트에서 얻는다: `UserKnownHostsFile ~/@@%u@@%l@@%i` 한 줄짜리 설정으로 `ssh -F <그 파일> -G probe`를 실행해 출력의 `userknownhostsfile` 값을 나눠 홈·이름·호스트 이름·uid를 읽는다(`tests/matches_openssh.rs`). 이것은 대조 시험이 기대값을 맞추는 방법일 뿐이고, 이식 크레이트와 내장 백엔드의 제품 동작은 그 값을 `embedded.local_user`·`embedded.home`과 호출자에게서 받는다.
 - 상대 `Include`: `-F`로 준 파일의 상대 `Include`는 실제 계정의 `~/.ssh` 아래로 풀린다(`readconf.c:2094`–`:2108`, 사용자 설정으로 읽기 때문). 대조 fixture는 절대 경로 `Include`만 쓰고, 그 경로는 환경 변수로 적는다(예: `Include ${TASTY_FIXTURE_DIR}/sub.conf`). OpenSSH는 `Include` 인자의 토큰과 환경 변수를 경로 판정 전에 펼치므로(`readconf.c:2085`–`:2093`) fixture 파일을 고치지 않고 checkout 위치와 관계없이 같은 파일을 읽는다. 시험은 같은 값을 기준 클라이언트의 환경과 이식 크레이트에 준다. 상대 경로 규칙은 주어진 홈으로 하는 단위 시험이 원본 규칙대로 본다. 실제 계정의 `~/.ssh`를 시험이 건드리지 않는다.
@@ -644,7 +655,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | 시험 | 자리 | 확인하는 것 |
 |---|---|---|
 | `ssh -G` 대조 | `tasty-net-ssh-config` `tests/matches_openssh.rs` | 같은 설정 묶음(Host·Match·Include·토큰·첫 값 우선·`ProxyJump`와 `ProxyCommand none`의 순서·홉 별칭·`Match final`의 두 번째 읽기·`Match version`)으로 `ssh -G <대상>`(대상이 홉이면 `ssh -G <홉>`)과 이식 크레이트의 `dump_client_config` 형식 출력이 같다. 위 기준 클라이언트로만 한다 |
-| `ssh-keygen -F` 대조 | 같은 크레이트 `tests/known_hosts_matches_openssh.rs` | 해시·와일드카드·부정·`[호스트]:포트`·`@revoked`·`@cert-authority` 줄이 섞인 파일에서 `ssh-keygen -F <호스트> -f <파일>`이 찾는 줄과 이식 크레이트가 찾는 줄이 같다 |
+| `ssh-keygen -F` 대조 | 같은 크레이트 `tests/known_hosts_matches_openssh.rs` | 해시·와일드카드·부정·`[호스트]:포트`·`@revoked`·`@cert-authority`·무효 줄(표식 오류, 키 형식·곡선 불일치, base64 오류, 끊긴 줄, 잘못된 해시)이 섞인 파일에서 `ssh-keygen -F <호스트> -f <파일>`이 찾는 줄(줄 번호·표식)과 종료 코드가 `KnownHosts::entries`의 키 형식이 있는 항목과 같고, `-l -E sha1 -F`가 찾는 줄(형식 짧은 이름·SHA1 지문·주석)이 키를 읽은 항목과 같다. 둘 다 아무 줄도 찾지 않는 이름은 "함께 거부"로 센다. 판정(`check`)은 `hostfile.rs` 단위 시험이 원본 순서의 표로 본다 |
 | 지시어 분류 | 같은 크레이트 단위 시험 | `keywords[]`의 132개 항목(이름 128개)을 원본 표로 시험 자료에 두고 모든 이름이 분류됐는지 본다. 별칭(`IdentityFile2`·`HostbasedKeyTypes`·`PubkeyAcceptedKeyTypes`·`ChallengeResponseAuthentication`·`KeepAlive`·`SmartcardDevice` 등)이 원래 지시어와 같은 처리를 받는다. 보안 관련 거부마다 거부, 표시마다 `shown`, 적지 않은 기본값에 노트 없음 |
 | 모르는 지시어 | 같은 크레이트 단위 시험과 기준 클라이언트 대조 | 기대값이 둘로 나뉜다. (1) 기준 클라이언트와 같아야 하는 것: 모르는 이름이 있으면 파일 전체 거부(적용되지 않는 `Host` 블록 안과, 적용되지 않는 블록의 `Include`가 읽는 파일 안도), 앞에서 적용된 `IgnoreUnknown`이 맞는 이름만 무시, 뒤에 오거나 적용되지 않는 블록의 `IgnoreUnknown`은 무시를 만들지 않음. 이 fixture에는 아는 이름의 보안 거부 값을 넣지 않고, `ssh -G` 종료 코드(0 또는 255)와 거부 여부, 거부면 그 종류와 파일·줄을 맞춘다(위 "사례와 기대"). 사례마다 fixture 폴더 하나를 둔다(`errors-unknown`, `unknown-include`, `unknown-ignored`, `unknown-not-ignored`, `unknown-ignore-after`, `unknown-ignore-inactive`). (2) 이 레포만의 것: 아는 이름의 보안 거부(예: `IgnoreUnknown VerifyHostKeyDNS` 뒤의 `VerifyHostKeyDNS yes`)는 기준 클라이언트가 받아도 이 레포는 거부한다. 이 경우는 기준 대조가 아니라 기대값 "거부"를 적은 단위 시험이다. `ssh -G` 대조에는 해석 결과만 비교한다 |
 | `ssh.overrides` 거부 | `tasty-net-ssh` 단위 시험 | `StrictHostKeyChecking=no`·`off`, `NoHostAuthenticationForLocalhost=yes`, `ProxyCommand=…`, 모르는 지시어를 `SshSettings::set`이 두 백엔드 모두에서 거절한다 |
@@ -687,7 +698,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 항목 | 상태 |
 |---|---|
 | 1단계 feature 분리 | 들어갔다(transport ssh feature 분리). 검사 단계 `scripts/check.sh transport-no-ssh` |
-| 이식 크레이트 `tasty-net-ssh-config` | 1단계가 만들었다: `ssh_config` 해석(`readconf.c`, `ssh.c` 설정 단계, `dump_client_config`)과 결과 API, 기준 클라이언트 `ssh -G` 대조 시험. 2단계(내장 SSH 백엔드)에 남은 것: known_hosts 판정과 `ssh-keygen -F` 대조, `IdentityFile` 펼침, 메모리 키 입구 |
+| 이식 크레이트 `tasty-net-ssh-config` | 1단계가 만들었다: `ssh_config` 해석(`readconf.c`, `ssh.c` 설정 단계, `dump_client_config`)과 결과 API, 기준 클라이언트 `ssh -G` 대조 시험. 2단계가 더했다: known_hosts 읽기와 판정(`KnownHosts`), `ssh-keygen -F` 대조, `IdentityFile`·`CertificateFile` 펼침과 출처(`identity_files`·`certificate_files`), known_hosts 파일 목록과 조회 이름. 남은 것: `accept-new` 기록(`add_host_to_hostfile`·`HashKnownHosts`), 메모리 키 입구(아래) |
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
@@ -706,7 +717,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 포트 발견과 터널의 대상 일치 | 후속 작업(내장 SSH 백엔드). 시스템 백엔드의 비교 방법은 결정됨(director 2937, 위 [포트 발견과 터널의 대상 일치](#포트-발견과-터널의-대상-일치)). 남은 것: `TargetMismatch`의 연결 목록 원인 이름과 그 재시도 분류, `ssh -G`를 부르는 때와 기한, 시험 |
 | 메모리 키와 `IdentityFile` 이름 | 후속 작업(내장 SSH 백엔드). 앱 제안(감싼 키 이름이 `IdentityFile ~/.ssh/<이름>`이나 기본 키 자리 이름과 같으면 그 자리의 키로 쓰기)을 대상 옵션과 따로 더할지. `ProxyJump` 홉에 메모리 키를 내밀지(OpenSSH는 점프 홉의 `ssh`에 `-i`를 넘기지 않는다, `ssh.c:1307`–`:1325`). 기본 키 목록을 채우지 않는 것과 `IdentitiesOnly`의 시험 |
 | 호스트 키 알고리즘 목록의 결과 API | 후속 작업(내장 SSH 백엔드, 2단계). 이식 크레이트는 조립(`kex_assemble_names`)에 실패하는 `HostKeyAlgorithms`(예: `!ssh-rsa`)를 `resolve`에서 설정 오류로 거부하고, 조립한 목록은 `ssh -G` 형식 출력에만 쓴다. 조립 결과를 구조화된 API로 내기, known_hosts에 있는 키 종류를 앞에 두는 순서 변경(`sshconnect2.c:150`–`:236`), russh가 아는 알고리즘과의 교집합은 2단계가 정한다 |
-| 메모리 키를 넣는 해석 입구 | 후속 작업(OpenSSH 해석 이식). 메모리 키를 `-i`처럼 명령행 identity로 넣어 기본 키 채움(`readconf.c:2930`–`:2941`)을 OpenSSH와 같게 하는 입구, 결과 API가 사용자가 적은 `IdentityFile`과 기본 키 자리를 구별해 내는지 |
+| 메모리 키를 넣는 해석 입구 | 175500 질문. 메모리 키를 `-i`처럼 명령행 identity로 넣어 기본 키 채움(`readconf.c:2930`–`:2941`)을 OpenSSH와 같게 하는 입구와, 메모리 키를 `IdentityFile`·`IdentitiesOnly` 값에 잇는 규칙. 결과 API의 구별은 이식 2단계가 냈다: `identity_files`의 `origin`이 `default`면 기본 키 자리, 그 밖은 사용자가 적은 값이다([결과 API](#결과-api)) |
 | 지역망 판정과 차단 사유 | 후속 작업(내장 SSH 백엔드). 지역망으로 볼 주소 범위(사설·링크 로컬 등)를 Android 정의로 확인해 정하기, `.local` 판정을 유효 `HostName`에 하는지, `LocalNetworkDenied`·`LocalNetworkBlocked`를 싣는 오류 타입과 연결 목록 원인 이름, 시험. 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한))의 자리는 결정됨(director 2937): `tasty-net-ssh`를 `deny(unsafe_code)`로 바꾸고 `cfg(target_os = "android")` 모듈 하나에서만 허용한다([크레이트 구성](crates.md#unsafe-규칙)). 그 모듈 밖에 `unsafe`가 없는지 보는 검사(grep 또는 clippy 설정)의 모양 |
 | E1을 판정할 CI 조합 | 후속 작업(내장 SSH 백엔드). [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준) E1의 시험은 두 백엔드를 함께 켠 빌드에서만 `auto`가 `not_found`로 내장을 고른다(내장만 켜면 이유가 `system_not_built`). 그 전 기본 조합(`system-ssh`만)으로는 돌지 않는다. 두 백엔드를 켠 시험 단계의 이름과 자리(D1과 같은 CI 실행인지), 세 OS 배치 |
 | 터널 채널이 세션 수신 루프를 멈추는 경우 | 알려진 한계. 로컬 쪽이 읽지 않는 터널 채널은 russh 큐를 채워 같은 세션 전체를 멈춘다. 링크 읽기가 늘 읽으므로 막는 장치를 두지 않는다 |
