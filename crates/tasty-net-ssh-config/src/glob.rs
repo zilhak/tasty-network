@@ -612,9 +612,11 @@ mod tests {
         assert_eq!(glob(&star), Err(GlobFailed));
 
         // A pattern of `PATH_MAX - 1` bytes without pattern characters is copied and looked
-        // up; one of `PATH_MAX` bytes matches nothing.
+        // up, so the file it names is found; one of `PATH_MAX` bytes matches nothing.
         let literal = |len: usize| format!("{base}/{}", "d".repeat(len - base.len() - 1));
-        assert_eq!(glob(&literal(PATH_MAX - 1)), Ok(Vec::new()));
+        let longest = literal(PATH_MAX - 1);
+        std::fs::write(&longest, "").unwrap();
+        assert_eq!(glob(&longest), Ok(vec![PathBuf::from(&longest)]));
         assert_eq!(glob(&literal(PATH_MAX)), Ok(Vec::new()));
         std::fs::remove_dir_all(&root).unwrap();
     }
