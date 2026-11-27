@@ -19,6 +19,9 @@ system-ssh = ["ssh", "tasty-net-ssh/system-ssh"]
 [dependencies]
 tasty-net-frame = { path = "../tasty-net-frame" }
 tasty-net-identity = { path = "../tasty-net-identity" }
+# The P2P adapter's connections and streams, and the QUIC close codes (docs/design/crates.md
+# "의존 방향": transport ─> p2p).
+tasty-net-p2p = { path = "../tasty-net-p2p" }
 tasty-net-ssh = { path = "../tasty-net-ssh", default-features = false, optional = true }
 # Nonces and bulk credentials (docs/design/crates.md "외부 의존 원칙").
 getrandom = "0.4"

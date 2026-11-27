@@ -25,7 +25,8 @@ pub enum TransportKind {
     /// A TCP connection accepted on a loopback listener. The receiving side of an SSH tunnel
     /// sees its channels this way: it cannot tell the tunnel from a local client.
     Tcp,
-    /// A QUIC stream of an iroh connection.
+    /// A bidirectional QUIC stream of a `tasty-net-p2p` connection, punched directly between
+    /// the two devices.
     P2p,
     /// An in-process pipe (tests).
     Memory,

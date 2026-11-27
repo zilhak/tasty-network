@@ -6,6 +6,10 @@ use std::fmt;
 use std::io;
 
 use tasty_net_identity::{DeviceId, StoreError};
+/// Why a whole P2P connection was closed: the QUIC close codes are `tasty-net-p2p`'s wire
+/// values, so the enum is defined there and shown here again (docs/design/handshake.md "QUIC
+/// 종료 코드").
+pub use tasty_net_p2p::P2pCloseReason;
 #[cfg(feature = "ssh")]
 use tasty_net_ssh::RemoteListenerAbsent;
 
@@ -112,63 +116,6 @@ impl RejectReason {
 impl fmt::Display for RejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-/// Why a P2P implementation closed a whole QUIC connection. The p2p crate maps the QUIC
-/// `error_code` to this value and back ([`P2pCloseReason::code`],
-/// [`P2pCloseReason::from_code`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum P2pCloseReason {
-    /// Code 0 `closed`: the last channel closed, or the endpoint shut down.
-    Closed,
-    /// Code 1 `not_paired`: the remote ID is not in the pairing list.
-    NotPaired,
-    /// Code 2 `direct_path_timeout`: no direct path came up in time.
-    DirectPathTimeout,
-    /// Code 3 `direct_path_lost`: the direct path went away.
-    DirectPathLost,
-    /// Any other code.
-    Unknown(u64),
-}
-
-impl P2pCloseReason {
-    /// The QUIC `error_code`.
-    pub fn code(self) -> u64 {
-        match self {
-            Self::Closed => 0,
-            Self::NotPaired => 1,
-            Self::DirectPathTimeout => 2,
-            Self::DirectPathLost => 3,
-            Self::Unknown(code) => code,
-        }
-    }
-
-    /// The value for a QUIC `error_code`. The reader decides by the code only.
-    pub fn from_code(code: u64) -> Self {
-        match code {
-            0 => Self::Closed,
-            1 => Self::NotPaired,
-            2 => Self::DirectPathTimeout,
-            3 => Self::DirectPathLost,
-            other => Self::Unknown(other),
-        }
-    }
-
-    /// The ASCII `reason` bytes sent with the code. `Unknown` has none of its own.
-    pub fn reason_bytes(self) -> &'static [u8] {
-        match self {
-            Self::Closed => b"closed",
-            Self::NotPaired => b"not_paired",
-            Self::DirectPathTimeout => b"direct_path_timeout",
-            Self::DirectPathLost => b"direct_path_lost",
-            Self::Unknown(_) => b"",
-        }
-    }
-
-    /// Only a plain close may be connected again.
-    pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Closed)
     }
 }
 
@@ -360,15 +307,34 @@ mod tests {
         for r in [
             P2pCloseReason::Closed,
             P2pCloseReason::NotPaired,
-            P2pCloseReason::DirectPathTimeout,
-            P2pCloseReason::DirectPathLost,
+            P2pCloseReason::SessionMismatch,
             P2pCloseReason::Unknown(77),
         ] {
             assert_eq!(P2pCloseReason::from_code(r.code()), r);
         }
-        assert_eq!(P2pCloseReason::NotPaired.reason_bytes(), b"not_paired");
+        assert_eq!(P2pCloseReason::NotPaired.reason(), b"not_paired");
         assert!(P2pCloseReason::Closed.is_retryable());
-        assert!(!P2pCloseReason::DirectPathLost.is_retryable());
+    }
+
+    /// 2 and 3 are reserved: no reason uses them any more, and a received one reads as an
+    /// unknown code, which is not retried.
+    #[test]
+    fn the_retired_close_codes_read_as_unknown() {
+        for code in [2, 3] {
+            let reason = P2pCloseReason::from_code(code);
+            assert_eq!(reason, P2pCloseReason::Unknown(code));
+            assert!(!reason.is_retryable());
+            assert!(!HandshakeError::Closed(reason).is_retryable());
+        }
+    }
+
+    #[test]
+    fn a_session_mismatch_is_not_retried() {
+        let reason = P2pCloseReason::from_code(4);
+        assert_eq!(reason, P2pCloseReason::SessionMismatch);
+        assert_eq!(reason.reason(), b"session_mismatch");
+        assert!(!reason.is_retryable());
+        assert!(!HandshakeError::Closed(reason).is_retryable());
     }
 
     #[test]

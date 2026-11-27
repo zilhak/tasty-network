@@ -1758,6 +1758,7 @@ dependencies = [
  "sha2",
  "tasty-net-frame",
  "tasty-net-identity",
+ "tasty-net-p2p",
  "tasty-net-ssh",
  "tracing",
  "windows-sys 0.61.2",
