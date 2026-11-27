@@ -52,6 +52,8 @@
 //! take `&str` and return new values; every delimiter they look for is ASCII, so slicing at
 //! the found positions keeps the strings valid UTF-8.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 /// `WHITESPACE` of `misc.c` and `readconf.c`.
 pub(crate) const WHITESPACE: &str = " \t\r\n";
 
@@ -637,21 +639,104 @@ pub(crate) enum Family {
     Inet6,
 }
 
-/// `getaddrinfo(name, ..., AI_NUMERICHOST)`: the address `name` is in numeric form, or
-/// `None`. IPv4 takes the `inet_aton(3)` forms (`a.b.c.d`, `a.b.c`, `a.b`, `a`; each part
-/// decimal, `0x` hexadecimal or `0` octal), IPv6 the `inet_pton(3)` form without a scope
-/// (`%`). Asked for IPv4, an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is that IPv4
-/// address, as glibc gives it. Written for this crate from those manual pages.
-pub(crate) fn numeric_host(name: &str, family: Family) -> Option<std::net::IpAddr> {
-    if family != Family::Inet6
-        && let Some(a) = inet_aton(name)
-    {
-        return Some(std::net::IpAddr::V4(a));
+/// The C library whose `getaddrinfo(AI_NUMERICHOST)` rule decides which names are numeric
+/// addresses. `ssh` asks the library of the OS it runs on, and the libraries differ
+/// (docs/design/ssh-backends.md "숫자 주소"). The rules are read from the sources of each
+/// library; the code is written for this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Libc {
+    /// The GNU C Library (Linux): `text_to_binary_address` of `nss/getaddrinfo.c` takes the
+    /// `inet_aton` forms (`__inet_aton_exact`), then `inet_pton(AF_INET6)`; asked for IPv4, an
+    /// IPv4-mapped IPv6 address is that IPv4 address.
+    Glibc,
+    /// Android bionic: `explore_numeric` of `libc/dns/net/getaddrinfo.c` takes only
+    /// `inet_pton` of the families asked for (its `inet_aton` branch is `#if 0`), and the
+    /// OpenBSD `inet_pton` reads a part with leading zeros as decimal.
+    Bionic,
+    /// Apple Libinfo and Libc (macOS, iOS): `_gai_numerichost` of `si_getaddrinfo.c` takes
+    /// `inet_pton(AF_INET)` (leading zeros are decimal), then `_inet_aton_check(strict)` for
+    /// the shorter forms, then `inet_pton(AF_INET6)`; asked for one family it refuses an
+    /// address of the other.
+    Darwin,
+}
+
+impl Libc {
+    /// Every library with a rule.
+    pub(crate) const ALL: &[Libc] = &[Libc::Glibc, Libc::Bionic, Libc::Darwin];
+
+    /// The library of the OS this crate is built for, `None` where this crate has no rule
+    /// (Windows, musl, the BSDs).
+    pub(crate) const fn current() -> Option<Libc> {
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            Some(Libc::Glibc)
+        } else if cfg!(target_os = "android") {
+            Some(Libc::Bionic)
+        } else if cfg!(target_vendor = "apple") {
+            Some(Libc::Darwin)
+        } else {
+            None
+        }
     }
-    let a = name.parse::<std::net::Ipv6Addr>().ok()?;
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Libc::Glibc => "glibc",
+            Libc::Bionic => "bionic",
+            Libc::Darwin => "Darwin",
+        }
+    }
+}
+
+/// `getaddrinfo(name, ..., AI_NUMERICHOST)` of the C library of this OS: the address `name`
+/// is in numeric form, or `None`. A scope (`%`) is not taken. On an OS without a rule
+/// ([`Libc::current`] is `None`) the answer is the one every library gives; where they
+/// differ it is `Err` with the reason, and the caller refuses.
+pub(crate) fn numeric_host(name: &str, family: Family) -> Result<Option<IpAddr>, String> {
+    if let Some(libc) = Libc::current() {
+        return Ok(numeric_host_of(libc, name, family));
+    }
+    let readings: Vec<(Libc, Option<IpAddr>)> = Libc::ALL
+        .iter()
+        .map(|&l| (l, numeric_host_of(l, name, family)))
+        .collect();
+    match readings.split_first() {
+        Some(((_, first), rest)) if rest.iter().all(|(_, a)| a == first) => Ok(*first),
+        _ => {
+            let each: Vec<String> = readings
+                .iter()
+                .map(|(l, a)| match a {
+                    Some(a) => format!("{} {}", l.name(), numeric_text(*a)),
+                    None => format!("{} not an address", l.name()),
+                })
+                .collect();
+            Err(format!(
+                "the C libraries read host \"{name}\" differently ({}), and this crate has no \
+                 numeric address rule for the C library of this OS",
+                each.join(", ")
+            ))
+        }
+    }
+}
+
+/// [`numeric_host`] by the rule of `libc`.
+pub(crate) fn numeric_host_of(libc: Libc, name: &str, family: Family) -> Option<IpAddr> {
+    let v4 = match libc {
+        Libc::Glibc => inet_aton_glibc(name),
+        Libc::Bionic => inet_pton4(name, LeadingZero::Decimal),
+        Libc::Darwin => inet_pton4(name, LeadingZero::Decimal).or_else(|| inet_aton_darwin(name)),
+    };
+    if let Some(a) = v4 {
+        // `ssh` does not pass `AI_V4MAPPED`: asked for IPv6, an IPv4 address is refused
+        // (glibc `EAI_ADDRFAMILY`, Darwin `-1`); bionic does not read IPv4 for IPv6 at all.
+        return (family != Family::Inet6).then_some(IpAddr::V4(a));
+    }
+    let a = inet_pton6(name, libc)?;
     match family {
-        Family::Inet => a.to_ipv4_mapped().map(std::net::IpAddr::V4),
-        Family::Any | Family::Inet6 => Some(std::net::IpAddr::V6(a)),
+        Family::Any | Family::Inet6 => Some(IpAddr::V6(a)),
+        // Only glibc takes an IPv4-mapped IPv6 address for IPv4. Darwin returns `-1`
+        // (`EAI_NONAME`), bionic reads only IPv4 for IPv4.
+        Family::Inet if libc == Libc::Glibc => a.to_ipv4_mapped().map(IpAddr::V4),
+        Family::Inet => None,
     }
 }
 
@@ -660,15 +745,16 @@ const V4_COMPAT_ZERO_WORDS: usize = 6;
 
 /// `getnameinfo(NI_NUMERICHOST)`: the `inet_ntop(3)` text of an address. It differs from
 /// the Rust form in one place: an IPv6 address whose first six words are zero and whose
-/// seventh is not is written with the last 32 bits dotted (`::192.0.2.1`). Written for this
-/// crate from the manual page.
-pub(crate) fn numeric_text(a: std::net::IpAddr) -> String {
-    if let std::net::IpAddr::V6(v6) = a {
+/// seventh is not is written with the last 32 bits dotted (`::192.0.2.1`). glibc, bionic
+/// (OpenBSD) and Apple Libc `inet_ntop6` give the same text: the Apple test for seven zero
+/// words cannot be reached (the seventh word is inside the zero run).
+pub(crate) fn numeric_text(a: IpAddr) -> String {
+    if let IpAddr::V6(v6) = a {
         let words = v6.segments();
         let (head, tail) = words.split_at(V4_COMPAT_ZERO_WORDS);
         if head.iter().all(|w| *w == 0) && tail.first().is_some_and(|w| *w != 0) {
             let [.., b0, b1, b2, b3] = v6.octets();
-            return format!("::{}", std::net::Ipv4Addr::new(b0, b1, b2, b3));
+            return format!("::{}", Ipv4Addr::new(b0, b1, b2, b3));
         }
     }
     a.to_string()
@@ -682,9 +768,51 @@ const OCTAL_RADIX: u32 = 8;
 const DECIMAL_RADIX: u32 = 10;
 /// The bits of one byte of an IPv4 address.
 const BITS_PER_PART: usize = 8;
+/// The bits of one hexadecimal digit.
+const BITS_PER_HEX_DIGIT: u32 = 4;
+/// glibc and bionic `inet_pton6` take at most four hexadecimal digits in a group.
+const GROUP_DIGITS_MAX: usize = 4;
+/// The largest value of a 16-bit IPv6 group.
+const GROUP_MAX: u32 = 0xffff;
 
-/// `inet_aton(3)` of the whole string.
-fn inet_aton(s: &str) -> Option<std::net::Ipv4Addr> {
+/// How `inet_pton4` reads a part with leading zeros.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeadingZero {
+    /// As decimal (OpenBSD and Apple `inet_pton4`).
+    Decimal,
+    /// Refused (glibc `inet_pton4`).
+    Refused,
+}
+
+/// `inet_pton(AF_INET)` of the whole string: four decimal parts of at most 255.
+fn inet_pton4(s: &str, leading_zero: LeadingZero) -> Option<Ipv4Addr> {
+    let mut out = Ipv4Addr::UNSPECIFIED.octets();
+    let mut parts = s.split('.');
+    for byte in &mut out {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if leading_zero == LeadingZero::Refused && part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        // Leading zeros keep the value small; a long part is refused digit by digit.
+        let mut v: u32 = 0;
+        for c in part.bytes() {
+            v = v * DECIMAL_RADIX + u32::from(c - b'0');
+            if v > INET_ATON_PART_MAX {
+                return None;
+            }
+        }
+        *byte = u8::try_from(v).ok()?;
+    }
+    parts.next().is_none().then(|| Ipv4Addr::from(out))
+}
+
+/// glibc `__inet_aton_exact` (`resolv/inet_addr.c`): `a.b.c.d`, `a.b.c`, `a.b` or `a`, each
+/// part read by `strtoul(.., 0)` (decimal, `0x` hexadecimal or `0` octal) and the whole
+/// value within 32 bits.
+fn inet_aton_glibc(s: &str) -> Option<Ipv4Addr> {
     let parts: Vec<&str> = s.split('.').collect();
     let last_max = *INET_ATON_LAST_MAX.get(parts.len().wrapping_sub(1))?;
     let mut value: u32 = 0;
@@ -714,7 +842,125 @@ fn inet_aton(s: &str) -> Option<std::net::Ipv4Addr> {
             value |= v;
         }
     }
-    Some(std::net::Ipv4Addr::from(value))
+    Some(Ipv4Addr::from(value))
+}
+
+/// Apple `_inet_aton_check(cp, addr, 1)` (Libc `net/FreeBSD/inet_addr.c`): the parts of
+/// `inet_aton`, where it differs from glibc in three places. A part is read into a 64-bit
+/// `u_long` that wraps, a one-part address keeps the low 32 bits of it, and a `0x` with no
+/// digit before a `.` is a zero part.
+fn inet_aton_darwin(s: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = s.split('.').collect();
+    let last_max = *INET_ATON_LAST_MAX.get(parts.len().wrapping_sub(1))?;
+    let mut value: u32 = 0;
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        if !part.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        let (digits, radix) = if let Some(h) = part.strip_prefix("0x").or(part.strip_prefix("0X")) {
+            (h, HEX_RADIX)
+        } else if let Some(o) = part.strip_prefix('0') {
+            (o, OCTAL_RADIX)
+        } else {
+            (*part, DECIMAL_RADIX)
+        };
+        // `0x` alone is no digit: refused as the last part, zero before a `.`.
+        if radix == HEX_RADIX && digits.is_empty() && last {
+            return None;
+        }
+        let mut v: u64 = 0;
+        for c in digits.chars() {
+            let d = c.to_digit(radix)?;
+            v = v.wrapping_mul(u64::from(radix)).wrapping_add(u64::from(d));
+        }
+        if !last {
+            let byte = u32::try_from(v).ok().filter(|b| *b <= INET_ATON_PART_MAX)?;
+            let shift = BITS_PER_PART * (INET_ATON_LAST_MAX.len() - 1 - i);
+            value |= byte << shift;
+        } else if parts.len() == 1 {
+            // `htonl(val)` keeps the low 32 bits.
+            let [b0, b1, b2, b3, ..] = v.to_le_bytes();
+            value = u32::from_le_bytes([b0, b1, b2, b3]);
+        } else {
+            value |= u32::try_from(v).ok().filter(|l| *l <= last_max)?;
+        }
+    }
+    Some(Ipv4Addr::from(value))
+}
+
+/// `inet_pton(AF_INET6)` of `libc`, without a scope: groups of hexadecimal digits split by
+/// `:`, one `::` for one or more zero groups, and a dotted IPv4 tail for the last two groups.
+/// glibc and bionic take at most four digits in a group, Apple any number whose value fits
+/// in 16 bits; the tail is read by the `inet_pton4` of that library (glibc refuses leading
+/// zeros there).
+fn inet_pton6(s: &str, libc: Libc) -> Option<Ipv6Addr> {
+    // The dotted tail is the last piece; the colon before it is not part of a group.
+    let (body, v4) = match s.rsplit_once(':') {
+        Some((_, last)) if last.contains('.') => {
+            let leading_zero = if libc == Libc::Glibc {
+                LeadingZero::Refused
+            } else {
+                LeadingZero::Decimal
+            };
+            let a = inet_pton4(last, leading_zero)?;
+            let body = s.get(..s.len() - last.len())?;
+            let body = if body.ends_with("::") {
+                body
+            } else {
+                body.strip_suffix(':')?
+            };
+            (body, Some(a))
+        }
+        _ => (s, None),
+    };
+    let groups = |t: &str| -> Option<Vec<u16>> {
+        if t.is_empty() {
+            return Some(Vec::new());
+        }
+        t.split(':')
+            .map(|piece| {
+                if piece.is_empty() || (libc != Libc::Darwin && piece.len() > GROUP_DIGITS_MAX) {
+                    return None;
+                }
+                let mut v: u32 = 0;
+                for c in piece.chars() {
+                    v = (v << BITS_PER_HEX_DIGIT) | c.to_digit(HEX_RADIX)?;
+                    if v > GROUP_MAX {
+                        return None;
+                    }
+                }
+                u16::try_from(v).ok()
+            })
+            .collect()
+    };
+    let (mut head, mut tail, gap) = match body.split_once("::") {
+        Some((h, t)) => (groups(h)?, groups(t)?, true),
+        None => (groups(body)?, Vec::new(), false),
+    };
+    if let Some(a) = v4 {
+        let [b0, b1, b2, b3] = a.octets();
+        let end = if gap { &mut tail } else { &mut head };
+        end.push(u16::from_be_bytes([b0, b1]));
+        end.push(u16::from_be_bytes([b2, b3]));
+    }
+    let words = Ipv6Addr::UNSPECIFIED.segments().len();
+    if gap {
+        // `::` stands for at least one group.
+        if head.len() + tail.len() >= words {
+            return None;
+        }
+        head.resize(words - tail.len(), 0);
+        head.extend(tail);
+    }
+    if head.len() != words {
+        return None;
+    }
+    let mut out = Ipv6Addr::UNSPECIFIED.octets();
+    for (bytes, g) in out.chunks_exact_mut(std::mem::size_of::<u16>()).zip(&head) {
+        bytes.copy_from_slice(&g.to_be_bytes());
+    }
+    Some(Ipv6Addr::from(out))
 }
 
 /// `valid_env_name`: one or more letters, digits or `_`.

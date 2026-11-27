@@ -470,49 +470,65 @@ fn parse_forward(
     Some(fwd)
 }
 
-/// `addr_match_cidr_list(NULL, list)`: whether a `Match localnetwork` list is valid.
-fn valid_cidr_list(list: &str) -> bool {
-    list.split(',').all(|cp| {
-        if cp.is_empty() || cp.len() > CIDR_ENTRY_MAX {
-            return false;
+/// `addr_match_cidr_list(NULL, list)`: whether a `Match localnetwork` list is valid, or
+/// `Err` when an entry is read differently by the C libraries and this OS has no rule
+/// ([`misc::numeric_host`]).
+fn valid_cidr_list(list: &str) -> Result<bool, String> {
+    // A bad entry makes the list bad whatever an earlier entry was read as.
+    let mut unknown = None;
+    for cp in list.split(',') {
+        match valid_cidr_entry(cp) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(m) => {
+                unknown.get_or_insert(m);
+            }
         }
-        if !cp
-            .bytes()
-            .all(|c| c.is_ascii_hexdigit() || c == b'.' || c == b':' || c == b'/')
+    }
+    unknown.map_or(Ok(true), Err)
+}
+
+/// One entry of [`valid_cidr_list`].
+fn valid_cidr_entry(cp: &str) -> Result<bool, String> {
+    if cp.is_empty() || cp.len() > CIDR_ENTRY_MAX {
+        return Ok(false);
+    }
+    if !cp
+        .bytes()
+        .all(|c| c.is_ascii_hexdigit() || c == b'.' || c == b':' || c == b'/')
+    {
+        return Ok(false);
+    }
+    let (addr, mask) = match cp.split_once('/') {
+        Some((a, m)) => (a, Some(m)),
+        None => (cp, None),
+    };
+    // `addr_pton`: `getaddrinfo(AI_NUMERICHOST)` for any family.
+    let Some(ip) = misc::numeric_host(addr, misc::Family::Any)? else {
+        return Ok(false);
+    };
+    let bits = if ip.is_ipv4() { IPV4_BITS } else { IPV6_BITS };
+    let len = match mask {
+        None => bits,
+        Some(m) => match misc::strtonum(m, 0, i64::from(i32::MAX))
+            .ok()
+            .and_then(|v| u32::try_from(v).ok())
         {
-            return false;
-        }
-        let (addr, mask) = match cp.split_once('/') {
-            Some((a, m)) => (a, Some(m)),
-            None => (cp, None),
-        };
-        // `addr_pton`: `getaddrinfo(AI_NUMERICHOST)` for any family.
-        let Some(ip) = misc::numeric_host(addr, misc::Family::Any) else {
-            return false;
-        };
-        let bits = if ip.is_ipv4() { IPV4_BITS } else { IPV6_BITS };
-        let len = match mask {
-            None => bits,
-            Some(m) => match misc::strtonum(m, 0, i64::from(i32::MAX))
-                .ok()
-                .and_then(|v| u32::try_from(v).ok())
-            {
-                Some(v) => v,
-                None => return false,
-            },
-        };
-        if len > bits {
-            return false;
-        }
-        // The host part under the mask must be zero.
-        let value: u128 = match ip {
-            std::net::IpAddr::V4(a) => u128::from(u32::from(a)),
-            std::net::IpAddr::V6(a) => u128::from(a),
-        };
-        // A zero length leaves every bit to the host part (a shift by 128 would overflow).
-        let host_mask = 1u128.checked_shl(bits - len).map_or(u128::MAX, |b| b - 1);
-        value & host_mask == 0
-    })
+            Some(v) => v,
+            None => return Ok(false),
+        },
+    };
+    if len > bits {
+        return Ok(false);
+    }
+    // The host part under the mask must be zero.
+    let value: u128 = match ip {
+        std::net::IpAddr::V4(a) => u128::from(u32::from(a)),
+        std::net::IpAddr::V6(a) => u128::from(a),
+    };
+    // A zero length leaves every bit to the host part (a shift by 128 would overflow).
+    let host_mask = 1u128.checked_shl(bits - len).map_or(u128::MAX, |b| b - 1);
+    Ok(value & host_mask == 0)
 }
 
 /// `strtol(s, &end, 8)` with the C rules: leading space and sign, then octal digits up to the
@@ -802,7 +818,9 @@ impl<'a> Reader<'a> {
                     }
                 }
             } else if is("localnetwork") {
-                if !valid_cidr_list(&arg) {
+                // A list this OS reads in a way this crate does not know is not known to be
+                // bad; the criterion is not known either way.
+                if valid_cidr_list(&arg) == Ok(false) {
                     return bad(format!("Invalid network list \"{arg}\""));
                 }
                 unknown.get_or_insert("localnetwork");
@@ -2288,16 +2306,17 @@ mod tests {
 
     #[test]
     fn cidr_lists() {
-        assert!(valid_cidr_list("192.0.2.0/24,2001:db8::/32"));
-        assert!(!valid_cidr_list("192.0.2.1/24"));
-        assert!(!valid_cidr_list("192.0.2.0/33"));
-        assert!(!valid_cidr_list("a,,b"));
-        assert!(!valid_cidr_list("host.example"));
+        let cidr = |l: &str| valid_cidr_list(l).expect("read alike by every C library");
+        assert!(cidr("192.0.2.0/24,2001:db8::/32"));
+        assert!(!cidr("192.0.2.1/24"));
+        assert!(!cidr("192.0.2.0/33"));
+        assert!(!cidr("a,,b"));
+        assert!(!cidr("host.example"));
         // A zero mask length: the whole address is the host part (addr.c:50-56).
-        assert!(valid_cidr_list("::/0"));
-        assert!(valid_cidr_list("0.0.0.0/0"));
-        assert!(!valid_cidr_list("1::/0"));
-        assert!(!valid_cidr_list("128.0.0.0/0"));
+        assert!(cidr("::/0"));
+        assert!(cidr("0.0.0.0/0"));
+        assert!(!cidr("1::/0"));
+        assert!(!cidr("128.0.0.0/0"));
     }
 
     #[test]

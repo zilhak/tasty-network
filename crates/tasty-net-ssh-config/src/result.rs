@@ -105,7 +105,8 @@ pub enum RefusalKind {
     RefuseConnection,
     /// The value needs something this crate does not have: running a program
     /// (`Match exec`), the local interfaces (`Match localnetwork`), a local value the caller
-    /// did not give, or a name service lookup.
+    /// did not give, a name service lookup, or the numeric address rule of the C library of
+    /// an OS this crate has no rule for, where the libraries read the host differently.
     Undeterminable,
 }
 

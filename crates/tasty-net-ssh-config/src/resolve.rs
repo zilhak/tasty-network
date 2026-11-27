@@ -572,13 +572,29 @@ impl ConfigSet {
         // `is_addr` (`ssh.c:293`-`:315`) and `resolve_addr` (`:324`-`:367`) ask `getaddrinfo` for
         // the configured address family.
         let family = address_family(&r.o);
-        let was_addr = is_addr_fast(&host) || numeric_host(&host, family).is_some();
+        // The numeric forms are those of the C library of this OS; where this crate has no
+        // rule for it and the libraries differ, the address `ssh` would use is not known.
+        let numeric = match numeric_host(&host, family) {
+            Ok(a) => a,
+            Err(message) => {
+                r.refuse(Refusal {
+                    kind: RefusalKind::Undeterminable,
+                    keyword: Some("hostname".to_string()),
+                    origin: first_origin(r, "hostname"),
+                    message,
+                });
+                None
+            }
+        };
+        let was_addr = is_addr_fast(&host) || numeric.is_some();
         if !was_addr {
             host = host.to_ascii_lowercase();
         }
         let canonicalize = r.o.canonicalize_hostname.unwrap_or(Canonicalize::No);
         if canonicalize != Canonicalize::No || was_addr {
-            if let Some(normal) = numeric_host(&host, family).map(numeric_text) {
+            // A name that is not an address stays one in lower case (`numeric_host` reads
+            // hexadecimal digits in both cases), so the first reading holds.
+            if let Some(normal) = numeric.map(numeric_text) {
                 if !normal.eq_ignore_ascii_case(&host) {
                     host = normal;
                 }
@@ -1060,56 +1076,174 @@ fn judge(r: &mut Reader<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::misc::{Libc, numeric_host_of};
 
     #[test]
     fn addresses() {
         assert!(is_addr_fast("192.0.2.1"));
         assert!(is_addr_fast("::1"));
         assert!(!is_addr_fast("host1"));
-        let n = |s: &str, f| numeric_host(s, f).map(numeric_text);
-        assert_eq!(
-            n("2001:DB8::1", Family::Any).as_deref(),
-            Some("2001:db8::1")
-        );
-        assert_eq!(n("host", Family::Any), None);
-        // The inet_aton(3) forms.
-        assert_eq!(n("127.1", Family::Any).as_deref(), Some("127.0.0.1"));
-        assert_eq!(n("010.0.0.1", Family::Any).as_deref(), Some("8.0.0.1"));
-        assert_eq!(n("0x7F000001", Family::Any).as_deref(), Some("127.0.0.1"));
-        assert_eq!(n("1.2.65535", Family::Any).as_deref(), Some("1.2.255.255"));
-        assert_eq!(n("08.0.0.1", Family::Any), None);
-        assert_eq!(n("1.2.3.256", Family::Any), None);
-        assert_eq!(n("0x", Family::Any), None);
-        assert_eq!(n("1..2", Family::Any), None);
-        // The address family.
-        assert_eq!(n("2001:db8::1", Family::Inet), None);
-        assert_eq!(n("127.1", Family::Inet6), None);
-        // An IPv4-mapped address asked for IPv4 (the glibc rule; the reference client on a
-        // BSD libc keeps the name, so these are not comparison cases), and the `inet_ntop`
-        // text.
-        assert_eq!(
-            n("::ffff:192.0.2.1", Family::Inet).as_deref(),
-            Some("192.0.2.1")
-        );
-        assert_eq!(
-            n("::FFFF:C000:201", Family::Inet).as_deref(),
-            Some("192.0.2.1")
-        );
-        assert_eq!(
-            n("::FFFF:C000:201", Family::Any).as_deref(),
-            Some("::ffff:192.0.2.1")
-        );
-        assert_eq!(n("::192.0.2.1", Family::Inet), None);
-        assert_eq!(
-            n("::192.0.2.1", Family::Any).as_deref(),
-            Some("::192.0.2.1")
-        );
-        assert_eq!(
-            n("::ffff:0:192.0.2.1", Family::Any).as_deref(),
-            Some("::ffff:0:c000:201")
-        );
-        assert_eq!(n("::1", Family::Any).as_deref(), Some("::1"));
-        assert_eq!(n("::", Family::Any).as_deref(), Some("::"));
+    }
+
+    /// The numeric forms of each C library (docs/design/ssh-backends.md "숫자 주소"): the
+    /// name, the family asked for, then the text `ssh` keeps for glibc, bionic and Darwin and
+    /// for an OS without a rule (Windows and the rest). `-` is not an address (the name is kept
+    /// as written), `refused` is a refusal.
+    const NUMERIC_FORMS: &[(&str, Family, [&str; 4])] = &[
+        // IPv4: the parts and their bases.
+        ("192.0.2.1", Family::Any, ["192.0.2.1"; 4]),
+        (
+            "127.1",
+            Family::Any,
+            ["127.0.0.1", "-", "127.0.0.1", "refused"],
+        ),
+        (
+            "10.1.1",
+            Family::Any,
+            ["10.1.0.1", "-", "10.1.0.1", "refused"],
+        ),
+        (
+            "1.2.65535",
+            Family::Any,
+            ["1.2.255.255", "-", "1.2.255.255", "refused"],
+        ),
+        (
+            "4294967295",
+            Family::Any,
+            ["255.255.255.255", "-", "255.255.255.255", "refused"],
+        ),
+        (
+            "010.0.0.1",
+            Family::Any,
+            ["8.0.0.1", "10.0.0.1", "10.0.0.1", "refused"],
+        ),
+        (
+            "08.0.0.1",
+            Family::Any,
+            ["-", "8.0.0.1", "8.0.0.1", "refused"],
+        ),
+        (
+            "0300.0.0.1",
+            Family::Any,
+            ["192.0.0.1", "-", "192.0.0.1", "refused"],
+        ),
+        ("00.0.0.01", Family::Any, ["0.0.0.1"; 4]),
+        (
+            "0x7F000001",
+            Family::Any,
+            ["127.0.0.1", "-", "127.0.0.1", "refused"],
+        ),
+        (
+            "0x7f.1",
+            Family::Any,
+            ["127.0.0.1", "-", "127.0.0.1", "refused"],
+        ),
+        // Apple only: a `0x` with no digit before a `.`, a one-part value past 32 bits.
+        ("0x.1.2.3", Family::Any, ["-", "-", "0.1.2.3", "refused"]),
+        ("4294967296", Family::Any, ["-", "-", "0.0.0.0", "refused"]),
+        ("1.2.3.256", Family::Any, ["-"; 4]),
+        ("1.2.3.4.5", Family::Any, ["-"; 4]),
+        ("0x", Family::Any, ["-"; 4]),
+        ("1..2", Family::Any, ["-"; 4]),
+        ("1.2.3.", Family::Any, ["-"; 4]),
+        ("host", Family::Any, ["-"; 4]),
+        // The family asked for.
+        ("192.0.2.1", Family::Inet, ["192.0.2.1"; 4]),
+        ("127.1", Family::Inet6, ["-"; 4]),
+        ("0x7F000001", Family::Inet6, ["-"; 4]),
+        ("192.0.2.1", Family::Inet6, ["-"; 4]),
+        ("2001:db8::1", Family::Inet, ["-"; 4]),
+        // IPv6 and its text.
+        ("2001:DB8::1", Family::Any, ["2001:db8::1"; 4]),
+        ("2001:DB8::1", Family::Inet6, ["2001:db8::1"; 4]),
+        ("::1", Family::Any, ["::1"; 4]),
+        ("::", Family::Any, ["::"; 4]),
+        ("1:2:3:4:5:6:7::", Family::Any, ["1:2:3:4:5:6:7:0"; 4]),
+        ("1::2:3:4:5:6:7:8", Family::Any, ["-"; 4]),
+        ("1:2:3:4:5:6:7:8:9", Family::Any, ["-"; 4]),
+        (":1::", Family::Any, ["-"; 4]),
+        ("1::2::3", Family::Any, ["-"; 4]),
+        ("1:2:", Family::Any, ["-"; 4]),
+        ("::FFFF:C000:201", Family::Any, ["::ffff:192.0.2.1"; 4]),
+        ("::192.0.2.1", Family::Any, ["::192.0.2.1"; 4]),
+        ("::192.0.2.1", Family::Inet, ["-"; 4]),
+        ("::ffff:0:192.0.2.1", Family::Any, ["::ffff:0:c000:201"; 4]),
+        (
+            "1:2:3:4:5:6:1.2.3.4",
+            Family::Any,
+            ["1:2:3:4:5:6:102:304"; 4],
+        ),
+        ("1:2:3:4:5:6:7:1.2.3.4", Family::Any, ["-"; 4]),
+        ("1.2.3.4::", Family::Any, ["-"; 4]),
+        ("fe80::1%lo", Family::Any, ["-"; 4]),
+        // An IPv4-mapped address asked for IPv4: only glibc takes the IPv4 address.
+        (
+            "::ffff:192.0.2.1",
+            Family::Inet,
+            ["192.0.2.1", "-", "-", "refused"],
+        ),
+        (
+            "::FFFF:C000:201",
+            Family::Inet,
+            ["192.0.2.1", "-", "-", "refused"],
+        ),
+        // The dotted tail and the group digits of `inet_pton6`.
+        (
+            "::ffff:010.0.0.1",
+            Family::Any,
+            ["-", "::ffff:10.0.0.1", "::ffff:10.0.0.1", "refused"],
+        ),
+        ("00001::", Family::Any, ["-", "-", "1::", "refused"]),
+        ("0001::", Family::Any, ["1::"; 4]),
+    ];
+
+    fn text(a: Option<std::net::IpAddr>) -> String {
+        a.map_or_else(|| "-".to_string(), numeric_text)
+    }
+
+    #[test]
+    fn numeric_forms_of_each_c_library() {
+        for (name, family, want) in NUMERIC_FORMS {
+            for (libc, want) in Libc::ALL.iter().zip(want) {
+                let got = text(numeric_host_of(*libc, name, *family));
+                assert_eq!(&got, want, "{} {name} {family:?}", libc.name());
+            }
+            // Without a rule: the reading every library gives, else a refusal.
+            let readings: Vec<String> = Libc::ALL
+                .iter()
+                .map(|l| text(numeric_host_of(*l, name, *family)))
+                .collect();
+            let alike = readings.windows(2).all(|w| w[0] == w[1]);
+            let other = if alike {
+                readings[0].as_str()
+            } else {
+                "refused"
+            };
+            assert_eq!(other, want[3], "no rule: {name} {family:?}");
+        }
+    }
+
+    #[test]
+    fn numeric_forms_of_this_os() {
+        let column = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            0
+        } else if cfg!(target_os = "android") {
+            1
+        } else if cfg!(target_vendor = "apple") {
+            2
+        } else {
+            3
+        };
+        for (name, family, want) in NUMERIC_FORMS {
+            let got = match numeric_host(name, *family) {
+                Ok(a) => text(a),
+                Err(m) => {
+                    assert!(m.contains(name), "{m}");
+                    "refused".to_string()
+                }
+            };
+            assert_eq!(got, want[column], "{name} {family:?}");
+        }
     }
 
     #[test]

@@ -11,7 +11,10 @@
 //! The crate never runs a program and does no name service lookup: what needs one
 //! (`Match exec`, `Match localnetwork`, `CanonicalizeHostname` with a name that is not an
 //! address) is refused as [`RefusalKind::Undeterminable`] or
-//! [`RefusalKind::SecurityNotImplemented`].
+//! [`RefusalKind::SecurityNotImplemented`]. Numeric host names are read by the rule of the C
+//! library of the OS (glibc, bionic, Darwin), as `ssh` reads them there; on an OS without a
+//! rule, a name the libraries read differently is refused as
+//! [`RefusalKind::Undeterminable`].
 //!
 //! The base version and the ported files, functions and line ranges are in the crate README.
 //! Files derived from OpenSSH keep the original notices and are under `LICENSE-OpenSSH`.

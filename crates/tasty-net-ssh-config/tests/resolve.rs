@@ -963,3 +963,52 @@ fn missing_config_file() {
         None
     );
 }
+
+/// The host `ssh` would use for a numeric name of this OS's C library, or `None` where this
+/// crate has no rule for it (docs/design/ssh-backends.md "숫자 주소").
+fn this_os(glibc: &str, bionic: &str, darwin: &str) -> Option<String> {
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        Some(glibc.to_string())
+    } else if cfg!(target_os = "android") {
+        Some(bionic.to_string())
+    } else if cfg!(target_vendor = "apple") {
+        Some(darwin.to_string())
+    } else {
+        None
+    }
+}
+
+#[test]
+fn a_numeric_host_follows_the_c_library_of_this_os() {
+    let cases = [
+        (
+            "010.0.0.1",
+            None,
+            this_os("8.0.0.1", "10.0.0.1", "10.0.0.1"),
+        ),
+        ("127.1", None, this_os("127.0.0.1", "127.1", "127.0.0.1")),
+        (
+            "::ffff:192.0.2.1",
+            Some("AddressFamily=inet"),
+            this_os("192.0.2.1", "::ffff:192.0.2.1", "::ffff:192.0.2.1"),
+        ),
+        // Read alike by every library: no refusal on any OS.
+        ("192.0.2.1", None, Some("192.0.2.1".to_string())),
+    ];
+    for (target, extra, want) in cases {
+        let cli = extra.map(|o| option(o, "override")).into_iter().collect();
+        let r = resolve_with("", target, cli);
+        match want {
+            Some(h) => {
+                assert!(r.refusal.is_none(), "{target}: {:?}", r.refusal);
+                assert_eq!(r.host, h, "{target}");
+            }
+            None => {
+                let f = r.refusal.expect("a refusal");
+                assert_eq!(f.kind, RefusalKind::Undeterminable, "{target}");
+                assert_eq!(f.keyword.as_deref(), Some("hostname"));
+                assert!(f.message.contains(target), "{}", f.message);
+            }
+        }
+    }
+}
