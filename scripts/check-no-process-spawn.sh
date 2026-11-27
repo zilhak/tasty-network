@@ -353,6 +353,8 @@ def self_test():
         ("use tokio::*;", "use tokio::*;\n"),
         ("여러 줄로 나눈 묶음 선언", "use std::{\n    io,\n    process::{\n        id,\n        Command,\n    },\n};\n"),
         ("cfg(any(test, unix)) 안의 금지 경로", "#[cfg(any(test, unix))]\nfn f() { std::process::Command::new(\"x\"); }\n"),
+        ("raw 식별자 use r#std::r#process::r#Command as Cmd;", "use r#std::r#process::r#Command as Cmd;\n"),
+        ("raw 식별자 경로 r#std::r#process::r#Child", "fn f(_c: r#std::r#process::r#Child) {}\n"),
     ]
     good = [
         ("use std::process::{id, exit};", "use std::process::{id, exit};\n"),
@@ -368,6 +370,8 @@ def self_test():
          "#[cfg(all(test, unix))]\nfn f() { std::process::Command::new(\"sh\"); }\n"),
         ("주석·문자열 안의 std::process::Command",
          "// std::process::Command\n/* use std::process::Command; */\nconst S: &str = \"std::process::Command\";\n"),
+        ("raw 문자열(# 8개) 안의 따옴표와 std::process::Command", "const S: &str = r########\"a \"# std::process::Command \"## b\"########;\n"),
+        ("raw 식별자 r#match는 키워드가 아니다", "fn r#match() {}\n"),
     ]
     cases = []
     for title, src in bad:

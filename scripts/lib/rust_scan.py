@@ -14,10 +14,21 @@ SUFFIX = re.compile(r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32
 PUNCT3 = ("<<=", ">>=", "...", "..=")
 PUNCT2 = ("::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
           "%=", "^=", "&=", "|=", "<<", ">>", "..")
+RAW_STR = re.compile(r"b?r(#*)\"")
+RAW_IDENT = re.compile(r"r#([A-Za-z_][A-Za-z0-9_]*)")
+# Rust의 엄격·예약 키워드(2018 이후). raw 식별자 r#<키워드>는 키워드가 아니므로 r#를 남긴다.
+KEYWORDS = {
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
+    "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final",
+    "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen",
+}
 
 
 def tokenize(text):
-    """(종류, 글자, 줄) 목록. 종류: num, ident, punct, str. 주석은 버린다."""
+    """(종류, 글자, 줄) 목록. 종류: num, ident, punct, str. 주석은 버린다. raw 식별자 r#name은
+    name으로 읽는다(name이 키워드면 r#name 그대로)."""
     out = []
     i, n, line = 0, len(text), 1
     while i < n:
@@ -41,10 +52,10 @@ def tokenize(text):
                     j += 1
             line += text.count("\n", i, j)
             i = j
-        elif re.match(r"b?r#*\"", text[i:i + 8]):
-            m = re.match(r"(b?r)(#*)\"", text[i:])
-            close = "\"" + m.group(2)
-            j = text.find(close, i + len(m.group(0)))
+        elif RAW_STR.match(text, i):
+            m = RAW_STR.match(text, i)
+            close = "\"" + m.group(1)
+            j = text.find(close, m.end())
             j = n if j < 0 else j + len(close)
             out.append(("str", text[i:j], line))
             line += text.count("\n", i, j)
@@ -80,6 +91,11 @@ def tokenize(text):
                 j = s.end()
             out.append(("num", text[i:j], line))
             i = j
+        elif RAW_IDENT.match(text, i):
+            m = RAW_IDENT.match(text, i)
+            name = m.group(1)
+            out.append(("ident", "r#" + name if name in KEYWORDS else name, line))
+            i = m.end()
         elif IDENT.match(text, i):
             m = IDENT.match(text, i)
             out.append(("ident", m.group(0), line))
