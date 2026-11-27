@@ -11,8 +11,11 @@
 //! - `ssh-keygen -l -E sha1 -F <name> -f <file>`: the lines it lists, with the key type, the
 //!   SHA-1 fingerprint and the comment, are the entries with a `key`.
 //!
-//! A name both list nothing for is counted as rejected alike: `ssh-keygen` exits with 1 and the
-//! crate gives no entry. The reference client is the one of `tests/matches_openssh.rs`
+//! A name both exit with 1 for is counted as rejected alike when the crate gives no entry.
+//!
+//! The port-less lookup of [`KnownHosts::check`] (`sshconnect.c:1181`-`:1193`) is compared
+//! as far as `ssh-keygen -F` shows it: for a host at a port other than 22, `-F [host]:port`
+//! lists nothing and the line the crate takes is one `-F host` lists. The reference client is the one of `tests/matches_openssh.rs`
 //! (`$TASTY_OPENSSH_REF_DIR/bin/ssh-keygen` or `target/tools/openssh-10.6p2/bin/ssh-keygen`),
 //! checked by the `ssh -V` next to it; without it the test fails when
 //! `TASTY_OPENSSH_REF_REQUIRED` is not empty and is skipped otherwise. Windows does not
@@ -24,7 +27,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use sha1::Digest as _;
 use tasty_net_ssh_config::settings::OPENSSH_VERSION;
-use tasty_net_ssh_config::{HostKeyEntry, HostKeyQuery, KnownHosts, Marker};
+use tasty_net_ssh_config::{HostKeyEntry, HostKeyQuery, HostKeyVerdict, KnownHosts, Marker};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -233,6 +236,7 @@ fn matches_ssh_keygen_f() {
         queries += 1;
         let entries: Vec<HostKeyEntry> = known.entries(&HostKeyQuery {
             name: name.to_string(),
+            without_port: None,
         });
 
         let f = run(&keygen, &["-F", name, "-f", path_arg(&file)]);
@@ -286,9 +290,49 @@ fn matches_ssh_keygen_f() {
             rejected_alike += 1;
         }
     }
+    // The port-less lookup: `(host, port, key)`.
+    let blob_of = |name: &str| {
+        let (_, line) = keys.iter().find(|(n, _)| n == name).expect("a key");
+        STANDARD
+            .decode(line.split_once(' ').expect("type and key").1)
+            .expect("base64")
+    };
+    let mut without_port = 0;
+    for (host, port, key) in [
+        ("mixed.example", 2222, "ED2"),
+        ("plain.example", 2200, "ED1"),
+    ] {
+        let ported = format!("[{host}]:{port}");
+        let f = run(&keygen, &["-F", &ported, "-f", path_arg(&file)]);
+        let bare = run(&keygen, &["-F", host, "-f", path_arg(&file)]);
+        let bare_lines: Vec<usize> = listed(&String::from_utf8_lossy(&bare.stdout))
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        let got = known.check(&HostKeyQuery::for_host(host, port, None), &blob_of(key));
+        match &got {
+            HostKeyVerdict::Match { line, .. }
+                if f.status.code() == Some(1) && bare_lines.contains(line) =>
+            {
+                without_port += 1;
+            }
+            _ => failures.push(format!(
+                "check {ported}: crate {got:?}, ssh-keygen -F {ported} exit {:?}, -F {host} lines {bare_lines:?}",
+                f.status.code()
+            )),
+        }
+        let aliased = known.check(
+            &HostKeyQuery::for_host(host, port, Some(&ported)),
+            &blob_of(key),
+        );
+        if aliased != HostKeyVerdict::NotFound {
+            failures.push(format!("check {ported} as HostKeyAlias: crate {aliased:?}"));
+        }
+    }
     // The base64 of every listed key is the one written (a sanity check of the decoder).
     for e in known.entries(&HostKeyQuery {
         name: "plain.example".to_string(),
+        without_port: None,
     }) {
         if let Some(k) = e.key {
             assert!(
@@ -301,7 +345,7 @@ fn matches_ssh_keygen_f() {
     std::fs::remove_dir_all(&dir).expect("remove the temporary folder");
     println!(
         "ssh-keygen -F comparison: {queries} names, {listed_f} lines listed by -F, {listed_l} by -l -F, \
-         {rejected_alike} names rejected alike, {} differences",
+         {rejected_alike} names rejected alike, {without_port} port-less lookups, {} differences",
         failures.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));

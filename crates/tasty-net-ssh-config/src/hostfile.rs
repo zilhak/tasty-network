@@ -1090,6 +1090,10 @@ fn read_lines_from(mut reader: impl std::io::BufRead) -> Vec<u8> {
 pub struct HostKeyQuery {
     /// The name, compared as `ssh` gives it (patterns ignore case, hashed names do not).
     pub name: String,
+    /// The name [`KnownHosts::check`] looks up again when `name` gives `HOST_NEW`: the host
+    /// without its port (`sshconnect.c:1181`-`:1193`). [`HostKeyQuery::for_host`] sets it for
+    /// a port other than 0 and 22 without `HostKeyAlias`.
+    pub without_port: Option<String>,
 }
 
 /// `put_host_port` (`misc.c:801`-`:812`): the host alone for port 0 and 22, else
@@ -1107,8 +1111,10 @@ impl HostKeyQuery {
     /// `sshconnect.c:648`-`:700`): `HostKeyAlias` when there is one, else the host with the
     /// port. `host` is the final host name ([`crate::Resolution::host`]).
     pub fn for_host(host: &str, port: u16, host_key_alias: Option<&str>) -> HostKeyQuery {
+        let ported = port != u16::MIN && port != DEFAULT_SSH_PORT;
         HostKeyQuery {
             name: host_key_alias.map_or_else(|| put_host_port(host, port), str::to_string),
+            without_port: (host_key_alias.is_none() && ported).then(|| host.to_string()),
         }
     }
 
@@ -1117,6 +1123,7 @@ impl HostKeyQuery {
     pub fn for_address(address: &str, port: u16) -> HostKeyQuery {
         HostKeyQuery {
             name: put_host_port(address, port),
+            without_port: None,
         }
     }
 }
@@ -1235,8 +1242,31 @@ impl KnownHosts {
     /// key equals no line. A certificate is not checked against `@cert-authority` lines
     /// (they are not trusted): it is checked for revocation by its public key and then
     /// judged as its plain key, as `ssh` does when no authority accepts it
-    /// (`sshconnect.c:1474`-`:1486`).
+    /// (`sshconnect.c:1474`-`:1486`). When the verdict is `HOST_NEW` ([`HostKeyVerdict::NotFound`]
+    /// or [`HostKeyVerdict::DistrustedCaLine`]) and the query has
+    /// [`HostKeyQuery::without_port`], that name is judged too and its
+    /// [`HostKeyVerdict::Match`] is taken; any other verdict of it leaves the first
+    /// (`sshconnect.c:1181`-`:1193`). Nothing is written.
     pub fn check(&self, query: &HostKeyQuery, key_blob: &[u8]) -> HostKeyVerdict {
+        let verdict = self.check_name(&query.name, key_blob);
+        if let (HostKeyVerdict::NotFound | HostKeyVerdict::DistrustedCaLine { .. }, Some(name)) =
+            (&verdict, &query.without_port)
+        {
+            let again = self.check_name(name, key_blob);
+            if matches!(again, HostKeyVerdict::Match { .. }) {
+                return again;
+            }
+        }
+        verdict
+    }
+
+    /// [`KnownHosts::check`] for one name.
+    fn check_name(&self, name: &str, key_blob: &[u8]) -> HostKeyVerdict {
+        let query = HostKeyQuery {
+            name: name.to_string(),
+            without_port: None,
+        };
+        let query = &query;
         let lines: Vec<(HostKeyEntry, Key)> = self
             .scanned(query)
             .into_iter()
@@ -1385,6 +1415,7 @@ mod tests {
     fn q(name: &str) -> HostKeyQuery {
         HostKeyQuery {
             name: name.to_string(),
+            without_port: None,
         }
     }
 
@@ -1805,6 +1836,68 @@ mod tests {
         assert_eq!(got, b"one\ntwo\n", "the cut line is dropped");
         let got = read_lines_from(&b"one\nlast"[..]);
         assert_eq!(got, b"one\nlast", "the last line without a newline is kept");
+    }
+
+    #[test]
+    fn a_port_is_dropped_for_a_new_host() {
+        let a = ed25519_blob(7);
+        let b = ed25519_blob(8);
+        let text = format!(
+            "port.example {k}\n[changed.example]:2222 {o}\nchanged.example {k}\n\
+             @revoked [rev.example]:2222 {k}\nrev.example {k}\nother.example {o}\n",
+            k = line("ssh-ed25519", &a),
+            o = line("ssh-ed25519", &b)
+        );
+        let (dir, kh) = hosts(&text);
+        let file = dir.0.join("known_hosts");
+        let at = |host: &str, port: u16, alias: Option<&str>, key: &[u8]| {
+            kh.check(&HostKeyQuery::for_host(host, port, alias), key)
+        };
+        assert_eq!(
+            at("port.example", 2222, None, &a),
+            HostKeyVerdict::Match {
+                file: file.clone(),
+                line: 1
+            }
+        );
+        assert_eq!(
+            at("port.example", 2222, Some("port.example:alias"), &a),
+            HostKeyVerdict::NotFound,
+            "not with HostKeyAlias"
+        );
+        assert_eq!(
+            at("port.example", 2222, None, &b),
+            HostKeyVerdict::NotFound,
+            "a Mismatch of the retry leaves HOST_NEW"
+        );
+        assert_eq!(
+            at("changed.example", 2222, None, &a),
+            HostKeyVerdict::Mismatch {
+                file: file.clone(),
+                line: 2
+            },
+            "no retry after HOST_CHANGED"
+        );
+        assert_eq!(
+            at("rev.example", 2222, None, &a),
+            HostKeyVerdict::Revoked {
+                file: file.clone(),
+                line: 4
+            },
+            "no retry after HOST_REVOKED"
+        );
+        assert_eq!(HostKeyQuery::for_host("h", 22, None).without_port, None);
+        assert_eq!(HostKeyQuery::for_host("h", 0, None).without_port, None);
+        assert_eq!(
+            HostKeyQuery::for_host("h", 2222, None)
+                .without_port
+                .as_deref(),
+            Some("h")
+        );
+        assert_eq!(
+            HostKeyQuery::for_address("10.0.0.1", 2222).without_port,
+            None
+        );
     }
 
     #[test]

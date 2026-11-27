@@ -67,7 +67,7 @@ those files (BSD-3-Clause; `charclass.h` is in the public domain).
 | | `sshbuf-misc.c` | the buffer `sshbuf_b64tod` decodes into (`:182`–`:203`) |
 | | `sshbuf.h`, `sshkey.h`, `ssh2.h`, `crypto_api.h` | `SSHBUF_SIZE_MAX`, `SSHBUF_MAX_BIGNUM`, `SSHBUF_MAX_ECPOINT`, `SSH_RSA_MINIMUM_MODULUS_SIZE`, `SSHKEY_CERT_MAX_PRINCIPALS`, `SSH2_CERT_TYPE_USER`, `SSH2_CERT_TYPE_HOST`, `ED25519_PK_SZ`, `MLDSA44_ED25519_PK_SZ` |
 | | `misc.c` | `put_host_port` (`:801`–`:812`) |
-| | `sshconnect.c` | `get_hostfile_hostname_ipaddr` (`:648`–`:700`), the retry with the plain key of a host certificate in `check_host_key` (`:1474`–`:1486`) |
+| | `sshconnect.c` | `get_hostfile_hostname_ipaddr` (`:648`–`:700`), the look-up without the port in `check_host_key` (`:1181`–`:1193`), the retry with the plain key of a host certificate in `check_host_key` (`:1474`–`:1486`) |
 
 Nothing that opens a socket, runs a program or does a name service lookup is ported:
 `Match exec`, `Match localnetwork` and `CanonicalizeHostname` with a name that is not an
