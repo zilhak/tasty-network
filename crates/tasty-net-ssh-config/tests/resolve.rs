@@ -172,6 +172,61 @@ fn include_refusal_names_its_own_line() {
     assert_eq!(f.origin, Some(Origin::File { path: top, line: 2 }));
 }
 
+// Linux only: a FIFO opened for reading and writing does not block there.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_file_is_not_read() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::PermissionsExt as _;
+    const GROUP_WRITABLE: u32 = 0o662;
+    let dir = folder();
+    let fifo = dir.join("config");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(GROUP_WRITABLE))
+        .expect("fifo mode");
+    // This end keeps the FIFO open, so opening it to read does not block and reading it would
+    // wait for more.
+    let mut end = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fifo)
+        .expect("open the fifo");
+    end.write_all(b"Port 1\n").expect("write the fifo");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = context(Vec::new());
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let r = ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Default {
+                user: Some(path),
+                system: None,
+            },
+        })
+        .expect("load")
+        .resolve("web", &ctx);
+        let _sent = tx.send(r);
+    });
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let r = rx
+        .recv_timeout(WAIT)
+        .expect("the resolution reads the refused file");
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert!(
+        f.message.contains("Bad owner or permissions"),
+        "{}",
+        f.message
+    );
+    // What was written is still in the FIFO: nobody read it.
+    let mut left = [0u8; 7];
+    end.read_exact(&mut left).expect("read the fifo");
+    assert_eq!(&left, b"Port 1\n");
+}
+
 #[test]
 fn service_name_port_is_refused() {
     // OpenSSH looks `ssh` up in the services database (`a2port`, `misc.c:592`-`:604`); this

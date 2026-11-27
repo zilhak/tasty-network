@@ -114,8 +114,8 @@ use crate::options::{
     SessionType, StrictHostKey, YesNoAsk, clear_or_none,
 };
 use crate::readconf::{
-    DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, Reader, connection_hash, parse_ssh_uri,
-    read_text, valid_hostname, valid_ruser,
+    DEFAULT_SSH_PORT, Env, Fatal, Flags, LoadedFile, OpenFile, Reader, connection_hash,
+    parse_ssh_uri, valid_hostname, valid_ruser,
 };
 use crate::result::{ConfigNote, NoteAction, NoteClass, Origin, Refusal, RefusalKind, ValueSource};
 use crate::settings;
@@ -271,19 +271,16 @@ impl Resolution {
 }
 
 fn load_one(path: &Path) -> Result<LoadedFile, std::io::Error> {
-    let (text, owner_mode) = read_text(path)?;
     Ok(LoadedFile {
         path: path.to_path_buf(),
-        text: Some(text),
-        owner_mode,
+        opened: Some(OpenFile::open(path)?),
     })
 }
 
 fn missing(path: &Path) -> LoadedFile {
     LoadedFile {
         path: path.to_path_buf(),
-        text: None,
-        owner_mode: None,
+        opened: None,
     }
 }
 
@@ -336,7 +333,7 @@ impl ConfigSet {
     pub fn files(&self) -> impl Iterator<Item = (&Path, bool)> {
         self.files
             .iter()
-            .map(|(f, _)| (f.path.as_path(), f.text.is_some()))
+            .map(|(f, _)| (f.path.as_path(), f.opened.is_some()))
     }
 
     /// Resolve the options for a destination (`[user@]host` or `ssh://...`).
