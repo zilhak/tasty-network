@@ -1,6 +1,7 @@
-// This file is derived from OpenSSH, modified: a Rust port of parts of readconf.c, readconf.h
-// of OpenSSH portable 10.6p2 (commit d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The
-// notices of those files follow as written there; LICENSE-OpenSSH has the OpenSSH licence.
+// This file is derived from OpenSSH, modified: a Rust port of parts of readconf.c, readconf.h,
+// addrmatch.c, addr.c of OpenSSH portable 10.6p2 (commit
+// d449e662b6b8b8cb20e852d8084c269af1c5e8f1). The notices of those files follow as written
+// there; LICENSE-OpenSSH has the OpenSSH licence.
 //
 // readconf.c:
 // /*
@@ -28,6 +29,40 @@
 //  * software must be clearly marked as such, and if the derived work is
 //  * incompatible with the protocol description in the RFC file, it must be
 //  * called by a name other than "ssh" or "Secure Shell".
+//  */
+//
+// addrmatch.c:
+// /*
+//  * Copyright (c) 2004-2008 Damien Miller <djm@mindrot.org>
+//  *
+//  * Permission to use, copy, modify, and distribute this software for any
+//  * purpose with or without fee is hereby granted, provided that the above
+//  * copyright notice and this permission notice appear in all copies.
+//  *
+//  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+//  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+//  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+//  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+//  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+//  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+//  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//  */
+//
+// addr.c:
+// /*
+//  * Copyright (c) 2004-2008 Damien Miller <djm@mindrot.org>
+//  *
+//  * Permission to use, copy, modify, and distribute this software for any
+//  * purpose with or without fee is hereby granted, provided that the above
+//  * copyright notice and this permission notice appear in all copies.
+//  *
+//  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+//  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+//  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+//  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+//  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+//  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+//  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //  */
 //! Reading configuration files: `process_config_line_depth` (`readconf.c:1143`),
 //! `match_cfg_line` (`:700`), `expand_match_exec_or_include_path` (`:654`),

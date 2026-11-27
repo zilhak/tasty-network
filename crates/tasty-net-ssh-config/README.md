@@ -33,6 +33,8 @@ This crate is `BSD-2-Clause AND ISC AND SSH-short`. The files derived from OpenS
 | `src/keywords.rs` | `readconf.c` | `keywords[]` (`:175`–`:325`), `parse_token` (`:958`–`:973`) |
 | `src/readconf.rs` | `readconf.c` | `ssh_connection_hash` (`:344`–`:361`), `expand_match_exec_or_include_path` (`:643`–`:694`), `match_cfg_line` (`:699`–`:923`), `process_config_line` and `process_config_line_depth` (`:1132`–`:2611`), `read_config_file` and `read_config_file_depth` (`:2618`–`:2683`, `READCONF_MAX_DEPTH` `:2629`), `parse_fwd_field` (`:3232`–`:3286`), `parse_forward` (`:3298`–`:3437`), `ssh_valid_hostname` (`:3439`–`:3452`), `ssh_valid_ruser` (`:3454`–`:3471`), `parse_jump` (`:3473`–`:3550`), `parse_ssh_uri` (`:3552`–`:3577`) |
 | | `readconf.h` | `SSHCONF_*` flags, `MAX_*` limits |
+| | `addrmatch.c` | the checks of `addr_match_cidr_list` with no address (`:105`–`:166`: empty entry, `INET6_ADDRSTRLEN + 3` length, `VALID_CIDR_CHARS`) |
+| | `addr.c` | `addr_unicast_masklen` (`:37`–`:47`), `masklen_valid` (`:49`–`:60`), `addr_host_is_all0s` (`:333`–`:344`), `addr_pton_cidr` (`:459`–`:495`) |
 | `src/options.rs` | `readconf.h` | `struct Options` |
 | | `readconf.c` | `add_local_forward` (`:368`–`:390`), `add_remote_forward` (`:397`–`:421`), `add_certificate_file` (`:453`–`:475`), `add_identity_file` (`:477`–`:506`), `multistate_*` tables (`:994`–`:1108`), `parse_multistate_value` (`:1111`–`:1126`), `initialize_options` (`:2713`–`:2838`), `fill_default_options` (`:2859`–`:3135`), `option_clear_or_none` (`:2686`–`:2690`), `fmt_multistate_int` to `dump_cfg_forwards` (`:3580`–`:3736`), `dump_client_config` (`:3738`–`:3968`) |
 | | `pathnames.h` | `_PATH_SSH_USER_DIR`, `_PATH_SSH_CLIENT_ID_*`, `_PATH_SSH_SYSTEM_HOSTFILE*`, `_PATH_SSH_USER_HOSTFILE*` |

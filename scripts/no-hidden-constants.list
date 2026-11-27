@@ -349,7 +349,7 @@ allow	crates/tasty-net-ssh-config/src/readconf.rs	const OCTAL_RADIX: u32 = 8	Str
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const FWDARG_MAX: usize = 255	readconf.c parse_forward의 fwdarg 길이 상한
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const NI_MAXHOST: usize = 1025	netdb.h NI_MAXHOST 1025(readconf.c parse_forward)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const PATH_MAX_SUN: usize = if cfg!(any( target_os = "macos", target_os = "ios", target_os = "freebsd" )) { 104 } else { 108 }	sun_path 크기(OpenSSH PATH_MAX_SUN, BSD 104·그 밖 108)
-allow	crates/tasty-net-ssh-config/src/readconf.rs	const CIDR_ENTRY_MAX: usize = 49	INET6_ADDRSTRLEN + 3 = 49(misc.c addr_match_cidr_list)
+allow	crates/tasty-net-ssh-config/src/readconf.rs	const CIDR_ENTRY_MAX: usize = 49	INET6_ADDRSTRLEN + 3 = 49(addrmatch.c:131 addr_match_cidr_list)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const IPV4_BITS: u32 = 32	IPv4 주소 비트 수(CIDR 접두 길이 상한)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const IPV6_BITS: u32 = 128	IPv6 주소 비트 수(CIDR 접두 길이 상한)
 allow	crates/tasty-net-ssh-config/src/readconf.rs	const CTRL_FIRST: u8 = 64	EscapeChar ^X의 둘째 바이트 하한 64(readconf.c)

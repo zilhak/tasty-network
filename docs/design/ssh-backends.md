@@ -338,6 +338,7 @@ struct SshInspection {
 | 원본 파일(줄 수) | 옮기는 것 |
 |---|---|
 | `readconf.c`(3968), `readconf.h`(268) | 키워드 표 `keywords[]`(`:178`–`:325`), 줄 해석 `process_config_line_depth`(`:1143`), `Match` 판정 `match_cfg_line`(`:700`), 파일 읽기 `read_config_file_depth`(`:2631`, 상한 `READCONF_MAX_DEPTH` `:2629`), `initialize_options`(`:2714`), `fill_default_options`(`:2860`), `parse_forward`(`:3299`), `parse_jump`(`:3474`), `dump_client_config`(`:3739`, 비교 시험의 출력 형식) |
+| `addrmatch.c`(166)·`addr.c`(510)의 해당 함수 | `Match localnetwork` 목록 검사: `addr_match_cidr_list`(`:106`, 주소 없이 부를 때의 항목 검사), `addr_pton_cidr`(`addr.c:460`)·`masklen_valid`(`:50`)·`addr_host_is_all0s`(`:334`) |
 | `match.c`(406) | `match_pattern`(`:82`), `match_pattern_list`(`:161`), `match_hostname`(`:233`), `match_host_and_ip`(`:250`), `match_user`(`:275`), `match_list`(`:313`), `match_filter_denylist`·`allowlist`(`:393`·`:403`) |
 | `hostfile.c`(982), `hostfile.h`(123) | `extract_salt`(`:69`), `host_hash`(`:116`), `hostfile_read_key`(`:158`), `check_markers`(`:181`), `load_hostkeys_file`(`:266`), `check_key_not_revoked`(`:316`), `check_hostkeys_by_key_or_type`(`:350`), `check_key_in_hostkeys`(`:408`), `lookup_key_in_hostkeys_by_type`(`:417`), `lookup_marker_in_hostkeys`(`:425`), `format_host_entry`(`:437`), `write_host_entry`(`:477`), `add_host_to_hostfile`(`:542`), `match_maybe_hashed`(`:770`), `hostkeys_foreach_file`(`:790`), `hostkeys_foreach`(`:966`). `format_host_entry`·`write_host_entry`는 `add_host_to_hostfile`이, `match_maybe_hashed`·`hostfile_read_key`는 `hostkeys_foreach_file`이 부르는 보조 함수라 판정 순서와 기록 형식을 같게 하려면 함께 옮긴다 |
 | `misc.c`(3352)의 해당 함수 | `a2port`(`:592`), `convtime`(`:746`), `parse_user_host_path`(`:914`), `tilde_expand`(`:1276`)·`tilde_expand_filename`(`:1344`), `dollar_expand`(`:1477`), `percent_expand`(`:1496`)·`percent_dollar_expand`(`:1515`), `argv_split`(`:2143`), `valid_env_name`(`:2532`) |
@@ -378,7 +379,7 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   |---|---|---|
   | Tatu Ylonen 조항만 | `readconf.c`, `readconf.h`, `sshconnect.c`, `hostfile.h` | `SSH-short` |
   | Tatu Ylonen 조항과 BSD | `ssh.c`, `hostfile.c`, `match.c` | `SSH-short`, `BSD-2-Clause` |
-  | ISC | `misc.c` | `ISC` |
+  | ISC | `misc.c`, `addrmatch.c`, `addr.c` | `ISC` |
   | Tatu Ylonen 조항만 | `pathnames.h` | `SSH-short` |
   | Tatu Ylonen 조항과 BSD | `cipher.c`, `log.c` | `SSH-short`, `BSD-2-Clause` |
   | ISC | `digest-openssl.c` | `ISC` |
