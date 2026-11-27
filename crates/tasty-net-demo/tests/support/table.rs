@@ -123,9 +123,7 @@ pub fn dialer_instance(server: &Proc, client: u32) -> String {
         .into_iter()
         .find(|l| l.starts_with(&prefix))
         .unwrap_or_else(|| panic!("no {prefix:?} line\n{}", server.transcript.render()));
-    tasty_net_demo::field(&line, "peer")
-        .unwrap_or_else(|| panic!("no peer= in {line:?}"))
-        .to_string()
+    super::scene::decoded(&line, "peer")
 }
 
 /// Checks both ends' entries of one tunnel that carries an attach link of `shape`, a bulk

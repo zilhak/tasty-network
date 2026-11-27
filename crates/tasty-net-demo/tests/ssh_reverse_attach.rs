@@ -17,13 +17,12 @@ use std::time::Duration;
 
 use support::process::{Proc, log, terminate};
 use support::scene::{
-    LOCAL_STEP, Ready, SSH_STEP, Scene, echo, number, one_at_a_time, transcript_line,
+    LOCAL_STEP, Ready, SSH_STEP, Scene, decoded, echo, number, one_at_a_time, transcript_line,
 };
 use support::table::{
     ROLE_REVERSED, check_reconnected, check_tunnel_entries, dialer_instance, in_state, local_links,
     read_table, wait_table,
 };
-use tasty_net_demo::table::decode_value;
 use tasty_net_demo::{Snapshot, field};
 
 /// The role table of a reversed SSH link, as both ends print it after `local=`.
@@ -72,14 +71,14 @@ fn reversed_attach(
     client: u32,
 ) -> u32 {
     let line = scene.connected(dialer);
-    assert_eq!(field(&line, "instance"), Some(ready.instance.as_str()));
+    assert_eq!(decoded(&line, "instance"), ready.instance, "{line}");
     let tunnel: u32 = number(&line, "tunnel_pid");
     assert_ne!(tunnel, 0, "the dialer reported its tunnel ssh");
     let dialer_roles = dialer.expect_prefix("dialer roles ", LOCAL_STEP);
 
     let proposal = server.expect_prefix("server proposal ", LOCAL_STEP);
     assert_eq!(field(&proposal, "answer"), Some("accept"), "{proposal}");
-    let dialer_instance = field(&proposal, "peer").unwrap_or("").to_string();
+    let dialer_instance = decoded(&proposal, "peer");
     assert_ne!(
         dialer_instance, ready.instance,
         "the proposal came from another instance"
@@ -168,7 +167,7 @@ fn a_quoted_instance_id_survives_the_descriptor() {
         .into_iter()
         .find(|l| l.starts_with("server proposal "))
         .expect("the proposal line");
-    assert_eq!(field(&proposal, "peer"), Some(ID), "{proposal}");
+    assert_eq!(decoded(&proposal, "peer"), ID, "{proposal}");
     held_echo(&mut server, &mut dialer, 1, "hello-quoted");
 
     scene.quit_dialer(dialer);
@@ -402,18 +401,13 @@ fn both_ends_produce_matching_local_links() {
     let mut dialer = start_reversing_dialer(&mut scene, &["--channels", "--instance-id", ID]);
     reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
     let open = dialer.expect_prefix("dialer channels-open ", SSH_STEP);
-    let value = |line: &str, key: &str| {
-        field(line, key)
-            .and_then(decode_value)
-            .unwrap_or_else(|| panic!("no {key}= value in {line:?}"))
-    };
-    assert_eq!(value(&open, "instance"), ready.instance, "{open}");
+    assert_eq!(decoded(&open, "instance"), ready.instance, "{open}");
     // The bulk channel's line comes from another server thread than the link's lines, so it
     // is looked for in the transcript.
     let bulk = transcript_line(&server, "server bulk-accepted ");
-    assert_eq!(value(&bulk, "peer"), ID, "{bulk}");
+    assert_eq!(decoded(&bulk, "peer"), ID, "{bulk}");
     let request = transcript_line(&server, "server request ");
-    assert_eq!(value(&request, "method"), "system.info", "{request}");
+    assert_eq!(decoded(&request, "method"), "system.info", "{request}");
     let links = matching_links(&mut server, &mut dialer, 1);
     let [_, dialer_device, acceptor_device, holder, transport] = &links[0];
     assert_ne!(dialer_device, acceptor_device);
@@ -436,7 +430,7 @@ fn mixed_holders_on_one_tunnel() {
     let record = scene.record.clone();
     let mut dialer = scene.start_dialer_with(&record, &["--also-holder", "acceptor"], &[]);
     let line = scene.connected(&mut dialer);
-    assert_eq!(field(&line, "instance"), Some(ready.instance.as_str()));
+    assert_eq!(decoded(&line, "instance"), ready.instance, "{line}");
     // The second link discovers the record over SSH and runs a handshake.
     let extra = dialer.expect_prefix("dialer extra-connected ", SSH_STEP);
     assert_eq!(field(&extra, "holder"), Some("acceptor"), "{extra}");

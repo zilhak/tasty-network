@@ -64,7 +64,7 @@
 //! | `dialer pid=<pid>` | at start |
 //! | `dialer ssh-spawned pid=<pid> role=<tunnel\|discovery>` | an `ssh` child was created |
 //! | `dialer attempt n=<n>` | an attempt starts |
-//! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded |
+//! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded (the server's ID encoded as in `tasty_net_demo::table`) |
 //! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
 //! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered (the value encoded as in `tasty_net_demo::table`) |
 //! | `dialer call method=<method> answer=<result\|error>` | `--channels --also-call`: the request channel answered that method (the value encoded as in `tasty_net_demo::table`) |
@@ -376,7 +376,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         };
         emit(&format!(
             "dialer connected attempt={attempt} instance={} tunnel_pid={}",
-            link.peer().instance_id(),
+            encode_value(link.peer().instance_id()),
             tunnel_pid.load(Ordering::SeqCst)
         ));
         emit(&format!(

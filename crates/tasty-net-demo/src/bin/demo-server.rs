@@ -33,8 +33,8 @@
 //! | Line | When |
 //! |------|------|
 //! | `server ready pid=<pid> port=<port> instance=<id>` | the record is published (the value encoded as in `tasty_net_demo::table`) |
-//! | `server proposal peer=<instance> answer=<accept\|refuse>` | a peer proposed that this end holds |
-//! | `server attached client=<n> live=<links> peer=<instance>` | the domain check took an attach link |
+//! | `server proposal peer=<instance> answer=<accept\|refuse>` | a peer proposed that this end holds (the value encoded as in `tasty_net_demo::table`) |
+//! | `server attached client=<n> live=<links> peer=<instance>` | the domain check took an attach link (the value encoded as in `tasty_net_demo::table`) |
 //! | `server roles client=<n> local=acceptor launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | an attach link is up (`<side>` is `dialer` or `acceptor`) |
 //! | `server control client=<n> <json>` | the descriptor of a link this end holds arrived |
 //! | `server control-invalid client=<n> error=<text>` | the first Control of a link this end would hold was not a descriptor; the link ends |
@@ -140,7 +140,7 @@ impl DomainPolicy for LivePolicy {
             emit(&format!(
                 "server attached client={client} live={} peer={}",
                 *live,
-                request.peer().instance_id()
+                encode_value(request.peer().instance_id())
             ));
         }
         Ok(DomainAccept {
@@ -264,7 +264,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn answer(proposal: RoleProposal, accept: bool) {
     emit(&format!(
         "server proposal peer={} answer={}",
-        proposal.peer().instance_id(),
+        encode_value(proposal.peer().instance_id()),
         if accept { "accept" } else { "refuse" }
     ));
     if accept {

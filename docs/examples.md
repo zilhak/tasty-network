@@ -77,7 +77,7 @@ send hello
 | `reconnect_after_server_restart` | 서버를 죽이고 다시 띄우면 dialer가 새로 발견한 레코드(다른 인스턴스 ID)로 다시 붙는다 |
 | `wrong_token_is_rejected_without_retry` | 틀린 토큰은 `token_invalid`로 거절되고 dialer는 시도 한 번으로 끝난다 |
 | `connection_table_reports_ssh_forward` | attach·bulk·요청 채널을 나르는 터널 하나가 dialer에서는 항목 하나(구간 셋, `ssh` 경유, rendezvous 없음), 서버에서는 채널마다 `ssh_inbound` 항목(bulk는 `parent`)이다. 터널을 끊으면 옛 항목은 원인과 함께 `disconnected`, 새 항목은 새 ID로 옛 ID를 가리키고 `reconnecting`에서 `connected`가 된다 |
-| `channel_lines_encode_their_values` | 공백·`=`·`%`·`"`가 든 서버 인스턴스 ID(`--instance-id`)와 요청 메서드(`--also-call`)가 `dialer channels-open instance=`·`server request method=` 줄에서 인코딩되어 그대로 되읽힌다 |
+| `channel_lines_encode_their_values` | 공백·`=`·`%`·`"`가 든 서버 인스턴스 ID(`--instance-id`)와 요청 메서드(`--also-call`)가 `server ready`·`dialer connected`·`dialer channels-open`의 `instance=`와 `dialer call`·`server request`의 `method=`에서 인코딩되어 그대로 되읽힌다. 두 요청 줄은 서버 stdout에서 부른 순서대로 나온다 |
 
 `crates/tasty-net-demo/tests/ssh_reverse_attach.rs`는 역할 반전을 같은 방식으로 확인한다(D3). 두 파일은 같은 시험 도우미(`tests/support/`)를 쓴다.
 

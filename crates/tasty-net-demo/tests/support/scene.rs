@@ -179,9 +179,7 @@ impl Scene {
         let ready = Ready {
             pid: number(&line, "pid"),
             port: number(&line, "port"),
-            instance: field(&line, "instance")
-                .and_then(decode_value)
-                .expect("instance"),
+            instance: decoded(&line, "instance"),
         };
         assert_eq!(ready.pid, server.pid(), "the ready line names the process");
         (server, ready)
@@ -470,7 +468,7 @@ pub fn connect_and_check(
     dialer: &mut Proc,
 ) -> u32 {
     let line = scene.connected(dialer);
-    assert_eq!(field(&line, "instance"), Some(ready.instance.as_str()));
+    assert_eq!(decoded(&line, "instance"), ready.instance, "{line}");
     let tunnel: u32 = number(&line, "tunnel_pid");
     log(&format!(
         "pids server={} dialer={} tunnel_ssh={tunnel} (sshd={})",
@@ -511,4 +509,11 @@ pub fn transcript_line(proc: &Proc, prefix: &str) -> String {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The value of `key=` in `line`, decoded as in `tasty_net_demo::table`.
+pub fn decoded(line: &str, key: &str) -> String {
+    field(line, key)
+        .and_then(decode_value)
+        .unwrap_or_else(|| panic!("no {key}= value in {line:?}"))
 }
