@@ -71,8 +71,16 @@ struct Channels {
     open: usize,
     /// When the last channel went (the accepting side's drain wait).
     idle_since: Option<Instant>,
-    /// The connection is closed or being closed: no new channel takes it.
+    /// This end closes or closed the connection: no new channel takes it.
     closing: bool,
+}
+
+impl Channels {
+    /// Whether the drain cap `cap` ran out since the last channel went, on a connection
+    /// nobody closes yet.
+    fn drained(&self, cap: Duration) -> bool {
+        !self.closing && self.idle_since.is_some_and(|since| since.elapsed() >= cap)
+    }
 }
 
 impl ConnState {
@@ -200,6 +208,21 @@ impl ConnState {
         }
     }
 
+    /// The accepting side's close at the drain cap, on `channels` (the lock held): when the cap
+    /// ran out since the last channel went, marks the connection closing in the same step, so
+    /// a channel that takes it meanwhile ([`ConnState::acquire`], under the same lock) either
+    /// came first and keeps it open, or finds it closing. Whether it closed.
+    fn close_if_drained(&self, mut channels: std::sync::MutexGuard<'_, Channels>) -> bool {
+        if !channels.drained(self.drain_cap) {
+            return false;
+        }
+        channels.closing = true;
+        drop(channels);
+        self.channels_changed.notify_all();
+        self.conn.close(P2pCloseReason::Closed);
+        true
+    }
+
     /// On the accepting side, once the last channel is gone: closes the connection with code 0
     /// at the drain cap unless a channel came or it closed first. The connection's thread
     /// checks the same between its waits for a stream, which may be longer
@@ -220,8 +243,7 @@ impl ConnState {
                     };
                     let left = state.drain_cap.saturating_sub(since.elapsed());
                     if left.is_zero() {
-                        drop(channels);
-                        state.close(P2pCloseReason::Closed);
+                        state.close_if_drained(channels);
                         return;
                     }
                     channels = state
@@ -238,9 +260,13 @@ impl ConnState {
     }
 
     /// On the accepting side: how long until the drain wait after the last channel ends, `None`
-    /// while channels are open (or none ever was).
+    /// while channels are open (or none ever was), and once this end closes the connection.
     fn drain_left(&self) -> Option<Duration> {
-        let since = lock(&self.channels).idle_since?;
+        let channels = lock(&self.channels);
+        if channels.closing {
+            return None;
+        }
+        let since = channels.idle_since?;
         Some(self.drain_cap.saturating_sub(since.elapsed()))
     }
 }
@@ -307,11 +333,10 @@ fn serve(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, poll: Duration) {
         if state.is_closed() {
             return;
         }
-        let drain = state.drain_left();
-        if drain.is_some_and(|left| left.is_zero()) {
-            state.close(P2pCloseReason::Closed);
+        if state.close_if_drained(lock(&state.channels)) {
             return;
         }
+        let drain = state.drain_left();
         let wait = drain.map_or(poll, |left| left.min(poll));
         match state.conn.accept_bi(Some(wait)) {
             Ok(stream) => take(state, queue, stream),
