@@ -159,6 +159,9 @@ pub struct ServerStatus {
     pub packets_dropped: u64,
     /// Receive errors of one datagram on any port, dropped.
     pub receive_errors: u64,
+    /// Sends on the primary port the OS refused as larger than the path (MTU discovery
+    /// probes), dropped.
+    pub send_too_large: u64,
     /// Candidate addresses the rule refused.
     pub candidates_rejected: u64,
     /// Candidate addresses left out by the per-kind caps.
@@ -231,6 +234,7 @@ impl Inner {
             stun_dropped: get(&c.stun_dropped),
             packets_dropped: get(&self.demux.dropped),
             receive_errors: get(&self.demux.receive_errors),
+            send_too_large: get(&self.demux.send_too_large),
             candidates_rejected: get(&c.candidates_rejected),
             candidates_truncated: get(&c.candidates_truncated),
             registrations_total: get(&c.registrations_total),
@@ -658,6 +662,7 @@ async fn status_loop(inner: Arc<Inner>) {
             stun_dropped = s.stun_dropped,
             packets_dropped = s.packets_dropped,
             receive_errors = s.receive_errors,
+            send_too_large = s.send_too_large,
             queue_full = s.queue_full,
             pending = s.pending,
             pending_refused = s.pending_refused,

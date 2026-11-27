@@ -164,7 +164,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 따른다. 모든 시간·횟수·상한은 설정 파일로 바꿀 수 있다.
 
 - 실행 중 조회: 떠 있는 서버는 시작할 때 전체 설정(항목마다 값과 출처 `default`·`configured`·`fixed`, 그 뒤에 계산값과 출처 `computed`)을 로그에 한 번 찍는다. 서버를 라이브러리로 띄운 쪽은 `Server::settings()`로 같은 값을 읽는다. 실행 중 상태(등록 수, 진행 중 펀칭 수, 상한에 걸린 횟수)는 `Server::status()`와 주기 로그(`status_log_interval`)로 본다. 원격 조회 엔드포인트는 두지 않는다(공격 면을 늘리지 않는다).
-- MTU 탐색: quinn은 분할 금지(DF)를 건 소켓에서만 MTU 탐색을 돌린다. 서버의 실제 UDP 소켓은 quinn의 UDP 계층(`quinn::udp::UdpSocketState`)으로 분할 금지를 켜고, OS가 받지 않으면 탐색이 꺼진다. 주입한 `PacketIo`는 분할 여부를 모르면 `may_fragment()` 기본값(참)을 써서 탐색이 꺼진다. 실제로 도는지는 조회의 계산값 `quic.mtu_discovery`(`on`·`off`, 출처 `computed`)로 본다. 꺼져 있으면 `quic.mtu_discovery.*` 설정은 쓰이지 않는다. 이 줄은 떠 있는 서버에만 있다(`settings --config`는 소켓을 열지 않는다).
+- MTU 탐색: quinn은 분할 금지(DF)를 건 소켓에서만 MTU 탐색을 돌린다. 서버의 실제 UDP 소켓은 quinn의 UDP 계층(`quinn::udp::UdpSocketState`)으로 분할 금지를 켜고, OS가 받지 않으면 탐색이 꺼진다. 주입한 `PacketIo`는 분할 여부를 모르면 `may_fragment()` 기본값(참)을 써서 탐색이 꺼진다. 실제로 도는지는 조회의 계산값 `quic.mtu_discovery`(`on`·`off`, 출처 `computed`)로 본다. 경로가 받지 않는 크기라 OS가 거절한 probe(`EMSGSIZE`)는 연결을 끊지 않고 잃은 것으로 친다. 그 수는 `Server::status()`·주기 로그의 `send_too_large`다([P2P](p2p.md#소켓-하나와-패킷-나누기)). 꺼져 있으면 `quic.mtu_discovery.*` 설정은 쓰이지 않는다. 이 줄은 떠 있는 서버에만 있다(`settings --config`는 소켓을 열지 않는다).
 - `tasty-rendezvous settings --config <파일>`은 그 파일을 읽었을 때의 값과 출처를 찍는다(떠 있는 프로세스의 값이 아니라 파일 기준이다. 배포 전 확인용).
 - 기기가 지켜야 할 시간 값은 `welcome.limits`로 기기에게 알린다(위 "메시지 표").
 

@@ -1685,6 +1685,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
+ "libc",
  "quinn",
  "quinn-proto",
  "rustls",
@@ -1694,6 +1695,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

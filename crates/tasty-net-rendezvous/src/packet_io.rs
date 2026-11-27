@@ -6,6 +6,10 @@
 //! [`DemuxSocket`] gives quinn a socket ([`quinn::AsyncUdpSocket`]) over a `PacketIo`: QUIC
 //! packets go to quinn, STUN packets go to a [`StunSink`], everything else is dropped and
 //! counted. The server's primary port and the device's P2P socket use the same code.
+//!
+//! A send the OS refuses as larger than the path takes ([`send_error_is_too_large`]) is dropped
+//! and counted like a lost datagram, as quinn's own UDP layer does: quinn's MTU discovery
+//! sends such probes, and quinn ends the connection on any other send error but `WouldBlock`.
 
 use std::fmt;
 use std::io::{self, IoSliceMut};
@@ -198,6 +202,19 @@ pub fn receive_error_is_fatal(e: &io::Error) -> bool {
     )
 }
 
+/// Whether a send error means the datagram is larger than the path takes (`EMSGSIZE`, Windows
+/// `WSAEMSGSIZE`). The OS gives it at once for an MTU discovery probe larger than the
+/// interface MTU.
+pub fn send_error_is_too_large(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    let too_large = Some(libc::EMSGSIZE);
+    #[cfg(windows)]
+    let too_large = Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE);
+    #[cfg(not(any(unix, windows)))]
+    let too_large = None;
+    too_large.is_some() && e.raw_os_error() == too_large
+}
+
 /// Counts of a [`DemuxSocket`].
 #[derive(Debug, Default)]
 pub struct DemuxCounters {
@@ -209,6 +226,8 @@ pub struct DemuxCounters {
     pub dropped: AtomicU64,
     /// Receive errors of one datagram, dropped ([`receive_error_is_fatal`] is false).
     pub receive_errors: AtomicU64,
+    /// Sends the OS refused as larger than the path ([`send_error_is_too_large`]), dropped.
+    pub send_too_large: AtomicU64,
 }
 
 /// A quinn socket over a [`PacketIo`] that splits received packets by their first byte.
@@ -271,7 +290,15 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
     }
 
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-        self.io.try_send_to(transmit.contents, transmit.destination)
+        match self.io.try_send_to(transmit.contents, transmit.destination) {
+            Err(e) if send_error_is_too_large(&e) => {
+                // An MTU probe too large for the path: quinn takes it as lost.
+                self.counters.send_too_large.fetch_add(1, Ordering::Relaxed);
+                debug!(error = %e, len = transmit.contents.len(), "datagram too large dropped");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     fn poll_recv(

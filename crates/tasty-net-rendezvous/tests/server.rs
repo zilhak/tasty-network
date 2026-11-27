@@ -1301,6 +1301,95 @@ async fn mtu_discovery_follows_the_socket() {
     assert_eq!(mtu(&server).value, Value::Switch(false));
 }
 
+/// Packet I/O over a real socket that does not fragment and whose path takes datagrams of at
+/// most `limit` bytes: a larger send fails at once as the OS fails it (`EMSGSIZE`).
+#[derive(Debug)]
+struct SmallPath {
+    io: UdpPacketIo,
+    limit: usize,
+}
+
+fn too_large() -> std::io::Error {
+    #[cfg(unix)]
+    let code = libc::EMSGSIZE;
+    #[cfg(windows)]
+    let code = windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE;
+    std::io::Error::from_raw_os_error(code)
+}
+
+impl PacketIo for SmallPath {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        self.io.poll_recv_from(cx, buf)
+    }
+    fn poll_send_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.io.poll_send_ready(cx)
+    }
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        if buf.len() > self.limit {
+            return Err(too_large());
+        }
+        self.io.try_send_to(buf, dest)
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+    fn may_fragment(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn mtu_probes_too_large_for_the_path_are_lost_not_fatal() {
+    // MTU discovery runs (the socket does not fragment) and probes above 1250 bytes are refused
+    // by the OS: the connection lives on and coordination goes on after the probes.
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let mut config = ServerConfig::new(key(100));
+    config.settings = local_settings();
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(SmallPath {
+                io: UdpPacketIo::bind(local).await.unwrap(),
+                limit: 1250,
+            }),
+            alternate_port: Arc::new(UdpPacketIo::bind(local).await.unwrap()),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    let mtu = server
+        .settings()
+        .into_iter()
+        .find(|e| e.key == MTU_DISCOVERY)
+        .expect("the MTU discovery line");
+    assert_eq!(mtu.value, Value::Switch(true));
+    let (mut a, _) = Device::register(&server, &key(1), &[]).await;
+    eventually("a probe is refused as too large", || {
+        server.status().send_too_large > 0
+    })
+    .await;
+    let (mut b, _) = Device::register(&server, &key(2), &[]).await;
+    a.send(&DeviceMessage::PunchRequest(PunchRequest {
+        request_id: 1,
+        peer: b.id,
+    }))
+    .await;
+    let ServerMessage::PunchOffer(offer) = b.recv().await else {
+        panic!("expected an offer after the probes");
+    };
+    assert_eq!(offer.from, a.id);
+    assert!(a.conn.close_reason().is_none());
+    assert_eq!(server.status().registrations, 2);
+}
+
 #[tokio::test]
 async fn dual_stack_addresses_are_ipv4() {
     // Windows opens [::] as IPv6 only, so an IPv4 device cannot reach it there.
