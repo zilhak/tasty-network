@@ -29,18 +29,28 @@ pub enum Source {
     Configured,
     /// Not settable (docs/design/p2p.md "고정값").
     Fixed,
+    /// Computed from other settings ([`COMPUTED`]).
+    Computed,
 }
 
 impl Source {
-    /// `default`, `configured` or `fixed`.
+    /// `default`, `configured`, `fixed` or `computed`.
     pub fn name(self) -> &'static str {
         match self {
             Source::Default => "default",
             Source::Configured => "configured",
             Source::Fixed => "fixed",
+            Source::Computed => "computed",
         }
     }
 }
+
+/// The values the query shows that are computed from settings and have no key of their own:
+/// `punch_session_ttl`, the session TTL of the `go_sent` stage (docs/design/rendezvous.md
+/// "서버 상태").
+pub static COMPUTED: &[&str] = &[PUNCH_SESSION_TTL];
+
+const PUNCH_SESSION_TTL: &str = "punch_session_ttl";
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -623,8 +633,16 @@ impl ServerSettings {
         self.set(key, parsed).map(|_| ())
     }
 
-    /// The value in effect for `key` and its source.
+    /// The value in effect for `key` and its source. A [`COMPUTED`] key gives the value
+    /// computed from the values in effect.
     pub fn get(&self, key: &str) -> Option<SettingEntry> {
+        if key == PUNCH_SESSION_TTL {
+            return Some(SettingEntry {
+                key: PUNCH_SESSION_TTL,
+                value: Value::Duration(self.punch_session_ttl()),
+                source: Source::Computed,
+            });
+        }
         let s = setting(key)?;
         Some(match self.configured.get(s.key) {
             Some(v) => SettingEntry {
@@ -644,9 +662,28 @@ impl ServerSettings {
         })
     }
 
-    /// Every setting with the value in effect and its source, in [`DEFAULTS`] order.
+    /// Every setting with the value in effect and its source, in [`DEFAULTS`] order, then the
+    /// [`COMPUTED`] values.
     pub fn entries(&self) -> Vec<SettingEntry> {
-        DEFAULTS.iter().filter_map(|s| self.get(s.key)).collect()
+        DEFAULTS
+            .iter()
+            .map(|s| s.key)
+            .chain(COMPUTED.iter().copied())
+            .filter_map(|k| self.get(k))
+            .collect()
+    }
+
+    fn punch_session_ttl(&self) -> Duration {
+        let d = |key| match self.get(key).map(|e| e.value) {
+            Some(Value::Duration(d)) => d,
+            other => panic!("{key} is a duration, got {other:?}"),
+        };
+        session_ttl(
+            d("start_delay_max"),
+            d("punch_window"),
+            d("quic_handshake_timeout"),
+            d("punch_session_grace"),
+        )
     }
 
     /// Check ranges and relations and give the values the server runs with.
@@ -1217,6 +1254,19 @@ impl Resolver<'_> {
     }
 }
 
+/// `start_delay_max + punch_window + 2 × quic_handshake_timeout + punch_session_grace`.
+fn session_ttl(
+    start_delay_max: Duration,
+    window: Duration,
+    handshake: Duration,
+    grace: Duration,
+) -> Duration {
+    start_delay_max
+        .saturating_add(window)
+        .saturating_add(handshake.saturating_mul(2))
+        .saturating_add(grace)
+}
+
 /// The body length of the largest `punch_go` the server can send with `candidates` candidates:
 /// every number at its largest, every enumeration at its longest name and every candidate the
 /// longest address text (IPv6 with a scope ID and port 65535) of the longest kind.
@@ -1258,10 +1308,12 @@ impl ServerParams {
     /// The session TTL of the `go_sent` stage: `start_delay_max + punch_window +
     /// 2 × quic_handshake_timeout + punch_session_grace` (docs/design/rendezvous.md "서버 상태").
     pub fn punch_session_ttl(&self) -> Duration {
-        self.start_delay_max
-            .saturating_add(self.punch_window)
-            .saturating_add(self.quic_handshake_timeout.saturating_mul(2))
-            .saturating_add(self.punch_session_grace)
+        session_ttl(
+            self.start_delay_max,
+            self.punch_window,
+            self.quic_handshake_timeout,
+            self.punch_session_grace,
+        )
     }
 }
 
@@ -1390,15 +1442,27 @@ mod tests {
                 Value::Absent(Absent::None),
             )
             .unwrap();
+        settings
+            .set(
+                "punch_session_grace",
+                Value::Duration(Duration::from_secs(9)),
+            )
+            .unwrap();
         let entries = settings.entries();
         let keys: Vec<&str> = entries.iter().map(|e| e.key).collect();
-        let listed: Vec<&str> = DEFAULTS.iter().map(|s| s.key).collect();
+        let listed: Vec<&str> = DEFAULTS
+            .iter()
+            .map(|s| s.key)
+            .chain(["punch_session_ttl"])
+            .collect();
         assert_eq!(keys, listed);
         for e in &entries {
             let want = match e.key {
-                "hello_timeout" | "max_devices" | "quic.datagram_receive_buffer_size" => {
-                    Source::Configured
-                }
+                "hello_timeout"
+                | "max_devices"
+                | "quic.datagram_receive_buffer_size"
+                | "punch_session_grace" => Source::Configured,
+                "punch_session_ttl" => Source::Computed,
                 k if setting(k).unwrap().kind == Kind::Fixed => Source::Fixed,
                 _ => Source::Default,
             };
@@ -1409,6 +1473,29 @@ mod tests {
             settings.get("hello_timeout").unwrap().value,
             Value::Duration(Duration::from_secs(7))
         );
+        // The computed TTL follows the values in effect, as the server computes it.
+        let ttl = settings.get("punch_session_ttl").unwrap();
+        assert_eq!(
+            ttl.value,
+            Value::Duration(Duration::from_secs(1 + 5 + 10 + 9))
+        );
+        assert_eq!(ttl.to_string(), "punch_session_ttl = 25 s (computed)");
+        let mut local = settings.clone();
+        local
+            .set(
+                "listen.primary",
+                Value::Address("127.0.0.1:0".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            local.get("punch_session_ttl").unwrap().value,
+            Value::Duration(local.resolve().unwrap().punch_session_ttl())
+        );
+        // A computed value is not a key a settings file may set.
+        assert!(matches!(
+            ServerSettings::new().set("punch_session_ttl", Value::Duration(Duration::ZERO)),
+            Err(SettingsError::UnknownKey(_))
+        ));
         // An absent value takes the table's word for that key.
         assert_eq!(
             settings

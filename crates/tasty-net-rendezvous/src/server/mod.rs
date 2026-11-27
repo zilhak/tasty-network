@@ -443,7 +443,8 @@ impl Server {
         })
     }
 
-    /// Every setting with its value and source (`default`, `configured`, `fixed`).
+    /// Every setting with its value and source (`default`, `configured`, `fixed`), then the
+    /// computed values (source `computed`, such as `punch_session_ttl`).
     pub fn settings(&self) -> Vec<SettingEntry> {
         self.inner.entries.clone()
     }

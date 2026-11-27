@@ -927,6 +927,12 @@ async fn settings_are_logged_at_start() {
     assert_eq!(by_key("listen.primary"), Source::Configured);
     assert_eq!(by_key("hello_timeout"), Source::Default);
     assert_eq!(by_key("tls.resumption"), Source::Fixed);
+    assert_eq!(by_key("punch_session_ttl"), Source::Computed);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains(" key=punch_session_ttl value=21 s source=computed"))
+    );
     // Without a running connection no IP address is in the default-level lines except the
     // server's own bind addresses on the start line.
     assert!(

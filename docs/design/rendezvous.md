@@ -145,7 +145,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 - 세션 TTL: 두 단계로 잰다.
   - `offered`: `punch_request`를 받은 때부터 `offer_timeout`. 지나면 A에게 `not_found`.
   - `go_sent`: 서버가 `punch_go`를 보낸 때(두 기기에 같은 때 보낸다)부터 `start_delay_max + punch_window + 2 × quic_handshake_timeout + punch_session_grace`. 기본 1 + 5 + 10 + 5 = 21 s다. 앞의 세 항은 B의 기한 전체다: 시작 지연 뒤 창 동안 프로브, 그 뒤 `handshake_ms`까지 새 Initial을 받고, 마감 직전에 받은 handshake에 다시 `handshake_ms`([P2P](p2p.md#펀칭-절차) 10). `punch_session_grace`는 서버에서 각 기기까지의 한쪽 통지 지연(기기의 기한은 `punch_go`를 받은 때부터 재므로 늦게 받은 기기는 그만큼 늦게 끝난다)과 `punch_result`가 서버로 오는 시간을 덮는다. 그래서 통지 지연이 grace보다 짧으면 기기가 자기 기한 안에 `punch_cancel{expired}`를 받지 않는다. 받더라도 QUIC handshake 중이면 무시한다.
-  - TTL은 계산값이고 `welcome.limits.punch_session_ttl_ms`(`go_sent` 단계 값)와 조회에 보인다.
+  - TTL은 계산값이고 `welcome.limits.punch_session_ttl_ms`(`go_sent` 단계 값)와 조회(이름 `punch_session_ttl`, 출처 `computed`)에 보인다. 설정 파일로 정하는 키가 아니다.
 - 설정 관계 검사: 서버는 시작할 때 `start_delay_margin ≤ start_delay_max`, `punch_session_grace ≥ 1 s`, `offer_timeout ≥ 100 ms`, `frame_timeout < idle_timeout`, `keepalive_interval < idle_timeout`, `1 + max_reported_reflexive + max_host_candidates ≤ 64`, 서버가 만들 수 있는 가장 큰 `punch_go`(그 수만큼의 후보가 모두 가장 긴 주소 글자인 IPv6·scope ID·포트 65535이고, 숫자는 가장 크고, 열거값은 가장 긴 이름)가 `max_message_bytes` 안에 드는지를 본다. 값의 범위도 본다: 시간 값은 모두 2^32 − 1 s 이하이고 현재 시각에 더해 시계 범위 안이어야 하며(세션 TTL 합도 같다), `quic.max_bidi_streams`는 1 이상 2^60 이하(조정 스트림 하나가 열려야 한다), `quic.max_uni_streams`는 2^60 이하다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §4.6). 어긋나면 어긋난 키와 값을 찍고 시작하지 않는다. 실행 중 기한은 검사한 덧셈으로 만든다.
 - 반사 주소 바뀜: 서버는 `reflexive_poll_interval`마다 조정 연결의 원격 주소(quinn `Connection::remote_address`)를 읽고, 바뀌었으면 등록을 고치고 `reflexive_changed`를 보낸다. 기기가 QUIC 클라이언트라 이 연결에서는 기기 쪽 NAT 재매핑이 QUIC 경로 이동으로 이어진다([RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) §9). 폴링 간격 안에 바뀌었다 돌아온 경우는 놓친다.
 - STUN 반사는 상태를 남기지 않는다(출발 주소별 속도 상한의 계수만 둔다).
@@ -156,7 +156,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 
 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 따른다. 모든 시간·횟수·상한은 설정 파일로 바꿀 수 있다.
 
-- 실행 중 조회: 떠 있는 서버는 시작할 때 전체 설정(항목마다 값과 출처 `default`·`configured`)을 로그에 한 번 찍는다. 서버를 라이브러리로 띄운 쪽은 `Server::settings()`로 같은 값을 읽는다. 실행 중 상태(등록 수, 진행 중 펀칭 수, 상한에 걸린 횟수)는 `Server::status()`와 주기 로그(`status_log_interval`)로 본다. 원격 조회 엔드포인트는 두지 않는다(공격 면을 늘리지 않는다).
+- 실행 중 조회: 떠 있는 서버는 시작할 때 전체 설정(항목마다 값과 출처 `default`·`configured`·`fixed`, 그 뒤에 계산값과 출처 `computed`)을 로그에 한 번 찍는다. 서버를 라이브러리로 띄운 쪽은 `Server::settings()`로 같은 값을 읽는다. 실행 중 상태(등록 수, 진행 중 펀칭 수, 상한에 걸린 횟수)는 `Server::status()`와 주기 로그(`status_log_interval`)로 본다. 원격 조회 엔드포인트는 두지 않는다(공격 면을 늘리지 않는다).
 - `tasty-rendezvous settings --config <파일>`은 그 파일을 읽었을 때의 값과 출처를 찍는다(떠 있는 프로세스의 값이 아니라 파일 기준이다. 배포 전 확인용).
 - 기기가 지켜야 할 시간 값은 `welcome.limits`로 기기에게 알린다(위 "메시지 표").
 
