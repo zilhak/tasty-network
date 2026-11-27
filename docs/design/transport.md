@@ -194,9 +194,9 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 ## 동기·비동기 경계
 
 - `Transport`, `RawChannel`, `Link`, `ChannelReader`·`ChannelWriter`는 모두 동기 API다. 블로킹 호출은 호출한 스레드를 막는다.
-- `tasty-net-p2p`는 `P2pEndpoint`를 만들 때 자기 tokio 런타임(멀티스레드, 작은 워커 수)을 만들어 소유한다. 동기 읽기·쓰기는 그 런타임 핸들의 `block_on`으로 QUIC 스트림을 읽고 쓴다. 시간 제한은 `tokio::time::timeout`으로 건다. 강제 종료는 링크마다 둔 취소 신호로 막힌 `block_on`을 깨우고 그 링크의 스트림을 닫는다.
+- `tasty-net-p2p`는 `P2pEndpoint`를 만들 때 자기 tokio 런타임(멀티스레드, 작은 워커 수)을 만들어 소유한다. 동기 읽기·쓰기는 호출한 스레드에서 future를 폴링하고 폴링 사이에 그 스레드를 park하는 브리지로 QUIC 스트림을 읽고 쓴다. 브리지는 그 런타임에 들어간(`Handle::enter`) 채로 폴링하고, 타이머와 소켓은 런타임의 워커가 돌린다. `Handle::block_on`과 달리 호출 스레드가 이미 런타임 안인지 검사하지 않으므로 어떤 문맥에서도 패닉하지 않는다. 시간 제한은 `tokio::time::timeout`으로 건다. 강제 종료는 링크마다 둔 취소 신호로 막힌 대기를 깨우고 그 링크의 스트림을 닫는다.
 - 런타임과 endpoint의 종료·회수는 라이브러리가 만든 블로킹 소유 스레드 하나가 한다. 마지막 `P2pEndpoint` 참조가 어디서 사라지든(비동기 작업 안 포함) drop은 그 스레드에 종료를 알리기만 하고, endpoint 닫기와 런타임 회수는 그 스레드에서 일어난다. 런타임 `Drop`이 비동기 문맥에서 기다리는 일을 막는다.
-- 동기 API를 비동기 작업 안에서 부르면 안 된다(`block_on`이 패닉한다). P2P 크레이트는 그 경우 오류를 돌려준다(패닉하지 않는다). 판정은 "현재 런타임 핸들이 있는가"가 아니라 "지금 비동기 작업을 실행하는 중인가"다. `spawn_blocking` 스레드에도 런타임 핸들은 있지만 그곳에서 부르는 것은 허용한다. tasty는 다른 곳(HTML HTTP 처리 등)에서 이미 tokio를 쓴다(`tasty:Cargo.toml`, `tasty:crates/tasty-remote/Cargo.toml`). 동기 API를 고른 근거는 attach 호출 경로가 동기 스레드 코드라는 데 있다. tokio 쪽 코드가 이 API를 부를 때는 `spawn_blocking` 같은 블로킹 경계를 거친다.
+- 동기 API를 비동기 작업 안에서 부르면 안 된다(`block_on`이 패닉한다). P2P 크레이트는 그 경우 오류를 돌려준다(패닉하지 않는다). 판정은 "현재 런타임 핸들이 있는가"가 아니라 "지금 비동기 작업을 실행하는 중인가"다. `spawn_blocking` 스레드에도 런타임 핸들은 있지만 그곳에서 부르는 것은 허용한다(`block_in_place` 안도 같다). 판정은 tokio의 협력 예산으로 한다: 작업의 폴링과 `Runtime::block_on`의 본 future에는 예산이 있고, `spawn_blocking`·`block_in_place`에는 없다. 한계: `tokio::task::coop::unconstrained`로 감싼 작업에도 예산이 없고, tokio 공개 API로는 이것을 `spawn_blocking`·`block_in_place`와 패닉 없이 가를 수 없다(`tokio::task::try_id`는 셋 모두에서 값이 있다). 그래서 그 작업 안의 호출은 거절되지 않고, 다른 블로킹 호출처럼 끝날 때까지 그 워커 스레드를 막는다. 패닉하지는 않는다. 그 작업이 endpoint 자신의 런타임에서 돌고 그 런타임의 워커가 하나(`runtime.worker_threads` = 1)이면, 막힌 워커가 타이머와 소켓을 돌릴 유일한 워커라서 호출이 교착할 수 있다. tasty는 다른 곳(HTML HTTP 처리 등)에서 이미 tokio를 쓴다(`tasty:Cargo.toml`, `tasty:crates/tasty-remote/Cargo.toml`). 동기 API를 고른 근거는 attach 호출 경로가 동기 스레드 코드라는 데 있다. tokio 쪽 코드가 이 API를 부를 때는 `spawn_blocking` 같은 블로킹 경계를 거친다.
 - 비동기 소비자가 생기면 `tasty-net-p2p`에 async API를 더한다. 동기 trait는 그대로 둔다.
 
 ## 순서 계약과 채널

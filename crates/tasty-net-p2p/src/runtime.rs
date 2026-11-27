@@ -25,8 +25,15 @@ const BUDGET_PROBE: usize = u8::MAX as usize;
 /// cooperative budget, and runs `spawn_blocking`, `block_in_place` and threads that only
 /// entered the runtime without one. So the probe takes budget units until tokio says the
 /// budget ran out (a task) or more than any budget were taken (no task), and gives every unit
-/// back. Nothing panics. A task wrapped in `tokio::task::coop::unconstrained` has no budget
-/// and is taken as not a task; blocking there stalls its worker, as any blocking call does.
+/// back. Nothing panics.
+///
+/// The limit: a task wrapped in `tokio::task::coop::unconstrained` has no budget either, and
+/// tokio's public API cannot tell it from `spawn_blocking` or `block_in_place` without a panic
+/// (`tokio::task::try_id` is `Some` in all three). Such a task is taken as not a task: the call
+/// is not refused, and [`block_on`] blocks that worker thread until the call ends, as any
+/// blocking call does. It does not panic. If the caller's task runs on the endpoint's own
+/// runtime and that runtime has one worker (`runtime.worker_threads` = 1), the blocked worker is
+/// the one that drives the runtime's timers and sockets, and the call can deadlock.
 pub(crate) fn in_async_task() -> bool {
     if Handle::try_current().is_err() {
         return false;
@@ -49,6 +56,34 @@ pub(crate) fn in_async_task() -> bool {
         drop(unit);
     }
     budgeted
+}
+
+/// Poll `fut` on this thread until it ends, parking the thread between polls: the bridge of
+/// the blocking API. The runtime's worker threads drive its timers and sockets, and
+/// `Handle::enter` lets the future find the runtime. Unlike `Handle::block_on` it does not
+/// check whether the thread already runs inside a runtime, so no context makes it panic (see
+/// [`in_async_task`] for the contexts where it blocks a worker).
+pub(crate) fn block_on<F: std::future::Future>(handle: &Handle, fut: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let _entered = handle.enter();
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+            return out;
+        }
+        // A wake between the poll and the park leaves the token, so the park returns at once.
+        std::thread::park();
+    }
 }
 
 /// The shutdown work the owner thread runs before it drops the runtime.
@@ -188,6 +223,46 @@ mod tests {
         f();
         WATCHED.with(|w| w.set(false));
         SEEN.load(Ordering::SeqCst) - before
+    }
+
+    /// The bridge never panics: not in the main future of another runtime's `block_on` (where
+    /// `Handle::block_on` panics) and not in an unconstrained task. The callers run on a
+    /// runtime other than the owner's, so the owner's workers stay free.
+    #[test]
+    fn the_bridge_does_not_panic_inside_another_runtime() {
+        let mut owner = Owner::start(1, Duration::from_secs(5)).expect("runtime");
+        let handle = owner.handle().clone();
+        let caller = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("caller runtime");
+        let wait = Duration::from_millis(10);
+        let mut got = Vec::new();
+        let panics = panics_here(|| {
+            let h = handle.clone();
+            got.push(caller.block_on(async move {
+                block_on(&h, async move {
+                    tokio::time::sleep(wait).await;
+                    1
+                })
+            }));
+            let h = handle.clone();
+            got.push(caller.block_on(async move {
+                tokio::spawn(tokio::task::coop::unconstrained(async move {
+                    block_on(&h, async move {
+                        tokio::time::sleep(wait).await;
+                        2
+                    })
+                }))
+                .await
+                .expect("task")
+            }));
+        });
+        assert_eq!((got, panics), (vec![1, 2], 0));
+        drop(caller);
+        let finished = owner.finished();
+        owner.stop(Box::new(|_| {}));
+        assert!(finished.wait(Duration::from_secs(10)));
     }
 
     #[test]

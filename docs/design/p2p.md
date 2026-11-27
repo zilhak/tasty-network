@@ -477,7 +477,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 ## endpoint와 런타임
 
 - `P2pEndpoint::bind(config)`가 tokio 런타임을 만들고 소켓을 연다. config: `enabled`, 기기 키, rendezvous 서버(주소와 서버 공개키), 페어링 허용 목록 저장소, `settings`([설정값](#설정값)). 켜져 있는데 서버를 주지 않으면 `bind`가 오류다.
-- 소유 런타임의 작업 스레드 수와 종료 대기 상한은 설정값이다(`runtime.worker_threads`·`runtime.shutdown_timeout`). 비동기 작업 안에서 블로킹 API를 부르면 `P2pError::InAsyncContext`다(`spawn_blocking` 안은 된다).
+- 소유 런타임의 작업 스레드 수와 종료 대기 상한은 설정값이다(`runtime.worker_threads`·`runtime.shutdown_timeout`). 비동기 작업 안에서 블로킹 API를 부르면 `P2pError::InAsyncContext`다(`spawn_blocking` 안은 된다). `tokio::task::coop::unconstrained`로 감싼 작업은 가려내지 못해 거절되지 않고 그 워커를 막는다(한계는 [전송 추상화](transport.md#동기비동기-경계)).
 - endpoint는 마지막 clone과 그 endpoint의 마지막 `P2pConnection`·스트림이 모두 drop될 때, 또는 `close()`에서 끝난다(연결만 쥐고 endpoint를 놓아도 연결은 계속 쓸 수 있다). 끝날 때는 새 블로킹 호출을 받지 않고, 런타임 안에서 막힌 호출(`accept` 등)을 `P2pError::Closed`로 깨우고, QUIC을 `closed`로 닫고, 받지 않은 연결과 소켓을 놓은 뒤 `Off`가 된다(`Off`는 소켓 없음). `close()` 뒤의 블로킹 호출은 런타임에 들어가지 않고 `Closed`(스트림은 `ConnectionAborted`)다.
 - 동기 API와 소유 런타임의 관계(블로킹 호출, 소유 스레드에서의 종료·회수, 비동기 작업 안에서 부르면 패닉 대신 오류)는 [전송 추상화](transport.md#동기비동기-경계)에 적힌 규칙을 이 크레이트가 자기 API에 지킨다. 어댑터는 그 위에 아무것도 더하지 않는다.
 - 같은 기기 키로 P2P endpoint는 하나만 연다. 서버는 같은 기기 ID의 등록을 하나만 두므로(새 등록이 옛 등록을 밀어낸다), 같은 키로 둘을 열면 서로를 밀어낸다. `bind`는 키 디렉터리의 잠금 파일을 배타로 잡고, 이미 잡혀 있으면 `P2pError::EndpointInUse`를 돌려준다. 한 프로세스 안에서는 키 디렉터리를 주지 않아도 같은 기기 ID의 켜진 endpoint를 하나만 둔다(프로세스 전역 목록, 두 번째 `bind`는 `EndpointInUse`). 잠금과 목록 자리는 `Off`에서 놓는다. 독립 P2P endpoint가 필요한 인스턴스는 다른 키 디렉터리를 쓴다. SSH 경로는 이 제약 없이 같은 키를 함께 쓴다.

@@ -911,6 +911,45 @@ fn blocking_calls_in_a_task_are_refused_without_a_panic() {
     d.ep.close();
 }
 
+/// A task in `tokio::task::coop::unconstrained` has no budget, and tokio cannot tell it from
+/// `spawn_blocking` without a panic, so its blocking calls are not refused: they block that
+/// worker until they end, and do not panic (src/runtime.rs `in_async_task`, docs/design/
+/// transport.md "동기·비동기 경계"). The task runs on the test's runtime, not on the endpoint's
+/// own, so the endpoint's workers stay free and the calls cannot deadlock.
+#[test]
+fn blocking_calls_in_an_unconstrained_task_end_without_a_panic() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let d = device(&n, 2, 1, &s, settings(&[]));
+    registered(&d);
+    let ep = d.ep.clone();
+    let mut ended = None;
+    let panics = panics_while(|| {
+        ended = Some(w.rt.block_on(async move {
+            tokio::spawn(tokio::task::coop::unconstrained(async move {
+                WATCHED.with(|x| x.set(true));
+                let got = (
+                    ep.accept_timeout(Some(Duration::from_millis(10))).err(),
+                    ep.next_event(Duration::from_millis(10)),
+                );
+                WATCHED.with(|x| x.set(false));
+                got
+            }))
+            .await
+            .expect("task")
+        }));
+    });
+    assert_eq!(panics, 0);
+    let (accept, next) = ended.unwrap();
+    assert!(
+        matches!(accept, Some(tasty_net_p2p::P2pError::TimedOut)),
+        "{accept:?}"
+    );
+    assert!(next.is_ok(), "{next:?}");
+    d.ep.close();
+}
+
 /// A device whose socket the test also holds, and the socket's reference count before the
 /// endpoint took it: the count comes back when the endpoint gives the socket up.
 fn counted_device(

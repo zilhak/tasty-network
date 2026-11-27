@@ -293,15 +293,14 @@ impl Core {
         }
         let _leave = Leave(self);
         let mut shutdown = self.shutdown.subscribe();
-        self.handle
-            .block_on(async move {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.wait_for(|down| *down) => None,
-                    out = fut => Some(out),
-                }
-            })
-            .ok_or(Blocked::Closed)
+        crate::runtime::block_on(&self.handle, async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|down| *down) => None,
+                out = fut => Some(out),
+            }
+        })
+        .ok_or(Blocked::Closed)
     }
 
     /// The QUIC endpoint, until `Off`.
