@@ -28,3 +28,9 @@ lax
 localish
 -o StrictHostKeyChecking=no web
 -o NoHostAuthenticationForLocalhost=yes web
+-o AddressFamily=inet ::ffff:192.0.2.1
+-o AddressFamily=inet ::FFFF:C000:201
+::FFFF:C000:201
+::192.0.2.1
+-o AddressFamily=inet ::192.0.2.1
+::ffff:0:192.0.2.1

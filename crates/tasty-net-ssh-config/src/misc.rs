@@ -627,22 +627,41 @@ pub(crate) enum Family {
     Inet6,
 }
 
-/// `getaddrinfo(name, ..., AI_NUMERICHOST)` and `getnameinfo(NI_NUMERICHOST)`: the address
-/// `name` is in numeric form, or `None`. IPv4 takes the `inet_aton(3)` forms (`a.b.c.d`,
-/// `a.b.c`, `a.b`, `a`; each part decimal, `0x` hexadecimal or `0` octal), IPv6 the
-/// `inet_pton(3)` form without a scope (`%`). Written for this crate from those manual pages.
+/// `getaddrinfo(name, ..., AI_NUMERICHOST)`: the address `name` is in numeric form, or
+/// `None`. IPv4 takes the `inet_aton(3)` forms (`a.b.c.d`, `a.b.c`, `a.b`, `a`; each part
+/// decimal, `0x` hexadecimal or `0` octal), IPv6 the `inet_pton(3)` form without a scope
+/// (`%`). Asked for IPv4, an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is that IPv4
+/// address, as glibc gives it. Written for this crate from those manual pages.
 pub(crate) fn numeric_host(name: &str, family: Family) -> Option<std::net::IpAddr> {
     if family != Family::Inet6
         && let Some(a) = inet_aton(name)
     {
         return Some(std::net::IpAddr::V4(a));
     }
-    if family != Family::Inet
-        && let Ok(a) = name.parse::<std::net::Ipv6Addr>()
-    {
-        return Some(std::net::IpAddr::V6(a));
+    let a = name.parse::<std::net::Ipv6Addr>().ok()?;
+    match family {
+        Family::Inet => a.to_ipv4_mapped().map(std::net::IpAddr::V4),
+        Family::Any | Family::Inet6 => Some(std::net::IpAddr::V6(a)),
     }
-    None
+}
+
+/// The zero 16-bit words that start an IPv4-compatible IPv6 address (`::a.b.c.d`).
+const V4_COMPAT_ZERO_WORDS: usize = 6;
+
+/// `getnameinfo(NI_NUMERICHOST)`: the `inet_ntop(3)` text of an address. It differs from
+/// the Rust form in one place: an IPv6 address whose first six words are zero and whose
+/// seventh is not is written with the last 32 bits dotted (`::192.0.2.1`). Written for this
+/// crate from the manual page.
+pub(crate) fn numeric_text(a: std::net::IpAddr) -> String {
+    if let std::net::IpAddr::V6(v6) = a {
+        let words = v6.segments();
+        let (head, tail) = words.split_at(V4_COMPAT_ZERO_WORDS);
+        if head.iter().all(|w| *w == 0) && tail.first().is_some_and(|w| *w != 0) {
+            let [.., b0, b1, b2, b3] = v6.octets();
+            return format!("::{}", std::net::Ipv4Addr::new(b0, b1, b2, b3));
+        }
+    }
+    a.to_string()
 }
 
 /// The largest value of the last part of an `inet_aton` address with 1 to 4 parts.

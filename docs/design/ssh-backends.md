@@ -339,13 +339,13 @@ struct SshInspection {
 | 원본 파일(줄 수) | 옮기는 것 |
 |---|---|
 | `readconf.c`(3968), `readconf.h`(268) | 키워드 표 `keywords[]`(`:178`–`:325`), 줄 해석 `process_config_line_depth`(`:1143`), `Match` 판정 `match_cfg_line`(`:700`), 파일 읽기 `read_config_file_depth`(`:2631`, 상한 `READCONF_MAX_DEPTH` `:2629`), `initialize_options`(`:2714`), `fill_default_options`(`:2860`), `parse_forward`(`:3299`), `parse_jump`(`:3474`), `dump_client_config`(`:3739`, 비교 시험의 출력 형식) |
-| `addrmatch.c`(166)·`addr.c`(510)의 해당 함수 | `Match localnetwork` 목록 검사: `addr_match_cidr_list`(`:106`, 주소 없이 부를 때의 항목 검사), `addr_pton_cidr`(`addr.c:460`)·`masklen_valid`(`:50`)·`addr_host_is_all0s`(`:334`) |
+| `addrmatch.c`(166)·`addr.c`(510)의 해당 함수 | `Match localnetwork` 목록 검사: `addr_match_cidr_list`(`:106`, 주소 없이 부를 때의 항목 검사), `addr_pton_cidr`(`addr.c:460`)·`masklen_valid`(`:50`)·`addr_host_is_all0s`(`:334`). `addr_pton`의 `getaddrinfo(AI_NUMERICHOST)`는 이 크레이트의 `numeric_host`(아래 라이선스 절)가 대신한다 |
 | `match.c`(406) | `match_pattern`(`:82`), `match_pattern_list`(`:161`), `match_hostname`(`:233`), `match_host_and_ip`(`:250`), `match_user`(`:275`), `match_list`(`:313`), `match_filter_denylist`·`allowlist`(`:393`·`:403`) |
 | `hostfile.c`(982), `hostfile.h`(123) | `extract_salt`(`:69`), `host_hash`(`:116`), `hostfile_read_key`(`:158`), `check_markers`(`:181`), `load_hostkeys_file`(`:266`), `check_key_not_revoked`(`:316`), `check_hostkeys_by_key_or_type`(`:350`), `check_key_in_hostkeys`(`:408`), `lookup_key_in_hostkeys_by_type`(`:417`), `lookup_marker_in_hostkeys`(`:425`), `format_host_entry`(`:437`), `write_host_entry`(`:477`), `add_host_to_hostfile`(`:542`), `match_maybe_hashed`(`:770`), `hostkeys_foreach_file`(`:790`), `hostkeys_foreach`(`:966`). `format_host_entry`·`write_host_entry`는 `add_host_to_hostfile`이, `match_maybe_hashed`·`hostfile_read_key`는 `hostkeys_foreach_file`이 부르는 보조 함수라 판정 순서와 기록 형식을 같게 하려면 함께 옮긴다 |
 | `misc.c`(3352)의 해당 함수 | `a2port`(`:592`), `convtime`(`:746`), `parse_user_host_path`(`:914`), `tilde_expand`(`:1276`)·`tilde_expand_filename`(`:1344`), `dollar_expand`(`:1477`), `percent_expand`(`:1496`)·`percent_dollar_expand`(`:1515`), `argv_split`(`:2143`), `valid_env_name`(`:2532`) |
 | `kex-names.c`(334), `myproposal.h`(124) | `kex_assemble_names`(`:241`, `+`·`-`·`^` 연산), 기본 알고리즘 목록 |
 | `sshconnect.c`(1809)·`sshconnect2.c`(2508)의 판정 부분 | `check_host_key`(`:984`)의 known_hosts 판정 순서, `verify_host_key`(`:1499`)의 `RevokedHostKeys` 처리(`:1544`–`:1563`), `order_hostkeyalgs`(`sshconnect2.c:121`–`:216`, known_hosts에 있는 키 형식을 앞으로), RSA 크기 검사 자리(`sshconnect2.c:96`·`:1593`·`:1847`) |
-| `ssh.c`(2510)의 설정 단계 | `tilde_expand_paths`(`:189`–`:199`), `default_client_percent_expand`(`:207`–`:213`), `process_config_files`(`:564`–`:594`, 사용자·시스템 설정을 읽는 순서와 `final` 두 번째 읽기), `main`의 설정 단계(`:1186`–`:1612`: 첫 읽기 `:1187`, `HostName`의 `%h` 펼침 `:1195`–`:1203`, 호스트 소문자화 `:1206`–`:1207`, CNAME 따라가기 `:1229`–`:1240`, `final` 다시 읽기 `:1246`–`:1265`, `fill_default_options` `:1267`, 기본 사용자, `ProxyJump` → 홉 명령과 `jumphost loop` `:1278`–`:1324`, `ConnectionAttempts` 검사 `:1360`, `RemoteCommand` 충돌 `:1363`–`:1364`, `RemoteCommand`와 경로 지시어의 `~`·`%` 펼침 `:1457`–`:1611`), `load_public_identity_files`(`:2355`–`:2497`, `IdentityFile`·`CertificateFile`의 펼침과 순서) |
+| `ssh.c`(2510)의 설정 단계 | `tilde_expand_paths`(`:189`–`:199`), `default_client_percent_expand`(`:207`–`:213`), `is_addr`(`:293`–`:315`)·`resolve_addr`(`:324`–`:367`, 숫자 주소만), `process_config_files`(`:564`–`:594`, 사용자·시스템 설정을 읽는 순서와 `final` 두 번째 읽기), `main`의 설정 단계(`:1186`–`:1612`: 첫 읽기 `:1187`, `HostName`의 `%h` 펼침 `:1195`–`:1203`, 호스트 소문자화 `:1206`–`:1207`, CNAME 따라가기 `:1229`–`:1240`, `final` 다시 읽기 `:1246`–`:1265`, `fill_default_options` `:1267`, 기본 사용자, `ProxyJump` → 홉 명령과 `jumphost loop` `:1278`–`:1324`, `ConnectionAttempts` 검사 `:1360`, `RemoteCommand` 충돌 `:1363`–`:1364`, `RemoteCommand`와 경로 지시어의 `~`·`%` 펼침 `:1457`–`:1611`), `load_public_identity_files`(`:2355`–`:2497`, `IdentityFile`·`CertificateFile`의 펼침과 순서) |
 | `openbsd-compat/fmt_scaled.c`(324)·`vis.c`(253)·`glob.c`(1077)·`charclass.h`(31)의 해당 함수 | `scan_scaled`(`:76`, `RekeyLimit`), `vis`(`:62`, `EscapeChar`의 `ssh -G` 출력), `glob`(`:180`)·`glob0`(`:473`)·`glob1`~`glob3`(`:612`~`:698`)·`match`(`:904`)·`g_charclass`(`:439`)와 `cclasses[]`(`Include`) |
 | `version.h`(6) | `SSH_RELEASE`(`Match version`의 판정 값) |
 | `cipher.c`(473), `mac.c`(255), `sshkey.c`(3732)의 이름 표 | `ciphers[]`·`cipher_alg_list`·`ciphers_valid`, `macs[]`·`mac_alg_list`·`mac_valid`, `keyimpls[]` 이름·`sshkey_alg_list`·`sshkey_names_valid2`(알고리즘 지시어의 값 검사와 `+`·`-`·`^`의 전체 목록) |
@@ -354,6 +354,7 @@ struct SshInspection {
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
 - 서비스 데이터베이스는 읽지 않는다. `a2port`(`misc.c:592`–`:604`)는 숫자 포트만 받는다. 원본은 `getservbyname`으로 서비스 이름(`Port ssh`)도 받지만, 이 크레이트는 그 줄을 설정 오류(`ConfigError`, 키워드 `port`)로 거부한다.
+- 숫자 주소는 Linux glibc의 `getaddrinfo`·`getnameinfo`가 내는 결과를 따른다(`inet_aton` 형식, `AddressFamily inet`에서 IPv4 매핑 IPv6를 IPv4로, IPv4 호환 IPv6 `::a.b.c.d`의 표기). scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다.
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
@@ -391,6 +392,7 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   | 공개 도메인 | `openbsd-compat/charclass.h`(Todd C. Miller) | 없음(고지만 둔다) |
 
 - `scan_scaled`(`RekeyLimit`, `src/scaled.rs`)와 `vis`(`EscapeChar` 출력, `options.rs`의 `vis_white`)는 원본(`openbsd-compat/fmt_scaled.c:75`–`:229`, `vis.c:61`–`:144`)의 구조·변수·경계 처리를 단계별로 따르므로 파생으로 표시하고 원본 고지를 둔다(director 3000). `glob(3)`(`Include`, `src/glob.rs`)는 Gate 4에서 `openbsd-compat/glob.c`(`glob`·`glob0`~`glob3`·`match`·`g_charclass`)와 `charclass.h`를 그대로 옮겨 다시 썼으므로 같은 기준으로 파생이고 두 파일의 고지를 둔다(glob.c 3조항 BSD, charclass.h 공개 도메인).
+- 숫자 주소의 판정과 표기(`misc.rs`의 `numeric_host`·`numeric_text`, `getaddrinfo(AI_NUMERICHOST)`·`getnameinfo(NI_NUMERICHOST)` 대신)는 옮긴 원본이 없다. `getaddrinfo(3)`·`inet_aton(3)`·`inet_ntop(3)` 매뉴얼 페이지를 보고 이 크레이트가 새로 쓴 코드다.
 
 - Tatu Ylonen 조항은 파생물을 그렇게 표시하라고 요구한다("Any derived versions of this software must be clearly marked as such"). 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는 것으로 이 요구를 지킨다. 원본 파일과 함수를 모듈 문서에 적는다.
 - 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`는 이미 있고, `SSH-short`는 이식 크레이트 작업이 더한다. cargo-deny가 `SSH-short`를 받지 못하면(라이선스 식을 해석하지 못하거나 허용 목록에 넣지 못하면) 그 작업은 다른 표기나 예외 설정으로 돌아가지 않고 보고한다.
@@ -678,6 +680,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
+| IPv6 scope의 정규화 | 175500 질문. 기준판은 `getaddrinfo`·`getnameinfo`가 scope를 OS 인터페이스 표로 풀어 `hostname`을 바꾼다(`fe80::1%0001`→`fe80::1%lo`, 16진 소문자화). 이식 크레이트는 인터페이스 표를 읽지 않아 scope가 붙은 주소를 적힌 그대로 둔다. 인터페이스 표를 읽을지, 그 값이 `%h`·호스트 키 조회 이름에 쓰이는 차이를 둘지 |
 | 비교 시험의 기준 클라이언트 빌드 | 원격 빌드 머신에서 확인했다. `scripts/install-openssh-ref.sh`가 기준 커밋을 빌드하고 `ssh -G` 대조가 돈다([비교 시험의 기준 클라이언트](#비교-시험의-기준-클라이언트)의 빌드 도구) |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |

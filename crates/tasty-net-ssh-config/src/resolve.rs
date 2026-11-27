@@ -106,7 +106,8 @@ use std::path::{Path, PathBuf};
 
 use crate::keywords::{KEYWORDS, Op, Treatment, treatment};
 use crate::misc::{
-    Account, ExpandError, Family, TildeError, Token, expand, numeric_host, tilde_expand,
+    Account, ExpandError, Family, TildeError, Token, expand, numeric_host, numeric_text,
+    tilde_expand,
 };
 use crate::options::{
     Canonicalize, Compression, Flag, ForwardEnd, Jump, LogLevel, Options, ProvidedBy, PubkeyAuth,
@@ -562,7 +563,7 @@ impl ConfigSet {
         }
         let canonicalize = r.o.canonicalize_hostname.unwrap_or(Canonicalize::No);
         if canonicalize != Canonicalize::No || was_addr {
-            if let Some(normal) = numeric_host(&host, family).map(|a| a.to_string()) {
+            if let Some(normal) = numeric_host(&host, family).map(numeric_text) {
                 if !normal.eq_ignore_ascii_case(&host) {
                     host = normal;
                 }
@@ -1050,7 +1051,7 @@ mod tests {
         assert!(is_addr_fast("192.0.2.1"));
         assert!(is_addr_fast("::1"));
         assert!(!is_addr_fast("host1"));
-        let n = |s: &str, f| numeric_host(s, f).map(|a| a.to_string());
+        let n = |s: &str, f| numeric_host(s, f).map(numeric_text);
         assert_eq!(
             n("2001:DB8::1", Family::Any).as_deref(),
             Some("2001:db8::1")
@@ -1068,6 +1069,26 @@ mod tests {
         // The address family.
         assert_eq!(n("2001:db8::1", Family::Inet), None);
         assert_eq!(n("127.1", Family::Inet6), None);
+        // An IPv4-mapped address asked for IPv4, and the `inet_ntop` text.
+        assert_eq!(
+            n("::ffff:192.0.2.1", Family::Inet).as_deref(),
+            Some("192.0.2.1")
+        );
+        assert_eq!(
+            n("::FFFF:C000:201", Family::Any).as_deref(),
+            Some("::ffff:192.0.2.1")
+        );
+        assert_eq!(n("::192.0.2.1", Family::Inet), None);
+        assert_eq!(
+            n("::192.0.2.1", Family::Any).as_deref(),
+            Some("::192.0.2.1")
+        );
+        assert_eq!(
+            n("::ffff:0:192.0.2.1", Family::Any).as_deref(),
+            Some("::ffff:0:c000:201")
+        );
+        assert_eq!(n("::1", Family::Any).as_deref(), Some("::1"));
+        assert_eq!(n("::", Family::Any).as_deref(), Some("::"));
     }
 
     #[test]
