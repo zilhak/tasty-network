@@ -1,5 +1,9 @@
 # Include with an absolute glob, Match final and Match version.
 Include ${TASTY_FIXTURE_DIR}/conf.d/*.conf
+# glob.c: `^` is not a negation, a class, a trailing `/` needs a folder.
+Include ${TASTY_FIXTURE_DIR}/glob/[^a]*
+Include ${TASTY_FIXTURE_DIR}/glob/[[:digit:]]*
+Include ${TASTY_FIXTURE_DIR}/glob/b.conf/
 Host short
     HostName final.example.net
 Match final host final.example.net

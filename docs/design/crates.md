@@ -104,7 +104,7 @@ frame, ssh-config, identity ─> (없음)
 
 ## 라이선스
 
-- 모든 크레이트는 MIT다. 예외는 `tasty-net-ssh-config` 하나다: `license = "BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short"`(director 2881, `BSD-3-Clause`는 `openbsd-compat` 파생 두 곳), 크레이트 폴더의 `LICENSE-OpenSSH`(OpenSSH `LICENCE` 전문), 옮긴 파일마다 원본 고지와 `derived from OpenSSH, modified`(사용자 결정 2026-11-27, 추가 결정 4). `BSD-2-Clause`·`BSD-3-Clause`·`ISC`는 `deny.toml` 허용 목록에 이미 있고 `SSH-short`는 이식 크레이트 작업이 더한다([라이선스](ssh-backends.md#라이선스)).
+- 모든 크레이트는 MIT다. 예외는 `tasty-net-ssh-config` 하나다: `license = "BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short"`(director 2881, `BSD-3-Clause`는 `openbsd-compat` 파생 파일), 크레이트 폴더의 `LICENSE-OpenSSH`(OpenSSH `LICENCE` 전문), 옮긴 파일마다 원본 고지와 `derived from OpenSSH, modified`(사용자 결정 2026-11-27, 추가 결정 4). `BSD-2-Clause`·`BSD-3-Clause`·`ISC`는 `deny.toml` 허용 목록에 이미 있고 `SSH-short`는 이식 크레이트 작업이 더한다([라이선스](ssh-backends.md#라이선스)).
 - 이 크레이트를 담는 앱(tasty, Android 앱)은 라이선스 고지에 OpenSSH 고지를 넣는다. 앱 쪽 작업은 전환 때 한다.
 
 ## unsafe 규칙

@@ -346,7 +346,7 @@ struct SshInspection {
 | `kex-names.c`(334), `myproposal.h`(124) | `kex_assemble_names`(`:241`, `+`·`-`·`^` 연산), 기본 알고리즘 목록 |
 | `sshconnect.c`(1809)·`sshconnect2.c`(2508)의 판정 부분 | `check_host_key`(`:984`)의 known_hosts 판정 순서, `verify_host_key`(`:1499`)의 `RevokedHostKeys` 처리(`:1544`–`:1563`), `order_hostkeyalgs`(`sshconnect2.c:121`–`:216`, known_hosts에 있는 키 형식을 앞으로), RSA 크기 검사 자리(`sshconnect2.c:96`·`:1593`·`:1847`) |
 | `ssh.c`(2510)의 설정 단계 | `tilde_expand_paths`(`:189`–`:199`), `default_client_percent_expand`(`:207`–`:213`), `process_config_files`(`:564`–`:594`, 사용자·시스템 설정을 읽는 순서와 `final` 두 번째 읽기), `main`의 설정 단계(`:1186`–`:1612`: 첫 읽기 `:1187`, `HostName`의 `%h` 펼침 `:1195`–`:1203`, 호스트 소문자화 `:1206`–`:1207`, CNAME 따라가기 `:1229`–`:1240`, `final` 다시 읽기 `:1246`–`:1265`, `fill_default_options` `:1267`, 기본 사용자, `ProxyJump` → 홉 명령과 `jumphost loop` `:1278`–`:1324`, `ConnectionAttempts` 검사 `:1360`, `RemoteCommand` 충돌 `:1363`–`:1364`, `RemoteCommand`와 경로 지시어의 `~`·`%` 펼침 `:1457`–`:1611`), `load_public_identity_files`(`:2355`–`:2497`, `IdentityFile`·`CertificateFile`의 펼침과 순서) |
-| `openbsd-compat/fmt_scaled.c`(324)·`vis.c`(253)의 해당 함수 | `scan_scaled`(`:76`, `RekeyLimit`), `vis`(`:62`, `EscapeChar`의 `ssh -G` 출력) |
+| `openbsd-compat/fmt_scaled.c`(324)·`vis.c`(253)·`glob.c`(1077)·`charclass.h`(31)의 해당 함수 | `scan_scaled`(`:76`, `RekeyLimit`), `vis`(`:62`, `EscapeChar`의 `ssh -G` 출력), `glob`(`:180`)·`glob0`(`:473`)·`glob1`~`glob3`(`:612`~`:698`)·`match`(`:904`)·`g_charclass`(`:439`)와 `cclasses[]`(`Include`) |
 | `version.h`(6) | `SSH_RELEASE`(`Match version`의 판정 값) |
 | `cipher.c`(473), `mac.c`(255), `sshkey.c`(3732)의 이름 표 | `ciphers[]`·`cipher_alg_list`·`ciphers_valid`, `macs[]`·`mac_alg_list`·`mac_valid`, `keyimpls[]` 이름·`sshkey_alg_list`·`sshkey_names_valid2`(알고리즘 지시어의 값 검사와 `+`·`-`·`^`의 전체 목록) |
 | `log.c`(656), `digest-openssl.c`(207)의 이름 표 | `log_levels[]`·`log_facilities[]`와 이름 변환(`LogLevel`·`SyslogFacility`), `digests[]` 이름(`FingerprintHash`) |
@@ -374,7 +374,7 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
 
 ### 라이선스
 
-- `Cargo.toml`: `license = "BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short"`(director 2881, `BSD-3-Clause`는 아래 `openbsd-compat` 두 파일 때문에 더함). 크레이트 폴더에 `LICENSE-OpenSSH`(원본 `LICENCE` 전문, 412줄)를 둔다.
+- `Cargo.toml`: `license = "BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short"`(director 2881, `BSD-3-Clause`는 아래 `openbsd-compat` 파일 때문에 더함). 크레이트 폴더에 `LICENSE-OpenSSH`(원본 `LICENCE` 전문, 412줄)를 둔다.
 - 표기는 옮기는 파일의 실제 조항을 따른다(기준 커밋의 머리 고지):
 
   | 조항 | 파일 | SPDX |
@@ -386,9 +386,10 @@ enum HostKeyVerdict { Match { file, line }, Mismatch { file, line }, Revoked { f
   | Tatu Ylonen 조항과 BSD | `cipher.c`, `log.c` | `SSH-short`, `BSD-2-Clause` |
   | ISC | `digest-openssl.c` | `ISC` |
   | BSD | `kex-names.c`, `myproposal.h`, `sshconnect2.c`, `mac.c`, `sshkey.c`, `sshconnect.h`, `defines.h` | `BSD-2-Clause` |
-  | 3조항 BSD | `openbsd-compat/fmt_scaled.c`(Ian F. Darwin), `openbsd-compat/vis.c`(Regents of the University of California) | `BSD-3-Clause` |
+  | 3조항 BSD | `openbsd-compat/fmt_scaled.c`(Ian F. Darwin), `openbsd-compat/vis.c`·`glob.c`(Regents of the University of California) | `BSD-3-Clause` |
+  | 공개 도메인 | `openbsd-compat/charclass.h`(Todd C. Miller) | 없음(고지만 둔다) |
 
-- `scan_scaled`(`RekeyLimit`, `src/scaled.rs`)와 `vis`(`EscapeChar` 출력, `options.rs`의 `vis_white`)는 원본(`openbsd-compat/fmt_scaled.c:75`–`:229`, `vis.c:61`–`:144`)의 구조·변수·경계 처리를 단계별로 따르므로 파생으로 표시하고 원본 고지를 둔다(director 3000). `glob(3)`(`Include`, `src/glob.rs`)는 원본과 구조가 달라(재귀 `fnmatch`, `M_PROTECT`·`glob0`/`glob2`/`glob3` 없음) 크레이트 라이선스만 갖는다.
+- `scan_scaled`(`RekeyLimit`, `src/scaled.rs`)와 `vis`(`EscapeChar` 출력, `options.rs`의 `vis_white`)는 원본(`openbsd-compat/fmt_scaled.c:75`–`:229`, `vis.c:61`–`:144`)의 구조·변수·경계 처리를 단계별로 따르므로 파생으로 표시하고 원본 고지를 둔다(director 3000). `glob(3)`(`Include`, `src/glob.rs`)는 Gate 4에서 `openbsd-compat/glob.c`(`glob`·`glob0`~`glob3`·`match`·`g_charclass`)와 `charclass.h`를 그대로 옮겨 다시 썼으므로 같은 기준으로 파생이고 두 파일의 고지를 둔다(glob.c 3조항 BSD, charclass.h 공개 도메인).
 
 - Tatu Ylonen 조항은 파생물을 그렇게 표시하라고 요구한다("Any derived versions of this software must be clearly marked as such"). 옮긴 파일마다 원본 파일의 저작권 고지를 그대로 두고 `derived from OpenSSH, modified`를 적는 것으로 이 요구를 지킨다. 원본 파일과 함수를 모듈 문서에 적는다.
 - 나머지 크레이트는 MIT 그대로다. `deny.toml`의 허용 목록에 `BSD-2-Clause`와 `ISC`는 이미 있고, `SSH-short`는 이식 크레이트 작업이 더한다. cargo-deny가 `SSH-short`를 받지 못하면(라이선스 식을 해석하지 못하거나 허용 목록에 넣지 못하면) 그 작업은 다른 표기나 예외 설정으로 돌아가지 않고 보고한다.

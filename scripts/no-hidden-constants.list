@@ -302,7 +302,11 @@ settings	crates/tasty-net-ssh-config/src/settings.rs
 table	crates/tasty-net-ssh-config/src/settings.rs	ssh-backends.md	고정값
 allow	crates/tasty-net-ssh-config/src/glob.rs	0	첫 바이트·빈 길이
 allow	crates/tasty-net-ssh-config/src/glob.rs	1	다음 바이트로 한 칸
-allow	crates/tasty-net-ssh-config/src/glob.rs	2	두 바이트 건너뛰기(이스케이프, [!·[^)
+allow	crates/tasty-net-ssh-config/src/glob.rs	2	두 칸 건너뛰기(범위 a-z, 클래스 끝 :], glob.c match·glob0)
+allow	crates/tasty-net-ssh-config/src/glob.rs	const M_QUOTE: Char = 0x8000	glob.c M_QUOTE 0x8000(패턴 문자 표시 비트)
+allow	crates/tasty-net-ssh-config/src/glob.rs	const M_PROTECT: Char = 0x4000	glob.c M_PROTECT 0x4000(이스케이프한 글자 표시 비트)
+allow	crates/tasty-net-ssh-config/src/glob.rs	const M_ASCII: Char = 0x00ff	glob.c M_ASCII 0x00ff(글자 바이트)
+allow	crates/tasty-net-ssh-config/src/glob.rs	const PATH_MAX: usize = if cfg!(any( target_os = "macos", target_os = "ios", target_os = "freebsd" )) { 1024 } else { 4096 }	C 라이브러리 PATH_MAX(BSD 1024·그 밖 4096): glob 패턴·경로 상한
 allow	crates/tasty-net-ssh-config/src/matching.rs	const SUBPATTERN_BUFFER: usize = 1024	OpenSSH match.c match_pattern_list의 부분 패턴 버퍼 char sub[1024]
 allow	crates/tasty-net-ssh-config/src/matching.rs	const MAX_PROPOSALS: usize = 40	OpenSSH match.c match_list의 MAX_PROP 40
 allow	crates/tasty-net-ssh-config/src/matching.rs	0	빈 목록·첫 위치

@@ -2110,7 +2110,9 @@ impl<'a> Reader<'a> {
             } else {
                 pattern
             };
-            let paths = crate::glob::glob(&pattern);
+            let Ok(paths) = crate::glob::glob(&pattern) else {
+                return bad(format!("glob failed for {pattern}."));
+            };
             let oactive = *active;
             for path in paths {
                 let sub = Flags {
@@ -2118,11 +2120,14 @@ impl<'a> Reader<'a> {
                     never_match: flags.never_match || !oactive,
                     ..flags
                 };
-                match self.read_file_inner(Path::new(&path), sub, active, depth + 1)? {
+                match self.read_file_inner(&path, sub, active, depth + 1)? {
                     Opened::Yes => {}
                     Opened::Missing => vanished = true,
                     Opened::Error(e) => {
-                        return bad(format!("Can't open user config file {path}: {e}"));
+                        return bad(format!(
+                            "Can't open user config file {}: {e}",
+                            path.display()
+                        ));
                     }
                 }
                 *active = oactive;

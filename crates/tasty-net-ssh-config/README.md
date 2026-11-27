@@ -23,10 +23,9 @@ function name.
 This crate is `BSD-2-Clause AND BSD-3-Clause AND ISC AND SSH-short`. The files derived from
 OpenSSH are marked `derived from OpenSSH, modified` and keep the notices of their original
 files. [LICENSE-OpenSSH](LICENSE-OpenSSH) is the OpenSSH `LICENCE` file of the base commit.
-`src/scaled.rs` and the `vis_white` function of `src/options.rs` follow `scan_scaled` and
-`vis` of `openbsd-compat` step by step, so they keep the notices of those files
-(BSD-3-Clause). `src/glob.rs` is not derived from OpenSSH (it reproduces the behavior of
-`glob(3)`).
+`src/scaled.rs`, `src/glob.rs` and the `vis_white` function of `src/options.rs` follow
+`scan_scaled`, `glob` and `vis` of `openbsd-compat` step by step, so they keep the notices of
+those files (BSD-3-Clause; `charclass.h` is in the public domain).
 
 ## Ported code
 
@@ -44,6 +43,8 @@ files. [LICENSE-OpenSSH](LICENSE-OpenSSH) is the OpenSSH `LICENCE` file of the b
 | | `digest-openssl.c` | `digests[]` names (`:58`), `ssh_digest_alg_by_name` (`:79`–`:89`) |
 | | `openbsd-compat/vis.c` | `vis` for `VIS_WHITE` (`:61`–`:144`, `isvisible` `:46`) |
 | `src/scaled.rs` | `openbsd-compat/fmt_scaled.c` | `scan_scaled` (`:75`–`:229`) |
+| `src/glob.rs` | `openbsd-compat/glob.c` | `glob` (`:179`–`:230`), `g_charclass` (`:438`–`:463`), `glob0` without `globtilde` (`:472`–`:594`), `glob1` (`:611`–`:622`), `glob2` (`:629`–`:695`), `glob3` (`:697`–`:780`), `match` (`:903`–`:969`) |
+| | `openbsd-compat/charclass.h` | `cclasses[]` |
 | `src/resolve.rs` | `ssh.c` | `tilde_expand_paths` (`:188`–`:199`), `default_client_percent_expand` and `default_client_percent_dollar_expand` (`:206`–`:232`), `is_addr_fast` (`:284`–`:289`), `resolve_addr` for numeric addresses only (`:323`–`:367`), `process_config_files` (`:563`–`:594`), the configuration stage of `main` (`:1039`–`:1612`) |
 | | `sshconnect.h` | `DEFAULT_CLIENT_PERCENT_EXPAND_ARGS` (the `%` tokens) |
 | `src/misc.rs` | `misc.c` | `strdelim_internal` and `strdelim` (`:481`–`:530`), `a2port` (`:591`–`:604`), `a2tun` (`:606`–`:635`), `convtime_double` and `convtime` (`:670`–`:758`), `hpdelim2` and `hpdelim` (`:822`–`:869`), `cleanhostname` (`:871`–`:879`), `parse_user_host_port` (`:981`–`:1032`), `urldecode` (`:1061`–`:1095`), `parse_uri` (`:1109`–`:1198`), `tilde_expand` and `tilde_expand_filename` (`:1275`–`:1351`), `vdollar_percent_expand`, `dollar_expand`, `percent_expand`, `percent_dollar_expand` (`:1360`–`:1527`), `ipqos[]` (`:1938`), `parse_ipqos` and `iptos2str` (`:1972`–`:2004`), `lowercase` (`:2006`–`:2011`), `argv_split` (`:2142`–`:2209`), `valid_domain` (`:2481`–`:2524`), `valid_env_name` (`:2531`–`:2543`), `atoi_err` (`:2545`–`:2554`), `parse_pattern_interval` (`:2635`–`:2665`), `path_absolute` (`:2668`–`:2672`) |
