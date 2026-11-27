@@ -122,7 +122,7 @@ Android 17(API 37)부터 SDK 37 이상을 대상으로 하는 앱은 지역망 �
 - 판정: 내장 백엔드가 첫 SSH 홉(`ProxyJump`가 있으면 첫 점프 호스트)의 소켓을 열기 전에 한다. 뒤의 홉은 첫 홉의 SSH 안으로 가므로 기기의 소켓이 닿는 곳은 첫 홉뿐이다. 유효 이름이 `.local`로 끝나면 이름 풀이 전에, 아니면 풀이한 주소가 지역망 주소일 때 앱의 지역망 판정 콜백을 부른다. 콜백은 그 홉의 이름과 (있으면) 주소를 받고 허용·거절을 돌려준다. 지역망 주소 범위는 후속 작업이 정한다.
 - (a) 콜백이 거절하면 소켓을 열지 않고 `LocalNetworkDenied`로 끝난다. 재시도하지 않는다.
 - (b) 허용했는데 소켓 연결이 실패하면, 그 소켓을 가진 내장 백엔드가 닫기 전에 NDK `android_getnetworkblockedreason(sockfd)`(`android/multinetwork.h`, 그 소켓에 기록된 차단 사유를 돌려주고 지운다)를 부른다. `ANDROID_NETWORK_BLOCKED_REASON_LNP`이면 `LocalNetworkBlocked`로, 아니면 원래 연결 오류로 끝난다([NDK 네트워킹 참조](https://developer.android.com/ndk/reference/group/networking)). FFI 오류로 바뀐 뒤에는 그 FD가 없으므로 앱이 나중에 읽을 수 없다.
-- API 29 빌드를 유지하는 호출 경계: NDK 참조 문서에는 이 함수가 어느 API 레벨부터 있는지 적혀 있지 않다(같은 쪽의 다른 함수에는 적혀 있다, 2026-11-27 확인). 그래서 빌드 때 링크하지 않고 실행 중에 심벌을 찾아 있을 때만 부른다. 없으면 (b)를 판정하지 않고 원래 연결 오류다. 대상 수준은 위 "대상 target"의 29 그대로다. 이 OS 호출은 `tasty-net-ssh`의 `cfg(target_os = "android")` 모듈 하나가 갖는다(director 2937, [크레이트 구성](crates.md#unsafe-규칙)).
+- API 29 빌드를 유지하는 호출 경계: 이 함수는 API 37에서 생겼다(NDK r30 `sysroot/usr/include/android/multinetwork.h`의 `int32_t android_getnetworkblockedreason(int sockfd) __INTRODUCED_IN(37);`, [NDK r30 헤더](https://android.googlesource.com/toolchain/prebuilts/ndk-darwin/r30/+/refs/heads/androidx-coordinatorlayout-release/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/android/multinetwork.h), 2026-11-27 확인. NDK 참조 문서 쪽에는 판이 적혀 있지 않다). 그래서 API 29 빌드에서는 직접 링크하지 않고 실행 중에 심벌을 찾아 있을 때만 부른다. 없으면 (b)를 판정하지 않고 원래 연결 오류다. 대상 수준은 위 "대상 target"의 29 그대로다. 이 OS 호출은 `tasty-net-ssh`의 `cfg(target_os = "android")` 모듈 하나가 갖는다(director 2937, [크레이트 구성](crates.md#unsafe-규칙)).
 - FFI: 두 사유는 FFI 오류 enum의 서로 다른 변형이다. 콜백은 아래 "API 원칙"의 연결 처리 안 콜백이다.
 
 ## 앱 수명
