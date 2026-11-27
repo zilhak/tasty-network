@@ -342,7 +342,11 @@ def collect(read, listing, exists):
         files = crate_files(crate, listing)
         if crate == SSH_CRATE:
             lib = f"crates/{crate}/src/lib.rs"
-            if not system_mod_guarded(read(lib)):
+            try:
+                guarded = system_mod_guarded(read(lib))
+            except ScanError as e:
+                raise ScanError(f"{lib}: {e}") from None
+            if not guarded:
                 violations.append(f"{lib}: mod system;에 #[cfg(feature = \"{SSH_SYSTEM_FEATURE}\")]가"
                                   " 없다(src/system/ 예외는 그 feature로만 켜져야 한다)")
         tests = test_module_files(read, files)
@@ -350,7 +354,11 @@ def collect(read, listing, exists):
         for f in checked:
             # #[path]는 모듈 파일을 폴더 규칙 밖에서 고른다. 그러면 src/system/ 제외와 시험 모듈 파일
             # 판정이 실제로 컴파일되는 파일과 맞는지 말할 수 없다.
-            product = strip_cfg_test(tokenize(read(f)))
+            try:
+                product = strip_cfg_test(tokenize(read(f)))
+                hits, uses = judge_source(read(f))
+            except ScanError as e:
+                raise ScanError(f"{f}: {e}") from None
             lines = path_attr_lines(product)
             if lines:
                 raise ScanError(f"{f}:{lines[0]}: #[path]·#[cfg_attr(…, path = …)] 모듈 선언은 판정하지 않는다")
@@ -359,10 +367,6 @@ def collect(read, listing, exists):
             lines = include_lines(product)
             if lines:
                 raise ScanError(f"{f}:{lines[0]}: include!는 판정하지 않는다")
-            try:
-                hits, uses = judge_source(read(f))
-            except ScanError as e:
-                raise ScanError(f"{f}: {e}") from None
             use_count += uses
             violations += [f"{f}:{line}: {p} ({why})" for line, p, why in hits]
         files_checked += len(checked)
@@ -613,6 +617,22 @@ def self_test():
     included_path = dict(tree)
     included_path["crates/tasty-net-rendezvous/src/lib.rs"] = "std::include!(concat!(\"x\", \".rs\"));\n"
     crate_case("경로로 부른 std::include!(다른 금지 크레이트)", included_path, "읽기 오류")
+    # 판정 불가 진단에 그 파일 경로가 붙는지: 닫히지 않은 raw 문자열·블록 주석을 시험 모듈 파일 찾기(모든
+    # 파일)와 mod system 판정(ssh의 lib.rs)이 먼저 읽는 자리에 둔다.
+    for title, path, text in (
+            ("닫히지 않은 raw 문자열의 진단에 파일 경로", "crates/tasty-net-rendezvous/src/lib.rs",
+             "const S: &str = r#\"a\";\n"),
+            ("닫히지 않은 블록 주석의 진단에 파일 경로", "crates/tasty-net-rendezvous/src/lib.rs", "/* a\n"),
+            ("ssh lib.rs의 닫히지 않은 문자열 진단에 파일 경로", "crates/tasty-net-ssh/src/lib.rs",
+             guarded + "const S: &str = \"a;\n")):
+        bad_file = dict(tree)
+        bad_file[path] = text
+        try:
+            run(bad_file)
+            got, v = "통과", []
+        except ScanError as e:
+            got, v = ("읽기 오류" if str(e).startswith(path + ":") else "경로 없는 읽기 오류"), [str(e)]
+        cases.append((title, got, "읽기 오류", v))
     test_path = dict(tree)
     test_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\n"
     test_path["crates/tasty-net-rendezvous/src/t.rs"] = "use std::process::Command;\n"

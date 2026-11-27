@@ -434,7 +434,11 @@ def test_module_files(read, files):
     edges, targets = {}, set()
     for f in files:
         edges[f] = []
-        for name, is_test, path, inline in file_mods(read(f)):
+        try:
+            mods = file_mods(read(f))
+        except ScanError as e:
+            raise ScanError(f"{f}: {e}") from None
+        for name, is_test, path, inline in mods:
             m = mod_file(f, name, path, inline, known)
             if m:
                 edges[f].append((m, is_test))
