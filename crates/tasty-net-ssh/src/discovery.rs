@@ -1339,31 +1339,37 @@ mod tests {
         assert_eq!(judge(&longer, &target), PortDiscoveryFailureKind::TimedOut);
     }
 
-    /// A `poll_min` of 1 s with a `poll_max` of 1 ms polls at 1 ms: a child that exits at once
-    /// is seen long before a second.
+    /// A `poll_min` of 1 s with a `poll_max` of 1 ms polls at 1 ms. The child runs on, so the
+    /// first exit check sees it running and the wait goes through its first sleep before the
+    /// second look (where `stop` ends it).
     #[test]
     fn the_first_poll_is_cut_to_the_longest_poll() {
         let mut l = limits();
         l.poll_min = Duration::from_secs(1);
         l.poll_max = Duration::from_millis(1);
-        let child = helper_command("echo:x")
+        let child = helper_command("sleep")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn");
         let mut owner = ChildOwner::Local(child);
-        let started = Instant::now();
+        let mut looks = Vec::new();
         let end = super::wait_with_timeout(
             &mut owner,
-            started + Duration::from_secs(5),
-            &mut || false,
+            Instant::now() + Duration::from_secs(5),
+            &mut || {
+                looks.push(Instant::now());
+                looks.len() > 1
+            },
             l,
         );
-        let took = started.elapsed();
-        assert_eq!(end, WaitEnd::Ended);
-        assert!(took < Duration::from_millis(900), "{took:?}");
-        let _reaped = owner.finish("poll").map(|mut c| c.wait());
+        assert_eq!(end, WaitEnd::Stopped);
+        let first_sleep = looks[1].duration_since(looks[0]);
+        assert!(first_sleep < Duration::from_millis(900), "{first_sleep:?}");
+        if let Ok(mut child) = owner.finish("poll") {
+            kill_and_reap(&mut child);
+        }
     }
 
     /// After an overflow, a grace of 1 ms with polls of 1 s cuts a running child off after about

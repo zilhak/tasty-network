@@ -701,6 +701,33 @@ mod tests {
         }
     }
 
+    /// No ready attempt starts after the deadline: an attempt there would be the only one that
+    /// connects, and none is seen.
+    #[test]
+    fn no_ready_attempt_starts_after_the_deadline() {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut attempts = Vec::new();
+        let readiness = poll_until_ready(
+            deadline,
+            Duration::from_secs(1),
+            || Ok(None),
+            |_| {
+                let at = Instant::now();
+                attempts.push(at);
+                at > deadline
+            },
+        )
+        .expect("no wait error");
+        assert_eq!(readiness, Readiness::TimedOut);
+        assert!(!attempts.is_empty());
+        let late: Vec<_> = attempts.iter().filter(|at| **at > deadline).collect();
+        assert!(
+            late.is_empty(),
+            "{} attempts after the deadline",
+            late.len()
+        );
+    }
+
     #[cfg(unix)]
     mod fake {
         use super::*;
