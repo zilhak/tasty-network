@@ -17,7 +17,7 @@
 | [handshake v2](handshake.md) | 버전 결정, 구버전 처리, SSH·P2P 흐름, 검사 순서, 필드, 거절 사유, 도메인 확장, bulk 자격 |
 | [기기 키·토큰](identity.md) | 기기 키와 연결 토큰의 수명·저장·권한, 동시 첫 생성, TOFU |
 | [P2P](p2p.md) | quinn + rendezvous 구조, 크레이트와 외부 의존, 소켓과 패킷 나누기, NAT 판별, 펀칭 절차, 흐름 표, 정책, 연결 유지, 재시도, 상태 기계, 설정값, 연결 정보, 인증, 어댑터와의 경계, 페어링, 펀칭 실험 |
-| [rendezvous](rendezvous.md) | 중계 없음의 보장, 포트와 전송, 기기 인증, 메시지와 종료 코드, 펀칭 프로브, 서버 상태, 서버 설정값, 클라이언트 설정, 배포 형태, `relay/` 처리 방침 |
+| [rendezvous](rendezvous.md) | 중계 없음의 보장, 포트와 전송, 기기 인증, 메시지와 종료 코드, 펀칭 프로브, 서버 상태, 서버 설정값, 클라이언트 설정, 배포 형태 |
 | [토폴로지](topology.md) | 노드·엣지 모델, 질의·결과 메시지, 탐색 규칙, 공개 범위 |
 | [위협 모델](threat-model.md) | 신뢰 경계, 위협별 대응과 맡는 쪽 |
 | [버전·호환](versioning.md) | 크레이트 semver, 태그, tasty가 쓰는 방식, 와이어 버전, CHANGELOG |
@@ -31,7 +31,7 @@
 | 주제 | 결정 | 문서 |
 |---|---|---|
 | tasty-ssh 의존 | i18n → 오류 enum + 영어 `Display`(a), utils → 이 레포에서 자체 구현, reaper → 자식 생성 훅 주입(b), remote-profiles → 값 타입만 두고 프로필 함수는 tasty에(c). 남는 tasty 의존 0 | [레포 경계](repo-boundary.md#tasty-ssh-역방향-의존-끊기) |
-| 크레이트 | `tasty-net-{frame, ssh, identity, transport, p2p, rendezvous, topology}` + 시험·예제 `tasty-net-demo` + `rendezvous/`(지금의 `relay/`를 바꾼다) | [크레이트 구성](crates.md) |
+| 크레이트 | `tasty-net-{frame, ssh, identity, transport, p2p, rendezvous, topology}` + 시험·예제 `tasty-net-demo` + `rendezvous/`(서버 배포 패키지) | [크레이트 구성](crates.md) |
 | P2P 구조 | iroh를 쓰지 않는다. rendezvous 서버(반사·펀칭 조정만, 중계 코드 경로 없음) + 펀칭된 UDP 위 quinn QUIC. 인증은 기기 키 raw public key(RFC 7250) | [P2P](p2p.md), [rendezvous](rendezvous.md) |
 | P2P 격리 | p2p·rendezvous는 identity만 쓴다(p2p → rendezvous). transport가 p2p를 어댑터로 쓰고 `P2pCloseReason`은 p2p가 정의한다 | [크레이트 구성](crates.md#p2p-크레이트-격리) |
 | P2P 정책 | 기본 꺼짐, 켰을 때만 서버 연결, 거는 쪽도 켜야 함, 같은 서버의 기기끼리만(비교 로직 없음), 전역 discovery 없음, 펀칭 실패 = 연결 실패(중계 없음). Q3 보류는 중계 경로가 없어 저절로 충족 | [P2P](p2p.md#정책) |

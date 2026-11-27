@@ -13,7 +13,7 @@ workflow 파일:
 | 파일 | 잡 |
 |---|---|
 | `.github/workflows/ci.yml` | fmt(한 OS), clippy·test(세 OS 매트릭스, `fail-fast: false`), SSH·P2P 통합 시험 준비 단계, P2P 크레이트 단독 시험·격리 검사, 설정값 정적 검사 |
-| `.github/workflows/rendezvous.yml`(후속, 지금의 `relay.yml`을 바꾼다) | rendezvous 서버 설정 검사와 STUN 응답 확인(Linux) |
+| `.github/workflows/rendezvous.yml` | rendezvous 서버 설정 검사와 STUN 응답 확인(Linux) |
 
 CI 밖에서 돌리는 시험(같은 망의 실제 서버 확인, 무거운 반복 측정)은 프로젝트의 원격 빌드 환경에서 한다. 그 환경의 위치는 이 레포에 적지 않는다. 결과는 같은 sha 기준으로 [동작 수준 기준](done-criteria.md)의 증거 표에 옮긴다.
 

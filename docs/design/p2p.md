@@ -15,7 +15,7 @@
 | P2P 전송 라이브러리 | `crates/tasty-net-p2p` | UDP 소켓과 패킷 나누기, NAT 판별, 펀칭, quinn 연결, 기기 키 인증, 페어링 허용 목록, 동기 API와 소유 런타임 |
 | rendezvous 프로토콜과 서버 | `crates/tasty-net-rendezvous`(라이브러리 + 실행 파일 `tasty-rendezvous`) | 조정 메시지 형식, STUN 부분 집합 코덱, 펀칭 프로브 형식, 기기 키 raw public key TLS 설정, 서버 본체 |
 | 전송 어댑터 | `tasty-net-transport`의 P2P 모듈 | `tasty-net-p2p`의 스트림을 `RawChannel`로 감싸고 handshake v2·링크·연결 공유를 얹는다([전송 추상화](transport.md)) |
-| 배포물 | `rendezvous/`(지금의 `relay/`를 바꾼다) | 서버 컨테이너 설정 예시와 검사, 운영 안내([rendezvous](rendezvous.md#배포-형태)) |
+| 배포물 | `rendezvous/` | 서버 컨테이너 설정 예시와 검사, 운영 안내([rendezvous](rendezvous.md#배포-형태)) |
 
 - 격리: `tasty-net-p2p`와 `tasty-net-rendezvous`는 이 workspace의 SSH·토폴로지·전송·프레임 크레이트에 의존하지 않는다. 공용 크레이트는 `tasty-net-identity` 하나다(근거는 [크레이트 구성](crates.md#p2p-크레이트-격리)). 전송 쪽이 P2P를 어댑터로 쓰고, 반대 방향 의존은 없다.
 - `tasty-net-p2p`는 `tasty-net-rendezvous`의 라이브러리(메시지 형식·코덱·TLS 설정)를 쓰고, 시험에서는 같은 크레이트의 서버를 프로세스 안에서 띄운다. 서버 크레이트는 `tasty-net-p2p`에 의존하지 않는다. 그래서 둘 사이에 순환이 없다.

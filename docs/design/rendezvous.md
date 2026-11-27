@@ -221,20 +221,12 @@ quinn·rustls의 값(QUIC 손실 복구 등)은 기기 쪽과 같은 항목을 �
 
 ## 배포 형태
 
-- 이 레포에 둘 것: `rendezvous/`(지금의 `relay/`를 바꾼다). `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시, `advertise.*` 포함), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인), `container-check.sh`(이미지로 띄운 서버에 같은 망의 기기 두 대를 붙이는 확인, D5 (b)), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 광고 주소, 두 번째 IP).
+- 이 레포에 둘 것: `rendezvous/`. `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시, `advertise.*` 포함), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인), `container-check.sh`(이미지로 띄운 서버에 같은 망의 기기 두 대를 붙이는 확인, D5 (b)), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 광고 주소, 두 번째 IP).
 - 외부 이미지를 쓰지 않는다. 바이너리는 이 workspace의 `tasty-rendezvous`이고, 판은 workspace 버전을 따른다([버전·호환](versioning.md)).
 - 서버 키 파일은 설정한 경로에 둔다. 파일 권한은 기기 키와 같은 규칙을 쓴다([기기 키·토큰](identity.md)). `keygen --dir`의 없는 디렉터리는 CLI가 미리 만들지 않고 identity의 키 파일 함수가 만든다(Unix에서 새로 만드는 중간 디렉터리까지 0700).
 - 컨테이너에서는 듣는 주소가 컨테이너 안 주소이므로 `advertise.*`를 반드시 준다(위 "광고 주소와 바인딩 주소").
 - 로컬 IP가 여럿인 호스트는 `listen.*`를 특정 IP로 둔다. wildcard에서는 STUN 응답 출발 IP가 질의 대상과 다를 수 있다(받은 패킷의 목적지 IP를 소켓이 넘기지 않아 응답의 출발 IP를 OS 경로 선택에 맡긴다. 기기는 질의한 주소에서 온 응답만 받으므로 그 응답을 버린다). 알려진 한계다. 서버는 소켓이 wildcard로 묶이면 시작할 때 경고 한 줄을 찍는다.
 - hub rendezvous는 hub가 이 패키지(또는 라이브러리)를 가져다 운영한다. hub 쪽 배포 방식은 이 레포에 적지 않는다.
-
-### `relay/` 패키지와 `relay.yml`의 처리 방침
-
-develop에는 iroh-relay용 `relay/`(설정 예시 두 개, compose, `check-config.sh`, `container-check.sh`, 운영 안내)와 CI workflow `.github/workflows/relay.yml`(`relay-config-check` 잡)이 들어가 있다. 이번 작업은 문서만 고치고 그 파일은 그대로 둔다.
-
-- 방침: 둘 다 없앤다. 내용이 iroh-relay 설정·이미지 고정·metrics에 묶여 있어 새 서버에 다시 쓸 부분이 없다. 대신 `rendezvous/` 패키지와 workflow `rendezvous.yml`(잡 `rendezvous-check`)을 새로 만든다.
-- 순서: rendezvous 서버 크레이트가 develop에 들어간 뒤 한 작업에서 `relay/`·`relay.yml` 제거와 `rendezvous/`·`rendezvous.yml` 추가를 함께 한다. 그 사이에는 `relay.yml`이 계속 돌아도 된다(이 레포 코드를 쓰지 않는다).
-- 같은 작업이 함께 고칠 것: `docs/dev-guide/ci.md`의 `relay.yml` 서술, [동작 수준 기준](done-criteria.md) D5의 잡 이름, 레포 `CLAUDE.md`의 relay 서버 패키지 서술, 그리고 `relay/README.md`의 링크 때문에 남겨 둔 안내 문서 [relay.md](relay.md)의 삭제.
 
 ## 위협 범위
 

@@ -16,7 +16,7 @@
 | `tasty-net-topology` | `crates/tasty-net-topology` | 가안 그대로 | 노드·엣지 모델, 질의·결과 메시지, 탐색 상태 기계 | frame, identity |
 | `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 전송 계층 두 프로세스 통합 시험(SSH, transport 위 P2P), 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, rendezvous, ssh, identity, frame |
 | `tasty-net-ffi` | `crates/tasty-net-ffi` | 새로 정함(2026-11-27, 후속 작업이 만든다) | UniFFI로 Kotlin·Swift 바인딩을 만드는 경계, FFI용 레코드·오류 enum, 이벤트 끌어오기, 앱 수명 이벤트 전달, SSH exec·SFTP 노출([모바일](mobile.md#바인딩-층)) | transport, ssh, p2p, identity, topology |
-| (크레이트 아님) | `rendezvous/`(지금의 `relay/`를 바꾼다) | 다시 정함(2026-11-27) | rendezvous 서버 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사 스크립트, 자체 운영 안내([rendezvous](rendezvous.md#배포-형태)) | 없음 |
+| (크레이트 아님) | `rendezvous/` | 다시 정함(2026-11-27) | rendezvous 서버 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사 스크립트, 자체 운영 안내([rendezvous](rendezvous.md#배포-형태)) | 없음 |
 
 각 크레이트가 모바일 target의 대상인지와 그 근거는 [모바일](mobile.md#크레이트별-판정)에 있다. 모바일 대상이 아닌 것은 `tasty-net-demo`와 rendezvous 실행 파일이다.
 
@@ -126,5 +126,5 @@ frame, ssh-config, identity ─> (없음)
 | P2P 어댑터 위 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달, 양방향 마지막 프레임 전달) | `tasty-net-transport`의 `tests/`(p2p가 정식 의존이다) |
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
-| rendezvous 서버 설정 검사와 STUN 응답 확인 | `rendezvous/check-config.sh`(CI workflow `rendezvous.yml`, 후속 작업이 만든다) |
+| rendezvous 서버 설정 검사와 STUN 응답 확인 | `rendezvous/check-config.sh`(CI workflow `rendezvous.yml`) |
 | 같은 망 안에서 실제 서버 프로세스를 거치는 연결 확인 | `rendezvous/container-check.sh`(원격 빌드 환경, D5 (b)) |

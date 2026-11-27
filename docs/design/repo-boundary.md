@@ -20,7 +20,7 @@
 | P2P | `tasty-net-p2p` | P2P 소켓, NAT 판별, 펀칭, quinn 연결, 기기 키 인증, 페어링 메시지·허용 목록 검사, 연결 정보·설정값 조회 |
 | rendezvous 서버 | `tasty-net-rendezvous` | 조정 프로토콜, STUN 반사, 서버 본체와 실행 파일 |
 | 토폴로지 | `tasty-net-topology` | 노드·엣지 모델, 질의·결과 메시지, capability 이름, 탐색 알고리즘, 응답 측 공통 함수 |
-| rendezvous 배포물 | `rendezvous/`(지금의 `relay/`를 바꾼다) | 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사, 운영 안내 |
+| rendezvous 배포물 | `rendezvous/` | 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사, 운영 안내 |
 
 ## tasty에 남을 것
 
