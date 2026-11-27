@@ -72,6 +72,7 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 - P2P 크레이트의 패킷 입출력은 trait(`PacketIo`: 보내기·받기·로컬 주소) 뒤에 있다. 기본 구현은 OS UDP 소켓이고, 시험은 프로세스 안 모의 NAT 구현을 `P2pConfig`로 넣는다.
 - 모의 NAT는 내부 주소마다 바깥 포트를 정하는 매핑 규칙(EIM, APDM)과 들어오는 패킷을 거르는 필터 규칙(endpoint-independent, address and port-dependent)을 가진다([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) §4.1·§5). "나가는 UDP 막힘"도 하나의 규칙이다. 매핑 만료 시간도 설정값이라 keepalive 시험에 쓴다.
 - 서버는 모의 망의 "공인" 쪽에 둔다. 두 번째 서버 IP 시험은 Linux에서 127.0.0.2를 쓰고, 다른 OS는 모의 망 주소로만 본다.
+- 올바른 서버는 보내지 않는 값(한계값을 벗어난 `punch_go`)이나 정한 때의 `punch_cancel`이 필요한 시험은 시험 안의 각본 서버를 쓴다. 각본 서버는 같은 조정 프로토콜을 모의 망 위에서 말하고 평문 STUN에 답하며, 기기 사이 바이트를 나르지 않는다(`tests/support/fake.rs`).
 
 ### 시험 목록 (요약, 정확한 조건은 시험 파일이 정본)
 

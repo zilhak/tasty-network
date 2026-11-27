@@ -29,9 +29,10 @@
 | `rustls` | p2p, rendezvous | TLS 1.3과 RFC 7250 raw public key. `default-features = false`, `features = ["ring", "std", "logging"]`. 기본 feature의 `aws_lc_rs`·`tls12`·`prefer-post-quantum`은 넣지 않는다. 설정을 만들 때 ring provider를 명시한다(`builder_with_provider`) |
 | `tokio` | p2p, rendezvous | 런타임, UDP 소켓, 타이머 |
 | `ed25519-dalek` | identity, rendezvous(간접으로 p2p) | 기기 키 서명·검증. rendezvous는 약한 키 검사(`VerifyingKey::is_weak`)만 직접 쓰고 identity와 같은 판(`=3.0.0`, `default-features = false`)을 고정한다 |
-| `serde`·`serde_json` | rendezvous | 조정 메시지 |
+| `serde`·`serde_json` | rendezvous, p2p | 조정 메시지(rendezvous), 페어링 메시지(p2p) |
 | `toml` | rendezvous | 서버 설정 파일(`default-features = false`, `std`·`parse`·`serde`) |
-| `socket2` | rendezvous | IPv6 소켓을 묶기 전에 `IPV6_V6ONLY`를 끄고([rendezvous](rendezvous.md#광고-주소와-바인딩-주소) 이중 스택) 묶인 소켓의 값을 읽는다. quinn의 UDP 계층과 같은 판(0.6) |
+| `socket2` | rendezvous, p2p | IPv6 소켓을 묶기 전에 `IPV6_V6ONLY`를 끄고([rendezvous](rendezvous.md#광고-주소와-바인딩-주소) 이중 스택) 묶인 소켓의 값을 읽는다. p2p는 소켓 버퍼 크기(`socket.recv_buffer`·`socket.send_buffer`)도 이것으로 정하고 읽는다. quinn의 UDP 계층과 같은 판(0.6) |
+| `getrandom` | rendezvous, p2p | OS 난수. 펀칭 토큰(rendezvous), 재연결 지연의 무작위 폭(p2p) |
 | `libc`(Unix)·`windows-sys`(Windows) | rendezvous | 경로보다 큰 보내기의 오류 번호 `EMSGSIZE`·`WSAEMSGSIZE`(아래 "소켓 하나와 패킷 나누기"). `windows-sys`는 `Win32_Networking_WinSock`만 켠다 |
 
 - 판은 정확히 고정한다(`=` 지정). 2026-11-27 확인 기준 최신은 quinn 0.11.12(`rustls ^0.23.5`를 선택 의존으로 둔다, `rust-version = "1.85"`), rustls 0.23.46(`rust-version = "1.71"`)이다. raw public key resolver가 0.23.16부터 있으므로 rustls는 그 이상이어야 한다([quinn](https://docs.rs/crate/quinn/latest), [rustls](https://docs.rs/rustls/latest/rustls/)). 구현 작업이 그때의 판을 다시 보고 고정하며, 올릴 때는 이 문서의 API 서술을 새 판으로 다시 확인하고 같은 커밋에서 고친다([버전·호환](versioning.md#의존-고정)).
@@ -55,6 +56,7 @@
 - 보내기 오류: 경로가 받지 않는 크기라 OS가 그 자리에서 거절한 보내기(`EMSGSIZE`, Windows `WSAEMSGSIZE`)는 그 데이터그램을 버리고 세며 quinn에는 성공으로 돌려준다. 분할 금지를 켜면 MTU 탐색 probe가 인터페이스 MTU보다 클 수 있고, quinn은 `WouldBlock` 밖의 보내기 오류에 연결 드라이버를 끝내기 때문이다. quinn의 UDP 계층(`UdpSocketState::send`)도 이 오류를 잃은 probe로 삼킨다. quinn은 답이 없는 probe를 잃은 것으로 보고 더 작은 크기로 탐색을 잇는다. 감싼 소켓이 걸러 주므로 주입한 `PacketIo`에도 같다.
 - 분류는 단위 시험 `demux_classifies_first_byte`(경계값 0·3·4·63·64·127·128·191·192·255)가 고정한다. 서버의 주 포트도 같은 분류 코드를 쓴다.
 - 소켓은 `[::]:0` 이중 스택으로 연다. OS가 이중 스택을 받지 않으면 IPv4 `0.0.0.0:0`으로 연다. 반사 주소는 서버에 닿은 주소족 하나에서만 얻는다. 전역 IPv6 주소는 사설 후보와 같이 호스트 후보로 보낸다(NAT 없이 닿을 수 있다). IPv6 경로가 실제로 쓰이는지는 펀칭 실험에서 본다.
+- 호스트 후보의 IP: 소켓이 묶인 IP(와일드카드가 아닐 때), 와일드카드면 서버로 가는 경로에서 OS가 고르는 로컬 IP(같은 주소족의 UDP 소켓을 서버 주소로 `connect`한 뒤의 `local_addr`, 패킷은 보내지 않는다), 그리고 `P2pConfig.host_ips`로 준 IP다. 포트는 P2P 소켓의 포트다. 모두 후보 주소 규칙([rendezvous](rendezvous.md#후보-주소-규칙))으로 거른 뒤 IPv4를 먼저 보낸다.
 - 소켓 수신·송신 버퍼 크기는 설정값이다(`socket.recv_buffer`·`socket.send_buffer`, 기본은 OS 값이고 조회에 실제 값과 출처 `os_default`가 보인다).
 
 ## NAT 판별
@@ -322,6 +324,8 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `path.poll_interval` | 1 s | 주소 바뀜을 1초 안에 연결 정보에 반영 |
 | `history.limit` | 32 | 연결마다 전이 이력 상한. 재연결 몇 번과 주소 바뀜을 담고, 넘치면 오래된 것부터 버리고 버린 수를 센다 |
 | `events.queue_limit` | 256 | 이벤트를 읽지 않는 호출자 때문에 메모리가 늘지 않게 |
+| `runtime.worker_threads` | 2 | 소유 런타임(아래 "endpoint와 런타임")의 작업 스레드 수. 소켓 하나와 연결 몇 개의 입출력·타이머만 돈다. `bind`는 1 이상 1024 이하만 받는다 |
+| `runtime.shutdown_timeout` | 5 s | endpoint가 끝날 때 소유 런타임이 남은 작업을 기다리는 상한. 넘으면 남은 작업을 버리고 스레드를 끝낸다 |
 | `socket.recv_buffer`, `socket.send_buffer` | OS 값 | 따로 주지 않으면 OS 값을 쓰고 조회에 `os_default`로 보인다 |
 
 - 펀칭 창과 handshake 기한, 시작 지연, `offer_timeout`은 서버 설정이다([rendezvous](rendezvous.md#서버-설정값)). 기기는 `welcome.limits`와 `punch_go`로 받은 값을 쓰고 상한만 검사한다.
@@ -372,13 +376,13 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | 키 | 고정값 | 이유 |
 |---|---|---|
 | `quic.grease_quic_bit` | 끔(`EndpointConfig::grease_quic_bit(false)`, quinn 기본 켬) | 켜면 상대가 QUIC 고정 비트를 0으로 보낼 수 있어 짧은 헤더는 첫 바이트가 0–63, 긴 헤더는 128–191이 된다. 첫 바이트 분류가 두 범위 모두 QUIC으로 보내지 않는다([RFC 9287](https://www.rfc-editor.org/rfc/rfc9287) §3.1, [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §1·§3, 위 "소켓 하나와 패킷 나누기") |
-| `quic.supported_versions` | QUIC v1 하나 | 첫 바이트 분류와 와이어 형식이 v1 기준이다 |
+| `quic.supported_versions` | QUIC v1 하나 | 첫 바이트 분류와 와이어 형식이 v1 기준이다. 클라이언트가 Initial에 쓰는 판(`ClientConfig::version`)도 quinn 기본 v1 그대로 둔다 |
 | `quic.preferred_address` | 없음 | 서버가 다른 주소로 옮기라고 하면 펀칭한 경로를 벗어난다 |
 | `quic.congestion_controller` | CUBIC | 알고리즘 선택은 동작값이 아니라 구현 선택이다. 바꾸면 위 `quic.cubic.*`의 뜻이 바뀐다 |
 | `tls.versions` | TLS 1.3만 | QUIC은 TLS 1.3만 쓴다([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)) |
 | `tls.provider` | ring | 위 "외부 의존과 고정" |
 | `tls.resumption` | 끔(`Resumption::disabled()`, rustls 기본은 켬) | 재개된 handshake는 CertificateVerify를 거치지 않는다([RFC 8446](https://www.rfc-editor.org/rfc/rfc8446) §2.2). 매 연결이 키 소유를 증명한다는 인증 전제(아래 "인증")가 깨진다 |
-| `tls.tickets` | 0(rustls 서버 `send_tls13_tickets`, rustls 기본 2) | 재개를 끄므로 티켓을 보내지 않는다 |
+| `tls.tickets` | 0(rustls 서버 `send_tls13_tickets`, rustls 기본 2) | 재개를 끄므로 티켓을 보내지 않는다. 클라이언트의 티켓 요청([RFC 9149](https://www.rfc-editor.org/rfc/rfc9149))에 따른 발급 상한 `max_tls13_tickets`도 rustls 기본 0(요청을 보지 않는다) 그대로 둔다 |
 | `tls.early_data` | 끔(클라이언트 `enable_early_data` false, 서버 `max_early_data_size` 0) | 0-RTT는 재개 위에서만 서고 재전송 공격에 열린다. quinn의 기본 생성 함수는 이것을 켜므로 이 설계는 rustls 설정을 직접 만든다 |
 | `tls.alpn` | `tasty-net/2`, `tasty-rendezvous/1` | 와이어 형식([버전·호환](versioning.md)) |
 
@@ -473,6 +477,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 ## endpoint와 런타임
 
 - `P2pEndpoint::bind(config)`가 tokio 런타임을 만들고 소켓을 연다. config: `enabled`, 기기 키, rendezvous 서버(주소와 서버 공개키), 페어링 허용 목록 저장소, `settings`([설정값](#설정값)). 켜져 있는데 서버를 주지 않으면 `bind`가 오류다.
+- 소유 런타임의 작업 스레드 수와 종료 대기 상한은 설정값이다(`runtime.worker_threads`·`runtime.shutdown_timeout`). 비동기 작업 안에서 블로킹 API를 부르면 `P2pError::InAsyncContext`다(`spawn_blocking` 안은 된다).
 - 동기 API와 소유 런타임의 관계(블로킹 호출, 소유 스레드에서의 종료·회수, 비동기 작업 안에서 부르면 패닉 대신 오류)는 [전송 추상화](transport.md#동기비동기-경계)에 적힌 규칙을 이 크레이트가 자기 API에 지킨다. 어댑터는 그 위에 아무것도 더하지 않는다.
 - 같은 기기 키로 P2P endpoint는 하나만 연다. 서버는 같은 기기 ID의 등록을 하나만 두므로(새 등록이 옛 등록을 밀어낸다), 같은 키로 둘을 열면 서로를 밀어낸다. `bind`는 키 디렉터리의 잠금 파일을 배타로 잡고, 이미 잡혀 있으면 `P2pError::EndpointInUse`를 돌려준다. 독립 P2P endpoint가 필요한 인스턴스는 다른 키 디렉터리를 쓴다. SSH 경로는 이 제약 없이 같은 키를 함께 쓴다.
 - 자기 기기 ID로 거는 연결은 네트워크에 보내기 전에 `SelfAttach`로 끝낸다. 서버도 같은 요청을 `self`로 거절한다.
