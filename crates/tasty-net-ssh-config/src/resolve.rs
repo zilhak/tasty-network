@@ -175,6 +175,7 @@ impl std::error::Error for ConfigError {}
 #[derive(Debug, Clone)]
 pub struct ConfigSet {
     files: Vec<(LoadedFile, Flags)>,
+    /// The `ssh -F` value, if one is given (`none` for [`ConfigFiles::None`]).
     only: Option<PathBuf>,
 }
 
@@ -308,7 +309,9 @@ impl ConfigSet {
                 ));
                 only = Some(path);
             }
-            ConfigFiles::None => {}
+            // `ssh.c:1064` keeps `config = "none"`; the `ProxyCommand` that `ProxyJump`
+            // makes passes it on (`:1320`-`:1321`).
+            ConfigFiles::None => only = Some(PathBuf::from("none")),
             ConfigFiles::Default { user, system } => {
                 if let Some(p) = user {
                     // `read_config_file` returns 0 for a file it cannot open.

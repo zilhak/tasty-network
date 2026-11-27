@@ -540,6 +540,20 @@ fn no_command_sets_request_tty() {
 }
 
 #[test]
+fn jump_command_passes_config_none() {
+    let set = ConfigSet::load(ConfigInputs {
+        files: ConfigFiles::None,
+    })
+    .expect("no files");
+    let r = set.resolve("web", &context(vec![option("ProxyJump=hop", "target")]));
+    assert_eq!(refusal_kind(&r), None);
+    assert_eq!(
+        r.options.proxy_command.as_deref(),
+        Some("ssh -F none -W '[%h]:%p' hop")
+    );
+}
+
+#[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());
     ctx.env.insert("NAME".to_string(), "value".to_string());
