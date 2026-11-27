@@ -9,7 +9,42 @@ import re
 class ScanError(Exception):
     """소스를 판정할 수 없다(검사는 통과로 보지 않고 판정 불가로 끝낸다)."""
 
-IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+class _Span:
+    """식별자 하나의 자리. re의 match처럼 group·start·end를 준다."""
+
+    def __init__(self, text, start, end, inner=0):
+        self._text, self._start, self._end, self._inner = text, start, end, inner
+
+    def group(self, k=0):
+        return self._text[self._start + (self._inner if k else 0):self._end]
+
+    def start(self):
+        return self._start
+
+    def end(self):
+        return self._end
+
+
+class _Ident:
+    """Rust 식별자(Unicode XID_Start 또는 _ 로 시작하고 XID_Continue가 잇는다). Python의 str.isidentifier가
+    같은 문자 분류를 쓴다. prefix가 있으면 그 글자 뒤의 식별자를 group(1)로 준다(raw 식별자 r#…)."""
+
+    def __init__(self, prefix=""):
+        self._prefix = prefix
+
+    def match(self, text, pos=0):
+        if not text.startswith(self._prefix, pos):
+            return None
+        i = pos + len(self._prefix)
+        if i >= len(text) or not text[i].isidentifier():
+            return None
+        j = i + 1
+        while j < len(text) and ("a" + text[j]).isidentifier():
+            j += 1
+        return _Span(text, pos, j, len(self._prefix))
+
+
+IDENT = _Ident()
 NUMBER = re.compile(
     r"0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+"
     r"|[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9_]+)?"
@@ -20,7 +55,7 @@ PUNCT2 = ("::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*="
           "%=", "^=", "&=", "|=", "<<", ">>", "..")
 # raw 문자열의 시작: r"…", r#"…"#, raw 바이트 br…, raw C cr…(같은 수의 #로 닫는다).
 RAW_STR = re.compile(r"[bc]?r(#*)\"")
-RAW_IDENT = re.compile(r"r#([A-Za-z_][A-Za-z0-9_]*)")
+RAW_IDENT = _Ident("r#")
 # Rust의 엄격·예약 키워드(2018 이후). raw 식별자 r#<키워드>는 키워드가 아니므로 r#를 남긴다.
 KEYWORDS = {
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",

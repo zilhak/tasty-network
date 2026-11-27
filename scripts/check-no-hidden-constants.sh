@@ -513,6 +513,10 @@ def self_test():
     case("시험 cfg 이름표 반복은 그 블록까지만 지운다", "target\tsrc\n", {"src/label.rs"}, 1)
     files["src/macroarg.rs"] = "fn f() -> u8 { m!(#[cfg(test)] 5) }\n"
     case("매크로 호출 인자 안의 #[cfg(test)] 모양은 지우지 않는다", "target\tsrc\n", {"src/macroarg.rs"}, 1)
+    files["src/macrouni.rs"] = ("macro_rules! 검사 { (#[cfg(test)] $e:expr) => { $e }; }\n"
+                                "fn f() -> u8 { 검사!(#[cfg(test)] 5) }\n")
+    case("Unicode 이름 매크로 호출 인자 안의 #[cfg(test)] 모양도 지우지 않는다", "target\tsrc\n",
+         {"src/macrouni.rs"}, 1)
     files["src/unclosed.rs"] = "const S: &str = \"a;\n"
     try:
         run("target\tsrc\n", {"src/unclosed.rs"})

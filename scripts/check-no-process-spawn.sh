@@ -442,6 +442,9 @@ def self_test():
         ("매크로 호출 인자 안의 #[cfg(test)] 모양 뒤 금지 경로",
          "macro_rules! evaluate { (#[cfg(test)] $e:expr) => { $e }; }\n"
          "fn f() { evaluate!(#[cfg(test)] std::process::Command::new(\"x\")); }\n"),
+        ("Unicode 이름 매크로 호출 인자 안의 #[cfg(test)] 모양 뒤 금지 경로",
+         "macro_rules! 검사 { (#[cfg(test)] $e:expr) => { $e }; }\n"
+         "fn f() { 검사!(#[cfg(test)] std::process::Command::new(\"x\")); }\n"),
         ("매크로 호출 인자 [ ]·{ } 안의 #[cfg(test)] 모양 뒤 금지 경로",
          "fn f() { m![#[cfg(test)] std::process::Command::new(\"x\")]; n::k! { #[cfg(test)] std::process::Child } }\n"),
         ("시험 cfg 이름표 반복 'a: loop { } 뒤의 금지 경로",
