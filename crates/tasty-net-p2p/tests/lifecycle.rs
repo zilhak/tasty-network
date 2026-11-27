@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tasty_net_p2p::settings::Value;
 use tasty_net_p2p::{
-    AttemptPhase, CauseDetail, EndpointPhase, P2pCloseReason, P2pConnectError, P2pEvent, Phase,
-    RendezvousServer, StopCause, Subject,
+    AttemptPhase, CauseDetail, EndpointPhase, P2pCloseReason, P2pConnectError, P2pEndpoint,
+    P2pEvent, Phase, RendezvousServer, StopCause, Subject,
 };
 use tasty_net_rendezvous::tls::{self, TlsOptions};
 use tasty_net_rendezvous::wire::message::ServerMessage;
@@ -948,6 +948,58 @@ fn blocking_calls_in_an_unconstrained_task_end_without_a_panic() {
     );
     assert!(next.is_ok(), "{next:?}");
     d.ep.close();
+}
+
+/// `close` wakes every caller that waits in `next_event`: the queued events, `Off` among them,
+/// still come first and once each, then every waiter and every later call gets `Closed` at
+/// once instead of waiting out its limit (docs/design/p2p.md "상태 기계").
+#[test]
+fn close_wakes_every_event_waiter_and_later_calls_are_closed() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let d = device(&n, 2, 1, &s, settings(&[]));
+    registered(&d);
+    let _before = d.ep.events();
+    let read_all = |ep: &P2pEndpoint| {
+        let mut got = Vec::new();
+        loop {
+            match ep.next_event(LONG) {
+                Ok(Some(e)) => got.push(e),
+                other => return (got, other.err()),
+            }
+        }
+    };
+    let started = Instant::now();
+    let (offs, ends) = std::thread::scope(|sc| {
+        let waiters: Vec<_> = (0..3).map(|_| sc.spawn(|| read_all(&d.ep))).collect();
+        std::thread::sleep(Duration::from_millis(200));
+        d.ep.close();
+        let mut offs = 0;
+        let mut ends = Vec::new();
+        for w in waiters {
+            let (got, end) = w.join().unwrap();
+            offs += endpoint_path(&got)
+                .iter()
+                .filter(|(to, ..)| *to == EndpointPhase::Off)
+                .count();
+            ends.push(end);
+        }
+        (offs, ends)
+    });
+    assert_eq!(offs, 1);
+    for end in ends {
+        assert!(
+            matches!(end, Some(tasty_net_p2p::P2pError::Closed)),
+            "{end:?}"
+        );
+    }
+    let later = d.ep.next_event(LONG);
+    assert!(
+        matches!(later, Err(tasty_net_p2p::P2pError::Closed)),
+        "{later:?}"
+    );
+    assert!(started.elapsed() < LONG, "{:?}", started.elapsed());
 }
 
 /// A device whose socket the test also holds, and the socket's reference count before the

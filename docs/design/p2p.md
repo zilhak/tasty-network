@@ -207,7 +207,7 @@ A                         서버                          B
 
 ## 상태 기계
 
-endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전이마다 이벤트 `{from, to, cause, at}`를 하나 낸다. `cause`는 아래 표의 원인 값이고, 오류가 원인이면 그 오류 값(`P2pConnectError`, QUIC 종료 코드, io 분류)을 함께 싣는다. 호출자는 `status()`로 지금 상태를, `events()`로 전이 이력을 본다. 이벤트 큐 상한은 `events.queue_limit`(기본 256)이고, 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 이벤트 하나를 남긴다.
+endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전이마다 이벤트 `{from, to, cause, at}`를 하나 낸다. `cause`는 아래 표의 원인 값이고, 오류가 원인이면 그 오류 값(`P2pConnectError`, QUIC 종료 코드, io 분류)을 함께 싣는다. 호출자는 `status()`로 지금 상태를, `events()`로 전이 이력을 본다. 이벤트 큐 상한은 `events.queue_limit`(기본 256)이고, 넘치면 가장 오래된 것을 버리고 `Lagged{dropped}` 이벤트 하나를 남긴다. 블로킹 대기 `next_event`는 endpoint의 끝도 받는다: 끝난 뒤에도 큐에 남은 이벤트(`Off` 포함)를 먼저 돌려주고, 큐가 비었으면 기다리지 않고 `P2pError::Closed`를 돌려준다. 기다리던 호출자는 끝에서 모두 깨어난다.
 
 ### endpoint
 

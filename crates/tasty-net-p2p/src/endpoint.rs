@@ -762,12 +762,17 @@ impl P2pEndpoint {
 
     /// The oldest queued event, waiting up to `limit` for one. It blocks, so inside an async
     /// task it is refused with [`P2pError::InAsyncContext`] ([`P2pEndpoint::events`] does not
-    /// wait).
+    /// wait). After the endpoint ended the queued events (`Off` among them) still come first;
+    /// once the queue is empty the call returns [`P2pError::Closed`] at once, and the end wakes
+    /// every caller that waits.
     pub fn next_event(&self, limit: Duration) -> Result<Option<P2pEvent>, P2pError> {
         if crate::runtime::in_async_task() {
             return Err(P2pError::InAsyncContext);
         }
-        Ok(self.core().and_then(|c| c.events.next(limit)))
+        match self.core() {
+            None => Ok(None),
+            Some(c) => c.events.next(limit).map_err(|_| P2pError::Closed),
+        }
     }
 
     /// Every setting with the value in effect and its source.
@@ -833,6 +838,7 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
             let _released = core.gate.release();
             drop(lock(&core.key_hold).take());
             core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
+            core.events.end();
         });
     })
 }

@@ -791,8 +791,11 @@ impl Log {
         }
         let end = Instant::now() + limit;
         while let Some(left) = end.checked_duration_since(Instant::now()) {
-            let Some(e) = ep.next_event(left).expect("next event") else {
-                break;
+            // After the end the queue holds every event there is: `Closed` once it is empty.
+            let e = match ep.next_event(left) {
+                Ok(Some(e)) => e,
+                Ok(None) | Err(tasty_net_p2p::P2pError::Closed) => break,
+                Err(e) => panic!("next event: {e:?}"),
             };
             self.0.push(e.clone());
             if f(&e) {

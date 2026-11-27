@@ -208,7 +208,13 @@ pub(crate) struct Events {
 struct Queue {
     events: VecDeque<P2pEvent>,
     dropped: u64,
+    /// The endpoint ended: no event comes any more.
+    ended: bool,
 }
+
+/// [`Events::next`] found the queue empty after the endpoint ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ended;
 
 impl Events {
     pub(crate) fn new(limit: usize) -> Self {
@@ -233,6 +239,13 @@ impl Events {
         self.ready.notify_all();
     }
 
+    /// The endpoint ended after its last event: wake every waiter, and from now on an empty
+    /// queue answers at once.
+    pub(crate) fn end(&self) {
+        self.lock().ended = true;
+        self.ready.notify_all();
+    }
+
     fn take_lagged(q: &mut Queue) -> Option<P2pEvent> {
         (q.dropped > u64::MIN).then(|| {
             let dropped = std::mem::take(&mut q.dropped);
@@ -248,18 +261,24 @@ impl Events {
         out
     }
 
-    /// The oldest event, waiting up to `limit` for one.
-    pub(crate) fn next(&self, limit: Duration) -> Option<P2pEvent> {
+    /// The oldest event, waiting up to `limit` for one. The queued events come first; once
+    /// the queue is empty after [`Events::end`], [`Ended`] at once.
+    pub(crate) fn next(&self, limit: Duration) -> Result<Option<P2pEvent>, Ended> {
         let until = Instant::now().checked_add(limit);
         let mut q = self.lock();
         loop {
             if let Some(lagged) = Self::take_lagged(&mut q) {
-                return Some(lagged);
+                return Ok(Some(lagged));
             }
             if let Some(e) = q.events.pop_front() {
-                return Some(e);
+                return Ok(Some(e));
             }
-            let left = until?.checked_duration_since(Instant::now())?;
+            if q.ended {
+                return Err(Ended);
+            }
+            let Some(left) = until.and_then(|u| u.checked_duration_since(Instant::now())) else {
+                return Ok(None);
+            };
             q = self
                 .ready
                 .wait_timeout(q, left)
@@ -272,6 +291,7 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn ev(n: u64) -> P2pEvent {
         P2pEvent::Transition {
@@ -294,6 +314,44 @@ mod tests {
             vec![P2pEvent::Lagged { dropped: 3 }, ev(3), ev(4)]
         );
         assert_eq!(q.drain(), vec![]);
-        assert_eq!(q.next(Duration::from_millis(10)), None);
+        assert_eq!(q.next(Duration::from_millis(10)), Ok(None));
+    }
+
+    /// After the end the queued events still come first, then every caller, the waiting ones
+    /// and the later ones, gets `Ended` at once.
+    #[test]
+    fn the_end_wakes_every_waiter_after_the_queued_events() {
+        let q = Arc::new(Events::new(8));
+        let long = Duration::from_secs(60);
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let q = Arc::clone(&q);
+                std::thread::spawn(move || {
+                    let mut got = Vec::new();
+                    loop {
+                        match q.next(long) {
+                            Ok(Some(e)) => got.push(e),
+                            Ok(None) => return (got, false),
+                            Err(Ended) => return (got, true),
+                        }
+                    }
+                })
+            })
+            .collect();
+        let started = Instant::now();
+        q.push(ev(1));
+        q.end();
+        let mut events = Vec::new();
+        for w in waiters {
+            let (got, ended) = w.join().expect("waiter");
+            assert!(ended);
+            events.extend(got);
+        }
+        assert_eq!(events, vec![ev(1)]);
+        assert!(started.elapsed() < long);
+        q.push(ev(2));
+        assert_eq!(q.next(long), Ok(Some(ev(2))));
+        assert_eq!(q.next(long), Err(Ended));
+        assert!(started.elapsed() < long);
     }
 }
