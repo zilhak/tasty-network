@@ -10,8 +10,9 @@
 //!   (`security_not_implemented` or `undeterminable`, a refusal OpenSSH does not make);
 //! - `refused <kind> <place> [<keyword>]`: the reference client exits with 255 and its error
 //!   output names the place, and this crate refuses with that kind at that place (and keyword).
-//!   The place is `<file>:<line>` with the file relative to the fixture folder, or
-//!   `command-line` for a `-o` value.
+//!   The place is `<file>:<line>` with the file relative to the fixture folder,
+//!   `command-line` for a `-o` value, or `-` for a stop after reading (`ssh.c`, the
+//!   `ssh -G` output); with `-` the error output must name the keyword instead.
 //!
 //! The reference client is the one `scripts/install-openssh-ref.sh` builds from the base
 //! commit: `$TASTY_OPENSSH_REF_DIR/bin/ssh` or `<workspace>/target/tools/openssh-10.6p2/bin/ssh`,
@@ -197,6 +198,7 @@ enum Expect {
 enum Place {
     File { file: String, line: usize },
     CommandLine,
+    AfterReading,
 }
 
 fn kind_of(name: &str) -> Result<RefusalKind, String> {
@@ -228,6 +230,11 @@ fn parse_expect(text: &str) -> Result<Expect, String> {
         ["refused", kind, place, rest @ ..] if rest.len() <= 1 => {
             let place = if *place == "command-line" {
                 Place::CommandLine
+            } else if *place == "-" {
+                if rest.is_empty() {
+                    return Err("a refusal after reading names its keyword".to_string());
+                }
+                Place::AfterReading
             } else {
                 let (file, line) = place
                     .rsplit_once(':')
@@ -301,22 +308,27 @@ fn check_case(
                 Place::File { file, line } => {
                     let path = fixture.join(file);
                     let mark = format!("{} line {line}:", path.display());
-                    (Origin::File { path, line: *line }, mark)
+                    (Some(Origin::File { path, line: *line }), mark)
                 }
                 Place::CommandLine => (
-                    Origin::CommandLine {
+                    Some(Origin::CommandLine {
                         label: "command-line".to_string(),
-                    },
+                    }),
                     "command-line line 0:".to_string(),
                 ),
+                Place::AfterReading => (None, keyword.clone().unwrap_or_default()),
             };
-            if !stderr.contains(&mark) {
+            if !stderr
+                .to_ascii_lowercase()
+                .contains(&mark.to_ascii_lowercase())
+            {
                 return Err(format!("ssh error output does not name {mark:?}: {stderr}"));
             }
             let Some(f) = &r.refusal else {
                 return Err("ssh refuses, the port does not".to_string());
             };
-            if f.kind != *kind || f.origin.as_ref() != Some(&want_origin) {
+            let origin_ok = want_origin.is_none() || f.origin == want_origin;
+            if f.kind != *kind || !origin_ok {
                 return Err(format!(
                     "port refusal {:?} at {:?} ({f}), the case expects {kind:?} at {want_origin:?}",
                     f.kind, f.origin

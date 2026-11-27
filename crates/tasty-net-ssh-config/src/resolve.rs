@@ -592,6 +592,16 @@ impl ConfigSet {
                 format!("{}: bad algorithm list", crate::keywords::keyword_name(e.0)),
             )
         })?;
+        // `ssh -G` stops on this in `dump_client_config` and `ssh` when it connects
+        // (`sshconnect2.c:245`); the resolution stops here.
+        if r.o.assembled_hostkeyalgorithms().is_none() {
+            return Err(Fatal(Refusal {
+                kind: RefusalKind::ConfigError,
+                keyword: Some("hostkeyalgorithms".to_string()),
+                origin: first_origin(r, "hostkeyalgorithms"),
+                message: "expand HostKeyAlgorithms: the list cannot be assembled".to_string(),
+            }));
+        }
         let user_was_default = r.o.user.is_none();
         if user_was_default {
             r.o.user = r.env.account.user.clone();

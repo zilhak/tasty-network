@@ -710,15 +710,23 @@ impl Options {
         )
     }
 
-    /// `dump_client_config`: the text `ssh -G` prints, for the final host name `host`.
-    pub fn dump_client_config(&self, host: &str) -> Result<String, String> {
-        let mut out = Dump(String::new());
-        let hostkeyalgorithms = kex_assemble_names(
+    /// `HostKeyAlgorithms` assembled with the default list (`kex_assemble_names` of
+    /// `dump_client_config`, `readconf.c:3750`-`:3753`), without the known_hosts ordering
+    /// `ssh` does when it connects. `None` if the list cannot be assembled.
+    pub(crate) fn assembled_hostkeyalgorithms(&self) -> Option<String> {
+        kex_assemble_names(
             self.hostkeyalgorithms.as_deref(),
             &AlgList::HostKey.default_list(),
             &AlgList::HostKey.all(),
         )
-        .ok_or_else(|| "expand HostKeyAlgorithms".to_string())?;
+    }
+
+    /// `dump_client_config`: the text `ssh -G` prints, for the final host name `host`.
+    pub fn dump_client_config(&self, host: &str) -> Result<String, String> {
+        let mut out = Dump(String::new());
+        let hostkeyalgorithms = self
+            .assembled_hostkeyalgorithms()
+            .ok_or_else(|| "expand HostKeyAlgorithms".to_string())?;
 
         out.string(Op::Host, Some(&self.host_arg));
         out.string(Op::User, self.user.as_deref());

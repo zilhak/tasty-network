@@ -554,6 +554,16 @@ fn jump_command_passes_config_none() {
 }
 
 #[test]
+fn host_key_algorithms_that_do_not_assemble() {
+    let r = resolve("HostKeyAlgorithms !ssh-rsa\n", "web");
+    let f = r.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(f.keyword.as_deref(), Some("hostkeyalgorithms"));
+    let ok = resolve("HostKeyAlgorithms ^ssh-ed25519\n", "web");
+    assert_eq!(refusal_kind(&ok), None);
+}
+
+#[test]
 fn environment_and_tokens() {
     let mut ctx = context(Vec::new());
     ctx.env.insert("NAME".to_string(), "value".to_string());
