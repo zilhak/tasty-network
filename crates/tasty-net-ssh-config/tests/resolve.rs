@@ -108,6 +108,46 @@ fn unknown_keyword_in_inactive_block_refuses() {
     ));
 }
 
+/// The file, line and name of the first bad line (docs/design/ssh-backends.md "결과 API").
+fn refusal_place(r: &Resolution) -> (Option<String>, Option<usize>) {
+    let f = r.refusal.as_ref().expect("a refusal");
+    let line = match &f.origin {
+        Some(Origin::File { line, .. }) => Some(*line),
+        _ => None,
+    };
+    (f.keyword.clone(), line)
+}
+
+#[test]
+fn refusal_names_the_bad_line() {
+    let unknown = resolve("Port 2222\nHost never\n    NoSuchOption yes\n", "web");
+    assert_eq!(
+        refusal_place(&unknown),
+        (Some("nosuchoption".to_string()), Some(3))
+    );
+    let syntax = resolve("Port 2222\nForwardX11 perhaps\nPort 99999\n", "web");
+    assert_eq!(refusal_kind(&syntax), Some(RefusalKind::ConfigError));
+    assert_eq!(
+        refusal_place(&syntax),
+        (Some("forwardx11".to_string()), Some(2))
+    );
+
+    let cli = resolve_with("", "web", vec![option("Port=x", "override")]);
+    let f = cli.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::ConfigError);
+    assert_eq!(f.keyword.as_deref(), Some("port"));
+    assert_eq!(
+        f.origin,
+        Some(Origin::CommandLine {
+            label: "override".to_string()
+        })
+    );
+    let cli_unknown = resolve_with("", "web", vec![option("NoSuch=1", "override")]);
+    let f = cli_unknown.refusal.expect("a refusal");
+    assert_eq!(f.kind, RefusalKind::UnknownKeyword);
+    assert_eq!(f.keyword.as_deref(), Some("nosuch"));
+}
+
 #[test]
 fn ignore_unknown_applies_only_before_the_line() {
     let before = resolve("IgnoreUnknown NoSuch*\nNoSuchOption yes\n", "web");

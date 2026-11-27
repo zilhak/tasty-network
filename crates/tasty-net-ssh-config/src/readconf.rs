@@ -228,6 +228,8 @@ pub(crate) struct Reader<'a> {
     pub(crate) localhost_values: Vec<(Flag, Origin)>,
     /// Every `SessionType` value read in an applied block, in order.
     pub(crate) session_type_values: Vec<(SessionType, Origin)>,
+    /// The keyword of the line being read (lower-cased), for the refusal of a bad line.
+    line_keyword: Option<String>,
 }
 
 fn starts_with_ci(s: &str, prefix: &str) -> bool {
@@ -522,6 +524,7 @@ impl<'a> Reader<'a> {
             strict_values: Vec::new(),
             localhost_values: Vec::new(),
             session_type_values: Vec::new(),
+            line_keyword: None,
         }
     }
 
@@ -869,7 +872,7 @@ impl<'a> Reader<'a> {
             ));
         }
         let mut bad_options = 0usize;
-        let mut first_bad: Option<(Origin, String, RefusalKind)> = None;
+        let mut first_bad: Option<(Origin, String, RefusalKind, Option<String>)> = None;
         for (i, line) in text.split_inclusive('\n').enumerate() {
             let origin = Origin::File {
                 path: path.to_path_buf(),
@@ -880,6 +883,7 @@ impl<'a> Reader<'a> {
                 .iter()
                 .filter(|n| n.class == NoteClass::UnknownKeyword)
                 .count();
+            self.line_keyword = None;
             match self.process_line(line, &origin, Some(active), flags, depth) {
                 Ok(()) => {}
                 Err(LineErr::Bad(msg)) => {
@@ -894,23 +898,24 @@ impl<'a> Reader<'a> {
                     } else {
                         RefusalKind::ConfigError
                     };
-                    first_bad.get_or_insert((origin, msg, kind));
+                    first_bad.get_or_insert((origin, msg, kind, self.line_keyword.clone()));
                 }
                 Err(LineErr::Fatal(f)) => return Err(f),
             }
         }
         if bad_options > 0 {
-            let (origin, msg, kind) = first_bad.unwrap_or((
+            let (origin, msg, kind, keyword) = first_bad.unwrap_or((
                 Origin::File {
                     path: path.to_path_buf(),
                     line: Default::default(),
                 },
                 String::new(),
                 RefusalKind::ConfigError,
+                None,
             ));
             return Err(fatal(
                 kind,
-                None,
+                keyword.as_deref(),
                 Some(&origin),
                 format!(
                     "{}: terminating, {bad_options} bad configuration options ({msg})",
@@ -926,6 +931,7 @@ impl<'a> Reader<'a> {
         let origin = Origin::CommandLine {
             label: label.to_string(),
         };
+        self.line_keyword = None;
         match self.process_line(line, &origin, None, Flags::default(), Default::default()) {
             Ok(()) => Ok(()),
             Err(LineErr::Fatal(f)) => Err(f),
@@ -939,7 +945,7 @@ impl<'a> Reader<'a> {
                 } else {
                     RefusalKind::ConfigError
                 },
-                None,
+                self.line_keyword.clone().as_deref(),
                 Some(&origin),
                 msg,
             )),
@@ -988,6 +994,7 @@ impl<'a> Reader<'a> {
             return Ok(());
         }
         let keyword = keyword.to_ascii_lowercase();
+        self.line_keyword = Some(keyword.clone());
         let s: String = rest
             .map(|r| r.trim_start_matches(|c| WHITESPACE.contains(c)).to_string())
             .unwrap_or_default();
@@ -1639,7 +1646,11 @@ impl<'a> Reader<'a> {
                 if cmdline {
                     return bad("Include directive not supported as a command-line option");
                 }
-                self.include(&mut av, &keyword, origin, active, flags, depth)?;
+                let included = self.include(&mut av, &keyword, origin, active, flags, depth);
+                // The included files set their own keywords; a refusal of this line names
+                // `include`.
+                self.line_keyword = Some(keyword.clone());
+                included?;
             }
             Op::IpQos => {
                 let arg = av.next();
