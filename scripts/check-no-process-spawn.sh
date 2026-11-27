@@ -487,6 +487,12 @@ def self_test():
         ("닫히지 않은 raw 문자열(판정 불가)", "const S: &str = r#\"a\";\nfn f() { std::process::Command::new(\"x\"); }\n"),
         ("닫히지 않은 문자열(판정 불가)", "fn f() { std::process::Command::new(\"x); }\n"),
         ("닫히지 않은 블록 주석(판정 불가)", "/* a\nfn f() { std::process::Command::new(\"x\"); }\n"),
+        ("블록 없는 시험 cfg if 뒤의 제품 함수(판정 불가)",
+         "fn g() { #[cfg(test)] if false }\nfn product() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg 블록 안의 닫히지 않은 [(판정 불가)",
+         "fn g() { #[cfg(test)] { let x = [; }\n}\nfn product() { std::process::Command::new(\"x\"); }\n"),
+        ("시험 cfg else 뒤 블록 없이 닫힘(판정 불가)",
+         "fn g(b: bool) { #[cfg(test)] if b { } else }\nfn product() { std::process::Command::new(\"x\"); }\n"),
         ("시험 cfg 블록이 닫히지 않는다(판정 불가)", "fn f() { #[cfg(test)] { a(); std::process::Command::new(\"x\");\n"),
         ("시험 cfg use가 ;로 끝나지 않는다(판정 불가)", "#[cfg(test)] use a::b\nfn g() { std::process::Command::new(\"x\"); }\n"),
     ]

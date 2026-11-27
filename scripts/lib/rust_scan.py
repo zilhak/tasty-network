@@ -125,20 +125,40 @@ def tokenize(text):
 
 
 def matching_close(toks, i):
-    """toks[i]가 여는 괄호일 때 짝 닫는 괄호의 위치. 짝이 없으면 ScanError(나머지를 한 덩어리로
-    보지 않는다)."""
+    """toks[i]가 여는 괄호일 때 짝 닫는 괄호의 위치. 세 종류의 괄호를 함께 센다. 짝이 없거나 안쪽에서
+    종류가 다른 닫는 괄호를 만나면(안쪽 괄호가 닫히지 않음) ScanError(나머지를 한 덩어리로 보지 않는다)."""
     pairs = {"(": ")", "[": "]", "{": "}"}
-    open_, close = toks[i][1], pairs[toks[i][1]]
-    depth = 0
+    stack = []
     for j in range(i, len(toks)):
-        if toks[j][0] == "punct":
-            if toks[j][1] == open_:
-                depth += 1
-            elif toks[j][1] == close:
-                depth -= 1
-                if depth == 0:
-                    return j
-    raise ScanError(f"{toks[i][2]}행: 괄호 {open_}가 닫히지 않았다")
+        if toks[j][0] != "punct":
+            continue
+        t = toks[j][1]
+        if t in pairs:
+            stack.append(t)
+        elif t in (")", "]", "}"):
+            if pairs[stack[-1]] != t:
+                raise ScanError(f"{toks[j][2]}행: 괄호 {stack[-1]}가 닫히지 않은 채 {t}가 나왔다")
+            stack.pop()
+            if not stack:
+                return j
+    raise ScanError(f"{toks[i][2]}행: 괄호 {toks[i][1]}가 닫히지 않았다")
+
+
+def _block_after(toks, k, what):
+    """k부터 그 깊이의 첫 { 위치. 사이의 ( [ 는 짝까지 건너뛴다. 둘러싼 닫는 괄호나 ;를 먼저 만나거나
+    끝나면 ScanError(블록을 찾으러 둘러싼 괄호를 넘지 않는다)."""
+    n = len(toks)
+    start = k
+    while k < n:
+        t = toks[k][1] if toks[k][0] == "punct" else None
+        if t == "{":
+            return k
+        if t in ("(", "["):
+            k = matching_close(toks, k)
+        elif t in (")", "]", "}", ";"):
+            break
+        k += 1
+    raise ScanError(f"{toks[min(start, n - 1)][2]}행: 시험 cfg {what}의 블록을 찾지 못했다")
 
 
 # 바깥 깊이의 ;에서 끝나는 항목. 그 안의 {…}(제네릭 인수의 블록, 초기식)는 항목을 끝내지 않는다.
@@ -274,21 +294,9 @@ def _cfg_item_end(toks, start):
     if first == "{":
         return matching_close(toks, j)
     if first in BLOCK_EXPR:
-        k = j
-        while k < n and toks[k][1] != "{":
-            if toks[k][1] in ("(", "["):
-                k = matching_close(toks, k)
-            k += 1
-        if k >= n:
-            raise ScanError(f"{toks[j][2]}행: 시험 cfg {first} 문장의 블록을 찾지 못했다")
-        end = matching_close(toks, k)
+        end = matching_close(toks, _block_after(toks, j + 1, f"{first} 문장"))
         while first == "if" and end + 1 < n and toks[end + 1][1] == "else":
-            k = end + 2
-            while k < n and toks[k][1] != "{":
-                k += 1
-            if k >= n:
-                raise ScanError(f"{toks[j][2]}행: 시험 cfg if 문장의 else 블록을 찾지 못했다")
-            end = matching_close(toks, k)
+            end = matching_close(toks, _block_after(toks, end + 2, "if 문장의 else"))
         return end
     brace = _macro_brace(toks, j)
     if brace is not None:
