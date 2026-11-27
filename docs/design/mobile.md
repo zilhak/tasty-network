@@ -56,7 +56,7 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
 | `tasty-net-demo` | 대상 아님 | 해당 없음 | 예제 바이너리와 두 프로세스 시험, sshd를 띄운다 |
 | `tasty-net-ffi`(새 크레이트, 아래 "바인딩 층") | 대상 | 아직 없음 | 위 대상 크레이트만 의존한다 |
 
-- director 확인은 API 수준 26 clang으로 했다. 이 문서의 대상 수준 29로 C 코드를 컴파일한 확인은 모바일 cross check가 처음 한다.
+- director 확인은 API 수준 26 clang으로 했다. 이 문서의 대상 수준 29로 C 코드를 컴파일한 확인은 모바일 cross check가 처음 했다: 원격 빌드 환경의 `scripts/check.sh mobile-check`(2026-11-28, NDK r30 30.0.16248370)에서 `aarch64-linux-android`·`x86_64-linux-android` 두 target 모두 아래 cross check 목록의 여섯 조합(p2p 포함)이 통과했고 `ring`이 API 29 clang으로 컴파일됐다.
 - 판정의 정본은 모바일 cross check(아래)다. 이 표는 그 단계가 생기기 전의 확인 기록이고, 그 단계가 처음 성공하면 "확인하지 않음" 칸을 그 실행으로 고친다.
 
 ## 다른 프로그램 실행 금지
@@ -74,7 +74,7 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
 
 ### 정적 검사 `no-process-spawn`
 
-`scripts/check.sh no-process-spawn`(모바일 cross check 작업이 만든다).
+`scripts/check.sh no-process-spawn`(`scripts/check-no-process-spawn.sh`. 판정 자체 시험을 먼저 돈다).
 
 1. 보는 파일: 금지 크레이트의 `src/**/*.rs`에서 `src/bin/**`와 `src/main.rs`를 뺀 것.
 2. `tasty-net-ssh`의 `src/system/**`는 빼고 본다. 단 `src/lib.rs`에 `#[cfg(feature = "system-ssh")]`가 붙은 `mod system;` 선언이 있어야 한다. 없으면 이 단계가 실패한다(폴더 예외가 feature로 보호되는지 확인한다).
@@ -82,7 +82,7 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
    - `#[cfg(test)]`와 `#[cfg(all(test, …))]`가 붙은 항목(그 뒤의 `mod`·`fn`·`use`·`impl` 블록, 중괄호 짝으로 끝을 찾는다)을 지운다.
    - 그런 속성이 붙은 파일 모듈 선언(`#[cfg(test)] mod tests;`)이 가리키는 파일(`<이름>.rs`, `<이름>/mod.rs`, 그 아래 폴더)은 보지 않는다. 지금 해당하는 것은 identity의 `src/device_key/tests.rs`(`device_key.rs:319`–`:321`이 선언)와 `src/record/tests.rs`(`record.rs:467`–`:469`)다.
    - `#[cfg(any(test, …))]`는 지우지 않는다. 시험 밖에서도 컴파일되기 때문이다.
-   - 기존 `no-hidden-constants`의 `strip_cfg_test`(`scripts/check-no-hidden-constants.sh:245`)는 정확히 `#[cfg(test)]`만 지운다. 이 단계는 `all(test, …)`까지 지우므로 같은 함수를 넓혀 함께 쓴다.
+   - 시험 항목 지우기와 시험 모듈 파일 찾기는 `no-hidden-constants`와 같은 함수(`scripts/lib/rust_scan.py`의 `strip_cfg_test`·`test_module_files`)다. 이 단계를 위해 그 함수가 `#[cfg(test)]`에 더해 직접 인자에 `test`가 있는 `#[cfg(all(…))]`도 지우게 넓혔고, `no-hidden-constants`도 같은 규칙을 따른다.
 4. 남은 코드의 `use` 선언을 나무로 펼친다. 묶음(`use std::{io, process::{Command, id}};`), 중첩 중괄호, 별칭(`as`), `self`(`use std::process::{self};`), 여러 줄에 걸친 선언, 앞의 `::`를 모두 풀어 `가져온 경로 → 지역 이름` 목록을 만든다.
    - 모듈 자체를 가져오는 것은 별칭과 관계없이 실패다: `std::process`(예: `use std::process;`, `use std::process as proc;`, `use std::{process as proc};`, `use std::process::{self as p};`)와 `tokio::process`(같은 모양들). 모듈을 지역 이름으로 들이면 그 뒤 `proc::Command`를 이름만으로는 가를 수 없기 때문이다. `std::process` 아래에서 가져와도 되는 것은 이름을 적은 `id`·`exit`·`abort`·`ExitCode`뿐이다. 글롭(`use std::process::*;`)도 실패다.
    - 금지 모듈의 윗 경로를 지역 이름으로 들이는 것도 별칭과 관계없이 실패다: 크레이트 루트 `std`·`::std`·`tokio`·`::tokio`(`use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`), `std::os`와 `std::os::<os>`(`use std::os::unix as u;`, `use std::os::{self as o};`). edition 2018부터는 `extern crate` 없이 `use`만으로 크레이트에 별칭을 줄 수 있어서, 이것을 두면 `s::process::Command`·`u::process::CommandExt`를 경로 문자열로 찾지 못하기 때문이다. 규칙을 한 줄로 쓰면: 펼친 `use` 항목의 가져온 경로가 금지 경로(`std::process`, `tokio::process`, `std::os::<os>::process`)와 같거나 그 앞부분이면, 그리고 이름을 적은 `id`·`exit`·`abort`·`ExitCode`가 아니면 실패다. 별칭 없이 `use std::os::unix;`처럼 윗 경로를 그대로 들이는 것도 같다. `std::os::<os>::prelude`에서의 글롭도 실패다.
@@ -97,15 +97,15 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
 모바일 cross check의 각 조합 그대로 feature가 보이는 `cargo tree`로 본다.
 
 ```text
-cargo tree --locked --target <t> -p <크레이트> <그 조합의 feature 인자> -e normal -f '{p} {f}' --prefix none
+cargo tree --locked --target <t> -p <크레이트> <그 조합의 feature 인자> -e normal -f '{p}|{f}' --prefix none
 ```
 
-- `-f '{p} {f}'`가 패키지마다 켜진 feature 목록을 찍는다. `-e normal`은 일반 의존만 따른다(빌드 의존은 호스트에서 돌므로 빼고, dev 의존은 시험용이라 뺀다).
+- `-f '{p}|{f}'`가 패키지마다 켜진 feature 목록을 찍는다(`|`는 패키지 출처의 공백과 feature를 가르는 구분자다). `-e normal`은 일반 의존만 따른다(빌드 의존은 호스트에서 돌므로 빼고, dev 의존은 시험용이라 뺀다).
 - 실패 조건: `tokio` 줄의 feature에 `process`가 있다, `russh-config` 줄이 있다, `tasty-net-ssh` 줄의 feature에 `system-ssh`가 있다.
 - russh 0.65.4의 일반 의존 tokio feature는 `io-util`·`sync`·`time`과 비 wasm `io-util`·`rt-multi-thread`·`time`·`net`이고 `process`는 dev 의존에만 있다. russh-sftp 4.0.0은 `io-util`·`rt`·`sync`·`time`·`macros`다. 그래서 지금 판에서는 이 검사가 통과해야 한다.
 - 빌드 성공만으로 판정하지 않는 근거: std의 `std::process`는 Android·iOS target에서도 컴파일된다(위 표의 ssh 행이 지금 통과한다).
-- 앱의 최종 의존 그래프(android 요구 #15): 같은 기준을 앱 작업 공간에서도 돌릴 수 있게 이 절을 공개 기준으로 둔다. 대상 target은 `aarch64-linux-android`·`x86_64-linux-android`이고, 명령은 앱 작업 공간에서 앱 cdylib 크레이트를 `-p`로 준 같은 `cargo tree`다(앱의 배포 빌드 feature 인자를 붙인다). 실패 조건 가운데 `russh-config` 줄과 `tasty-net-ssh`의 `system-ssh`는 그대로다. `tokio`의 `process`는 앱 자신이 켤 수 있으므로(다른 프로그램 실행 금지는 앱 코드에 적용되지 않는다, 아래 "바인딩 층") 그 줄만으로 실패로 보지 않는다. 같은 앱 패키지·target·배포 feature 인자·일반 의존 범위로 거꾸로 본 `cargo tree --locked --target <t> -p <앱 cdylib 크레이트> <배포 feature 인자> -e normal,features -i tokio`(feature를 켠 쪽을 거꾸로 보인다)에서 `process`를 켠 경로에 `tasty-net-*` 크레이트가 있을 때만 실패다. `-e features`만 주면 Cargo가 빌드·dev 의존도 함께 보이므로 `normal`을 같이 준다([cargo tree](https://doc.rust-lang.org/cargo/commands/cargo-tree.html) `--edges`).
-- 이 검사를 하는 스크립트는 모바일 cross check 작업이 만들고, 앱 작업 공간의 `Cargo.toml` 경로와 크레이트 이름을 인자로 받아 이 레포 밖에서도 같은 조건으로 돈다. 인자 모양은 그 작업이 정한다.
+- 앱의 최종 의존 그래프(android 요구 #15): 같은 기준을 앱 작업 공간에서도 돌릴 수 있게 이 절을 공개 기준으로 둔다. 대상 target은 `aarch64-linux-android`·`x86_64-linux-android`이고, 명령은 앱 작업 공간에서 앱 cdylib 크레이트를 `-p`로 준 같은 `cargo tree`다(앱의 배포 빌드 feature 인자를 붙인다). 실패 조건 가운데 `russh-config` 줄과 `tasty-net-ssh`의 `system-ssh`는 그대로다. `tokio`의 `process`는 앱 자신이 켤 수 있으므로(다른 프로그램 실행 금지는 앱 코드에 적용되지 않는다, 아래 "바인딩 층") 그 줄만으로 실패로 보지 않는다. 같은 앱 패키지·target·배포 feature 인자·일반 의존 범위로 거꾸로 본 `cargo tree --locked --target <t> -p <앱 cdylib 크레이트> <배포 feature 인자> -e normal,features -i tokio@<판> --no-dedupe --prefix depth -f '{p}'`(feature를 켠 쪽을 거꾸로 보인다. `--no-dedupe`는 이미 보인 노드의 경로를 `(*)`로 접지 않게 한다)에서 `process`를 켠 경로에 `tasty-net-*` 크레이트가 있을 때만 실패다. `process`가 켜진 tokio 판마다 따로 본다. `-e features`만 주면 Cargo가 빌드·dev 의존도 함께 보이므로 `normal`을 같이 준다([cargo tree](https://doc.rust-lang.org/cargo/commands/cargo-tree.html) `--edges`).
+- 이 검사를 하는 스크립트는 `scripts/check-mobile-deps.sh` 한 파일이고 이 레포 밖에서도 같은 조건으로 돈다. 인자는 `--manifest-path <Cargo.toml>`, `--app`(앱 그래프 기준, 없으면 이 레포 기준), `--target <t>`(여러 번), `-p <크레이트>`, `--` 뒤의 feature 인자다. 앱에서 쓰는 예와 출력, 종료 코드는 [CI](../dev-guide/ci.md#앱-작업-공간에서-의존-쪽-검사)에 있다.
 
 ## 모바일의 SSH
 
@@ -315,15 +315,15 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 
 ## 모바일 cross check
 
-CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 그때 [CI](../dev-guide/ci.md)와 [CI와 시험 환경](testing.md)에 적는다.
+CI 잡 둘이 있다(`.github/workflows/ci.yml`). 잡 설정과 NDK 판의 근거는 [CI](../dev-guide/ci.md#모바일-cross-check)에 있다.
 
 | 잡 | 러너 | target | 준비 |
 |---|---|---|---|
-| `mobile-android` | `ubuntu-latest` | `aarch64-linux-android`, `x86_64-linux-android` | `rustup target add`, NDK 설치(판 고정), 위 "대상 target"의 `CC_<target>`·`AR_<target>`(`llvm-ar`)·`CARGO_TARGET_<TARGET>_LINKER` |
+| `mobile-android` | `ubuntu-latest` | `aarch64-linux-android`, `x86_64-linux-android` | `rustup target add`, NDK 설치(판 고정, r30, `scripts/install-ndk.sh`), 위 "대상 target"의 `CC_<target>`·`AR_<target>`(`llvm-ar`)·`CARGO_TARGET_<TARGET>_LINKER` |
 | `mobile-ios` | `macos-latest` | `aarch64-apple-ios`, `aarch64-apple-ios-sim` | `rustup target add` |
 
-- 검사 단계 이름: `mobile-check`(`scripts/check.sh mobile-check <target>`). 로컬에 그 target이 없으면 단계는 실패하지 않고 "target 없음"을 한 줄로 알리고 건너뛴 target을 적는다. CI 잡은 건너뛰기를 실패로 본다(환경 변수로 구분).
-- 명령(target마다, 모두 `--locked`): `cargo check --locked --target <t> -p <크레이트> --lib <feature 인자>`. 조합마다 위 "의존 쪽 검사"의 `cargo tree`를 같은 인자로 돌린다.
+- 검사 단계 이름: `mobile-check`(`scripts/check.sh mobile-check <target>`). 로컬에 그 target이 없으면 단계는 실패하지 않고 "target 없음"을 한 줄로 알리고 건너뛴 target을 적는다. CI 잡은 건너뛰기를 실패로 본다(환경 변수 `MOBILE_CHECK_REQUIRE=1`로 구분).
+- 명령(target마다, 모두 `--locked`): `cargo check --locked --target <t> -p <크레이트> --lib <feature 인자>`. 조합마다 위 "의존 쪽 검사"의 `cargo tree`를 같은 인자로 돌린다. 아래 표에서 지금 목록에 든 행은 `scripts/mobile-crates.list`에 한 줄씩 있다.
 
   | 크레이트 | feature 인자 | 목록에 드는 때 |
   |---|---|---|
@@ -337,14 +337,14 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
   | `tasty-net-ffi` | 없음 | ffi 크레이트가 생긴 커밋부터 |
 
 - 그 전 단계에서 `tasty-net-ssh`는 목록에 없다. 1단계의 ssh에는 `system-ssh`만 있어 모바일 조합이 없기 때문이다. 목록에서 빼는 것은 이 문서가 모바일 대상이 아니라고 정한 것(`tasty-net-demo`, rendezvous 실행 파일)과 아직 없는 크레이트·조합뿐이다.
-- 같은 잡이 정적 검사 `no-process-spawn`과, ffi가 생긴 뒤에는 생성 검사(Kotlin은 `mobile-android` 잡, Swift는 `mobile-ios` 잡)를 본다.
+- `mobile-android` 잡이 정적 검사 `no-process-spawn`을 본다(소스만 읽으므로 한 잡). ffi가 생긴 뒤에는 생성 검사(Kotlin은 `mobile-android` 잡, Swift는 `mobile-ios` 잡)도 같은 잡이 본다.
 - `cargo check`는 링크하지 않으므로 NDK 링커 설정이 맞는지는 보지 않는다. C 코드 컴파일(`ring`)만 NDK clang과 `llvm-ar`을 쓴다. 링크까지 보는 검사(`cargo build --target`)는 앱 쪽 묶기에서 처음 필요해진다.
 
 ## D 기준과의 관계
 
-결정됨(director 2931): D11(모바일 target 빌드 검사)을 [동작 수준 기준](done-criteria.md)에 넣는다. 내장 백엔드 attach 시험은 tasty 전환 기준에 넣지 않고 [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준)으로 따로 둔다. D11을 판정할 `mobile-android`·`mobile-ios` 잡은 아직 없다. 모바일 cross check 작업이 만든다.
+결정됨(director 2931): D11(모바일 target 빌드 검사)을 [동작 수준 기준](done-criteria.md)에 넣는다. 내장 백엔드 attach 시험은 tasty 전환 기준에 넣지 않고 [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준)으로 따로 둔다. D11을 판정할 잡은 `mobile-android`·`mobile-ios`다.
 
-- 태그 규칙([버전·호환](versioning.md#태그와-브랜치))도 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, 모바일 cross check CI(모바일 cross check 작업)가 tasty 전환 태그보다 먼저 있어야 한다.
+- 태그 규칙([버전·호환](versioning.md#태그와-브랜치))도 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, 모바일 cross check CI가 tasty 전환 태그보다 먼저 있어야 한다. 그 CI는 이제 있다.
 - D11은 판정 sha마다 위 cross check 표에서 "목록에 드는 때"를 채운 행 전체를 본다. T3가 들어온 뒤의 `tasty-net-p2p`, 이식 크레이트가 생긴 뒤의 `tasty-net-ssh-config`, 내장 백엔드 작업 뒤의 내장 조합 두 행도 그 커밋부터 든다.
 
 ## 후속 작업과 미정
@@ -352,7 +352,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | 항목 | 상태 |
 |---|---|
 | transport ssh feature 분리(1단계) | 들어갔다. [feature 계약](ssh-backends.md#feature-계약), 검사 단계 `scripts/check.sh transport-no-ssh` |
-| 모바일 cross check CI와 `no-process-spawn` | 후속 작업. 이 문서 "모바일 cross check", "다른 프로그램 실행 금지" |
+| 모바일 cross check CI와 `no-process-spawn` | 들어갔다. CI 잡 `mobile-android`·`mobile-ios`, 검사 단계 `scripts/check.sh mobile-check`·`no-process-spawn`([CI](../dev-guide/ci.md#모바일-cross-check)) |
 | OpenSSH 해석 이식 크레이트 | 후속 작업. [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트) |
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
@@ -362,10 +362,10 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | FFI의 요청 클라이언트와 오류 | 후속 작업(바인딩 크레이트). #7+: 객체·메서드 이름, `params`와 결과의 표현(JSON 문자열 또는 바이트), `Remote` 오류 값의 표현, attach 링크 쪽에도 상대 `caps` 조회를 둘지, `PeerTooOld`·`TargetMismatch` 변형의 모양 |
 | Kotlin 패키지 이름의 값 | 후속 작업(바인딩 크레이트). #12: `uniffi.toml`의 `package_name` 값, rlib 링크 시험에서 두 네임스페이스의 Kotlin이 모두 `tasty_mobile_core`를 싣는지 볼지 |
 | 지역망 판정 콜백과 두 오류의 FFI 모양 | 후속 작업(바인딩 크레이트, 내장 SSH 백엔드). #14: 콜백 이름과 인자, 두 변형의 필드, 콜백 안에서 앱이 권한을 요청할 때의 대기 상한, 실행 중 심벌을 찾을 라이브러리와 방법 |
-| 앱 그래프의 의존 쪽 검사 스크립트 | 후속 작업(모바일 cross check). #15: 인자 모양(`Cargo.toml` 경로·크레이트·target·feature), `tokio` `process`를 켠 경로 판정의 출력, 그래프에 tokio가 여러 판일 때(`-i tokio@<판>`)와 없을 때(`cargo tree`가 실패한다)의 처리, 앱 레포 CI에서 부르는 방법 |
+| 앱 그래프의 의존 쪽 검사 스크립트 | 들어갔다(#15). `scripts/check-mobile-deps.sh`의 `--manifest-path`·`--app`·`--target`·`-p`·`--` 뒤 feature 인자. `process`를 켠 경로는 `tokio feature "process" <- … <- <앱>`으로 찍는다. tokio가 여러 판이면 `process`가 켜진 판마다 `-i tokio@<판>`으로 보고, tokio가 없거나 `process`가 꺼져 있으면 거꾸로 보지 않는다. 앱 레포 CI에서 부르는 방법은 [CI](../dev-guide/ci.md#앱-작업-공간에서-의존-쪽-검사) |
 | FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
 | 의존(tokio·quinn·ring·russh)의 최소 iOS 배포 대상 | 확인하지 않음 |
-| `x86_64-linux-android`·iOS 두 target의 빌드 | 확인하지 않음(원격·작업 머신에 target 없음) |
+| `x86_64-linux-android`·iOS 두 target의 빌드 | `x86_64-linux-android`는 원격 빌드 환경의 `mobile-check`에서 통과(2026-11-28, 위 "크레이트별 판정"). iOS 두 target은 확인하지 않음(작업 머신에 macOS가 없다. CI `mobile-ios` 잡이 처음 본다) |
 | tasty 설정 화면의 SSH 항목 | tasty 전환 때. 이 레포 범위 밖 |
