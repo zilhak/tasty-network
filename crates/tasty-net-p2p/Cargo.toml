@@ -1,0 +1,28 @@
+[package]
+name = "tasty-net-p2p"
+description = "Direct UDP P2P transport of the Tasty network: NAT judgement, punching over a rendezvous server, QUIC with device keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The only workspace crates this crate may use (docs/design/crates.md "P2P 크레이트 격리").
+tasty-net-identity = { path = "../tasty-net-identity" }
+tasty-net-rendezvous = { path = "../tasty-net-rendezvous" }
+# Exact pins and features, the same as tasty-net-rendezvous (docs/design/p2p.md "외부 의존과 고정").
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+# Socket buffer sizes and IPV6_V6ONLY on the P2P socket; the same version as quinn's UDP layer.
+socket2 = "0.6"
+# The reconnect jitter and STUN transaction IDs.
+getrandom = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[lints]
+workspace = true

@@ -1680,6 +1680,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tasty-net-p2p"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tasty-net-identity",
+ "tasty-net-rendezvous",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tasty-net-rendezvous"
 version = "0.1.0"
 dependencies = [
