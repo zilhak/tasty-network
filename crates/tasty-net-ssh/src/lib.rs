@@ -177,11 +177,14 @@ const SERVER_ALIVE_COUNT_MAX_OPTION: &str = "ServerAliveCountMax";
 
 /// The values of the options `name` in the target's extra options, in order (`Key=Value` or
 /// `Key Value`; ssh compares option names without case). The value is the text after the name
-/// and one `=`, as written; [`openssh_argument`] reads it the way ssh does.
+/// and one `=`, as written; [`openssh_argument`] reads it the way ssh does. A name with no value
+/// (`Key` alone or `Key=`) gives an empty value, which ssh refuses as a missing argument.
 fn target_options<'a>(target: &'a SshTarget, name: &'a str) -> impl Iterator<Item = &'a str> {
     target.extra_options.iter().filter_map(move |opt| {
         let opt = opt.trim();
-        let split = opt.find(|c: char| c == '=' || c.is_whitespace())?;
+        let split = opt
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(opt.len());
         let (key, rest) = opt.split_at(split);
         let rest = rest.trim_start();
         let value = rest.strip_prefix('=').unwrap_or(rest).trim();
@@ -191,14 +194,15 @@ fn target_options<'a>(target: &'a SshTarget, name: &'a str) -> impl Iterator<Ite
 
 /// The single argument of an option value, split the way OpenSSH splits it (`argv_split`):
 /// spaces and tabs end it, single or double quotes group text and are removed, and a backslash
-/// escapes a quote, a backslash or (outside quotes) a space. `None` when ssh would refuse it:
-/// no argument, an unclosed quote, or more than one argument.
+/// escapes a quote, a backslash or (outside quotes) a space. A `#` that starts an argument
+/// outside quotes starts a comment to the end (`terminate_on_comment`, as ssh reads options).
+/// `None` when ssh would refuse it: no argument, an unclosed quote, or more than one argument.
 fn openssh_argument(value: &str) -> Option<String> {
     let mut args: Vec<String> = Vec::new();
     let mut chars = value.chars().peekable();
     loop {
         while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
-        if chars.peek().is_none() {
+        if chars.peek().is_none_or(|c| *c == '#') {
             break;
         }
         let mut arg = String::new();
@@ -249,7 +253,8 @@ const TIME_UNITS: [(char, u64); 5] = [
 
 /// A time in the integer OpenSSH time format (`convtime`): whole numbers, each followed by a
 /// unit `s`, `m`, `h`, `d` or `w` (either case) or by nothing (seconds), written one after
-/// another (`1m30s`, `90`), each unit at most once. A unit written twice (`1s2s`, also `1s2`)
+/// another (`1m30s`, `90`), each unit at most once. A number may start with `+`, as `strtol`
+/// reads it (`+5`). A unit written twice (`1s2s`, also `1s2`)
 /// and a fraction (`1.5`, which newer OpenSSH reads) are not read. OpenSSH refuses a total above
 /// `i32::MAX` seconds; so does this.
 pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
@@ -270,7 +275,7 @@ pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
         return None;
     }
     for c in text.chars() {
-        if c.is_ascii_digit() {
+        if c.is_ascii_digit() || (c == '+' && digits.is_empty()) {
             digits.push(c);
         } else {
             add(&mut digits, c.to_ascii_lowercase())?;

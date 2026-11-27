@@ -346,6 +346,25 @@ fn the_target_connect_timeout_is_read_like_openssh() {
         (&["ConnectTimeout='60'"][..], "'60'", "target", d(60)),
         (&["ConnectTimeout=\"60"][..], "\"60", "target", d(10)),
         (&["ConnectTimeout=1m 30s"][..], "1m 30s", "target", d(10)),
+        // A comment after the value is dropped, and a plus sign is read, as ssh does.
+        (
+            &["ConnectTimeout=60 # slow link"][..],
+            "60 # slow link",
+            "target",
+            d(60),
+        ),
+        (&["ConnectTimeout=+5"][..], "+5", "target", d(5)),
+        (&["ConnectTimeout=1m+30s"][..], "1m+30s", "target", d(90)),
+        (&["ConnectTimeout=#5"][..], "#5", "target", d(10)),
+        // A name with no value is a value ssh refuses, not a skipped option.
+        (&["ConnectTimeout"][..], "", "target", d(10)),
+        (&["ConnectTimeout="][..], "", "target", d(10)),
+        (
+            &["ConnectTimeout", "ConnectTimeout=60"][..],
+            "",
+            "target",
+            d(10),
+        ),
         // The first value that is not none is the one ssh takes, readable or not.
         (
             &["ConnectTimeout=5", "ConnectTimeout=60"][..],
@@ -377,7 +396,11 @@ fn the_target_connect_timeout_is_read_like_openssh() {
     // The format itself.
     assert_eq!(parse_openssh_time("1w2d3h4m5s"), Some(d(788_645)));
     assert_eq!(parse_openssh_time("1m30"), Some(d(90)));
+    assert_eq!(parse_openssh_time("+5"), Some(d(5)));
     for refused in [
+        "+",
+        "++5",
+        "1+5",
         "",
         "m",
         "1.5",
