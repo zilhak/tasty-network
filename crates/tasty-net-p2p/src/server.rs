@@ -259,14 +259,19 @@ async fn registered(
         Err(e) => return close_malformed(conn, e),
     };
     on_welcome(core, &welcome);
+    // The mismatch is in place before anything can see the registration: an attempt that sees
+    // `Registered` also sees it and ends with ServerLimitsInvalid.
+    let mismatch = limits_mismatch(core, &welcome.limits);
+    {
+        let mut r = lock(&core.reg);
+        r.mismatch = mismatch;
+        r.registered_at = Some(SystemTime::now());
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<DeviceMessage>();
     *lock(&core.link) = Some(Link { tx });
     let server_limit = welcome.limits.max_message_bytes;
-    let registered_at = SystemTime::now();
-    lock(&core.reg).registered_at = Some(registered_at);
     core.endpoint_to(EndpointPhase::Registered, Cause::named("registered"));
-    if let Some(key) = limits_mismatch(core, &welcome.limits) {
-        lock(&core.reg).mismatch = Some(key);
+    if let Some(key) = mismatch {
         core.endpoint_to(
             EndpointPhase::Registered,
             Cause::with(

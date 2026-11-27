@@ -305,6 +305,16 @@ fn server_limits_mismatch_is_reported() {
             Value::Duration(Duration::from_secs(2)),
         )]),
     );
+    // The mismatch is in place as soon as the registration shows, so no attempt can pass the
+    // check between the two.
+    assert!(wait_until(LONG, || {
+        let st = a.ep.status();
+        let shown = st.state == EndpointPhase::Registered;
+        if shown {
+            assert_eq!(st.limits_mismatch, Some("quic.handshake_timeout_max"));
+        }
+        shown
+    }));
     let b = device(&n2, 2, 2, &s, settings(&[]));
     pair(&a, &b);
     registered(&a);
