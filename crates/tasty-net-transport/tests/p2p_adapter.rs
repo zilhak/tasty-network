@@ -943,6 +943,135 @@ fn the_drain_cap_does_not_wait_for_the_poll_interval() {
     );
 }
 
+/// Binds the endpoint of the key `seed` again, as long as `tasty-net-p2p` refuses it because
+/// the earlier endpoint of that key is not off yet (it ends once every handle of it and of its
+/// connections is gone); how long that took.
+fn bind_again(server: &Rendezvous, seed: u8, peer: DeviceId) -> Duration {
+    let started = Instant::now();
+    loop {
+        let pairing = Arc::new(PairingList::new());
+        pairing.add(peer);
+        let mut config = P2pConfig::new(key(seed), pairing);
+        config.enabled = true;
+        config.server = Some(server.info);
+        match P2pEndpoint::bind(config) {
+            Ok(again) => {
+                let took = started.elapsed();
+                // Closed once registered: a close in the middle of the registration keeps the
+                // server's shutdown at the end of the test waiting.
+                wait_until("the registration of the endpoint bound again", || {
+                    again.status().state == EndpointPhase::Registered
+                });
+                again.close();
+                return took;
+            }
+            Err(tasty_net_p2p::P2pError::EndpointInUse) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("bind again: {error:?}"),
+        }
+    }
+}
+
+/// An accepting side whose idle connections wait `drain_cap` for the dialer's close, on its
+/// own endpoint `b` (of key `seed + 1`), next to a dialing endpoint `a`.
+fn draining_ends(
+    server: &Rendezvous,
+    seed: u8,
+    drain_cap: Duration,
+) -> (P2pEndpoint, P2pEndpoint, P2pListener) {
+    let (ka, kb) = (key(seed), key(seed + 1));
+    let a = endpoint(server, seed, kb.id());
+    let b = endpoint(server, seed + 1, ka.id());
+    let accept = AcceptConfig::new(
+        kb,
+        format!("acceptor-{seed}"),
+        None,
+        Arc::new(Policy::default()),
+    )
+    .with_timeouts(LinkTimeouts {
+        drain_cap,
+        ..timeouts()
+    });
+    let listener = P2pListener::new(b.clone(), accept).expect("listener");
+    (a, b, listener)
+}
+
+/// `a`'s connection to `b`, once `b` is registered.
+fn dial_raw(a: &P2pEndpoint, b: &P2pEndpoint) -> tasty_net_p2p::P2pConnection {
+    let started = Instant::now();
+    loop {
+        match a.connect(b.id()) {
+            Ok(conn) => return conn,
+            Err(_) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("connect: {error:?}"),
+        }
+    }
+}
+
+/// The dialer closes an accepted connection while the accepting side waits the drain cap for
+/// it: the wait ends with the connection, which keeps nothing of the endpoint after that.
+#[test]
+fn the_drain_wait_ends_when_the_dialer_closes() {
+    let long = Duration::from_secs(10);
+    let server = Rendezvous::start();
+    let (a, b, listener) = draining_ends(&server, 80, long);
+    let conn = dial_raw(&a, &b);
+    let mut stream = conn.open_bi().expect("a stream");
+    stream.set_read_timeout(Some(PATIENCE));
+    stream.write_all(b"{}\n").expect("a first line");
+    let inbound = listener
+        .accept_timeout(Some(PATIENCE))
+        .expect("the channel");
+    let refusing = std::thread::spawn(move || inbound.handshake(&AttemptCancel::new()));
+    let ack = read_ack(&mut stream);
+    assert_eq!(ack["ok"], json!(false), "{ack}");
+    // The refusal lingers until this side's end; then it was the accepting side's last
+    // channel, which waits for the dialer's close from here on.
+    stream.finish().expect("this side's end");
+    let refused = refusing.join().expect("the refusing handshake");
+    assert!(refused.is_err());
+    conn.close(P2pCloseReason::Closed);
+    drop((stream, conn, listener, b));
+    let took = bind_again(&server, 81, key(80).id());
+    assert!(
+        took < long / 2,
+        "the accepting endpoint ended {took:?} after the close: the drain wait kept it"
+    );
+    a.close();
+}
+
+/// A channel that waited in the listener goes with its ended connection, and its end starts no
+/// drain wait on that connection.
+#[test]
+fn a_waiting_channel_of_an_ended_connection_starts_no_drain_wait() {
+    let long = Duration::from_secs(10);
+    let server = Rendezvous::start();
+    let (a, b, listener) = draining_ends(&server, 82, long);
+    let conn = dial_raw(&a, &b);
+    let mut stream = conn.open_bi().expect("a stream");
+    stream
+        .write_all(b"waits")
+        .expect("bytes that open the stream");
+    // Nobody accepts: the channel waits in the listener.
+    wait_until("the waiting channel", || {
+        format!("{listener:?}").contains("waiting: 1")
+    });
+    conn.close(P2pCloseReason::Closed);
+    wait_until("the channel's removal", || {
+        format!("{listener:?}").contains("waiting: 0")
+    });
+    drop((stream, conn, listener, b));
+    let took = bind_again(&server, 83, key(82).id());
+    assert!(
+        took < long / 2,
+        "the accepting endpoint ended {took:?} after the close: a drain wait kept it"
+    );
+    a.close();
+}
+
 /// Both sides send a last frame and end their side; each application reads the other's last
 /// frame. The acceptor ends its side first and reads late: its EOF waits until it read the
 /// dialer's end, so the dialer's close of the connection drops nothing.

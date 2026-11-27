@@ -83,12 +83,14 @@ impl Stream {
         if self.side == ConnSide::Dialer {
             return self.finish_now();
         }
+        // On a connection that ended no peer end comes, and no wait keeps the connection.
+        let ended = matches!(self.conn.wait_closed(Duration::ZERO), Ok(Some(_)));
         {
             let mut end = lock(&self.end);
             if end.finished || end.aborted || end.finish_wanted {
                 return Ok(());
             }
-            if !end.eof_read {
+            if !end.eof_read && !ended {
                 end.finish_wanted = true;
                 drop(end);
                 self.finish_after_drain_cap();

@@ -73,13 +73,16 @@ struct Channels {
     idle_since: Option<Instant>,
     /// This end closes or closed the connection: no new channel takes it.
     closing: bool,
+    /// The QUIC connection ended (its thread saw the end, whoever closed it): no channel
+    /// takes it and no drain timer waits on it.
+    ended: bool,
 }
 
 impl Channels {
     /// Whether the drain cap `cap` ran out since the last channel went, on a connection
     /// nobody closes yet.
     fn drained(&self, cap: Duration) -> bool {
-        !self.closing && self.idle_since.is_some_and(|since| since.elapsed() >= cap)
+        !self.closing && !self.ended && self.idle_since.is_some_and(|since| since.elapsed() >= cap)
     }
 }
 
@@ -166,7 +169,7 @@ impl ConnState {
     /// A place for one more channel, unless the connection is closing.
     pub(crate) fn acquire(self: &Arc<Self>) -> Option<ChannelSlot> {
         let mut channels = lock(&self.channels);
-        if channels.closing || self.conn.close_reason().is_some() {
+        if channels.closing || channels.ended || self.conn.close_reason().is_some() {
             return None;
         }
         channels.open += 1;
@@ -180,7 +183,15 @@ impl ConnState {
 
     /// Whether a new channel may still take the connection.
     pub(crate) fn is_usable(&self) -> bool {
-        !lock(&self.channels).closing && self.conn.close_reason().is_none()
+        let channels = lock(&self.channels);
+        !channels.closing && !channels.ended && self.conn.close_reason().is_none()
+    }
+
+    /// The connection's thread saw the connection end: wakes the drain timer, which then
+    /// lets the connection go, and no later channel end starts one.
+    fn mark_ended(&self) {
+        lock(&self.channels).ended = true;
+        self.channels_changed.notify_all();
     }
 
     /// Closes the whole connection with `reason`; no new channel takes it.
@@ -199,6 +210,8 @@ impl ConnState {
             }
             match self.side {
                 ConnSide::Dialer => channels.closing = true,
+                // An ended connection has nothing to wait for.
+                ConnSide::Acceptor if channels.ended => return,
                 ConnSide::Acceptor => channels.idle_since = Some(Instant::now()),
             }
         }
@@ -224,9 +237,9 @@ impl ConnState {
     }
 
     /// On the accepting side, once the last channel is gone: closes the connection with code 0
-    /// at the drain cap unless a channel came or it closed first. The connection's thread
-    /// checks the same between its waits for a stream, which may be longer
-    /// (`path.poll_interval`).
+    /// at the drain cap unless a channel came, this end closed it or it ended first. The
+    /// connection's thread checks the same between its waits for a stream, which may be
+    /// longer (`path.poll_interval`).
     fn close_after_drain_cap(self: &Arc<Self>) {
         let state = Arc::clone(self);
         let spawned = std::thread::Builder::new()
@@ -234,7 +247,7 @@ impl ConnState {
             .spawn(move || {
                 let mut channels = lock(&state.channels);
                 loop {
-                    if channels.closing {
+                    if channels.closing || channels.ended {
                         return;
                     }
                     let Some(since) = channels.idle_since else {
@@ -314,12 +327,15 @@ pub(crate) fn watch(state: Arc<ConnState>, queue: Option<Weak<Queue>>, poll: Dur
         // Without its thread nobody takes its streams or closes it when idle: close it now.
         tracing::debug!(%error, "no thread for a P2P connection");
         state.close(P2pCloseReason::Closed);
+        state.mark_ended();
         state.end_entry();
     }
 }
 
 fn run(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, poll: Duration) {
     serve(state, queue, poll);
+    // Before the waiting channels go: their ends start no drain timer.
+    state.mark_ended();
     // The listener hands out no channel of the ended connection.
     if let Some(queue) = queue.and_then(Weak::upgrade) {
         queue.remove(state);
