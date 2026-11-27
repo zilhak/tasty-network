@@ -283,6 +283,7 @@ allow	crates/tasty-net-p2p/src/nat.rs	sent = 0	세기의 시작: 보낸 요청 �
 allow	crates/tasty-net-p2p/src/nat.rs	sent += 1	세기: 보낸 요청 하나
 allow	crates/tasty-net-p2p/src/probe.rs	usize::MIN	후보 차례의 시작 첨자 0
 allow	crates/tasty-net-p2p/src/probe.rs	wrapping_add(1)	다음 후보로 한 칸
+allow	crates/tasty-net-p2p/src/runtime.rs	const BUDGET_PROBE: usize = u8::MAX as usize	tokio 내부 협조 예산(1.54의 128)보다 큰 탐침 상한: 동작값이 아니라 예산 없음 판정의 경계
 allow	crates/tasty-net-p2p/src/server.rs	u64::MIN	연속 실패 수의 시작·초기화, 0은 무제한 (p2p.md rendezvous.reconnect.max_attempts)
 allow	crates/tasty-net-p2p/src/server.rs	+= 1	세기: 재연결 번호, 연속 실패 수
 allow	crates/tasty-net-p2p/src/server.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
