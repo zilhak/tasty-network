@@ -82,6 +82,7 @@ allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut rejected = 0	세�
 allow	crates/tasty-net-rendezvous/src/server/state.rs	saturating_add(1)	후보 규칙의 서버 반사 주소 하나(rendezvous.md 후보 주소 규칙)
 allow	crates/tasty-net-rendezvous/src/server/state.rs	/ 2	start_after 식의 절반 RTT (rendezvous.md 서버 상태)
 allow	crates/tasty-net-rendezvous/src/server/state.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-rendezvous/src/server/state.rs	u64::MIN	세기: 보낸 expired 취소 수의 시작 0
 allow	crates/tasty-net-rendezvous/src/access.rs	index + 1	오류의 행 번호는 1부터
 allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	skip(1)	argv 첫 칸은 실행 파일 이름
 allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	Id::from_u64(u64::MAX)	span을 만들지 않는 로그 구독자의 자리 ID(0은 쓸 수 없다)
