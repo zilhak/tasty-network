@@ -281,7 +281,17 @@ fn move_endpoint(
     to: EndpointPhase,
     cause: Cause,
 ) -> bool {
-    let mut r = lock(reg);
+    move_endpoint_in(&mut lock(reg), events, shutting_down, to, cause)
+}
+
+/// [`move_endpoint`] on a state whose lock the caller already holds.
+fn move_endpoint_in(
+    r: &mut Registration,
+    events: &Events,
+    shutting_down: impl FnOnce() -> bool,
+    to: EndpointPhase,
+    cause: Cause,
+) -> bool {
     if r.phase == Some(EndpointPhase::Off) && shutting_down() {
         return false;
     }
@@ -352,8 +362,25 @@ impl Core {
             to,
             cause,
         ) {
-            self.reg_changed.send_modify(|n| *n = n.wrapping_add(1));
+            self.reg_moved();
         }
+    }
+
+    /// Move the endpoint state machine inside a section that already holds the state's lock,
+    /// so the move goes with what that section checked; whether it moved. The caller calls
+    /// [`Core::reg_moved`] after it releases the lock when it moved.
+    pub(crate) fn endpoint_to_in(
+        &self,
+        r: &mut Registration,
+        to: EndpointPhase,
+        cause: Cause,
+    ) -> bool {
+        move_endpoint_in(r, &self.events, || self.is_shutting_down(), to, cause)
+    }
+
+    /// Wake the waiters of a registration change.
+    pub(crate) fn reg_moved(&self) {
+        self.reg_changed.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// Send a message on the coordination connection of registration `generation` only: work
@@ -1850,6 +1877,59 @@ mod tests {
         assert!(matches!(again.try_recv(), Ok(DeviceMessage::NatReport(_))));
         assert!(!ep.status().nat_answers.is_empty());
         assert!(nat_changed(ep.events()), "the control reports nat_changed");
+        ep.close();
+    }
+
+    /// The `nat_changed` move of a judgement goes with its check of the registration: once
+    /// the registration is cleared and the state left `Registered` (as the server loop does
+    /// before Backoff or Stopped), that judgement does not move the state back. Each round
+    /// takes the state's lock the moment the judgement shows and ends the registration there,
+    /// the narrowest place a server loop on another worker can take it.
+    #[test]
+    fn a_judgement_does_not_move_an_ended_registration_back() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([45; 32]).id();
+        let StandIn { ep, core, .. } = stand_in(
+            44,
+            peer,
+            &[
+                ("nat.stun_rto", Value::Duration(Duration::from_millis(1))),
+                ("nat.stun_attempts", Value::Count(1)),
+            ],
+        );
+        for round in 0..2_000 {
+            let (tx, _queue) = mpsc::unbounded_channel();
+            let generation = core.open_link(tx);
+            {
+                let mut r = lock(&core.reg);
+                r.nat = None;
+                r.phase = Some(EndpointPhase::Registered);
+            }
+            let judging = core
+                .handle
+                .spawn(crate::server::rejudge(core.clone(), generation));
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(Instant::now() < until, "round {round}: judged");
+                let Ok(mut r) = core.reg.try_lock() else {
+                    std::hint::spin_loop();
+                    continue;
+                };
+                if r.nat.is_some() {
+                    // The server loop's end of the registration, in one step.
+                    *lock(&core.link) = None;
+                    r.nat = None;
+                    r.phase = Some(EndpointPhase::Backoff);
+                    break;
+                }
+            }
+            core.handle.block_on(judging).expect("judged");
+            assert_eq!(
+                lock(&core.reg).phase,
+                Some(EndpointPhase::Backoff),
+                "round {round}: the judgement moved the ended registration back"
+            );
+        }
         ep.close();
     }
 

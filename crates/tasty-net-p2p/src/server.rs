@@ -599,10 +599,19 @@ pub(crate) async fn rejudge(core: Arc<Core>, generation: u64) {
             .map(|n| (n.mapping, n.answers.first().and_then(|a| a.reflexive)));
         let changed = before != Some((j.mapping, j.answers.first().and_then(|a| a.reflexive)));
         r.nat = Some(j);
-        changed && r.phase == Some(EndpointPhase::Registered)
+        // The transition goes in the same section as the check of the registration: the
+        // server loop clears a registration under this lock before it moves to Backoff or
+        // Stopped, so a judgement of a registration that ended never moves the state back.
+        changed
+            && r.phase == Some(EndpointPhase::Registered)
+            && core.endpoint_to_in(
+                &mut r,
+                EndpointPhase::Registered,
+                Cause::named("nat_changed"),
+            )
     };
     if changed {
-        core.endpoint_to(EndpointPhase::Registered, Cause::named("nat_changed"));
+        core.reg_moved();
     }
 }
 
