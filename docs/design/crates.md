@@ -86,7 +86,8 @@ frame, ssh, identity ─> (없음)
 | 크레이트 | 적용 |
 |---|---|
 | `tasty-net-p2p`, `tasty-net-rendezvous` | 처음부터 따른다. 항목 표는 [P2P](p2p.md#설정값), [rendezvous](rendezvous.md#서버-설정값) |
-| `tasty-net-transport`, `tasty-net-ssh` | develop에 이미 있는 상수(heartbeat 간격·시간 제한, 터널 준비 기한, 출력 상한 등)를 이 규칙에 맞추는 후속 작업으로 둔다. 그때 각 문서에 항목 표를 더한다 |
+| `tasty-net-transport` | develop에 이미 있는 상수(heartbeat 간격·시간 제한 등)를 이 규칙에 맞추는 후속 작업으로 둔다. 그때 문서에 항목 표를 더한다 |
+| `tasty-net-ssh` | 따른다(연결·keepalive 옵션, 포트 발견 기한·출력 상한, 터널 준비 기한, backoff). 항목 표는 [전송 추상화](transport.md#ssh-크레이트-설정값) |
 | `tasty-net-frame` | 위와 같다(프레임 상한은 와이어 형식이므로 제외) |
 | `tasty-net-identity` | 따른다. 항목 표는 [기기 키·토큰](identity.md#설정값) |
 | `tasty-net-topology` | 따른다(탐색 기한·상한). 메시지 크기 상한은 프레임 상한에서 나온 와이어 형식이라 제외. 항목 표는 [토폴로지](topology.md#설정값) |
