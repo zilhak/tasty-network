@@ -42,7 +42,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts", "lib"))
 from rust_scan import (  # noqa: E402  (scripts/lib/rust_scan.py)
-    matching_close, strip_cfg_test, test_module_files, tokenize,
+    KEYWORDS, matching_close, strip_cfg_test, test_module_files, tokenize,
 )
 
 TAG = "[no-process-spawn]"
@@ -188,9 +188,10 @@ def path_hits(toks, spans):
         if i in skip or toks[i][0] != "ident":
             continue
         if (i > 1 and toks[i - 1][1] == "::"
-                and (toks[i - 2][0] == "ident" or toks[i - 2][1] == ">")):
-            # 경로 한가운데(a::std::…, <T>::std::…)는 그 경로의 첫 조각에서 본다. 앞에 ::만 있으면
-            # (::std::…) 루트 경로라 여기서 본다.
+                and ((toks[i - 2][0] == "ident" and toks[i - 2][1] not in KEYWORDS)
+                     or toks[i - 2][1] == ">")):
+            # 경로 한가운데(a::std::…, <T>::std::…)는 그 경로의 첫 조각에서 본다. 앞에 ::만 있거나
+            # 그 앞이 키워드면(::std::…, return ::std::…, &mut ::std::…) 루트 경로라 여기서 본다.
             continue
         t, line = toks[i][1], toks[i][2]
         if t == "extern" and i + 4 < n and toks[i + 1][1] == "crate" \
@@ -355,6 +356,12 @@ def self_test():
         ("cfg(any(test, unix)) 안의 금지 경로", "#[cfg(any(test, unix))]\nfn f() { std::process::Command::new(\"x\"); }\n"),
         ("raw 식별자 use r#std::r#process::r#Command as Cmd;", "use r#std::r#process::r#Command as Cmd;\n"),
         ("raw 식별자 경로 r#std::r#process::r#Child", "fn f(_c: r#std::r#process::r#Child) {}\n"),
+        ("return ::std::process::Command", "fn f() -> ::std::process::Output { return ::std::process::Command::new(\"x\").output().unwrap(); }\n"),
+        ("&mut ::std::process::Command", "fn f() { g(&mut ::std::process::Command::new(\"x\")); }\n"),
+        ("for a in ::std::process::Command", "fn f() { for a in ::std::process::Command::new(\"x\").get_args() { h(a); } }\n"),
+        ("match guard if ::std::process::Command", "fn f(x: u8) { match x { _ if ::std::process::Command::new(\"x\").status().is_ok() => {} _ => {} } }\n"),
+        ("while ::tokio::process::Command", "fn f() { while ::tokio::process::Command::new(\"y\").spawn().is_err() {} }\n"),
+        ("else 블록 안의 ::std::process::Command", "fn f(b: bool) -> ::std::process::Output { if b { todo!() } else { ::std::process::Command::new(\"x\").output().unwrap() } }\n"),
     ]
     good = [
         ("use std::process::{id, exit};", "use std::process::{id, exit};\n"),
@@ -372,6 +379,7 @@ def self_test():
          "// std::process::Command\n/* use std::process::Command; */\nconst S: &str = \"std::process::Command\";\n"),
         ("raw 문자열(# 8개) 안의 따옴표와 std::process::Command", "const S: &str = r########\"a \"# std::process::Command \"## b\"########;\n"),
         ("raw 식별자 r#match는 키워드가 아니다", "fn r#match() {}\n"),
+        ("a::std::process::Command(다른 크레이트 안의 std 모듈)", "fn f() { other::std::process::Command::new(\"x\"); }\n"),
     ]
     cases = []
     for title, src in bad:
