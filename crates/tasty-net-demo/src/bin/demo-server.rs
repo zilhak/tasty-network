@@ -28,6 +28,7 @@
 //! | `server attached client=<n> live=<links> peer=<instance>` | the domain check took an attach link |
 //! | `server roles client=<n> local=acceptor launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | an attach link is up (`<side>` is `dialer` or `acceptor`) |
 //! | `server control client=<n> <json>` | the descriptor of a link this end holds arrived |
+//! | `server control-invalid client=<n> error=<text>` | the first Control of a link this end would hold was not a descriptor; the link ends |
 //! | `server echo client=<n> <text>` | a Data frame came back on a link this end holds |
 //! | `server send-failed error=<text>` | a `send` line found no held link, or writing failed |
 //! | `server link-ended client=<n> end=<detach\|failure name>` | the link's reader ended |
@@ -45,7 +46,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::{Args, emit, error_chain, failure_name, link_timeouts};
+use tasty_net_demo::{Args, Snapshot, emit, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken, DeviceKey, RecordPublication};
 use tasty_net_transport::{
@@ -312,9 +313,11 @@ fn serve_link(mut link: Link, instance_id: &str, held: &Held) {
         return;
     };
     let end = if roles.provider == Side::Acceptor {
-        let snapshot = format!(
-            "{{\"snapshot\":{{\"instance_id\":\"{instance_id}\",\"client_id\":{client}}}}}"
-        );
+        let snapshot = Snapshot {
+            instance_id: instance_id.to_string(),
+            client_id: client,
+        }
+        .to_json();
         match writer.write_frame(StreamTag::Control, snapshot.as_bytes()) {
             Ok(()) => echo(reader, &writer),
             Err(error) => format!("write_failed:{}", error.kind()),
@@ -341,6 +344,13 @@ fn hold(
 ) -> (String, ChannelWriter) {
     match reader.read_frame() {
         Ok(frame) if frame.tag == StreamTag::Control => {
+            // Only a descriptor makes this end the holder; anything else ends the link.
+            if let Err(error) = Snapshot::parse(&frame.payload) {
+                emit(&format!(
+                    "server control-invalid client={client} error={error}"
+                ));
+                return ("protocol".into(), writer);
+            }
             // Held before the line goes out: a `send` that follows the line finds the link.
             lock(held).push((client, writer));
             emit(&format!(

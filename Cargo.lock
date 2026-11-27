@@ -1497,6 +1497,7 @@ name = "tasty-net-demo"
 version = "0.1.0"
 dependencies = [
  "russh",
+ "serde_json",
  "tasty-net-frame",
  "tasty-net-identity",
  "tasty-net-ssh",

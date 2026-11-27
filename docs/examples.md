@@ -80,6 +80,7 @@ send hello
 | 시험 | 확인하는 것(요약) |
 |---|---|
 | `reversed_holder_echo` | 서버가 제안을 수락하고 holder가 된다. 두 끝이 같은 역할 표(SSH를 띄운 쪽·dialer·제공 쪽·다시 거는 쪽은 dialer, holder는 서버)를 찍고, 첫 Control은 dialer의 descriptor다. 서버가 보낸 Data가 dialer를 거쳐 돌아온다 |
+| `a_quoted_instance_id_survives_the_descriptor` | 따옴표·역슬래시가 든 dialer 인스턴스 ID가 descriptor(JSON 직렬화)를 거쳐 서버에 그대로 닿는다. 서버는 descriptor를 파싱하고, 파싱되지 않으면 holder가 되지 않고 `server control-invalid`를 찍는다 |
 | `reconnect_after_tunnel_kill` | 터널 ssh를 끝내면 서버 쪽 링크가 끝나고 dialer가 새 터널(다른 PID)로 다시 붙어 다시 제안한다. 역할 표와 echo가 그대로다 |
 | `refused_proposal_stops_without_retry` | 거절하는 서버에서 dialer는 `role_refused`로 시도 한 번 만에 종료 코드 3으로 끝난다 |
 | `self_attach_is_rejected` | 서버의 인스턴스 ID를 쓰는 dialer는 `self_attach`로 끝나고 제안·attach가 일어나지 않는다 |

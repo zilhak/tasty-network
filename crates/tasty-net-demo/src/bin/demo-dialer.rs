@@ -62,7 +62,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use tasty_net_demo::{Args, emit, error_chain, failure_name, link_timeouts};
+use tasty_net_demo::{Args, Snapshot, emit, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
 use tasty_net_ssh::{Backoff, PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
@@ -235,10 +235,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let provides = roles.provider == Side::Dialer;
                 // The provider sends the descriptor first (O2), before any stdin line can.
                 if provides {
-                    let descriptor = format!(
-                        "{{\"snapshot\":{{\"instance_id\":\"{instance_id}\",\"client_id\":{}}}}}",
-                        link.client_id().unwrap_or(0)
-                    );
+                    let descriptor = Snapshot {
+                        instance_id: instance_id.clone(),
+                        client_id: link.client_id().unwrap_or(0),
+                    }
+                    .to_json();
                     if let Err(error) =
                         writer.write_frame(StreamTag::Control, descriptor.as_bytes())
                     {

@@ -20,6 +20,51 @@ use std::time::Duration;
 use tasty_net_frame::ReadFailure;
 use tasty_net_transport::LinkTimeouts;
 
+/// What the workspace descriptor of the demo names: the providing instance and the client ID
+/// the accepting end gave the link. The provider sends it as the link's first Control frame,
+/// `{"snapshot":{"instance_id":"<id>","client_id":<n>}}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub instance_id: String,
+    pub client_id: u32,
+}
+
+impl Snapshot {
+    /// The descriptor as JSON. The instance ID is any string the handshake took, so it is
+    /// serialized, never pasted between quotes.
+    pub fn to_json(&self) -> String {
+        serde_json::json!({
+            "snapshot": {
+                "instance_id": self.instance_id,
+                "client_id": self.client_id,
+            }
+        })
+        .to_string()
+    }
+
+    /// Reads a descriptor, or says why it is not one.
+    pub fn parse(payload: &[u8]) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|e| format!("not JSON: {e}"))?;
+        let snapshot = value
+            .get("snapshot")
+            .ok_or_else(|| "no snapshot".to_string())?;
+        let instance_id = snapshot
+            .get("instance_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "no string instance_id".to_string())?;
+        let client_id = snapshot
+            .get("client_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| "no u32 client_id".to_string())?;
+        Ok(Self {
+            instance_id: instance_id.to_string(),
+            client_id,
+        })
+    }
+}
+
 /// Prints one event line on stdout and flushes it, so a reader of the pipe sees it at once.
 pub fn emit(line: &str) {
     let mut out = std::io::stdout().lock();
@@ -176,6 +221,38 @@ pub fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use super::Snapshot;
+
+    /// An instance ID with a quote and a backslash comes back unchanged.
+    #[test]
+    fn a_descriptor_keeps_any_instance_id() {
+        for id in ["demo-dialer-7", "desk\"east", "a\\b\\\"c", "\\u0041", ""] {
+            let snapshot = Snapshot {
+                instance_id: id.to_string(),
+                client_id: 3,
+            };
+            let json = snapshot.to_json();
+            assert_eq!(Snapshot::parse(json.as_bytes()), Ok(snapshot), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_broken_descriptor_is_refused() {
+        for payload in [
+            &b"{\"snapshot\":{\"instance_id\":\"desk\"east\",\"client_id\":1}}"[..],
+            b"{}",
+            b"{\"snapshot\":{\"instance_id\":7,\"client_id\":1}}",
+            b"{\"snapshot\":{\"instance_id\":\"x\",\"client_id\":-1}}",
+            b"not json",
+        ] {
+            assert!(
+                Snapshot::parse(payload).is_err(),
+                "{}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+    }
+
     use super::*;
 
     fn args(words: &[&str]) -> Vec<OsString> {

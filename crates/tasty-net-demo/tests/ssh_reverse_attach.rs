@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use support::process::{Proc, log, terminate};
 use support::scene::{LOCAL_STEP, Ready, SSH_STEP, Scene, number, one_at_a_time};
-use tasty_net_demo::field;
+use tasty_net_demo::{Snapshot, field};
 
 /// The role table of a reversed SSH link, as both ends print it after `local=`.
 const REVERSED: &str =
@@ -101,9 +101,15 @@ fn reversed_attach(
     let control = server.expect(&format!("{control_prefix:?}"), LOCAL_STEP, |l| {
         l.starts_with(&control_prefix)
     });
-    assert!(
-        control.contains(&dialer_instance),
-        "the descriptor names the dialer's instance: {control}"
+    let descriptor = Snapshot::parse(&control.as_bytes()[control_prefix.len()..])
+        .unwrap_or_else(|e| panic!("the descriptor is not one ({e}): {control}"));
+    assert_eq!(
+        descriptor,
+        Snapshot {
+            instance_id: dialer_instance,
+            client_id: client,
+        },
+        "the descriptor names the dialer's instance and the link's client ID: {control}"
     );
     // The dialer provides, so it receives no snapshot.
     assert!(
@@ -133,6 +139,30 @@ fn reversed_holder_echo() {
     assert_eq!(field(&ended, "end"), Some("detach"), "{ended}");
     let released = server.expect_prefix("server released ", LOCAL_STEP);
     assert_eq!(field(&released, "live"), Some("0"), "{released}");
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// An instance ID with a quote and a backslash reaches the holder unchanged in the descriptor:
+/// the dialer serializes it, the server parses it.
+#[test]
+fn a_quoted_instance_id_survives_the_descriptor() {
+    const ID: &str = "desk\"east\\x";
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let mut dialer = start_reversing_dialer(&mut scene, &["--instance-id", ID]);
+    reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
+    let proposal = server
+        .transcript
+        .lines()
+        .into_iter()
+        .find(|l| l.starts_with("server proposal "))
+        .expect("the proposal line");
+    assert_eq!(field(&proposal, "peer"), Some(ID), "{proposal}");
+    held_echo(&mut server, &mut dialer, 1, "hello-quoted");
+
+    scene.quit_dialer(dialer);
     Scene::stop_server(server);
     scene.finish();
 }
