@@ -1304,9 +1304,13 @@ impl KnownHosts {
     /// of the look-up without the port is taken only when the address without its port does
     /// not give [`HostKeyVerdict::Mismatch`]; otherwise the first verdict stays. `ssh` passes
     /// that case when `StrictHostKeyChecking` is `no` (it only warns), so this rejects more
-    /// there. A certificate is not checked by address, as `ssh` does not load the address
-    /// lines for one (`sshconnect.c:1058`). The address check of the name with the port is
-    /// the caller's, with [`HostKeyQuery::for_address`].
+    /// there. A certificate is checked by address as its plain key. `ssh` loads no address
+    /// lines for a certificate (`sshconnect.c:1058`), but when it drops to the plain key (a
+    /// certificate with no trusted CA or out of its validity, `sshconnect.c:1473`-`:1486`)
+    /// the look-up without the port starts with the plain key and checks the address. This
+    /// crate does not read the validity of a certificate, so it takes the case that rejects
+    /// more. The address check of the name with the port is the caller's, with
+    /// [`HostKeyQuery::for_address`].
     pub fn check_with_address(
         &self,
         query: &HostKeyQuery,
@@ -1318,14 +1322,13 @@ impl KnownHosts {
             (&verdict, &query.without_port)
         {
             let again = self.check_name(name, key_blob);
-            let is_cert = parse_blob(key_blob).is_some_and(|k| k.cert);
-            let address_differs = !is_cert
-                && address.is_some_and(|a| {
-                    matches!(
-                        self.check_name(&put_host_port(a, u16::MIN), key_blob),
-                        HostKeyVerdict::Mismatch { .. }
-                    )
-                });
+            // `check_name` judges a certificate as its plain key.
+            let address_differs = address.is_some_and(|a| {
+                matches!(
+                    self.check_name(&put_host_port(a, u16::MIN), key_blob),
+                    HostKeyVerdict::Mismatch { .. }
+                )
+            });
             if matches!(again, HostKeyVerdict::Match { .. }) && !address_differs {
                 return again;
             }
@@ -1791,13 +1794,18 @@ mod tests {
         assert_eq!(kh.check_with_address(&web, Some("10.0.0.8"), &a), matched);
         assert_eq!(kh.check_with_address(&web, Some("10.0.0.10"), &a), matched);
         assert_eq!(kh.check_with_address(&web, Some("10.0.0.9"), &a), matched);
-        // A certificate is not checked by address.
+        // A certificate is checked by address as its plain key: another key at the address
+        // without the port fails the retry, the same key passes.
         let (dir, kh) = hosts(&format!(
-            "web.example {ka}\n10.0.0.7 {kb}\n",
+            "web.example {ka}\n10.0.0.7 {kb}\n10.0.0.8 {ka}\n",
             ka = line("ssh-ed25519", &ed25519_blob(4))
         ));
         assert_eq!(
             kh.check_with_address(&web, Some("10.0.0.7"), &cert(4)),
+            HostKeyVerdict::NotFound
+        );
+        assert_eq!(
+            kh.check_with_address(&web, Some("10.0.0.8"), &cert(4)),
             HostKeyVerdict::Match {
                 file: dir.0.join("known_hosts"),
                 line: 1
