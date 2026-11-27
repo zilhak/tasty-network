@@ -305,6 +305,10 @@ pub(crate) fn watch(state: Arc<ConnState>, queue: Option<Weak<Queue>>, poll: Dur
 
 fn run(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, poll: Duration) {
     serve(state, queue, poll);
+    // The listener hands out no channel of the ended connection.
+    if let Some(queue) = queue.and_then(Weak::upgrade) {
+        queue.remove(state);
+    }
     state.end_entry();
 }
 

@@ -53,6 +53,20 @@ impl Queue {
         lock(&self.items).ended = true;
         self.changed.notify_all();
     }
+
+    /// Takes out the waiting channels of `conn`, which ended.
+    pub(crate) fn remove(&self, conn: &Arc<ConnState>) {
+        let removed: VecDeque<_> = {
+            let mut items = lock(&self.items);
+            let (gone, kept) = std::mem::take(&mut items.waiting)
+                .into_iter()
+                .partition(|(c, _)| Arc::ptr_eq(c, conn));
+            items.waiting = kept;
+            gone
+        };
+        // Dropped outside the lock: a channel's drop releases its place on the connection.
+        drop(removed);
+    }
 }
 
 /// The accepting side of P2P channels on one endpoint.
@@ -153,6 +167,13 @@ impl P2pListener {
         let mut items = lock(&self.queue.items);
         loop {
             if let Some((conn, channel)) = items.waiting.pop_front() {
+                if conn.is_closed() {
+                    // Its connection ended before its thread took it out.
+                    drop(items);
+                    drop((conn, channel));
+                    items = lock(&self.queue.items);
+                    continue;
+                }
                 return Ok(P2pInbound {
                     channel,
                     conn,

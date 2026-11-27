@@ -809,6 +809,54 @@ fn a_new_connection_takes_no_more_channels_before_its_first_handshake() {
     drop(link);
 }
 
+/// A channel that waited in the listener while its connection ended is not handed out.
+#[test]
+fn the_listener_hands_out_no_channel_of_an_ended_connection() {
+    let server = Rendezvous::start();
+    let (ka, kb) = (key(74), key(75));
+    let a = endpoint(&server, 74, kb.id());
+    let b = endpoint(&server, 75, ka.id());
+    let accept = AcceptConfig::new(kb, "acceptor-75", None, Arc::new(Policy::default()))
+        .with_timeouts(timeouts());
+    let listener = P2pListener::new(b.clone(), accept).expect("listener");
+    let started = Instant::now();
+    let conn = loop {
+        match a.connect(b.id()) {
+            Ok(conn) => break conn,
+            Err(_) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("connect: {error:?}"),
+        }
+    };
+    let mut stream = conn.open_bi().expect("a stream");
+    stream
+        .write_all(b"waits")
+        .expect("bytes that open the stream");
+    // Nobody accepts: the channel waits in the listener.
+    wait_until("the waiting channel", || {
+        format!("{listener:?}").contains("waiting: 1")
+    });
+    conn.close(P2pCloseReason::Closed);
+    wait_until("the end on the accepting side", || {
+        b.connections()
+            .iter()
+            .all(|info| info.state == tasty_net_p2p::AttemptPhase::Closed)
+    });
+    match listener.accept_timeout(Some(Duration::from_millis(500))) {
+        Err(error) => {
+            let kind = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<io::Error>())
+                .map(io::Error::kind);
+            assert_eq!(kind, Some(io::ErrorKind::TimedOut), "{error:?}");
+        }
+        Ok(inbound) => panic!("a channel of the ended connection was handed out: {inbound:?}"),
+    }
+    drop((stream, conn, listener));
+    a.close();
+    b.close();
+}
+
 /// The ACK among the Control frames the accepting side writes on `stream`.
 fn read_ack(stream: &mut tasty_net_p2p::P2pStream) -> Value {
     loop {
