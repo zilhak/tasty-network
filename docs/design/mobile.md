@@ -85,10 +85,11 @@ develop b103e90을 `aarch64-linux-android`로 두 번 확인했다.
    - 기존 `no-hidden-constants`의 `strip_cfg_test`(`scripts/check-no-hidden-constants.sh:245`)는 정확히 `#[cfg(test)]`만 지운다. 이 단계는 `all(test, …)`까지 지우므로 같은 함수를 넓혀 함께 쓴다.
 4. 남은 코드의 `use` 선언을 나무로 펼친다. 묶음(`use std::{io, process::{Command, id}};`), 중첩 중괄호, 별칭(`as`), `self`(`use std::process::{self};`), 여러 줄에 걸친 선언, 앞의 `::`를 모두 풀어 `가져온 경로 → 지역 이름` 목록을 만든다.
    - 모듈 자체를 가져오는 것은 별칭과 관계없이 실패다: `std::process`(예: `use std::process;`, `use std::process as proc;`, `use std::{process as proc};`, `use std::process::{self as p};`)와 `tokio::process`(같은 모양들). 모듈을 지역 이름으로 들이면 그 뒤 `proc::Command`를 이름만으로는 가를 수 없기 때문이다. `std::process` 아래에서 가져와도 되는 것은 이름을 적은 `id`·`exit`·`abort`·`ExitCode`뿐이다. 글롭(`use std::process::*;`)도 실패다.
+   - 금지 모듈의 윗 경로를 지역 이름으로 들이는 것도 별칭과 관계없이 실패다: 크레이트 루트 `std`·`::std`·`tokio`·`::tokio`(`use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`), `std::os`와 `std::os::<os>`(`use std::os::unix as u;`, `use std::os::{self as o};`). edition 2018부터는 `extern crate` 없이 `use`만으로 크레이트에 별칭을 줄 수 있어서, 이것을 두면 `s::process::Command`·`u::process::CommandExt`를 경로 문자열로 찾지 못하기 때문이다. 규칙을 한 줄로 쓰면: 펼친 `use` 항목의 가져온 경로가 금지 경로(`std::process`, `tokio::process`, `std::os::<os>::process`)와 같거나 그 앞부분이면, 그리고 이름을 적은 `id`·`exit`·`abort`·`ExitCode`가 아니면 실패다. 별칭 없이 `use std::os::unix;`처럼 윗 경로를 그대로 들이는 것도 같다. `std::os::<os>::prelude`에서의 글롭도 실패다.
    - 금지 이름을 직접 가져오는 것은 별칭과 관계없이 실패다(`use std::process::Command as Cmd;`, `use std::os::unix::process::CommandExt as _;`).
    - `use` 없이 적은 경로도 찾는다: `std::process::`·`::std::process::`·`tokio::process::` 뒤의 금지 이름, `std::os::<os>::process::CommandExt`. `extern crate std as s;`·`extern crate tokio as t;`처럼 크레이트에 별칭을 주는 선언은 실패다(별칭 경로를 다시 찾지 않아도 되게).
    - 하나라도 있으면 파일:줄과 펼친 경로를 찍고 실패한다. 펼치기는 `rustc`를 부르지 않는 스크립트 안의 작은 파서다. 문자열·주석 안의 글자는 먼저 지운다.
-5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식). 실패해야 하는 입력: `std::process::Command::new`, `use std::process::Command;`, `use std::process as p;`, `use std::{process as proc};`, `use std::{io, process::{self, id}};`, `use tokio::{process as p};`, `use tokio::process::Command as C;`, `use std::process::*;`, `extern crate std as s;`, 여러 줄로 나눈 묶음 선언, `mod system;`의 feature 속성을 뺀 입력. 통과해야 하는 입력: `use std::process::{id, exit};`, `std::process::abort()`, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 금지 경로, `src/system/` 안에만 둔 금지 경로, 주석·문자열 안의 `std::process::Command`.
+5. 검사 자체의 시험을 둔다(`no-hidden-constants`와 같은 방식). 실패해야 하는 입력: `std::process::Command::new`, `use std::process::Command;`, `use std::process as p;`, `use std::{process as proc};`, `use std::{io, process::{self, id}};`, `use tokio::{process as p};`, `use tokio::process::Command as C;`, `use std::process::*;`, `extern crate std as s;`, `use std as s;`, `use ::std as s;`, `use std::{self as s};`, `use tokio as t;`, `use std::os::unix as u;`, `use std::os::unix;`, `use std::os::unix::prelude::*;`, 여러 줄로 나눈 묶음 선언, `mod system;`의 feature 속성을 뺀 입력. 통과해야 하는 입력: `use std::process::{id, exit};`, `use std::os::unix::fs::PermissionsExt;`, `use std::io;`, `std::process::abort()`, `cfg(test)`·`cfg(all(test, unix))` 안에만 둔 금지 경로, `src/system/` 안에만 둔 금지 경로, 주석·문자열 안의 `std::process::Command`.
 
 ### 의존 쪽 검사
 
@@ -125,7 +126,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 ```
 
 - `AppEvent`는 `tasty-net-p2p`가 정의하고 transport가 다시 내보낸다(`P2pCloseReason`과 같은 방식, [크레이트 구성](crates.md#p2p-크레이트-격리)).
-- 이벤트는 연결 목록과 P2P 상태 기계의 전이 원인(`app_background`, `app_foreground`, `network_changed`, `network_lost`)으로 기록된다.
+- 이벤트는 연결 목록과 P2P 상태 기계의 전이 원인(`app_background`, `app_foreground`, `network_changed`, `network_lost`, 붙들기의 `background_hold`·`background_hold_released`)으로 기록된다.
 - 데스크톱 소비자는 부르지 않아도 된다. 부르지 않으면 지금의 동작 그대로다.
 - 이 API의 구현은 후속 작업이다. P2P 상태 기계에 아래 `Paused` 상태와 전이를 더하는 일, [P2P](p2p.md#상태-기계) 표를 고치는 일도 그 작업이 한다.
 
@@ -133,19 +134,19 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 
 - 이벤트는 들어온 순서대로 두 값을 바꾼다: 앞·뒤(`Foreground`·`Background`), 망 있음·없음(`NetworkChanged`는 있음, `NetworkLost`는 없음). 처음 값은 앞·망 있음이다. 같은 값이 다시 오면 값은 그대로이고, `NetworkChanged`만은 값이 같아도 "망 바뀜" 처리를 한다.
 - endpoint는 이벤트마다 두 값과 붙들기 값 하나로 목표를 다시 계산한다. 목표가 "등록"인 조건은 `망 있음 && (앞 || lifecycle.background_registration = keep || 붙들기)`이고, 아니면 "멈춤"이다. 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
-- 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산한다.
-- `Background` 뒤 `lifecycle.background_grace` 안에 `Foreground`가 오면 예정된 닫기를 취소한다. endpoint는 `Registered` 그대로이고 이력에 `app_foreground`(취소)만 남는다.
+- 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산하고, 전이 원인은 `background_hold`(켜짐)·`background_hold_released`(꺼짐)다.
+- 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`으로 가지 않고, 목표가 "등록"인 동안에는 `Paused`로 가지 않는다.
+- 예정된 닫기: `Registered`에서 목표가 "멈춤"이 되면(`app_background`, `background_hold_released`) 바로 닫지 않고 `lifecycle.background_grace` 뒤로 닫기를 예약한다(`network_lost`는 예약 없이 바로 `Paused`). 예약이 끝나기 전에 목표가 다시 "등록"이 되면(`app_foreground`, `background_hold`, 설정 바뀜) 예약을 취소한다. endpoint는 `Registered` 그대로이고 이력에는 취소한 원인만 남는다. 예약이 끝나는 때에 목표를 한 번 더 보고, 그때도 "멈춤"일 때만 닫는다.
 
 ### endpoint 상태 (p2p.md에 더할 것)
 
-| 전이 | 원인 |
+| 전이 | 원인(그 뒤 목표) |
 |---|---|
-| `Registered` → `Paused` | `app_background`(grace가 끝나 서버 연결을 코드 0으로 닫음), `network_lost` |
-| `Connecting`·`Backoff` → `Paused` | `app_background`(바로), `network_lost`. 재연결 backoff도 멈춘다 |
-| `Paused` → `Connecting` | `app_foreground`, `network_changed`, 붙들기 켜짐. 어느 원인이든 다시 계산한 목표가 "등록"일 때만이다(`network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다). backoff 시도 번호를 1로 되돌린다 |
-| `Registered` → `Paused` | 붙들기 꺼짐으로 목표가 "멈춤"이 됨(백그라운드에서). `app_background`와 같이 grace 뒤에 닫는다 |
-| `Backoff` → `Connecting` | `network_changed`(대기를 끝내고 바로, 시도 번호 1) |
-| `Registered` → `Registered` | `network_changed`(아래) |
+| `Registered` → `Paused` | 예약한 닫기가 끝남(목표 "멈춤", 서버 연결을 코드 0으로 닫음), `network_lost`(바로) |
+| `Connecting`·`Backoff` → `Paused` | `app_background`, `background_hold_released`, `network_lost`(모두 목표 "멈춤"일 때, 바로). 하던 시도와 backoff 대기를 멈춘다 |
+| `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
+| `Backoff` → `Connecting` | `network_changed`(목표 "등록"일 때, 대기를 끝내고 바로, 시도 번호 1). 목표가 "멈춤"이면 위 `Paused` 행이다 |
+| `Registered` → `Connecting` | `network_changed`(목표 "등록"일 때, 아래 "망 바뀜") |
 
 - `Paused`가 싣는 값: 원인, 멈춘 시각. 소켓 `L`은 닫지 않는다(P2P를 끄는 것이 아니다).
 
@@ -155,7 +156,7 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 
 | 상태 | 하는 일 |
 |---|---|
-| `Registered` | 조정 연결(서버와의 QUIC 연결)은 그대로 두고 흐름 3(NAT 판별)과 4(`nat_report`)를 바로 다시 한다. 흐름 3은 조정 연결 밖의 STUN 요청이라 조정 연결이 살아 있는지를 알려 주지 않는다. 그래서 생존은 따로 본다: `nat_report`를 보낸 뒤 `lifecycle.network_change_probe` 안에 조정 연결로 UDP 데이터그램이 하나라도 들어와야 한다(quinn 0.11.12 `Connection::stats()`의 `udp_rx.datagrams`가 보낸 때의 값보다 커짐, `connection.rs:554`). `nat_report`는 ACK를 부르는 패킷이라 살아 있는 서버는 그 안에 ACK를 보낸다. quinn `Connection`에는 ping API가 없고 rendezvous 프로토콜에는 `nat_report`의 응답 메시지가 없어서 이 방법을 쓴다. 들어오지 않으면 조정 연결을 닫고 backoff 없이 흐름 1~4(흐름 14와 같다)를 한다. 흐름 3 자체가 실패하면(STUN 응답 없음) 기존 흐름 3의 실패 규칙을 따른다 |
+| `Registered` | 조정 연결(서버와의 QUIC 연결)을 코드 0(`closed`)으로 닫고 backoff 없이 흐름 1~4(흐름 14와 같다, 시도 번호 1)를 한다. 옛 연결을 먼저 닫는 것은, 새 등록이 옛 연결을 `superseded`(코드 2, 멈춤)로 닫게 두지 않기 위해서다([rendezvous](rendezvous.md#메시지-표)). 조정 연결이 새 망에서 살아 있는지 판정하지 않고 늘 다시 맺는다. 근거: rendezvous 프로토콜에는 등록 뒤 서버가 답하는 요청이 없어(흐름 4 `nat_report`도 응답이 없다) 새 망으로 보낸 것이 전달됐다는 증거를 받을 수 없다. quinn `Connection`에는 ping API가 없고, `Connection::stats()`의 `udp_rx.datagrams`는 패킷 인증 전에 늘고 같은 연결의 아무 패킷이나 세므로 증거가 아니다. 흐름 3(STUN)은 조정 연결 밖이다. 다시 맺는 비용은 QUIC handshake와 `hello`·`welcome` 한 번이고 망 바뀜은 드물다 |
 | `Connecting` | 하던 시도를 그대로 둔다(새 망에서 흐름 1부터 하고 있다) |
 | `Backoff`·`Paused` | 위 전이 표대로 흐름 1~4를 한다 |
 
@@ -170,7 +171,7 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 | 이벤트 | 동작 |
 |---|---|
 | `Background` | 아래 재연결 조건이 거짓이 된 대상의 대기 중인 재연결을 멈춘다. 열린 터널은 그대로 둔다 |
-| `Foreground` | 멈춘 재연결을 바로 한 번 시도하고 backoff를 처음 간격으로 되돌린다 |
+| `Foreground` | 재연결 조건이 참이 된 대상의 멈춘 재연결을 바로 한 번 시도하고 backoff를 처음 간격으로 되돌린다(망이 없으면 시도하지 않는다) |
 | `NetworkChanged` | `lifecycle.ssh_on_network_change = reconnect`(기본)면 SSH 터널(내장 세션 포함)을 원인 `network_changed`로 닫는다. 재연결 조건이 참인 대상만 `Redialer`가 바로 다시 걸고, 거짓인 대상은 조건이 참이 될 때(`Foreground` 등)까지 기다린다. `keep`이면 keepalive가 끊김을 본다 |
 | `NetworkLost` | 재연결 대기를 멈추고 `give_up_after` 시계도 멈춘다. 다음 `NetworkChanged`에서 다시 시작한다 |
 
@@ -186,7 +187,6 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 | `lifecycle.background_registration` | p2p | `pause` | `pause`·`keep` | 백그라운드 앱은 곧 멈추므로 등록을 붙들어 둘 수 없다. 멈춘 기기의 등록은 서버 `idle_timeout`(기본 45 s)까지 남고, 그동안 이 기기로 온 펀칭은 서버 `offer_timeout` 뒤 `not_found`로 끝난다([rendezvous](rendezvous.md#서버-상태)). 코드 0(`closed`, 기기가 P2P를 끔)으로 먼저 닫으면 등록이 바로 지워지고 원인이 연결 정보에 남는다 |
 | `lifecycle.background_grace` | p2p | 10 s | 0 s ~ 10 min | 앱 전환처럼 곧 돌아오는 경우에 등록을 다시 하지 않게 한다. OS가 백그라운드 앱에 실행을 허락하는 시간이 얼마인지는 확인하지 않음. 그보다 짧게 두어야 닫기가 실제로 나간다. 펀칭 실험(P1) 때 기기에서 다시 본다 |
 | `lifecycle.p2p_on_network_change` | p2p | `reconnect` | `reconnect`·`keep` | 위 "망 바뀜" |
-| `lifecycle.network_change_probe` | p2p | 3 s | 100 ms ~ 1 min | 서버까지 한 번 왕복과 재전송 몇 번(`quic.initial_rtt` 333 ms 기준) |
 | `lifecycle.ssh_on_network_change` | transport | `reconnect` | `reconnect`·`keep` | SSH 터널은 TCP라 로컬 주소가 바뀌면 이어지지 않는다. keepalive가 끊김을 볼 때까지(`ssh.server_alive_interval × ssh.server_alive_count_max`) 기다리지 않는다 |
 | `lifecycle.background_redial` | transport | `pause` | `pause`·`keep` | 실행이 멈출 앱에서 backoff 시도를 쓰지 않고, 복귀 때 바로 시도한다 |
 | `lifecycle.home_background` | transport | `pause` | `pause`·`keep` | OS 허가가 앱 몫이라 기본은 다른 대상과 같다 |
@@ -285,7 +285,7 @@ tasty-android의 요구 목록(director 2865, 앱 쪽 보고서 R2의 번호)을
 | 7b | `PeerKeyStore` | 앱이 구현하는 callback interface로 받는다([identity](identity.md)의 `get`·`pin_if_absent`·`replace`와 같은 세 메서드). 최초 등록의 원자성(`pin_if_absent`)은 앱 저장소가 지킨다. 키가 바뀌면 연결은 `PeerKeyMismatch`로 끝나고 라이브러리가 `replace`를 스스로 부르지 않는다. 다시 등록은 사용자가 확인한 뒤 앱이 부르는 FFI 메서드(`replace`를 거친다)로만 한다. 저장소 오류는 `HandshakeError::Store`처럼 앱의 오류 문자열을 담아 돌아온다 |
 | 8 | 연결 목록·사유·`is_retryable()`·`EventStream::next(timeout)`·`AppEvent` | 위 "API 원칙"과 "앱 수명" |
 | 9 | 앱 폴더의 기기 키 | `TastyNet::new`가 키 디렉터리를 받아 `DeviceKey::load_or_create`로 만든다. 비밀키는 FFI로 내지 않고 기기 ID만 낸다. `File::lock`이 Android에서 잠그는지는 연결 레코드 경로의 문제라 따로 확인하고 결과만 기록한다 |
-| 10 | Android용 태그 | 태그 규칙은 [버전·호환](versioning.md)이다. 앱은 태그로 rev를 올린다. 태그를 붙인 사실을 앱 쪽에 알리는 경로는 이 설계 밖이다 |
+| 10 | Android용 태그 | 앱이 소비하는 기준은 tasty 전환 태그(tasty가 이 레포 크레이트로 옮겨 가며 고정하는 태그)다. 앱은 따로 태그를 받지 않고 그 태그의 rev를 쓴다. 그 태그는 모바일 cross check(`aarch64-linux-android`·`x86_64-linux-android`, NDK API 29)가 통과한 커밋에만 붙인다. 태그 규칙은 [버전·호환](versioning.md)이다. 태그를 붙인 사실을 앱 쪽에 알리는 경로는 이 설계 밖이다 |
 | 11 | 내장 백엔드의 PowerShell·cmd 포트 발견 | Rust 쪽 시험이 맡는다. FFI에는 더할 것이 없다 |
 
 ## 모바일 cross check
