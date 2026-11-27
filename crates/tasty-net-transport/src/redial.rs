@@ -473,6 +473,9 @@ mod tests {
     use crate::connection_table::ConnectionTableConfig;
     use crate::reject::{P2pCloseReason, RejectReason, TooOldEvidence};
     use crate::transport::ConnectError;
+    use tasty_net_p2p::settings::SettingsError;
+    use tasty_net_p2p::{P2pConnectError, P2pError};
+    use tasty_net_rendezvous::tls::TlsError;
 
     /// A clock that moves only when the redialer sleeps (by the wait plus `late`) or when an
     /// attempt says so.
@@ -764,16 +767,52 @@ mod tests {
             },
             HandshakeError::Closed(P2pCloseReason::Closed),
             HandshakeError::Closed(P2pCloseReason::NotPaired),
+            HandshakeError::Closed(P2pCloseReason::SessionMismatch),
+            HandshakeError::Closed(P2pCloseReason::Unknown(7)),
             HandshakeError::Io(std::io::Error::other("reset")),
             HandshakeError::Connect(ConnectError::Cancelled),
             HandshakeError::Connect(ConnectError::Io(std::io::Error::other("refused"))),
+            HandshakeError::Connect(ConnectError::SelfAttach),
         ];
-        for error in &errors {
+        let p2p = [
+            P2pError::Disabled,
+            P2pError::Connect(P2pConnectError::Busy),
+            P2pError::Connect(P2pConnectError::RendezvousLost),
+            P2pError::Connect(P2pConnectError::Declined),
+            P2pError::Connect(P2pConnectError::SelfAttach),
+            P2pError::Settings(SettingsError::UnknownKey("x".to_owned())),
+            P2pError::NoServer,
+            P2pError::EndpointInUse,
+            P2pError::InAsyncContext,
+            P2pError::Closed,
+            P2pError::TimedOut,
+            P2pError::Io(std::io::Error::other("bind")),
+            P2pError::Tls(TlsError::InvalidKey),
+        ];
+        let errors = errors.into_iter().chain(
+            p2p.into_iter()
+                .map(|e| HandshakeError::Connect(ConnectError::P2p(e))),
+        );
+        for error in errors {
+            let cause = Cause::of_handshake(&error);
             assert_eq!(
-                Cause::of_handshake(error).is_retryable(),
+                cause.is_retryable(),
                 error.is_retryable(),
-                "{error}"
+                "{error}: {cause}"
             );
+            if let HandshakeError::Connect(connect) = &error {
+                assert_eq!(
+                    Cause::of_connect(connect).is_retryable(),
+                    connect.is_retryable(),
+                    "{connect}"
+                );
+            }
+            // A QUIC close keeps its code unless it is the plain close of a peer.
+            if let HandshakeError::Closed(reason) = &error
+                && !reason.is_retryable()
+            {
+                assert_eq!(cause, Cause::P2pClosed(*reason), "{error}");
+            }
         }
     }
 }

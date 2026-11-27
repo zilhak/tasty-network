@@ -202,6 +202,9 @@ pub enum Cause {
     P2p(tasty_net_p2p::Cause),
     /// The P2P connection was closed by the peer, or by `tasty-net-p2p`, with this code.
     P2pClosed(P2pCloseReason),
+    /// The P2P endpoint cannot make connections: it is off, closed, set up wrong or used by
+    /// another endpoint (the error's text). Connecting again does not change it.
+    P2pUnavailable(String),
 }
 
 impl Cause {
@@ -229,6 +232,7 @@ impl Cause {
             Self::P2pConnect(_) => "p2p_connect_failed",
             Self::P2p(cause) => cause.name,
             Self::P2pClosed(_) => "p2p_closed",
+            Self::P2pUnavailable(_) => "p2p_unavailable",
         }
     }
 
@@ -250,6 +254,7 @@ impl Cause {
             Self::PeerTooOld
             | Self::Refused(_)
             | Self::HandshakeFailed(_)
+            | Self::P2pUnavailable(_)
             | Self::Cancelled
             | Self::ClosedHere => false,
             #[cfg(feature = "ssh")]
@@ -279,7 +284,9 @@ impl Cause {
             ConnectError::SelfAttach => Self::P2pConnect(P2pConnectError::SelfAttach),
             ConnectError::P2p(e) => match e.connect_error() {
                 Some(attempt) => Self::P2pConnect(*attempt),
-                None => Self::ConnectFailed(e.to_string()),
+                // A timeout or an I/O failure: connecting again can give another result.
+                None if error.is_retryable() => Self::ConnectFailed(e.to_string()),
+                None => Self::P2pUnavailable(e.to_string()),
             },
         }
     }
@@ -298,6 +305,8 @@ impl Cause {
             HandshakeError::Io(e) => Self::ConnectFailed(e.to_string()),
             // A plain QUIC close during the handshake: the peer closed the channel.
             HandshakeError::Closed(reason) if reason.is_retryable() => Self::PeerClosed,
+            // Another code (a refused pairing, a session mismatch): the code stays.
+            HandshakeError::Closed(reason) => Self::P2pClosed(*reason),
             other => Self::HandshakeFailed(other.to_string()),
         }
     }
@@ -308,9 +317,10 @@ impl fmt::Display for Cause {
         match self {
             #[cfg(feature = "ssh")]
             Self::Discovery(kind) => write!(f, "{}: {kind}", self.as_str()),
-            Self::TunnelFailed(text) | Self::ConnectFailed(text) | Self::HandshakeFailed(text) => {
-                write!(f, "{}: {text}", self.as_str())
-            }
+            Self::TunnelFailed(text)
+            | Self::ConnectFailed(text)
+            | Self::HandshakeFailed(text)
+            | Self::P2pUnavailable(text) => write!(f, "{}: {text}", self.as_str()),
             Self::Rejected(reason) | Self::Refused(reason) => {
                 write!(f, "{}: {reason}", self.as_str())
             }
