@@ -194,7 +194,9 @@ fn bad<T>(msg: impl Into<String>) -> Result<T, LineErr> {
 pub(crate) struct LoadedFile {
     pub(crate) path: PathBuf,
     /// `None`: it does not exist.
-    pub(crate) opened: Option<OpenFile>,
+    pub(crate) text: Option<String>,
+    /// Owner and mode, for `CHECKPERM` (Unix).
+    pub(crate) owner_mode: Option<(u32, u32)>,
 }
 
 /// What a resolution knows about the local side.
@@ -889,19 +891,21 @@ impl<'a> Reader<'a> {
         } else {
             None
         };
-        let opened = match preloaded {
-            Some(f) => match f.opened {
-                Some(o) => o,
+        // A top-level file was read by `load` once its mode passed; an `Include` file is
+        // opened here and read only after the check below.
+        let (text, owner_mode, opened) = match preloaded {
+            Some(f) => match f.text {
+                Some(t) => (Some(t), f.owner_mode, None),
                 None => return Ok(Opened::Missing),
             },
             None => match OpenFile::open(path) {
-                Ok(v) => v,
+                Ok(o) => (None, o.owner_mode, Some(o)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Opened::Missing),
                 Err(e) => return Ok(Opened::Error(e.to_string())),
             },
         };
         if flags.check_perm
-            && let Some((uid, mode)) = opened.owner_mode
+            && let Some((uid, mode)) = owner_mode
             && !perm_ok(uid, mode, self.env.uid)
         {
             return Err(fatal(
@@ -914,7 +918,11 @@ impl<'a> Reader<'a> {
                 format!("Bad owner or permissions on {}", path.display()),
             ));
         }
-        let text = opened.text();
+        let text = match (text, opened) {
+            (Some(t), _) => t,
+            (None, Some(o)) => o.read(),
+            (None, None) => String::new(),
+        };
         let mut bad_options = 0usize;
         let mut first_bad: Option<(Origin, String, RefusalKind, Option<String>)> = None;
         for (i, line) in text.split_inclusive('\n').enumerate() {
@@ -2149,12 +2157,13 @@ fn outcome(result: bool, unknown: Option<&'static str>) -> MatchOutcome {
 }
 
 /// A file opened once: `fopen` and `fstat` of `read_config_file_depth`
-/// (`readconf.c:2644`-`:2664`). Its text is read (`getline`) only when asked, after the
-/// caller has judged the owner and mode, as OpenSSH reads no line of a refused file.
-#[derive(Debug, Clone)]
+/// (`readconf.c:2644`-`:2664`). Its text is read (`getline`) only after the caller has
+/// judged the owner and mode from the same handle, as OpenSSH reads no line of a refused
+/// file.
+#[derive(Debug)]
 pub(crate) struct OpenFile {
     /// `None`: a folder the OS does not open as a file; it reads as an empty file.
-    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    file: Option<std::fs::File>,
     /// Owner and mode, for `CHECKPERM` (Unix).
     pub(crate) owner_mode: Option<(u32, u32)>,
 }
@@ -2178,20 +2187,18 @@ impl OpenFile {
         };
         let meta = file.metadata()?;
         Ok(OpenFile {
-            file: Some(std::sync::Arc::new(std::sync::Mutex::new(file))),
+            file: Some(file),
             owner_mode: owner_mode(&meta),
         })
     }
 
-    /// The text from the start of the file. A read error ends the text as it ends
-    /// `getline`, so a folder (which opens on Unix) reads as an empty file.
-    pub(crate) fn text(&self) -> String {
-        use std::io::{Read as _, Seek as _};
+    /// The text, read to the end from where the file is (it was just opened, so a pipe or
+    /// FIFO is read too). A read error ends the text as it ends `getline`, so a folder
+    /// (which opens on Unix) reads as an empty file.
+    pub(crate) fn read(self) -> String {
+        use std::io::Read as _;
         let mut bytes = Vec::new();
-        if let Some(file) = &self.file
-            && let Ok(mut file) = file.lock()
-            && file.rewind().is_ok()
-        {
+        if let Some(mut file) = self.file {
             // `read_to_end` keeps what it read before an error.
             let _ended = file.read_to_end(&mut bytes);
         }
@@ -2215,7 +2222,7 @@ pub(crate) fn owner_mode(meta: &std::fs::Metadata) -> Option<(u32, u32)> {
 
 /// `CHECKPERM`: owned by root or the user, not writable by group or others. Without the
 /// user's uid only the mode is checked.
-fn perm_ok(uid: u32, mode: u32, me: Option<u32>) -> bool {
+pub(crate) fn perm_ok(uid: u32, mode: u32, me: Option<u32>) -> bool {
     #[cfg(unix)]
     {
         let owner_ok = uid == 0 || me.is_none_or(|m| m == uid);
@@ -2302,7 +2309,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("a folder");
         let opened = OpenFile::open(&dir).expect("a folder opens");
-        assert_eq!(opened.text(), "");
+        assert_eq!(opened.read(), "");
         let missing = OpenFile::open(&dir.join("missing")).expect_err("no such file");
         assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
         std::fs::remove_dir_all(&dir).expect("remove the folder");

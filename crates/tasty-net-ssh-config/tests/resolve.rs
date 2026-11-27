@@ -227,6 +227,56 @@ fn a_refused_file_is_not_read() {
     assert_eq!(&left, b"Port 1\n");
 }
 
+// Linux only: FIFOs made with mkfifo.
+#[cfg(target_os = "linux")]
+#[test]
+fn files_that_pass_are_read_from_fifos() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    const OWNER_ONLY: u32 = 0o600;
+    let dir = folder();
+    let fifo = |name: &str, text: String| {
+        let path = dir.join(name);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(OWNER_ONLY))
+            .expect("fifo mode");
+        // The writer opens when a reader does, writes and closes, which ends the text.
+        let writer = path.clone();
+        std::thread::spawn(move || {
+            let mut end = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&writer)
+                .expect("open the fifo to write");
+            end.write_all(text.as_bytes()).expect("write the fifo");
+        });
+        path
+    };
+    let inner = fifo("inner", "User fromfifo\n".to_string());
+    let top = fifo(
+        "config",
+        format!("Port 2201\nInclude {}\n", inner.display()),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = context(Vec::new());
+    std::thread::spawn(move || {
+        let r = ConfigSet::load(ConfigInputs {
+            files: ConfigFiles::Only(top),
+        })
+        .expect("load")
+        .resolve("web", &ctx);
+        let _sent = tx.send(r);
+    });
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let r = rx.recv_timeout(WAIT).expect("the resolution ends");
+    assert_eq!(refusal_kind(&r), None);
+    assert_eq!(r.options.port, Some(2201));
+    assert_eq!(r.options.user.as_deref(), Some("fromfifo"));
+}
+
 #[test]
 fn service_name_port_is_refused() {
     // OpenSSH looks `ssh` up in the services database (`a2port`, `misc.c:592`-`:604`); this

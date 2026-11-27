@@ -172,7 +172,8 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// The top-level configuration files, read. `Include` files are read when resolving,
+/// The top-level configuration files, read once their mode passed (see [`ConfigSet::load`]).
+/// `Include` files are read when resolving,
 /// because which files an `Include` names depends on the target (its `%` tokens) and on the
 /// blocks that apply.
 #[derive(Debug, Clone)]
@@ -270,28 +271,45 @@ impl Resolution {
     }
 }
 
-fn load_one(path: &Path) -> Result<LoadedFile, std::io::Error> {
+/// Open a top-level file, judge it from the same handle and read it only if it passes
+/// (`read_config_file_depth`, `readconf.c:2644`-`:2664`). The owner needs the local uid,
+/// which `resolve` gets, so here only the mode is judged; `resolve` judges both again and
+/// gives the refusal. A file whose mode is refused is not read.
+fn load_one(path: &Path, check_perm: bool) -> Result<LoadedFile, std::io::Error> {
+    let opened = OpenFile::open(path)?;
+    let owner_mode = opened.owner_mode;
+    let refused = check_perm
+        && owner_mode.is_some_and(|(uid, mode)| !crate::readconf::perm_ok(uid, mode, None));
+    let text = if refused {
+        drop(opened);
+        String::new()
+    } else {
+        opened.read()
+    };
     Ok(LoadedFile {
         path: path.to_path_buf(),
-        opened: Some(OpenFile::open(path)?),
+        text: Some(text),
+        owner_mode,
     })
 }
 
 fn missing(path: &Path) -> LoadedFile {
     LoadedFile {
         path: path.to_path_buf(),
-        opened: None,
+        text: None,
+        owner_mode: None,
     }
 }
 
 impl ConfigSet {
-    /// Read the top-level files.
+    /// Read the top-level files: each is opened, its mode judged from the same handle, and
+    /// read to the end only if it passes.
     pub fn load(inputs: ConfigInputs) -> Result<ConfigSet, ConfigError> {
         let mut files = Vec::new();
         let mut only = None;
         match inputs.files {
             ConfigFiles::Only(path) => {
-                let f = load_one(&path).map_err(|e| ConfigError::CannotOpen {
+                let f = load_one(&path, false).map_err(|e| ConfigError::CannotOpen {
                     path: path.clone(),
                     message: e.to_string(),
                 })?;
@@ -310,7 +328,7 @@ impl ConfigSet {
             ConfigFiles::Default { user, system } => {
                 if let Some(p) = user {
                     // `read_config_file` returns 0 for a file it cannot open.
-                    let f = load_one(&p).unwrap_or_else(|_| missing(&p));
+                    let f = load_one(&p, true).unwrap_or_else(|_| missing(&p));
                     files.push((
                         f,
                         Flags {
@@ -321,7 +339,7 @@ impl ConfigSet {
                     ));
                 }
                 if let Some(p) = system {
-                    let f = load_one(&p).unwrap_or_else(|_| missing(&p));
+                    let f = load_one(&p, false).unwrap_or_else(|_| missing(&p));
                     files.push((f, Flags::default()));
                 }
             }
@@ -333,7 +351,7 @@ impl ConfigSet {
     pub fn files(&self) -> impl Iterator<Item = (&Path, bool)> {
         self.files
             .iter()
-            .map(|(f, _)| (f.path.as_path(), f.opened.is_some()))
+            .map(|(f, _)| (f.path.as_path(), f.text.is_some()))
     }
 
     /// Resolve the options for a destination (`[user@]host` or `ssh://...`).
