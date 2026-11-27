@@ -23,14 +23,15 @@
 #      image=built|given, peer=built|given을 적는다. D5 (b)의 증거는 image=built peer=built인 실행이다.
 #   2. config: 예시 설정의 광고 두 줄을 바꾼 사본을 이미지의 settings --config로 읽어 두 값이 configured인지 본다.
 #   3. keygen: 임시 볼륨에 서버 키를 만들고 공개키를 얻는다.
-#   4. start: 컨테이너를 띄워 시작 줄(같은 공개키)을 기다리고, 서버 쪽 수신 카운터(컨테이너 eth0의
-#      rx_bytes·rx_packets)를 읽는다.
-#   5. connect: 두 기기가 서버의 소개로 붙어 CONTAINER_CHECK_MESSAGE_BYTES 바이트 메시지를 echo한다.
-#      두 예제의 연결 정보 줄(경로·주소쌍·서버)을 그대로 적는다.
-#   6. path: 두 기기의 성공 후보 종류가 host이고 상대 주소가 알린 호스트 IP인지, 서버가 본 반사 주소와
-#      다른지 본다. 서버 로그의 매핑 판별과 펀칭 mode도 적는다.
-#   7. no-forward: 서버 쪽 수신 바이트의 증가가 메시지 크기보다 작은지 본다. 기기 사이에는 메시지와
-#      그 echo로 메시지 크기의 두 배 이상이 오갔으므로, 그 데이터가 서버를 지났다면 증가가 이보다 크다.
+#   4. start: 컨테이너를 띄워 시작 줄(같은 공개키)을 기다린다.
+#   5. connect-control, connect-data: 두 기기가 서버의 소개로 붙어 메시지를 echo한다. 대조 실행은 1바이트,
+#      데이터 실행은 CONTAINER_CHECK_MESSAGE_BYTES 바이트다. 실행마다 앞뒤로 서버 쪽 수신 카운터(컨테이너
+#      eth0의 rx_bytes·rx_packets)를 읽고, 두 예제의 연결 정보 줄(경로·주소쌍·서버)을 그대로 적는다.
+#   6. path-control, path-data: 두 기기의 성공 후보 종류가 host이고 상대 주소가 알린 호스트 IP인지, 서버가
+#      본 반사 주소와 다른지 본다. 서버 로그의 매핑 판별과 펀칭 mode도 적는다.
+#   7. no-forward: 데이터 실행의 서버 쪽 수신 바이트가 대조 실행의 두 배를 넘지 않는지 본다. 두 실행은 메시지
+#      크기만 다르고 서버로 가는 제어 트래픽은 메시지를 싣지 않는다. 메시지가 서버를 지났다면 데이터 실행은
+#      대조 실행 + 메시지 바이트 이상이다. 메시지가 대조 실행의 두 배 이하면 판정 불가다(근거: no_forward_ok 주석).
 #   8. stop: docker stop(SIGINT)으로 멈추고 종료 코드 0과 종료 로그를 본다.
 #   9. cleanup: 예제가 남았으면 SIGTERM 뒤 기한 안에 끝나는지 보고 남으면 SIGKILL로 끝내 거둔다. 이 실행의
 #      컨테이너·볼륨·이미지를 지우고 남지 않았는지 본다. 하나라도 실패하면 result=fail step=cleanup이고
@@ -128,11 +129,31 @@ advertise_config() {
     ' "$1"
 }
 
-# 서버 쪽 수신 바이트 증가 $1이 메시지 크기 $2보다 작다. 기기 사이 데이터(메시지와 echo, $2의 두 배 이상)가
-# 서버를 지났다면 증가가 $2보다 크다.
+# no_forward_ok <데이터 실행의 서버 수신 바이트> <대조 실행의 서버 수신 바이트> <메시지 바이트>
+# 두 실행은 같은 단계(등록, NAT 판별, 펀칭 요청, 연결, echo, 닫기)를 밟고 메시지 크기만 다르다. 서버로 가는
+# 제어 트래픽(조정 연결과 STUN)은 메시지를 싣지 않으므로 메시지 크기와 무관하다. 그 실행마다의 차이(연결 재요청,
+# STUN 재전송, 펀칭 재시도 punch.attempts 2회)는 제어 교환 한 번을 더 하는 것을 넘지 않는다고 보고, 데이터
+# 실행의 상한을 대조 실행의 두 배로 둔다. 메시지(한 방향만 해도 메시지 바이트)가 서버를 지났다면 데이터 실행은
+# 대조 실행 + 메시지 바이트 이상이므로, 메시지가 대조 실행의 두 배보다 크면 상한을 넘는다.
+# 0: 상한 안. 1: 상한을 넘음(까닭 한 줄). 2: 판정 불가(값이 숫자가 아니거나 메시지가 대조 실행의 두 배 이하).
 no_forward_ok() {
-    [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 1
-    (($1 < $2))
+    local data=$1 control=$2 msg=$3
+    if ! [[ "$data" =~ ^[0-9]{1,18}$ && "$control" =~ ^[0-9]{1,18}$ && "$msg" =~ ^[0-9]{1,18}$ ]]; then
+        echo "서버 수신 바이트가 숫자가 아니다: data='$data' control='$control' message='$msg'"
+        return 2
+    fi
+    if ((control == 0)); then
+        echo "대조 실행에서 서버 수신 바이트가 늘지 않았다(카운터가 서버 컨테이너의 것인지 볼 수 없다)"
+        return 2
+    fi
+    if ((msg <= 2 * control)); then
+        echo "메시지($msg B)가 대조 실행 서버 수신($control B)의 두 배 이하라 판정할 수 없다. CONTAINER_CHECK_MESSAGE_BYTES를 키운다"
+        return 2
+    fi
+    if ((data > 2 * control)); then
+        echo "데이터 실행의 서버 수신($data B)이 상한(대조 실행 $control B의 두 배)을 넘었다"
+        return 1
+    fi
 }
 
 # path_ok <dialer 줄> <listener 줄> <호스트 IP> <서버가 본 반사 주소들(쉼표)>: 두 예제의 성공 후보 종류가
@@ -224,10 +245,20 @@ self_test() {
     sed 's/^# alternate_port = 3479$/alternate_port = 3479/' "$EXAMPLE" >"$dir/open.toml"
     check not advertise_config "$dir/open.toml" 127.0.0.1 40001 >/dev/null
     rm -rf "${dir:?}"
-    check no_forward_ok 5000 98304
-    check not no_forward_ok 98304 98304
-    check not no_forward_ok 200000 98304
-    check not no_forward_ok '' 98304
+    no_forward_ok 20100 19800 98304 >/dev/null
+    check test "$?" -eq 0
+    no_forward_ok 39600 19800 98304 >/dev/null
+    check test "$?" -eq 0
+    no_forward_ok 39601 19800 98304 >/dev/null
+    check test "$?" -eq 1
+    no_forward_ok 118104 19800 98304 >/dev/null
+    check test "$?" -eq 1
+    no_forward_ok 20100 60000 98304 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 20100 0 98304 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok '' 19800 98304 >/dev/null
+    check test "$?" -eq 2
     check test "$(decimal_in 08 1 120000)" = 8
     check test "$(decimal_in 98304 1 120000)" = 98304
     check not decimal_in 0 1 120000
@@ -412,12 +443,49 @@ server_rx() {
         | tr '\n' ' ' | sed 's/ $//'
 }
 
+# server_rx를 읽어 "바이트 패킷" 두 십진수일 때만 낸다. 아니면 읽은 것을 내고 실패한다.
+rx_snapshot() {
+    local v
+    v=$(server_rx) || { echo "$v"; return 1; }
+    [[ "$v" =~ ^[0-9]{1,18}\ [0-9]{1,18}$ ]] || { echo "$v"; return 1; }
+    echo "$v"
+}
+
+# run_pair <이름> <메시지 바이트>: listener와 dialer를 띄워 메시지를 echo하고, 두 예제의 연결 정보 줄을
+# dial_line·listen_line에 둔다. 출력은 TMP/<이름>-*.out·.log다. 실패하면 fail_at으로 끝난다.
+# main_check의 peer·pub·primary_port·host_ip·listener_id·dialer_id를 쓴다.
+run_pair() {
+    local name=$1 bytes=$2 message listen_rc dial_rc
+    message=$(printf '%*s' "$bytes" '' | tr ' ' x)
+    local common=(--server "127.0.0.1:$primary_port" --server-key "$pub" --timeout "$PEER_TIMEOUT"
+        --host-ip "$host_ip")
+    "$peer" --listen --key-dir "$TMP/listener" --peer "$dialer_id" ${common[@]+"${common[@]}"} \
+        >"$TMP/$name-listener.out" 2>"$TMP/$name-listener.log" &
+    PEER_PIDS+=($!)
+    "$peer" --dial "$listener_id" --key-dir "$TMP/dialer" --message "$message" ${common[@]+"${common[@]}"} \
+        >"$TMP/$name-dialer.out" 2>"$TMP/$name-dialer.log" &
+    PEER_PIDS+=($!)
+    wait_until "$PEER_WAIT_SECONDS" all_ended ${PEER_PIDS[@]+"${PEER_PIDS[@]}"} \
+        || fail_at "예제($name)가 ${PEER_WAIT_SECONDS}s 안에 끝나지 않았다"
+    listen_rc=0
+    wait "${PEER_PIDS[0]}" || listen_rc=$?
+    dial_rc=0
+    wait "${PEER_PIDS[1]}" || dial_rc=$?
+    PEER_PIDS=()
+    dial_line=$(grep '^echo ok ' "$TMP/$name-dialer.out" | head -n 1)
+    listen_line=$(grep '^echoed ' "$TMP/$name-listener.out" | head -n 1)
+    [[ "$dial_rc" -eq 0 && -n "$dial_line" ]] || fail_at "dialer($name) 종료 코드 $dial_rc, echo 확인 줄 없음"
+    [[ "$listen_rc" -eq 0 && -n "$listen_line" ]] || fail_at "listener($name) 종료 코드 $listen_rc, echo 줄 없음"
+    [[ "$listen_line" == "echoed $bytes bytes from $dialer_id via "* ]] \
+        || fail_at "listener($name)가 echo한 크기나 상대가 다르다: $listen_line"
+}
+
 server_logs() { docker logs "$CONTAINER" 2>&1; }
 server_started() { server_logs | grep -qF "rendezvous server started public_key=$1 "; }
 
 main_check() {
     local tool json peer peer_from image image_from sha host_ip ports primary_port alternate_port cfg out keyout pub
-    local before after rx0 rx1 pk0 pk1 message listener_id dialer_id dial_rc listen_rc
+    local listener_id dialer_id
     local dial_line listen_line reflexive nat mode why state rc
 
     STEP=build
@@ -523,51 +591,54 @@ main_check() {
     CONTAINER=$container
     rm -f "$TMP/run.log"
     wait_until "$START_SECONDS" server_started "$pub" || fail_at "서버 시작 줄이 ${START_SECONDS}s 안에 나오지 않았다"
-    before=$(server_rx) || fail_at "서버 쪽 수신 카운터를 읽지 못했다"
-    read -r rx0 pk0 <<<"$before"
-    step_ok "container=$CONTAINER server_rx_bytes=$rx0 server_rx_packets=$pk0"
+    step_ok "container=$CONTAINER"
 
-    STEP=connect
     listener_id=$("$peer" id --key-dir "$TMP/listener" 2>&1) || fail_at "listener 키: $listener_id"
     dialer_id=$("$peer" id --key-dir "$TMP/dialer" 2>&1) || fail_at "dialer 키: $dialer_id"
-    message=$(printf '%*s' "$MESSAGE_BYTES" '' | tr ' ' x)
-    local common=(--server "127.0.0.1:$primary_port" --server-key "$pub" --timeout "$PEER_TIMEOUT"
-        --host-ip "$host_ip")
-    "$peer" --listen --key-dir "$TMP/listener" --peer "$dialer_id" ${common[@]+"${common[@]}"} \
-        >"$TMP/listener.out" 2>"$TMP/listener.log" &
-    PEER_PIDS+=($!)
-    "$peer" --dial "$listener_id" --key-dir "$TMP/dialer" --message "$message" ${common[@]+"${common[@]}"} \
-        >"$TMP/dialer.out" 2>"$TMP/dialer.log" &
-    PEER_PIDS+=($!)
-    wait_until "$PEER_WAIT_SECONDS" all_ended ${PEER_PIDS[@]+"${PEER_PIDS[@]}"} \
-        || fail_at "예제가 ${PEER_WAIT_SECONDS}s 안에 끝나지 않았다"
-    listen_rc=0
-    wait "${PEER_PIDS[0]}" || listen_rc=$?
-    dial_rc=0
-    wait "${PEER_PIDS[1]}" || dial_rc=$?
-    PEER_PIDS=()
-    dial_line=$(grep '^echo ok ' "$TMP/dialer.out" | head -n 1)
-    listen_line=$(grep '^echoed ' "$TMP/listener.out" | head -n 1)
-    [[ "$dial_rc" -eq 0 && -n "$dial_line" ]] || fail_at "dialer 종료 코드 $dial_rc, echo 확인 줄 없음"
-    [[ "$listen_rc" -eq 0 && -n "$listen_line" ]] || fail_at "listener 종료 코드 $listen_rc, echo 줄 없음"
-    [[ "$listen_line" == "echoed $MESSAGE_BYTES bytes from $dialer_id via "* ]] \
-        || fail_at "listener가 echo한 크기나 상대가 다르다: $listen_line"
-    step_ok "dialer: $dial_line"
-    step_ok "listener: $listen_line"
+    nat=""
+    mode=""
 
-    STEP=path
-    reflexive=$(reflexive_of "$(server_logs)")
-    nat=$(server_logs | grep -F 'nat report' | sed -n 's/.* mapping=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
-    mode=$(server_logs | grep -F 'punch offered' | sed -n 's/.* mode=\([^ ]*\).*/\1/p' | tail -n 1)
-    why=$(path_ok "$dial_line" "$listen_line" "$host_ip" "$reflexive") || fail_at "$why (nat=$nat mode=$mode)"
-    step_ok "path=host devices=same-host-processes network=private-ipv4 nat=$nat mode=$mode"
+    # 대조 실행(1바이트)과 데이터 실행(MESSAGE_BYTES)을 같은 서버로 차례로 돌리고, 실행마다 앞뒤의 서버
+    # 쪽 수신 카운터를 읽는다.
+    local run bytes before after rx0 rx1 pk0 pk1 control_bytes control_packets data_bytes data_packets
+    for run in control data; do
+        bytes=1
+        [[ "$run" == data ]] && bytes=$MESSAGE_BYTES
+        STEP=connect-$run
+        before=$(rx_snapshot) || fail_at "서버 쪽 수신 카운터를 읽지 못했다: '$before'"
+        run_pair "$run" "$bytes"
+        after=$(rx_snapshot) || fail_at "서버 쪽 수신 카운터를 읽지 못했다: '$after'"
+        read -r rx0 pk0 <<<"$before"
+        read -r rx1 pk1 <<<"$after"
+        step_ok "dialer: $dial_line"
+        step_ok "listener: $listen_line"
+        step_ok "server_rx_bytes_delta=$((rx1 - rx0)) server_rx_packets_delta=$((pk1 - pk0))"
+
+        STEP=path-$run
+        reflexive=$(reflexive_of "$(server_logs)")
+        nat=$(server_logs | grep -F 'nat report' | sed -n 's/.* mapping=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
+        mode=$(server_logs | grep -F 'punch offered' | sed -n 's/.* mode=\([^ ]*\).*/\1/p' | tail -n 1)
+        why=$(path_ok "$dial_line" "$listen_line" "$host_ip" "$reflexive") || fail_at "$why (nat=$nat mode=$mode)"
+        step_ok "path=host devices=same-host-processes network=private-ipv4 nat=$nat mode=$mode"
+
+        if [[ "$run" == control ]]; then
+            control_bytes=$((rx1 - rx0))
+            control_packets=$((pk1 - pk0))
+        else
+            data_bytes=$((rx1 - rx0))
+            data_packets=$((pk1 - pk0))
+        fi
+    done
 
     STEP=no-forward
-    after=$(server_rx) || fail_at "서버 쪽 수신 카운터를 읽지 못했다"
-    read -r rx1 pk1 <<<"$after"
-    no_forward_ok "$((rx1 - rx0))" "$MESSAGE_BYTES" \
-        || fail_at "서버 쪽 수신 바이트가 메시지 크기 이상 늘었다: $((rx1 - rx0)) >= $MESSAGE_BYTES"
-    step_ok "server_rx_bytes_delta=$((rx1 - rx0)) server_rx_packets_delta=$((pk1 - pk0)) message_bytes=$MESSAGE_BYTES device_bytes_at_least=$((2 * MESSAGE_BYTES))"
+    local judged=0
+    why=$(no_forward_ok "$data_bytes" "$control_bytes" "$MESSAGE_BYTES") || judged=$?
+    case "$judged" in
+        0) ;;
+        2) unsure "$why" ;;
+        *) fail_at "$why" ;;
+    esac
+    step_ok "control_rx_bytes=$control_bytes control_rx_packets=$control_packets data_rx_bytes=$data_bytes data_rx_packets=$data_packets bound_bytes=$((2 * control_bytes)) message_bytes=$MESSAGE_BYTES device_bytes_at_least=$((2 * MESSAGE_BYTES))"
 
     STEP=stop
     docker stop --time "$STOP_SECONDS" "$CONTAINER" >/dev/null 2>&1 || fail_at "docker stop 실패"
