@@ -500,6 +500,16 @@ fn lock_key_dir(dir: &std::path::Path) -> Result<File, P2pError> {
     }
 }
 
+/// The QUIC server configuration of the P2P socket: the shared one with `quic.allow_migration`.
+pub(crate) fn p2p_server_config(
+    params: &P2pParams,
+    crypto: quinn::crypto::rustls::QuicServerConfig,
+) -> quinn::ServerConfig {
+    let mut c = tasty_net_rendezvous::quic::server_config(&params.quic, crypto);
+    c.migration(params.allow_migration);
+    c
+}
+
 impl P2pEndpoint {
     /// Make the endpoint. Off: no socket, nothing sent. On: the settings are checked, the key
     /// directory's lock is taken, the runtime and the socket are made and the endpoint starts
@@ -555,8 +565,7 @@ impl P2pEndpoint {
         .map_err(P2pError::Tls)?;
         let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_tls)
             .map_err(|e| P2pError::Io(std::io::Error::other(e)))?;
-        let mut server_config = tasty_net_rendezvous::quic::server_config(&params.quic, crypto);
-        server_config.migration(params.allow_migration);
+        let server_config = p2p_server_config(&params, crypto);
         let endpoint = {
             let _enter = handle.enter();
             quinn::Endpoint::new_with_abstract_socket(

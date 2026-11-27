@@ -86,6 +86,7 @@ fn applied(core: &Core, go: &PunchGo, l: &Limits) -> Vec<AppliedSetting> {
         .filter(|e| {
             e.key.starts_with("punch.")
                 || e.key.starts_with("socket.")
+                || e.key.starts_with("tls.")
                 || e.key.starts_with("quic.")
                 || e.key.starts_with("nat.")
                 || e.key.starts_with("path.")

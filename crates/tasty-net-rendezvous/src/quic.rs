@@ -3,12 +3,13 @@
 
 use std::sync::Arc;
 
+use quinn::congestion::CubicConfig;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{
     AckFrequencyConfig, EndpointConfig, MtuDiscoveryConfig, TransportConfig, ValidationTokenConfig,
     VarInt,
 };
-use quinn_proto::HashedConnectionIdGenerator;
+use quinn_proto::{ConnectionIdGenerator, HashedConnectionIdGenerator};
 
 use crate::settings::QuicParams;
 
@@ -55,10 +56,31 @@ pub fn transport_config(p: &QuicParams) -> TransportConfig {
     } else {
         t.ack_frequency_config(None);
     }
-    let mut cubic = quinn::congestion::CubicConfig::default();
-    cubic.initial_window(p.cubic_initial_window);
-    t.congestion_controller_factory(Arc::new(cubic));
+    t.congestion_controller_factory(Arc::new(congestion(p)));
     t
+}
+
+/// The congestion controller of the transport configuration (CUBIC, fixed
+/// `quic.congestion_controller`) with `quic.cubic.initial_window`.
+pub fn congestion(p: &QuicParams) -> CubicConfig {
+    let mut cubic = CubicConfig::default();
+    cubic.initial_window(p.cubic_initial_window);
+    cubic
+}
+
+/// The connection ID generator factory of the endpoint configuration, with
+/// `quic.cid_lifetime`.
+pub fn cid_generator(
+    p: &QuicParams,
+) -> impl Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync + 'static {
+    let lifetime = p.cid_lifetime;
+    move || {
+        let mut g = HashedConnectionIdGenerator::new();
+        if let Some(d) = lifetime {
+            g.set_lifetime(d);
+        }
+        Box::new(g)
+    }
 }
 
 /// The endpoint configuration, with the fixed values (grease off, QUIC v1 only).
@@ -69,14 +91,7 @@ pub fn endpoint_config(p: &QuicParams) -> EndpointConfig {
     e.min_reset_interval(p.min_reset_interval)
         .grease_quic_bit(false)
         .supported_versions(vec![QUIC_VERSION_1]);
-    let lifetime = p.cid_lifetime;
-    e.cid_generator(move || {
-        let mut g = HashedConnectionIdGenerator::new();
-        if let Some(d) = lifetime {
-            g.set_lifetime(d);
-        }
-        Box::new(g)
-    });
+    e.cid_generator(cid_generator(p));
     e
 }
 

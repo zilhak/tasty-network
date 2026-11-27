@@ -21,7 +21,11 @@ fn server_ips(s: &TestServer) -> Vec<IpAddr> {
     vec![ip, IpAddr::from([o[0], o[1], o[2], o[3] + 1])]
 }
 
-const PREFIXES: [&str; 6] = ["punch.", "socket.", "quic.", "nat.", "path.", "history."];
+/// The setting groups a connection applies: every device value of the punch, the socket, QUIC
+/// and TLS (fixed values included), the NAT judgement, the path watch and the history.
+const PREFIXES: [&str; 7] = [
+    "punch.", "socket.", "quic.", "tls.", "nat.", "path.", "history.",
+];
 
 #[test]
 fn connection_reports_applied_settings() {
@@ -67,8 +71,8 @@ fn connection_reports_applied_settings() {
     let cb =
         b.ep.accept_timeout(Some(Duration::from_secs(10)))
             .expect("accept");
-    let shown = a.ep.settings();
-    for (i, conn) in [&ca, &cb].into_iter().enumerate() {
+    for (ep, conn) in [(&a.ep, &ca), (&b.ep, &cb)] {
+        let shown = ep.settings();
         let info = conn.info().expect("info");
         let device_part: Vec<_> = info
             .applied
@@ -81,9 +85,17 @@ fn connection_reports_applied_settings() {
             .filter(|e| PREFIXES.iter().any(|p| e.key.starts_with(p)))
             .map(|e| (e.key, e.value, e.source))
             .collect();
-        // B's device values are B's own; only A's are compared with A's endpoint.
-        if i == 0 {
-            assert_eq!(device_part, want);
+        // Each side's device values are its own endpoint's, all of them.
+        assert_eq!(device_part, want);
+        for (key, source) in [
+            ("socket.recv_buffer", Source::OsDefault),
+            ("tls.resumption", Source::Fixed),
+            ("quic.grease_quic_bit", Source::Fixed),
+        ] {
+            assert!(
+                device_part.iter().any(|e| e.0 == key && e.2 == source),
+                "{key} as {source:?}"
+            );
         }
         let get = |key: &str| {
             info.applied

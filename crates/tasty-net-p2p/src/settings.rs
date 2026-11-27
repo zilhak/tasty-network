@@ -1552,6 +1552,10 @@ mod tests {
             .set("quic.max_uni_streams", Value::Count(1))
             .set("quic.keepalive_interval", d(7000))
             .set("quic.idle_timeout", d(21_000))
+            .set("quic.cubic.initial_window", Value::Bytes(24_000))
+            .set("quic.cid_lifetime", d(600_000))
+            .set("quic.min_reset_interval", d(40))
+            .set("quic.allow_migration", Value::Switch(false))
             .set("tls.max_fragment_size", Value::Bytes(1000));
         s
     }
@@ -1597,6 +1601,20 @@ mod tests {
         ] {
             assert_eq!(field(&ack, name), want, "{name}");
         }
+        assert!(
+            format!("{:?}", quic::congestion(&p.quic)).contains("initial_window: 24000"),
+            "{:?}",
+            quic::congestion(&p.quic)
+        );
+        assert_eq!(
+            quic::cid_generator(&p.quic)().cid_lifetime(),
+            Some(Duration::from_secs(600))
+        );
+        // quinn keeps the reset interval private: the resolved value is what the endpoint
+        // configuration gets.
+        assert_eq!(p.quic.min_reset_interval, Duration::from_millis(40));
+        let migration = format!("{:?}", crate::endpoint::p2p_server_config(&p, crypto()));
+        assert_eq!(field(&migration, "migration"), "false");
         let e = format!("{:?}", quic::endpoint_config(&p.quic));
         assert_eq!(field(&e, "max_udp_payload_size"), "1400");
         // Fixed: grease off.
