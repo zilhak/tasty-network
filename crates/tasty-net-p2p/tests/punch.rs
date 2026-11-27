@@ -513,7 +513,12 @@ fn unpaired_quic_is_closed_with_not_paired() {
             .expect("the connection comes up before B closes it");
     assert!(ca.wait_closed(Duration::from_secs(10)).is_ok());
     assert_eq!(ca.close_reason(), Some(P2pCloseReason::NotPaired));
+    // B closes the connection and then records its attempt's `Closed`, so A can see the close
+    // before B's record is queued: read B's events until that record.
     let mut log = Log::default();
+    let _closed = log.wait(&b, Duration::from_secs(10), |e| {
+        closed_with(std::slice::from_ref(e), "not_paired")
+    });
     log.drain(&b);
     assert!(closed_with(&log.0, "not_paired"));
     assert_eq!(count_to(&log.0, AttemptPhase::Connected), 0);
