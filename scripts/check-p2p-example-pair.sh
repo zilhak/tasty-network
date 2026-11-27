@@ -23,6 +23,21 @@ SERVER_STOP_LIMIT=15
 # 위 두 대기의 확인 간격(초).
 POLL=0.2
 
+# 인자로 받은 이름 가운데 json을 읽는 실제 python 인터프리터를 고른다. PATH에 있다는 것만 보지
+# 않고 실행해 본다. Windows의 실행 별칭 스텁(WindowsApps의 python3.exe)은 PATH에 있어도
+# 아무것도 출력하지 않고 끝나므로 고르지 않는다.
+pick_python() {
+    local c
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 || continue
+        if [ "$("$c" -c 'import json; print(json.dumps("ok"))' 2>/dev/null | tr -d '\r')" = '"ok"' ]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # 프로세스 $2...가 모두 끝나기를 $1초까지 기다린다. 다 끝나면 0, 상한을 넘으면 1.
 wait_ended() {
     local limit=$1 p alive deadline
@@ -39,9 +54,11 @@ wait_ended() {
     done
 }
 
-# 자체 시험: 상한을 넘은 대기는 실패하고, 끝난 프로세스의 대기는 끝난다.
+# 자체 시험: 상한을 넘은 대기는 실패하고, 끝난 프로세스의 대기는 끝나며, 출력 없는 python
+# 스텁은 고르지 않는다.
 self_test() {
-    local slow quick n=0
+    local dir slow quick n=0
+    dir="$(mktemp -d)"
     sleep 30 &
     slow=$!
     if wait_ended 1 "$slow"; then
@@ -59,6 +76,14 @@ self_test() {
         exit 1
     }
     n=$((n + 1))
+    printf '#!/bin/sh\nexit 0\n' > "$dir/python3"
+    chmod +x "$dir/python3"
+    if PATH="$dir:$PATH" pick_python python3 >/dev/null; then
+        echo "[p2p-example-pair] 자체 시험 실패: 아무것도 출력하지 않는 python3 스텁을 골랐다." >&2
+        exit 1
+    fi
+    n=$((n + 1))
+    rm -rf "${dir:?}"
     echo "[p2p-example-pair] 자체 시험 통과 — 사례 ${n}개" >&2
 }
 
@@ -67,11 +92,10 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 0
 fi
 
-PY=""
-for c in python3 python; do
-    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
-done
-[ -n "$PY" ] || { echo "[p2p-example-pair] 판정 불가: python3가 PATH에 없다." >&2; exit 2; }
+PY=$(pick_python python3 python) || {
+    echo "[p2p-example-pair] 판정 불가: json을 읽는 python3(또는 python)가 PATH에 없다(실행 별칭 스텁만 있는 경우 포함)." >&2
+    exit 2
+}
 
 TMP="$(mktemp -d)"
 PIDS=()
