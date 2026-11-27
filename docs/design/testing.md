@@ -140,4 +140,4 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 
 - 모바일 cross check(CI 잡 `mobile-android`·`mobile-ios`, 검사 단계 `mobile-check`)의 러너·target·크레이트 목록·feature 조합은 [모바일](mobile.md#모바일-cross-check)이 정본이다. 후속 작업이 잡을 만들 때 위 "CI 러너"의 workflow 표에 행을 더한다.
 - 다른 프로그램 실행 금지의 정적 검사 `no-process-spawn`은 [모바일](mobile.md#다른-프로그램-실행-금지)에 있다.
-- 위 "SSH 통합 시험의 sshd"의 시험은 시스템 `ssh` 클라이언트를 쓴다. 같은 흐름을 내장 SSH 백엔드로 돌리는 시험(OpenSSH 클라이언트를 `PATH`에서 뺀 조건), 폴백 선택 시험, `ssh -G` 대조, 지원하지 않는 지시어 표시와 안전한 실패 시험의 자리는 [모바일](mobile.md#시험의-자리-내장-백엔드)에 있다. 서버 쪽은 같은 시험 sshd를 쓴다.
+- 위 "SSH 통합 시험의 sshd"의 시험은 시스템 `ssh` 클라이언트를 쓴다. 같은 흐름을 내장 SSH 백엔드로 돌리는 시험(OpenSSH 클라이언트를 찾지 못하게 한 조건), 폴백 선택 시험, `ssh -G`·`ssh-keygen -F` 대조, 지시어 분류 시험, exec 종료 상태와 SFTP 읽기·쓰기 시험의 자리는 [SSH 백엔드](ssh-backends.md#시험의-자리)에 있다. 서버 쪽은 같은 시험 sshd를 쓰고, SFTP 시험을 위해 `Subsystem sftp internal-sftp`를 설정한다.
