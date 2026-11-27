@@ -49,3 +49,7 @@ jobs:
       # and 3479. The last line is "rendezvous-check result=ok|fail".
       - name: rendezvous check
         run: bash rendezvous/check-config.sh
+      # The judging functions of the container check (D5 (b)), without docker or
+      # a build. The check itself runs in the remote build environment.
+      - name: rendezvous container check self-test
+        run: bash rendezvous/container-check.sh --self-test

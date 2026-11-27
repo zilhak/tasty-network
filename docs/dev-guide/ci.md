@@ -1,6 +1,6 @@
 # CI
 
-워크플로는 `.github/workflows/ci.yml`과 `.github/workflows/rendezvous.yml` 두 개다. 둘 다 `develop`·`release`·`main` push, 이 세 브랜치를 base로 한 PR, 수동 실행(`workflow_dispatch`)에서 돈다. `ci.yml`의 검사는 `scripts/check.sh`의 단계를, `rendezvous.yml`의 검사는 `rendezvous/check-config.sh`를 부르므로 로컬과 훅에서 같은 명령으로 다시 돌릴 수 있다.
+워크플로는 `.github/workflows/ci.yml`과 `.github/workflows/rendezvous.yml` 두 개다. 둘 다 `develop`·`release`·`main` push, 이 세 브랜치를 base로 한 PR, 수동 실행(`workflow_dispatch`)에서 돈다. `ci.yml`의 검사는 `scripts/check.sh`의 단계를, `rendezvous.yml`의 검사는 `rendezvous/check-config.sh`와 `rendezvous/container-check.sh --self-test`를 부르므로 로컬과 훅에서 같은 명령으로 다시 돌릴 수 있다.
 
 ## 잡
 
@@ -10,7 +10,7 @@
 | `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`), `p2p-isolation`(`scripts/check.sh p2p-isolation`), `no-hidden-constants`(`scripts/check.sh no-hidden-constants`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
-| `rendezvous-check` (`rendezvous.yml`) | `ubuntu-latest` | `bash rendezvous/check-config.sh --self-test`, `bash rendezvous/check-config.sh` |
+| `rendezvous-check` (`rendezvous.yml`) | `ubuntu-latest` | `bash rendezvous/check-config.sh --self-test`, `bash rendezvous/check-config.sh`, `bash rendezvous/container-check.sh --self-test`(D5 (b) 검사의 판정 함수만. docker 없이 돈다) |
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
 - `rendezvous.yml`은 `rendezvous/` 밖만 바뀐 커밋에서도 돈다. `develop`의 어느 커밋이든 D5 (a)의 실행 ID를 남기기 위해서다. 아래 concurrency 규칙은 두 워크플로가 같고 그룹 이름의 앞머리(`ci-`·`rendezvous-`)만 다르다.
