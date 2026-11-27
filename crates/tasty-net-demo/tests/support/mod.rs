@@ -10,6 +10,7 @@ pub mod process;
 mod russh_server;
 pub mod scene;
 pub mod sshd;
+pub mod table;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};

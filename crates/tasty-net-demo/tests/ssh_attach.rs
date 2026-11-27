@@ -10,7 +10,8 @@
 //! port.
 //!
 //! Evidence lines go to stderr unconditionally (`[ssh_attach] ...`): `sshd=<server>`, the
-//! process IDs, and the tunnel PIDs before and after a reconnect.
+//! process IDs, the tunnel PIDs before and after a reconnect, and the connection table
+//! entries of `connection_table_reports_ssh_forward` (docs/design/testing.md "연결 목록 시험").
 
 mod support;
 
@@ -21,6 +22,7 @@ use support::process::{Transcript, is_running, log, terminate, wait_all_gone};
 use support::scene::{
     DropReport, LOCAL_STEP, SSH_STEP, Scene, connect_and_check, echo, number, one_at_a_time,
 };
+use support::table::{FORWARD, check_reconnected, check_tunnel_entries, dialer_instance};
 use tasty_net_demo::field;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 
@@ -139,6 +141,45 @@ fn reconnect_after_server_restart() {
     scene.quit_dialer(dialer);
     Scene::stop_server(restarted);
     drop(server);
+    scene.finish();
+}
+
+/// The connection tables of both ends for a forward link whose tunnel also carries a bulk and
+/// a request channel, before and after the tunnel is killed and the dialer connects again.
+#[test]
+fn connection_table_reports_ssh_forward() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = scene.start_server();
+    let record = scene.record.clone();
+    let mut dialer = scene.start_dialer_with(&record, &["--channels"], &[]);
+    // The channels open before the snapshot is read, so `connect_and_check` passed the
+    // `channels-open` line; the dialer's table shows them.
+    let before = connect_and_check(&mut scene, &mut server, &ready, &mut dialer);
+    let instance = dialer_instance(&server, 1);
+    let tunnel = check_tunnel_entries(
+        &scene,
+        &mut server,
+        &ready,
+        &mut dialer,
+        &instance,
+        &FORWARD,
+    );
+
+    log(&format!("ending the tunnel ssh pid={before}"));
+    terminate(before);
+    dialer.expect_prefix("dialer lost ", LOCAL_STEP);
+    let line = scene.connected(&mut dialer);
+    assert_ne!(
+        number::<u32>(&line, "tunnel_pid"),
+        before,
+        "a new tunnel ssh"
+    );
+    check_reconnected(&mut server, &mut dialer, &tunnel, &FORWARD);
+    echo(&mut dialer, "hello-again");
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(server);
     scene.finish();
 }
 
