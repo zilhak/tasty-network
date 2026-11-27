@@ -238,8 +238,7 @@ allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_HOUR: u64 = 60 * SECS_PER_M
 allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR	OpenSSH 시간 형식의 단위 d
 allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_WEEK: u64 = 7 * SECS_PER_DAY	OpenSSH 시간 형식의 단위 w
 allow	crates/tasty-net-ssh/src/lib.rs	total: u64 = 0	OpenSSH 시간 형식: 합은 0에서 시작
-allow	crates/tasty-net-ssh/src/lib.rs	's' => 1	OpenSSH 시간 형식의 단위 s
-allow	crates/tasty-net-ssh/src/lib.rs	add(&mut digits, 1)	OpenSSH 시간 형식: 단위 없는 끝 숫자는 초
+allow	crates/tasty-net-ssh/src/lib.rs	const TIME_UNITS: [(char, u64); 5] = [('s', 1), ('m', SECS_PER_MINUTE), ('h', SECS_PER_HOUR), ('d', SECS_PER_DAY), ('w', SECS_PER_WEEK),]	OpenSSH 시간 형식의 단위 다섯과 그 초
 allow	crates/tasty-net-ssh/src/lib.rs	i32::MAX	OpenSSH 시간 형식: convtime이 받는 최대 초(INT_MAX)
 allow	crates/tasty-net-ssh/src/lib.rs	=> Duration::MAX	OpenSSH: ConnectTimeout 0은 기한 없음이라 시간으로 분류하지 않는다
 allow	crates/tasty-net-ssh/src/listener.rs	connect_failures.fetch_add(1,	거절 줄 하나를 센다(수를 하나씩 올린다)

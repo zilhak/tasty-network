@@ -176,15 +176,60 @@ const SERVER_ALIVE_INTERVAL_OPTION: &str = "ServerAliveInterval";
 const SERVER_ALIVE_COUNT_MAX_OPTION: &str = "ServerAliveCountMax";
 
 /// The values of the options `name` in the target's extra options, in order (`Key=Value` or
-/// `Key Value`; ssh compares option names without case).
+/// `Key Value`; ssh compares option names without case). The value is the text after the name
+/// and one `=`, as written; [`openssh_argument`] reads it the way ssh does.
 fn target_options<'a>(target: &'a SshTarget, name: &'a str) -> impl Iterator<Item = &'a str> {
     target.extra_options.iter().filter_map(move |opt| {
         let opt = opt.trim();
         let split = opt.find(|c: char| c == '=' || c.is_whitespace())?;
         let (key, rest) = opt.split_at(split);
-        let value = rest.trim_start().trim_start_matches('=').trim();
+        let rest = rest.trim_start();
+        let value = rest.strip_prefix('=').unwrap_or(rest).trim();
         key.eq_ignore_ascii_case(name).then_some(value)
     })
+}
+
+/// The single argument of an option value, split the way OpenSSH splits it (`argv_split`):
+/// spaces and tabs end it, single or double quotes group text and are removed, and a backslash
+/// escapes a quote, a backslash or (outside quotes) a space. `None` when ssh would refuse it:
+/// no argument, an unclosed quote, or more than one argument.
+fn openssh_argument(value: &str) -> Option<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut chars = value.chars().peekable();
+    loop {
+        while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut arg = String::new();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match (c, quote) {
+                ('\\', _) => match chars.peek() {
+                    Some(&n)
+                        if n == '\'' || n == '"' || n == '\\' || (n == ' ' && quote.is_none()) =>
+                    {
+                        arg.push(n);
+                        chars.next();
+                    }
+                    _ => arg.push(c),
+                },
+                (' ' | '\t', None) => break,
+                ('"' | '\'', None) => quote = Some(c),
+                (q, Some(open)) if q == open => quote = None,
+                _ => arg.push(c),
+            }
+        }
+        if quote.is_some() {
+            return None;
+        }
+        args.push(arg);
+    }
+    let mut args = args.into_iter();
+    match (args.next(), args.next()) {
+        (Some(arg), None) => Some(arg),
+        _ => None,
+    }
 }
 
 /// The `none` of an OpenSSH time option: it leaves the option unset, so a later value sets it.
@@ -193,17 +238,32 @@ const SECS_PER_MINUTE: u64 = 60;
 const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
 const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
 const SECS_PER_WEEK: u64 = 7 * SECS_PER_DAY;
+/// The units of the OpenSSH time format, with their seconds. A number with no unit is seconds.
+const TIME_UNITS: [(char, u64); 5] = [
+    ('s', 1),
+    ('m', SECS_PER_MINUTE),
+    ('h', SECS_PER_HOUR),
+    ('d', SECS_PER_DAY),
+    ('w', SECS_PER_WEEK),
+];
 
-/// A time in the OpenSSH time format (`convtime`): numbers, each followed by a unit `s`, `m`,
-/// `h`, `d` or `w` (either case) or by nothing (seconds), written one after another (`1m30s`,
-/// `90`). OpenSSH refuses a total above `i32::MAX` seconds; so does this.
+/// A time in the integer OpenSSH time format (`convtime`): whole numbers, each followed by a
+/// unit `s`, `m`, `h`, `d` or `w` (either case) or by nothing (seconds), written one after
+/// another (`1m30s`, `90`), each unit at most once. A unit written twice (`1s2s`, also `1s2`)
+/// and a fraction (`1.5`, which newer OpenSSH reads) are not read. OpenSSH refuses a total above
+/// `i32::MAX` seconds; so does this.
 pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
     let mut total: u64 = 0;
+    let mut used = [false; TIME_UNITS.len()];
     let mut digits = String::new();
-    let mut add = |digits: &mut String, unit: u64| -> Option<()> {
+    let mut add = |digits: &mut String, unit: char| -> Option<()> {
+        let at = TIME_UNITS.iter().position(|(u, _)| *u == unit)?;
+        if std::mem::replace(&mut used[at], true) {
+            return None;
+        }
         let n: u64 = digits.parse().ok()?;
         digits.clear();
-        total = total.checked_add(n.checked_mul(unit)?)?;
+        total = total.checked_add(n.checked_mul(TIME_UNITS[at].1)?)?;
         Some(())
     };
     if text.is_empty() {
@@ -212,42 +272,44 @@ pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
     for c in text.chars() {
         if c.is_ascii_digit() {
             digits.push(c);
-            continue;
+        } else {
+            add(&mut digits, c.to_ascii_lowercase())?;
         }
-        let unit = match c.to_ascii_lowercase() {
-            's' => 1,
-            'm' => SECS_PER_MINUTE,
-            'h' => SECS_PER_HOUR,
-            'd' => SECS_PER_DAY,
-            'w' => SECS_PER_WEEK,
-            _ => return None,
-        };
-        add(&mut digits, unit)?;
     }
     if !digits.is_empty() {
-        add(&mut digits, 1)?;
+        add(&mut digits, 's')?;
     }
     (total <= u64::from(i32::MAX.unsigned_abs())).then(|| Duration::from_secs(total))
 }
 
-/// The target's own `ConnectTimeout` as ssh takes it: the first value that is not `none`.
+/// The target's own `ConnectTimeout` as ssh takes it.
+///
+/// OpenSSH (`readconf.c`, `parse_time`) keeps the first value it reads, but `none` sets the
+/// option to unset, so a later value still sets it. A value ssh refuses stops it reading the
+/// options, so that value is the one taken.
 enum TargetTimeout<'a> {
     /// The target leaves it to this crate's setting.
     Unset,
-    /// A value in the OpenSSH time format.
+    /// A value in the integer OpenSSH time format, as written.
     Read(&'a str, Duration),
-    /// A value ssh would refuse; it is shown as written and does not classify.
+    /// A value this crate does not read; it is shown as written and does not classify.
     Unreadable(&'a str),
 }
 
 fn target_connect_timeout(target: &SshTarget) -> TargetTimeout<'_> {
-    match target_options(target, CONNECT_TIMEOUT_OPTION).find(|v| *v != OPENSSH_UNSET) {
-        None => TargetTimeout::Unset,
-        Some(v) => match parse_openssh_time(v) {
-            Some(d) => TargetTimeout::Read(v, d),
-            None => TargetTimeout::Unreadable(v),
-        },
+    for raw in target_options(target, CONNECT_TIMEOUT_OPTION) {
+        let Some(arg) = openssh_argument(raw) else {
+            return TargetTimeout::Unreadable(raw);
+        };
+        if arg == OPENSSH_UNSET {
+            continue;
+        }
+        return match parse_openssh_time(&arg) {
+            Some(d) => TargetTimeout::Read(raw, d),
+            None => TargetTimeout::Unreadable(raw),
+        };
     }
+    TargetTimeout::Unset
 }
 
 /// The connect timeout ssh runs with for `target`: the target's own `ConnectTimeout` if it sets

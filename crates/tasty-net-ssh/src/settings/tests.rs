@@ -331,6 +331,34 @@ fn the_target_connect_timeout_is_read_like_openssh() {
         ),
         (&["ConnectTimeout=ten"][..], "ten", "target", d(10)),
         (&["ConnectTimeout=0"][..], "0", "target", Duration::MAX),
+        // Each unit at most once; a fraction is not read (the integer format).
+        (&["ConnectTimeout=1s2s"][..], "1s2s", "target", d(10)),
+        (&["ConnectTimeout=1.5"][..], "1.5", "target", d(10)),
+        (&["ConnectTimeout=1m30.5s"][..], "1m30.5s", "target", d(10)),
+        // Quotes come off as ssh splits the argument, before none and the number are told.
+        (&["ConnectTimeout=\"none\""][..], "10", "default", d(10)),
+        (
+            &["ConnectTimeout=\"none\"", "ConnectTimeout=60"][..],
+            "60",
+            "target",
+            d(60),
+        ),
+        (&["ConnectTimeout='60'"][..], "'60'", "target", d(60)),
+        (&["ConnectTimeout=\"60"][..], "\"60", "target", d(10)),
+        (&["ConnectTimeout=1m 30s"][..], "1m 30s", "target", d(10)),
+        // The first value that is not none is the one ssh takes, readable or not.
+        (
+            &["ConnectTimeout=5", "ConnectTimeout=60"][..],
+            "5",
+            "target",
+            d(5),
+        ),
+        (
+            &["ConnectTimeout=ten", "ConnectTimeout=60"][..],
+            "ten",
+            "target",
+            d(10),
+        ),
     ] {
         assert_eq!(
             applied(&defaults, options),
@@ -349,7 +377,18 @@ fn the_target_connect_timeout_is_read_like_openssh() {
     // The format itself.
     assert_eq!(parse_openssh_time("1w2d3h4m5s"), Some(d(788_645)));
     assert_eq!(parse_openssh_time("1m30"), Some(d(90)));
-    for refused in ["", "m", "1.5", "-1", "1 m", "99999999999"] {
+    for refused in [
+        "",
+        "m",
+        "1.5",
+        "1m30.5s",
+        "-1",
+        "1 m",
+        "99999999999",
+        "1s2s",
+        "1s2",
+        "1m1M",
+    ] {
         assert_eq!(parse_openssh_time(refused), None, "{refused:?}");
     }
 }
