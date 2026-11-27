@@ -287,11 +287,13 @@ pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
     (total <= u64::from(i32::MAX.unsigned_abs())).then(|| Duration::from_secs(total))
 }
 
-/// The target's own `ConnectTimeout` as ssh takes it.
+/// The target's own `ConnectTimeout` as this crate picks it for the query and the discovery
+/// classification.
 ///
-/// OpenSSH (`readconf.c`, `parse_time`) keeps the first value it reads, but `none` sets the
-/// option to unset, so a later value still sets it. A value ssh refuses stops it reading the
-/// options, so that value is the one taken.
+/// Like OpenSSH (`readconf.c`, `parse_time`) it takes the first value, skipping `none`, which
+/// leaves the option unset so a later value still sets it. The first other value is the one
+/// picked even when this crate does not read it. ssh itself also checks every later value and
+/// exits before connecting if one is invalid; this crate does not repeat that check.
 enum TargetTimeout<'a> {
     /// The target leaves it to this crate's setting.
     Unset,
