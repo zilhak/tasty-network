@@ -12,6 +12,11 @@ publish = false
 name = "tasty-rendezvous"
 path = "src/bin/tasty-rendezvous.rs"
 
+# The probe of rendezvous/check-config.sh; its tests run with cargo test.
+[[example]]
+name = "stun_probe"
+test = true
+
 [dependencies]
 # The only workspace crate this crate may use (docs/design/crates.md "P2P 크레이트 격리").
 tasty-net-identity = { path = "../tasty-net-identity" }

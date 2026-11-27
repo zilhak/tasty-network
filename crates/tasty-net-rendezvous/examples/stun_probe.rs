@@ -13,8 +13,10 @@
 //! ```
 //!
 //! With no matching answer before the timeout it prints `stun-probe server=<addr> result=timeout`
-//! and exits 1. A wrong argument exits 2. Packets that are not the answer to this request
-//! (another transaction ID, not STUN, a request) are skipped and counted in the timeout line.
+//! and exits 1. A datagram longer than the largest answer of this subset is not read as an
+//! answer: it prints `stun-probe server=<addr> result=oversize len=<bytes>` and exits 1. A wrong
+//! argument exits 2. Packets that are not the answer to this request (another transaction ID,
+//! not STUN, a request) are skipped and counted in the timeout line.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::process::ExitCode;
@@ -24,10 +26,29 @@ use tasty_net_rendezvous::wire::stun::{self, StunClass};
 
 const USAGE: &str = "usage: stun_probe <host:port> <timeout ms>";
 
-/// The largest datagram read; a STUN answer of this subset is 44 bytes at most.
+/// The largest answer to a Binding Request without a punch token: the 20-byte header and one
+/// IPv6 XOR-MAPPED-ADDRESS (docs/design/rendezvous.md "포트와 전송", 크기와 증폭).
+const MAX_ANSWER: usize = 44;
+
+/// The receive buffer, larger than [`MAX_ANSWER`] so that a longer datagram is seen as longer
+/// (a datagram cut to the buffer still reads as at least this many bytes).
 const RECV_BUFFER: usize = 1500;
 
-fn probe(server: SocketAddr, timeout: Duration) -> Result<ExitCode, String> {
+/// How a probe ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// The server answered with this mapped address.
+    Answer {
+        local: SocketAddr,
+        mapped: SocketAddr,
+    },
+    /// No answer before the deadline; `skipped` packets were not the answer.
+    Timeout { skipped: u32 },
+    /// A datagram longer than [`MAX_ANSWER`] came; it is not read as an answer.
+    Oversize { len: usize },
+}
+
+fn probe(server: SocketAddr, timeout: Duration) -> Result<Outcome, String> {
     let bind: SocketAddr = if server.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -52,8 +73,7 @@ fn probe(server: SocketAddr, timeout: Duration) -> Result<ExitCode, String> {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            println!("stun-probe server={server} result=timeout skipped={skipped}");
-            return Ok(ExitCode::FAILURE);
+            return Ok(Outcome::Timeout { skipped });
         }
         socket
             .set_read_timeout(Some(left))
@@ -70,15 +90,15 @@ fn probe(server: SocketAddr, timeout: Duration) -> Result<ExitCode, String> {
             }
             Err(e) => return Err(format!("receive from {server}: {e}")),
         };
+        if n > MAX_ANSWER {
+            return Ok(Outcome::Oversize { len: n });
+        }
         let answer = buf
             .get(..n)
             .and_then(|packet| stun::parse(packet).ok())
             .filter(|m| m.class == StunClass::BindingSuccess && m.transaction_id == txid);
         match answer.and_then(|m| m.mapped) {
-            Some(mapped) => {
-                println!("stun-probe server={server} local={local} mapped={mapped}");
-                return Ok(ExitCode::SUCCESS);
-            }
+            Some(mapped) => return Ok(Outcome::Answer { local, mapped }),
             None => skipped = skipped.saturating_add(1),
         }
     }
@@ -106,10 +126,112 @@ fn main() -> ExitCode {
         }
     };
     match probe(server, Duration::from_millis(timeout_ms)) {
-        Ok(code) => code,
+        Ok(Outcome::Answer { local, mapped }) => {
+            println!("stun-probe server={server} local={local} mapped={mapped}");
+            ExitCode::SUCCESS
+        }
+        Ok(Outcome::Timeout { skipped }) => {
+            println!("stun-probe server={server} result=timeout skipped={skipped}");
+            ExitCode::FAILURE
+        }
+        Ok(Outcome::Oversize { len }) => {
+            println!("stun-probe server={server} result=oversize len={len}");
+            ExitCode::FAILURE
+        }
         Err(e) => {
             eprintln!("stun_probe: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake server that answers the first request with `answer(request txid)`.
+    fn fake_server(answer: fn(&stun::TransactionId) -> Vec<u8>) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = socket.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; RECV_BUFFER];
+            let (n, from) = socket.recv_from(&mut buf).unwrap();
+            let request = stun::parse(&buf[..n]).unwrap();
+            socket
+                .send_to(&answer(&request.transaction_id), from)
+                .unwrap();
+        });
+        addr
+    }
+
+    fn soon() -> Duration {
+        Duration::from_secs(5)
+    }
+
+    #[test]
+    fn an_answer_gives_the_mapped_address() {
+        let server = fake_server(|txid| {
+            stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None)
+        });
+        let outcome = probe(server, soon()).unwrap();
+        let want: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        assert!(
+            matches!(outcome, Outcome::Answer { mapped, .. } if mapped == want),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_largest_answer_is_read() {
+        let server = fake_server(|txid| {
+            let answer = stun::binding_success(txid, "[2001:db8::1]:4000".parse().unwrap(), None);
+            assert_eq!(answer.len(), MAX_ANSWER);
+            answer
+        });
+        let outcome = probe(server, soon()).unwrap();
+        assert!(matches!(outcome, Outcome::Answer { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_datagram_longer_than_the_largest_answer_is_not_an_answer() {
+        // A valid answer followed by more bytes: cut to its first bytes it would parse, so the
+        // probe must refuse it by its length, not by the codec.
+        let server = fake_server(|txid| {
+            let mut answer = stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None);
+            answer.resize(RECV_BUFFER + 100, 0);
+            answer
+        });
+        let outcome = probe(server, soon()).unwrap();
+        assert!(
+            matches!(outcome, Outcome::Oversize { len } if len > MAX_ANSWER),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn one_byte_over_the_largest_answer_is_not_an_answer() {
+        let server = fake_server(|txid| {
+            let mut answer = stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None);
+            answer.resize(MAX_ANSWER + 1, 0);
+            answer
+        });
+        let outcome = probe(server, soon()).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Oversize {
+                len: MAX_ANSWER + 1
+            }
+        );
+    }
+
+    #[test]
+    fn another_transaction_is_skipped_until_the_deadline() {
+        let server = fake_server(|txid| {
+            let mut other = *txid;
+            other[0] ^= 0xff;
+            stun::binding_success(&other, "127.0.0.1:4000".parse().unwrap(), None)
+        });
+        let outcome = probe(server, Duration::from_millis(300)).unwrap();
+        assert_eq!(outcome, Outcome::Timeout { skipped: 1 });
     }
 }
