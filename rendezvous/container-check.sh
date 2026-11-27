@@ -28,7 +28,8 @@
 #      데이터 실행은 CONTAINER_CHECK_MESSAGE_BYTES 바이트다. 실행마다 앞뒤로 서버 쪽 수신 카운터(컨테이너
 #      eth0의 rx_bytes·rx_packets)를 읽고, 두 예제의 연결 정보 줄(경로·주소쌍·서버)을 그대로 적는다.
 #   6. path-control, path-data: 두 기기의 성공 후보 종류가 host이고 상대 주소가 알린 호스트 IP인지, 서버가
-#      본 반사 주소와 다른지 본다. 서버 로그의 매핑 판별과 펀칭 mode도 적는다.
+#      본 반사 주소와 다른지 본다. 서버 로그의 매핑 판별과 펀칭 mode도 적는다. 반사 주소·매핑·mode는 그 실행
+#      구간의 서버 로그(실행 전 줄 수 뒤의 줄)에서만 읽는다.
 #   7. no-forward: 데이터 실행의 서버 쪽 수신 바이트가 대조 실행의 두 배를 넘지 않는지 본다. 두 실행은 메시지
 #      크기만 다르고 서버로 가는 제어 트래픽은 메시지를 싣지 않는다. 메시지가 서버를 지났다면 데이터 실행은
 #      대조 실행 + 메시지 바이트 이상이다. 메시지가 대조 실행의 두 배 이하이거나 어느 실행의 수신 바이트·패킷
@@ -206,6 +207,13 @@ reflexive_of() {
     grep -F 'registered addresses' <<<"$1" | sed -n 's/.* reflexive=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//'
 }
 
+# log_after <로그> <줄 수>: 로그에서 앞의 <줄 수> 줄 뒤의 줄만 낸다. 실행마다 그 실행 전의 서버 로그 줄 수를
+# 재 두고, 그 뒤의 줄로 그 실행의 반사 주소·매핑·mode를 읽는다(앞 실행의 줄을 쓰지 않는다).
+log_after() {
+    [[ "$2" =~ ^[0-9]{1,18}$ ]] || return 1
+    awk -v n="$2" 'NR > n' <<<"$1"
+}
+
 # 글자 $1이 십진수이고 $2–$3 안이면 앞의 0을 뗀 값을 낸다. 아니면 실패한다. 산술식에 넣기 전에 형식과
 # 자릿수(9자리까지)를 보므로 08 같은 값이 8진수로 읽히거나 큰 수가 넘쳐 감기지 않는다.
 decimal_in() {
@@ -305,6 +313,16 @@ self_test() {
     check not path_ok "$d" "$l" 10.255.0.1 "10.255.0.1:5002" >/dev/null
     check test "$(reflexive_of $'DEBUG x: registered addresses device=a reflexive=172.31.255.1:6002 stun=[127.0.0.1:1]\nINFO x: registered device=a\nDEBUG x: registered addresses device=b reflexive=172.31.255.1:6001 stun=[]\nDEBUG x: registered addresses device=b reflexive=172.31.255.1:6001 stun=[]')" = 172.31.255.1:6001,172.31.255.1:6002
     check test -z "$(reflexive_of 'INFO x: registered device=a')"
+    local clog dlog
+    clog=$'DEBUG x: registered addresses device=a reflexive=172.31.255.1:6001 stun=[]\nINFO x: punch offered device=a peer=b punch_id=1 mode=HostOnly'
+    dlog=$'DEBUG x: registered addresses device=a reflexive=172.31.255.1:7001 stun=[]'
+    # 대조 실행 로그만 있고 데이터 실행 구간이 비면 반사 주소가 없어 path 판정이 실패한다.
+    check test -z "$(log_after "$clog" 2)"
+    check not path_ok "$d" "$l" 10.255.0.1 "$(reflexive_of "$(log_after "$clog" 2)")" >/dev/null
+    # 데이터 실행 구간의 줄만 읽는다.
+    check test "$(reflexive_of "$(log_after "$clog"$'\n'"$dlog" 2)")" = 172.31.255.1:7001
+    check test "$(log_after "$clog" 0)" = "$clog"
+    check not log_after "$clog" x
     if [[ "$fails" -eq 0 ]]; then
         log "자체 시험 통과 — 사례 ${n}개"
         echo "rendezvous-check container self-test result=ok"
@@ -623,11 +641,12 @@ main_check() {
 
     # 대조 실행(1바이트)과 데이터 실행(MESSAGE_BYTES)을 같은 서버로 차례로 돌리고, 실행마다 앞뒤의 서버
     # 쪽 수신 카운터를 읽는다.
-    local run bytes before after rx0 rx1 pk0 pk1 control_bytes control_packets data_bytes data_packets
+    local run bytes log_start run_log before after rx0 rx1 pk0 pk1 control_bytes control_packets data_bytes data_packets
     for run in control data; do
         bytes=1
         [[ "$run" == data ]] && bytes=$MESSAGE_BYTES
         STEP=connect-$run
+        log_start=$(server_logs | wc -l | tr -d ' ')
         before=$(rx_snapshot) || fail_at "서버 쪽 수신 카운터를 읽지 못했다: '$before'"
         run_pair "$run" "$bytes"
         after=$(rx_snapshot) || fail_at "서버 쪽 수신 카운터를 읽지 못했다: '$after'"
@@ -638,9 +657,10 @@ main_check() {
         step_ok "server_rx_bytes_delta=$((rx1 - rx0)) server_rx_packets_delta=$((pk1 - pk0))"
 
         STEP=path-$run
-        reflexive=$(reflexive_of "$(server_logs)")
-        nat=$(server_logs | grep -F 'nat report' | sed -n 's/.* mapping=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
-        mode=$(server_logs | grep -F 'punch offered' | sed -n 's/.* mode=\([^ ]*\).*/\1/p' | tail -n 1)
+        run_log=$(log_after "$(server_logs)" "$log_start") || fail_at "서버 로그 줄 수를 읽지 못했다: '$log_start'"
+        reflexive=$(reflexive_of "$run_log")
+        nat=$(grep -F 'nat report' <<<"$run_log" | sed -n 's/.* mapping=\([^ ]*\).*/\1/p' | sort -u | tr '\n' ',' | sed 's/,$//')
+        mode=$(grep -F 'punch offered' <<<"$run_log" | sed -n 's/.* mode=\([^ ]*\).*/\1/p' | tail -n 1)
         why=$(path_ok "$dial_line" "$listen_line" "$host_ip" "$reflexive") || fail_at "$why (nat=$nat mode=$mode)"
         step_ok "path=host devices=same-host-processes network=private-ipv4 nat=$nat mode=$mode"
 
