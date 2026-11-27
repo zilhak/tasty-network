@@ -27,60 +27,30 @@
 //! is not here; the consumer does it with these value types. The crate reads no environment
 //! variable: host key checking is [`SshLauncher::with_verify`].
 
-mod cancel;
-mod discovery;
 mod listener;
 pub mod settings;
-mod spawn;
-mod tunnel;
+mod system;
 
-pub use cancel::{SshCancel, SshCancelScope};
-pub use discovery::{
-    PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
-    PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port, detect_port_mode,
-    discover_remote_port,
-};
 pub use listener::{
     ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
 };
 pub use settings::{
     PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT, SshSettings,
 };
-pub use spawn::{SpawnFn, SpawnHook, SshLauncher};
-pub use tunnel::{Backoff, SshTunnel, TunnelError, tunnel_drop_totals};
+pub use system::cancel::{SshCancel, SshCancelScope};
+pub use system::discovery::{
+    PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
+    PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port, detect_port_mode,
+    discover_remote_port,
+};
+pub use system::resolve_ssh_path;
+pub use system::spawn::{SpawnFn, SpawnHook, SshLauncher};
+pub use system::tunnel::{Backoff, SshTunnel, TunnelError, tunnel_drop_totals};
 
 use std::fmt;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use settings::Source;
-
-/// Path of the system `ssh` binary.
-///
-/// Windows prefers the system OpenSSH so that the Windows ssh-agent is used. When it is
-/// missing, a warning is logged and `ssh.exe` from `PATH` is used. Other systems use `ssh`
-/// from `PATH`.
-pub fn resolve_ssh_path() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Ok(windir) = std::env::var("WINDIR") {
-            let full = PathBuf::from(windir).join(r"System32\OpenSSH\ssh.exe");
-            if full.exists() {
-                return full;
-            }
-        }
-        tracing::warn!(
-            "system OpenSSH (%WINDIR%\\System32\\OpenSSH\\ssh.exe) not found; falling back to \
-             ssh.exe from PATH. A Git-bundled ssh does not see the Windows agent, so \
-             passwordless authentication may fail."
-        );
-        PathBuf::from("ssh.exe")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("ssh")
-    }
-}
 
 /// Connection target and its ssh options. `ssh` resolves the destination itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -879,13 +849,5 @@ mod tests {
         if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
             assert_eq!(expand_tilde("~/.ssh/k"), format!("{home}/.ssh/k"));
         }
-    }
-
-    #[test]
-    fn resolve_ssh_path_nonempty() {
-        let p = resolve_ssh_path();
-        assert!(!p.as_os_str().is_empty());
-        #[cfg(not(windows))]
-        assert_eq!(p, PathBuf::from("ssh"));
     }
 }

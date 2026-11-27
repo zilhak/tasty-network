@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::cancel::{kill_and_reap, recover_mutex};
 use crate::listener::{ListenerVerdict, StderrMarks, VerdictTiming, relay_stderr};
 use crate::settings::SshSettings;
+use crate::system::cancel::{kill_and_reap, recover_mutex};
 use crate::{SshLauncher, SshTarget};
 
 /// Returns a free local port and the listener holding it. Between dropping the listener and
@@ -768,7 +768,7 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         const FAKE_ARGS_ENV: &str = "TASTY_NET_SSH_FAKE_FORWARDER_ARGS";
-        const FORWARDER_TEST: &str = "tunnel::tests::fake::fake_ssh_forwarder_entry";
+        const FORWARDER_TEST: &str = "system::tunnel::tests::fake::fake_ssh_forwarder_entry";
 
         struct Script(PathBuf);
 

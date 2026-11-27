@@ -11,8 +11,8 @@ use std::str::FromStr;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
 use crate::settings::SshSettings;
+use crate::system::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
 use crate::{SpawnHook, SshLauncher, SshTarget, connect_timeout_for};
 
 /// Exit code of the remote subcommand when the instance that wrote the record has exited.
