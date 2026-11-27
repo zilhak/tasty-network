@@ -49,16 +49,28 @@ log() { echo "[rendezvous-check] $*" >&2; }
 # 파일 머리의 주석 블록(둘째 줄부터 첫 비주석 줄 전까지)을 도움말로 출력한다.
 show_help() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
-# wait_until <초> <명령...>: 명령이 성공할 때까지 POLL_SECONDS마다 다시 부른다.
+# 지금 시각(마이크로초). bash 5의 EPOCHREALTIME을 쓰고, 없으면 date의 나노초에서 얻는다.
+now_us() {
+    local t=${EPOCHREALTIME:-}
+    if [[ -n "$t" ]]; then
+        t=${t/[.,]/}
+    else
+        t=$(date +%s%N)
+        t=${t%???}
+    fi
+    echo "$((10#$t))"
+}
+
+# wait_until <초> <명령...>: 명령이 성공할 때까지 POLL_SECONDS마다 다시 부른다. 기한은 부른 횟수가
+# 아니라 경과 시각으로 잰다(명령과 sleep에 걸린 시간도 기한에 든다).
 # 기한 안에 성공하면 0, 기한을 넘기면 1.
 wait_until() {
-    local limit=$1 i=0 ticks
+    local limit=$1 end
     shift
-    ticks=$(awk -v s="$limit" -v t="$POLL_SECONDS" 'BEGIN { printf "%d", s / t }')
+    end=$(($(now_us) + $(awk -v s="$limit" 'BEGIN { printf "%d", s * 1000000 }')))
     until "$@"; do
-        [[ "$i" -lt "$ticks" ]] || return 1
+        [[ "$(now_us)" -lt "$end" ]] || return 1
         sleep "$POLL_SECONDS"
-        i=$((i + 1))
     done
 }
 
@@ -460,6 +472,16 @@ echo "WARN s: bound to a wildcard address" >&2; exec sleep 30.25'
     expect ok "cleanup: 신호를 무시하는 서버를 기한 뒤 SIGKILL로 거둔다" cleanup_deaf
     expect ok "wait_until: 기한 안에 성공" wait_until 1 true
     expect fail "wait_until: 기한을 넘기면 실패" wait_until 0.3 false
+    slow_false() { sleep 0.4; false; }
+    wait_slow() { # 부를 때마다 0.4 s 걸리는 명령도 기한 1 s 근처에서 끝난다(횟수로 세면 5 s 넘게 걸린다).
+        local start
+        start=$(now_us)
+        ! wait_until 1 slow_false && [[ $(($(now_us) - start)) -lt 2000000 ]]
+    }
+    expect ok "wait_until: 기한을 경과 시각으로 잰다" wait_slow
+    expect ok "now_us: 늘어나는 마이크로초" test "$(now_us)" -gt 1000000000000000
+    now_from_date() { local a b; a=$(now_us); b=$(unset EPOCHREALTIME; now_us); [[ "$b" -ge "$a" && $((b - a)) -lt 5000000 ]]; }
+    expect ok "now_us: EPOCHREALTIME이 없으면 date로 같은 단위" now_from_date
 
     # 실제 예시 파일에도 판정 함수가 기대대로 걸리는지 본다(빌드 없이).
     expect ok "예시: 표 안에 적은 키가 있다" test -n "$(configured_keys "$EXAMPLE")"
