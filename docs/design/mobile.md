@@ -345,7 +345,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 결정됨(director 2931): D11(모바일 target 빌드 검사)을 [동작 수준 기준](done-criteria.md)에 넣는다. 내장 백엔드 attach 시험은 tasty 전환 기준에 넣지 않고 [모바일 공개 전 기준](done-criteria.md#모바일-공개-전-기준)으로 따로 둔다. D11을 판정할 `mobile-android`·`mobile-ios` 잡은 아직 없다. 모바일 cross check 작업이 만든다.
 
 - 태그 규칙([버전·호환](versioning.md#태그와-브랜치))도 tasty 전환 태그를 모바일 cross check 통과 커밋에만 붙이게 하므로, 모바일 cross check CI(모바일 cross check 작업)가 tasty 전환 태그보다 먼저 있어야 한다.
-- 내장 백엔드 조합이 D11에 들려면 이식 크레이트(`tasty-net-ssh-config`)와 내장 백엔드 작업이 먼저 develop에 있어야 한다. 그 전의 D11은 위 cross check 표의 "모바일 cross check 작업부터" 행만 본다.
+- D11은 판정 sha마다 위 cross check 표에서 "목록에 드는 때"를 채운 행 전체를 본다. T3가 들어온 뒤의 `tasty-net-p2p`, 이식 크레이트가 생긴 뒤의 `tasty-net-ssh-config`, 내장 백엔드 작업 뒤의 내장 조합 두 행도 그 커밋부터 든다.
 
 ## 후속 작업과 미정
 
