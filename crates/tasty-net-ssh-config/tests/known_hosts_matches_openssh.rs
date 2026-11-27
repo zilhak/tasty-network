@@ -15,7 +15,8 @@
 //!
 //! The port-less lookup of [`KnownHosts::check`] (`sshconnect.c:1181`-`:1193`) is compared
 //! as far as `ssh-keygen -F` shows it: for a host at a port other than 22, `-F [host]:port`
-//! lists nothing and the line the crate takes is one `-F host` lists. The reference client is the one of `tests/matches_openssh.rs`
+//! lists nothing and exits with 1, `-F host` exits with 0, and the line the crate takes is one
+//! `-F host` lists. The reference client is the one of `tests/matches_openssh.rs`
 //! (`$TASTY_OPENSSH_REF_DIR/bin/ssh-keygen` or `target/tools/openssh-10.6p2/bin/ssh-keygen`),
 //! checked by the `ssh -V` next to it; without it the test fails when
 //! `TASTY_OPENSSH_REF_REQUIRED` is not empty and is skipped otherwise. Windows does not
@@ -309,16 +310,23 @@ fn matches_ssh_keygen_f() {
             .into_iter()
             .map(|(n, _, _)| n)
             .collect();
+        // The same exit contract as above: `-F [host]:port` finds nothing (1, no output),
+        // `-F host` finds lines (0).
+        let ported_none = exit_agrees(f.status, false) && f.stdout.is_empty();
+        let bare_lists = !bare_lines.is_empty() && exit_agrees(bare.status, true);
         let got = known.check(&HostKeyQuery::for_host(host, port, None), &blob_of(key));
         match &got {
             HostKeyVerdict::Match { line, .. }
-                if f.status.code() == Some(1) && bare_lines.contains(line) =>
+                if ported_none && bare_lists && bare_lines.contains(line) =>
             {
                 without_port += 1;
             }
             _ => failures.push(format!(
-                "check {ported}: crate {got:?}, ssh-keygen -F {ported} exit {:?}, -F {host} lines {bare_lines:?}",
-                f.status.code()
+                "check {ported}: crate {got:?}, ssh-keygen -F {ported} exit {:?} ({} bytes out), \
+                 -F {host} exit {:?} lines {bare_lines:?}",
+                f.status.code(),
+                f.stdout.len(),
+                bare.status.code()
             )),
         }
         let aliased = known.check(
