@@ -478,7 +478,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `VerifyHostKeyDNS yes`·`ask` | 호스트 키를 믿는 근거(DNS SSHFP)다. 무시하면 DNS 지문과 맞지 않는 키를 `accept-new`가 받을 수 있다 |
 | `KnownHostsCommand` | 다른 프로그램을 실행해야 하고, 빠지면 `accept-new`가 다른 키를 받을 수 있다 |
 | `RevokedHostKeys`가 KRL 파일 | 폐기 목록을 읽지 못하면 폐기된 키를 받을 수 있다 |
-| `ProxyCommand`(`none` 아님), `ProxyJump` 뒤에 온 `ProxyCommand`(`none` 아님) | 다른 프로그램 실행이다. 뒤의 경우는 OpenSSH도 `inconsistent options: ProxyCommand+ProxyJump`로 끝낸다(`ssh.c:1300`–`:1303`). `ProxyCommand`가 먼저면 `ProxyJump`는 OpenSSH에서도 쓰이지 않는다(`parse_jump`의 `active &= proxy_command == NULL && jump_host == NULL`, `readconf.c:3493`) |
+| 유효 값이 `ProxyCommand`(`none` 아님) | 다른 프로그램 실행이다. 유효 값만 판정한다. `ProxyJump`가 먼저 적용되면 `parse_jump`가 `ProxyCommand none`을 넣으므로(`readconf.c:3534`) 뒤에 온 `ProxyCommand`는 첫 값 우선으로 버려지고 거부하지 않는다. `ProxyCommand`가 먼저면 `ProxyJump`는 OpenSSH에서도 쓰이지 않는다(`parse_jump`의 `active &= proxy_command == NULL && jump_host == NULL`, `readconf.c:3493`). 두 값이 함께 남는 경우(`ssh.c:1300`–`:1303`의 `inconsistent options: ProxyCommand+ProxyJump`)는 설정 오류다 |
 | `Match exec` | 다른 프로그램을 실행해야 블록 적용을 판정한다. 판정하지 못한 블록의 `Hostname`·`ProxyJump`가 빠지면 고르는 대상이 달라진다 |
 | `Match localnetwork` | 블록 적용을 판정하지 못한다(같은 이유) |
 | `CanonicalizeHostname yes`·`always` | 무시하면 OpenSSH와 다른 호스트로 연결한다 |

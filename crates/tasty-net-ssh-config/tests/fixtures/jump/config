@@ -18,3 +18,6 @@ Host none-jump
     ProxyJump none
 Host chain
     ProxyJump ssh://u@a.example.org:2203,b.example.org
+Host pj-then-pc
+    ProxyJump hop
+    ProxyCommand nc %h %p
