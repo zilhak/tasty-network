@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# push 전에 형식, 셸 자산, tasty 의존 없음, Clippy, workspace 컴파일을 검사한다.
+# push 전에 형식, 셸 자산, tasty 의존 없음, P2P 크레이트 격리, Clippy, workspace 컴파일을 검사한다.
 # 시험(cargo test)은 실제 ssh·포트를 쓰는 것이 있어 여기서 돌리지 않는다. CI가 세 OS에서 돌린다.
 # 설치: bash scripts/dev-setup.sh (core.hooksPath = .githooks)
 # 검사별 범위: docs/dev-guide/git-hooks.md
@@ -52,8 +52,9 @@ run_check() {
 run_check B.1 'cargo fmt --all --check' bash scripts/check.sh fmt
 run_check B.2 '셸 자산 shellcheck' bash scripts/check.sh shell
 run_check B.3 'tasty 의존 없음' bash scripts/check.sh no-tasty-deps
-run_check B.4 'cargo clippy --workspace --all-targets -- -D warnings' bash scripts/check.sh lint
-run_check B.5 'cargo check --workspace --all-targets --locked' bash scripts/check.sh check
+run_check B.4 'P2P 크레이트 격리' bash scripts/check.sh p2p-isolation
+run_check B.5 'cargo clippy --workspace --all-targets -- -D warnings' bash scripts/check.sh lint
+run_check B.6 'cargo check --workspace --all-targets --locked' bash scripts/check.sh check
 
 printf '\npush 전 검사 결과 (총 %s초)\n' "$((SECONDS - STARTED))"
 cat "$SUMMARY"

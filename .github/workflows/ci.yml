@@ -90,7 +90,7 @@ jobs:
         run: scripts/check.sh test --no-fail-fast
 
   repo-checks:
-    name: shellcheck, no-tasty-deps
+    name: shellcheck, no-tasty-deps, p2p-isolation
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -108,6 +108,9 @@ jobs:
       # Criterion D7 of docs/design/done-criteria.md.
       - name: no-tasty-deps
         run: scripts/check.sh no-tasty-deps
+      # Criterion D8 of docs/design/done-criteria.md.
+      - name: p2p-isolation
+        run: scripts/check.sh p2p-isolation
 
   deny:
     name: cargo deny (licenses, bans, sources)

@@ -19,10 +19,11 @@
 
 | 명령 | 하는 일 |
 |---|---|
-| `bash scripts/check.sh` | fmt, shellcheck, no-tasty-deps, clippy, test |
+| `bash scripts/check.sh` | fmt, shellcheck, no-tasty-deps, p2p-isolation, clippy, test |
 | `bash scripts/check.sh fmt` | `cargo fmt --all --check` |
 | `bash scripts/check.sh lint` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `bash scripts/check.sh test` | `cargo test --workspace --locked` |
+| `bash scripts/check.sh p2p-isolation` | P2P 크레이트의 workspace 안 의존 범위(자체 시험 포함) |
 | `bash scripts/check.sh deny` | cargo deny의 licenses·bans·sources (`deny.toml`) |
 
 단계 목록의 정본은 `bash scripts/check.sh help`다. `Cargo.lock`은 커밋한다. 의존을 해석하는 cargo 명령(clippy·test·check·metadata·deny·fetch)은 `--locked`로 돌린다. `cargo fmt`는 의존을 해석하지 않아 그 옵션이 없다.

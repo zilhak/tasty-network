@@ -59,7 +59,7 @@ frame, ssh, identity ─> (없음)
   3. frame은 쓰지 않는다. P2P 스트림은 바이트 스트림이고 프레임은 transport가 그 위에 얹는다. 조정 메시지의 길이 접두는 rendezvous의 형식 모듈이 따로 정한다(4바이트 길이 + JSON, frame의 tag 구조가 필요 없다).
 - rendezvous → p2p 방향이 아니라 p2p → rendezvous인 근거: p2p의 시험과 예제가 서버를 프로세스 안에서 띄워야 하고, 메시지 형식은 한 곳에 있어야 한다. 서버가 p2p에 의존하면 p2p 시험이 서버를 쓰기 위해 순환(dev 의존)이 생긴다.
 - transport는 p2p를 어댑터로 쓴다. `P2pCloseReason`과 QUIC 종료 코드 표의 정의는 p2p로 옮기고 transport는 다시 내보낸다(지금 develop의 transport 코드에 있는 정의를 옮기는 일은 후속 작업이다).
-- 확인: 정적 검사 `p2p-isolation`(`cargo metadata`에서 두 크레이트의 workspace 안 의존이 위 범위 밖이면 실패, 후속 작업이 만든다)이 [동작 수준 기준](done-criteria.md) D8이다.
+- 확인: 정적 검사 `p2p-isolation`(`scripts/check.sh p2p-isolation`, `cargo metadata`에서 두 크레이트의 workspace 안 의존이 위 범위 밖이면 실패)이 [동작 수준 기준](done-criteria.md) D8이다.
 
 ## 외부 의존 원칙
 
