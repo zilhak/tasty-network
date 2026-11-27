@@ -1807,7 +1807,7 @@ dependencies = [
 name = "tasty-net-topology"
 version = "0.1.0"
 dependencies = [
- "getrandom",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "tasty-net-frame",
