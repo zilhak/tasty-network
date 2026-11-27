@@ -32,7 +32,7 @@ use tasty_net_identity::{DeviceId, DeviceKey};
 use tasty_net_p2p::settings::Value;
 use tasty_net_p2p::{
     AttemptPhase, P2pCloseReason, P2pConfig, P2pConnectionInfo, P2pEndpoint, P2pEvent, PairingList,
-    Phase, RendezvousServer,
+    Phase, RendezvousServer, Side,
 };
 
 const USAGE: &str = "usage: punch_probe id --key-dir <dir>
@@ -50,6 +50,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const REGISTER_LIMIT: Duration = Duration::from_secs(30);
 /// The poll interval while waiting for the registration.
 const REGISTER_POLL: Duration = Duration::from_millis(50);
+/// The poll interval of the attempt watch: an attempt leaves the connection list when it
+/// closes, so its NAT values are kept while it runs.
+const WATCH_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Default)]
 struct Args {
@@ -232,6 +235,42 @@ fn line(
     })
 }
 
+/// The latest information of an attempt of `side` that got `punch_go` (it carries both NAT
+/// mappings and the mode), kept over `prev`.
+fn keep_latest(
+    prev: Option<P2pConnectionInfo>,
+    now: Vec<P2pConnectionInfo>,
+    side: Side,
+) -> Option<P2pConnectionInfo> {
+    now.into_iter()
+        .filter(|i| i.side == side && i.nat.is_some())
+        .max_by_key(|i| i.id)
+        .or(prev)
+}
+
+/// Runs `f` while a watch thread keeps the latest information of the attempts of `side`, so a
+/// failed attempt still reports its NAT combination.
+fn watched<T>(
+    ep: &P2pEndpoint,
+    side: Side,
+    f: impl FnOnce() -> T,
+) -> (T, Option<P2pConnectionInfo>) {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let watch = s.spawn(|| {
+            let mut kept = None;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                kept = keep_latest(kept, ep.connections(), side);
+                std::thread::sleep(WATCH_POLL);
+            }
+            keep_latest(kept, ep.connections(), side)
+        });
+        let out = f();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        (out, watch.join().unwrap_or(None))
+    })
+}
+
 /// The middle and the largest value.
 fn median_max(mut v: Vec<f64>) -> (Json, Json) {
     if v.is_empty() {
@@ -252,11 +291,12 @@ fn dial(a: &Args, peer: DeviceId, end: Instant) -> Result<(u64, u64), String> {
             break;
         }
         let _old = ep.events();
-        let r = ep.connect(peer);
+        let (r, seen) = watched(&ep, Side::Dialer, || ep.connect(peer));
         let events = ep.events();
         let out = match &r {
             Ok(c) => line(n, &events, c.info(), None),
-            Err(e) => line(n, &events, None, Some(e.to_string())),
+            // The attempt left the list when it closed: what the watch kept of it.
+            Err(e) => line(n, &events, seen, Some(e.to_string())),
         };
         if let (Some(ms), true) = (out["request_to_punched_ms"].as_f64(), r.is_ok()) {
             times.push(ms);
@@ -287,10 +327,16 @@ fn listen(a: &Args, end: Instant) -> Result<(u64, u64), String> {
     for n in 1..=count {
         let left = end.saturating_duration_since(Instant::now());
         let _old = ep.events();
-        let conn = match ep.accept_timeout(Some(left)) {
+        let (taken_conn, seen) = watched(&ep, Side::Acceptor, || ep.accept_timeout(Some(left)));
+        let conn = match taken_conn {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("punch_probe: accept: {e}");
+                // The measurement counts the failure too, with the NAT values of the last
+                // punch that reached this side.
+                println!(
+                    "{}",
+                    line(n, &ep.events(), seen, Some(format!("accept: {e}")))
+                );
                 break;
             }
         };
@@ -330,5 +376,66 @@ fn main() -> ExitCode {
             eprintln!("punch_probe: {e}\n{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tasty_net_p2p::{NatInfo, P2pConnectError};
+    use tasty_net_rendezvous::wire::message::{NatMapping, PunchMode};
+
+    fn info(id: u64, side: Side, nat: bool) -> P2pConnectionInfo {
+        // Only the fields the line and the watch read matter.
+        P2pConnectionInfo {
+            id,
+            peer: DeviceKey::from_seed([8; 32]).id(),
+            side,
+            state: AttemptPhase::Punching,
+            local_bind: None,
+            local_ip: None,
+            local_reflexive: None,
+            remote_addr: None,
+            remote_candidate: None,
+            rendezvous: None,
+            nat: nat.then_some(NatInfo {
+                local: NatMapping::Independent,
+                peer: NatMapping::Dependent,
+                mode: PunchMode::All,
+            }),
+            attempt: Default::default(),
+            rtt: None,
+            last_cause: None,
+            history: Vec::new(),
+            history_dropped: 0,
+            applied: Vec::new(),
+        }
+    }
+
+    /// A failed attempt's line carries the NAT combination the watch kept.
+    #[test]
+    fn a_failed_attempt_reports_its_nat_combination() {
+        let kept = keep_latest(None, vec![info(1, Side::Dialer, true)], Side::Dialer);
+        // The attempt left the list; the kept values stay.
+        let kept = keep_latest(kept, Vec::new(), Side::Dialer);
+        let out = line(1, &[], kept, Some(P2pConnectError::PunchFailed.to_string()));
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["local_nat"], json!("Independent"));
+        assert_eq!(out["peer_nat"], json!("Dependent"));
+        assert_eq!(out["mode"], json!("All"));
+        // Attempts before punch_go and of the other side are not taken.
+        let none = keep_latest(
+            None,
+            vec![info(2, Side::Dialer, false), info(3, Side::Acceptor, true)],
+            Side::Dialer,
+        );
+        assert!(none.is_none());
+        // The newest attempt wins.
+        let newest = keep_latest(
+            None,
+            vec![info(4, Side::Acceptor, true), info(5, Side::Acceptor, true)],
+            Side::Acceptor,
+        );
+        assert_eq!(newest.map(|i| i.id), Some(5));
     }
 }
