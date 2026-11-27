@@ -527,6 +527,7 @@ impl EntryRef {
             transport: EdgeTransport::of(peer.transport, holder),
             opened_at: SystemTime::now(),
             rtt: None,
+            applied: link_timeouts(timeouts),
         };
         self.table.with_state(|state, _| {
             let Some(stored) = state.entries.get_mut(&self.id) else {
@@ -600,10 +601,16 @@ impl EntryRef {
         self.update(|info| {
             info.peer.device_id = Some(peer.device_id);
             info.peer.instance_id = Some(peer.instance_id.clone());
+            // The first channel's values stay: a later link or channel on the same tunnel
+            // shows its own on its link row, without changing what the others run with.
             let applied = link_timeouts(timeouts);
-            info.applied
-                .retain(|s| !applied.iter().any(|a| a.key == s.key));
-            info.applied.splice(0..0, applied);
+            if !info
+                .applied
+                .iter()
+                .any(|s| applied.iter().any(|a| a.key == s.key))
+            {
+                info.applied.splice(0..0, applied);
+            }
         });
         self.transition(ConnectionState::Connected, None, None);
     }

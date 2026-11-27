@@ -19,11 +19,13 @@ use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTa
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionState,
     ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, Finish, HandshakeError,
-    Holder, PathKind, Phase, RedialError, Redialer, RedialerConfig, RejectReason, Side,
-    SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake, dial_request,
+    Holder, LinkTimeouts, PathKind, Phase, RedialError, Redialer, RedialerConfig, RejectReason,
+    Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake,
+    dial_request,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
+use tasty_net_transport::settings::{Setting, SettingValue};
 
 const FAKE_ARGS_ENV: &str = "TASTY_NET_TRANSPORT_FAKE_SSH_ARGS";
 const FORWARDER_TEST: &str = "fake_ssh_forwarder_entry";
@@ -962,4 +964,55 @@ fn a_drain_cap_that_runs_out_ends_the_link_row_of_a_link_still_held() {
     assert!(entry.links.is_empty(), "{:?}", entry.links);
     assert_eq!(entry.last_cause, Some(Cause::Lost));
     drop((reader, writer, link));
+}
+
+#[test]
+fn links_on_one_tunnel_show_their_own_applied_values() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("per-link-applied");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    let with_read_timeout = |secs| {
+        client().with_timeouts(LinkTimeouts {
+            read_timeout: Duration::from_secs(secs),
+            ..common::timeouts()
+        })
+    };
+    let read_timeout = |applied: &[Setting]| {
+        applied
+            .iter()
+            .find(|s| s.key == "link.read_timeout")
+            .map(|s| s.value)
+    };
+    let secs = |n| Some(SettingValue::Duration(Duration::from_secs(n)));
+
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let first =
+        dial_handshake(conn, &with_read_timeout(10), Holder::Dialer, None, &cancel).expect("first");
+    let conn = transport.connect(&target(), &cancel).expect("connect");
+    let second = dial_handshake(conn, &with_read_timeout(30), Holder::Dialer, None, &cancel)
+        .expect("second");
+    let entry = table.connections().pop().expect("the tunnel entry");
+    assert_eq!(entry.links.len(), 2);
+    assert_eq!(read_timeout(&entry.links[0].applied), secs(10));
+    assert_eq!(read_timeout(&entry.links[1].applied), secs(30));
+    assert_eq!(
+        read_timeout(&entry.applied),
+        secs(10),
+        "the entry keeps the values of the link that connected it"
+    );
+
+    drop(second);
+    wait_until("the second link row goes", || {
+        table
+            .connections()
+            .pop()
+            .is_some_and(|e| e.links.len() == 1)
+    });
+    let entry = table.connections().pop().expect("the tunnel entry");
+    assert_eq!(read_timeout(&entry.links[0].applied), secs(10));
+    assert_eq!(read_timeout(&entry.applied), secs(10));
+    drop(first);
 }

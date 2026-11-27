@@ -377,7 +377,7 @@ impl EdgeTransport {
 }
 
 /// An attach link on an entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkInfo {
     /// The link ID, the same on both ends.
     pub link_id: LinkId,
@@ -392,6 +392,10 @@ pub struct LinkInfo {
     pub opened_at: SystemTime,
     /// The round-trip time (none for SSH).
     pub rtt: Option<Duration>,
+    /// The `link.*` values this link runs with, with their sources. Links on one entry may
+    /// run with different values; the entry's own `applied` keeps those of the channel that
+    /// first connected it.
+    pub applied: Vec<Setting>,
 }
 
 /// The progress of the redialer on an entry it set up.
