@@ -23,6 +23,7 @@ use crate::transport::AcceptError;
 
 use super::conn::{ConnSide, ConnState, watch};
 use super::poll_interval;
+use super::stream;
 use super::table::{Followed, open_entry};
 
 /// The streams the connections' threads took, waiting for [`P2pListener::accept`].
@@ -161,12 +162,22 @@ impl P2pListener {
     }
 
     /// [`P2pListener::accept`] waiting at most `limit`; past it the error's kind is
-    /// `TimedOut`.
+    /// `TimedOut`. Called in an async task it hands out no channel: a waiting one stays, and
+    /// the error is [`P2pError::InAsyncContext`] (judged on the waiting channel's connection, so
+    /// with none waiting the call waits on the caller's thread).
+    ///
+    /// [`P2pError::InAsyncContext`]: tasty_net_p2p::P2pError::InAsyncContext
     pub fn accept_timeout(&self, limit: Option<Duration>) -> Result<P2pInbound, AcceptError> {
         let started = Instant::now();
         let mut items = lock(&self.queue.items);
         loop {
             if let Some((conn, channel)) = items.waiting.pop_front() {
+                if stream::in_async_task(&conn.conn) {
+                    // Refused as `tasty-net-p2p` refuses its blocking calls in an async task
+                    // (docs/design/transport.md "동기·비동기 경계"); the channel waits on.
+                    items.waiting.push_front((conn, channel));
+                    return Err(AcceptError::new(io::Error::other(P2pError::InAsyncContext)));
+                }
                 if conn.is_closed() {
                     // Its connection ended before its thread took it out.
                     drop(items);

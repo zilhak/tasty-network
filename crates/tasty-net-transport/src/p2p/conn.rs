@@ -160,10 +160,13 @@ impl ConnState {
         });
     }
 
-    /// Whether the QUIC connection ended.
+    /// Whether the QUIC connection ended. A zero wait answers at once; in an async task
+    /// `tasty-net-p2p` refuses it, which says nothing of the connection: open, as far as known.
     pub(crate) fn is_closed(&self) -> bool {
-        // A zero wait answers at once: closed or still open.
-        matches!(self.conn.wait_closed(Duration::ZERO), Ok(Some(_)) | Err(_))
+        match self.conn.wait_closed(Duration::ZERO) {
+            Ok(end) => end.is_some(),
+            Err(error) => !stream::is_in_async_context(&error),
+        }
     }
 
     /// A place for one more channel, unless the connection is closing.

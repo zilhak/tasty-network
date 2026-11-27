@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tasty_net_p2p::{
-    P2pCancel, P2pCloseReason, P2pConnection, P2pRecvStream, P2pSendStream, P2pStream,
+    P2pCancel, P2pCloseReason, P2pConnection, P2pError, P2pRecvStream, P2pSendStream, P2pStream,
 };
 
 use crate::cancel::{AttemptCancel, Cancellable};
@@ -376,6 +376,11 @@ pub(crate) fn open(
     conn: &P2pConnection,
     cancel: &AttemptCancel,
 ) -> Result<P2pStream, ConnectError> {
+    if in_async_task(conn) {
+        // The open waits on another thread, which `tasty-net-p2p` would not refuse: refused
+        // here as it refuses its own blocking calls (docs/design/transport.md "동기·비동기 경계").
+        return Err(ConnectError::P2p(P2pError::InAsyncContext));
+    }
     let opening = Arc::new(Opening::default());
     let _registration = cancel
         .register(Arc::clone(&opening) as Arc<dyn Cancellable>)
@@ -394,6 +399,21 @@ pub(crate) fn open(
         return Err(ConnectError::Io(error));
     }
     opening.wait()
+}
+
+/// Whether the caller runs an async task, judged as `tasty-net-p2p` judges its blocking calls:
+/// a zero wait for the end of `conn` is one of them. A connection that already ended answers
+/// that wait without the judgement; a stream open on it fails at once anyway.
+pub(crate) fn in_async_task(conn: &P2pConnection) -> bool {
+    matches!(conn.wait_closed(Duration::ZERO), Err(error) if is_in_async_context(&error))
+}
+
+/// Whether `error` is the refusal of a blocking call of `tasty-net-p2p` in an async task.
+pub(crate) fn is_in_async_context(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<P2pError>())
+        .is_some_and(|inner| matches!(inner, P2pError::InAsyncContext))
 }
 
 /// One stream open waiting on its thread.

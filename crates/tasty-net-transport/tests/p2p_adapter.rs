@@ -891,6 +891,80 @@ fn a_new_connection_takes_no_more_channels_before_its_first_handshake() {
     drop(link);
 }
 
+/// Whether `error` is the refusal of a blocking call in an async task.
+fn in_async_context(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if let Some(io) = error.downcast_ref::<io::Error>()
+            && let Some(inner) = io.get_ref()
+            && matches!(
+                inner.downcast_ref::<tasty_net_p2p::P2pError>(),
+                Some(tasty_net_p2p::P2pError::InAsyncContext)
+            )
+        {
+            return true;
+        }
+        next = error.source();
+    }
+    false
+}
+
+/// Another channel on a shared connection, asked for in an async task, is refused there as
+/// `tasty-net-p2p` refuses its blocking calls, though its open waits on a thread of its own;
+/// outside it opens.
+#[test]
+fn a_channel_asked_for_in_an_async_task_is_refused() {
+    let pair = Pair::start(86, Mode::Echo);
+    let cancel = AttemptCancel::new();
+    let conn = pair
+        .connect(&cancel, &ConnectOptions::new())
+        .expect("a channel");
+    let endpoint = conn.endpoint.clone();
+    let link = dial_handshake(conn, &pair.dial, Holder::Dialer, None, &cancel).expect("link");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let refused = runtime.block_on(async { endpoint.connect_more(&AttemptCancel::new()) });
+    assert!(
+        matches!(
+            &refused,
+            Err(ConnectError::P2p(tasty_net_p2p::P2pError::InAsyncContext))
+        ),
+        "{refused:?}"
+    );
+    endpoint
+        .connect_more(&AttemptCancel::new())
+        .expect("a channel outside the async task");
+    drop(link);
+}
+
+/// A listener asked for a channel in an async task hands out none and keeps the waiting one:
+/// the refusal of its connection check there is no end of the connection.
+#[test]
+fn a_waiting_channel_stays_when_an_async_task_asks_for_it() {
+    let server = Rendezvous::start();
+    let (a, b, listener) = draining_ends(&server, 88, timeouts().drain_cap);
+    let conn = dial_raw(&a, &b);
+    let mut stream = conn.open_bi().expect("a stream");
+    stream
+        .write_all(b"waits")
+        .expect("bytes that open the stream");
+    wait_until("the waiting channel", || {
+        format!("{listener:?}").contains("waiting: 1")
+    });
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let refused =
+        runtime.block_on(async { listener.accept_timeout(Some(Duration::from_millis(500))) });
+    match refused {
+        Err(error) => assert!(in_async_context(&error), "{error:?}"),
+        Ok(inbound) => panic!("a channel was handed out in an async task: {inbound:?}"),
+    }
+    let inbound = listener
+        .accept_timeout(Some(Duration::from_millis(500)))
+        .expect("the channel that waited");
+    drop((inbound, stream, conn, listener));
+    a.close();
+    b.close();
+}
+
 /// A channel that waited in the listener while its connection ended is not handed out.
 #[test]
 fn the_listener_hands_out_no_channel_of_an_ended_connection() {
