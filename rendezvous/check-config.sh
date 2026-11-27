@@ -25,6 +25,8 @@
 #   STUN_PROBE                     stun_probe 예제 실행 파일
 #   RENDEZVOUS_START_SECONDS       서버 시작 로그를 기다리는 시간. 기본 30
 #   RENDEZVOUS_STUN_TIMEOUT_MS     STUN 응답 하나를 기다리는 시간. 기본 2000
+#   RENDEZVOUS_STOP_SECONDS        SIGINT 뒤 서버가 끝나기를 기다리는 시간. 넘으면 SIGKILL하고 실패. 기본 10
+#   RENDEZVOUS_CLEANUP_SECONDS     실패 경로 정리에서 SIGTERM 뒤 기다리는 시간. 넘으면 SIGKILL. 기본 5
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +34,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 EXAMPLE="$HERE/rendezvous.toml"
 START_SECONDS="${RENDEZVOUS_START_SECONDS:-30}"
 STUN_TIMEOUT_MS="${RENDEZVOUS_STUN_TIMEOUT_MS:-2000}"
+STOP_SECONDS="${RENDEZVOUS_STOP_SECONDS:-10}"
+CLEANUP_SECONDS="${RENDEZVOUS_CLEANUP_SECONDS:-5}"
+# 기다리는 동안 다시 보는 간격(초).
+POLL_SECONDS=0.1
 
 # 빌드 명령. json-render-diagnostics는 산출물 JSON을 stdout에 내고 컴파일 오류 본문은 사람이 읽는
 # 형식으로 stderr에 남긴다(json만 쓰면 오류 본문이 stdout JSON에 묻혀 로그에서 사라진다).
@@ -43,12 +49,46 @@ log() { echo "[rendezvous-check] $*" >&2; }
 # 파일 머리의 주석 블록(둘째 줄부터 첫 비주석 줄 전까지)을 도움말로 출력한다.
 show_help() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
+# wait_until <초> <명령...>: 명령이 성공할 때까지 POLL_SECONDS마다 다시 부른다.
+# 기한 안에 성공하면 0, 기한을 넘기면 1.
+wait_until() {
+    local limit=$1 i=0 ticks
+    shift
+    ticks=$(awk -v s="$limit" -v t="$POLL_SECONDS" 'BEGIN { printf "%d", s / t }')
+    until "$@"; do
+        [[ "$i" -lt "$ticks" ]] || return 1
+        sleep "$POLL_SECONDS"
+        i=$((i + 1))
+    done
+}
+
+# 프로세스 $1이 없다(bash는 끝난 자식을 바로 거두므로 끝난 자식도 없는 것으로 보인다).
+gone() { ! kill -0 "$1" 2>/dev/null; }
+
+# stop_process <pid> <신호> <초>: 신호를 보내고 기한 안에 끝나기를 기다린다. 끝나면 0이고 종료 코드는
+# STOP_RC다. 기한을 넘기면 SIGKILL로 끝내고 거둔 뒤 1이다(STOP_RC는 강제 종료의 코드).
+STOP_RC=""
+stop_process() {
+    local pid=$1 sig=$2 limit=$3
+    kill -s "$sig" "$pid" 2>/dev/null
+    if wait_until "$limit" gone "$pid"; then
+        STOP_RC=0
+        wait "$pid" 2>/dev/null || STOP_RC=$?
+        return 0
+    fi
+    kill -s KILL "$pid" 2>/dev/null
+    STOP_RC=0
+    wait "$pid" 2>/dev/null || STOP_RC=$?
+    return 1
+}
+
 TMP=""
 SERVER_PID=""
 cleanup() {
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null
-        wait "$SERVER_PID" 2>/dev/null
+    if [[ -n "$SERVER_PID" ]] && ! gone "$SERVER_PID"; then
+        stop_process "$SERVER_PID" TERM "$CLEANUP_SECONDS" \
+            || log "정리: 서버(pid $SERVER_PID)가 SIGTERM 뒤 ${CLEANUP_SECONDS}s 안에 끝나지 않아 SIGKILL로 끝냈다"
+        SERVER_PID=""
     fi
     if [[ -n "$TMP" ]]; then
         rm -rf "${TMP:?}"
@@ -322,6 +362,54 @@ access = everyone'
     expect fail "check_probe_line: 반사 IP가 다르다" check_probe_line 'stun-probe server=127.0.0.1:3478 local=0.0.0.0:51000 mapped=198.51.100.1:51000' 127.0.0.1:3478
     expect fail "check_probe_line: 빈 줄" check_probe_line '' 127.0.0.1:3478
 
+    # 서버 종료의 기한. 가짜 서버는 직접 자식으로 띄운다(함수로 감싸면 신호가 감싼 subshell로 간다).
+    # 비대화 bash의 백그라운드 자식은 SIGINT를 무시한 채 시작하고 bash는 그 신호를 다시 잡지 못하므로,
+    # SIGINT에 끝나는 가짜는 처리기를 새로 거는 python3로 만든다(실제 서버는 tokio가 처리기를 건다).
+    local fake_ok='import signal, sys, time
+def stop(*_):
+    sys.stderr.write("shutting down\n"); sys.exit(0)
+signal.signal(signal.SIGINT, stop)
+while True: time.sleep(0.1)'
+    local fake_deaf='trap "" INT TERM; while :; do sleep 0.1; done'
+    stop_ok() { (
+        python3 -c "$fake_ok" >/dev/null 2>>"$t/fake.log" &
+        SERVER_PID=$!
+        sleep 0.3
+        STOP_SECONDS=3 stop_server "$t/fake.log"
+    ); }
+    stop_deaf() { # 결과 줄이 실패로 남고 기한 근처에서 끝나며 가짜 서버가 남지 않아야 한다.
+        local out start
+        start=$SECONDS
+        out=$( (
+            bash -c "$fake_deaf" >/dev/null 2>&1 &
+            SERVER_PID=$!
+            echo "$SERVER_PID" >"$t/deaf.pid"
+            sleep 0.3
+            STOP_SECONDS=1 stop_server "$t/fake.log"
+        ) 2>/dev/null)
+        [[ "$(tail -n 1 <<<"$out")" == "rendezvous-check result=fail step=stop" ]] \
+            && [[ $((SECONDS - start)) -le 5 ]] && gone "$(cat "$t/deaf.pid")"
+    }
+    cleanup_deaf() { # 실패 경로 정리가 무시하는 서버를 기한 안에 끝내고 거둔다.
+        local start
+        start=$SECONDS
+        (
+            bash -c "$fake_deaf" >/dev/null 2>&1 &
+            SERVER_PID=$!
+            echo "$SERVER_PID" >"$t/deaf.pid"
+            TMP=""
+            CLEANUP_SECONDS=1
+            sleep 0.3
+            cleanup 2>/dev/null
+            [[ -z "$SERVER_PID" ]]
+        ) && gone "$(cat "$t/deaf.pid")" && [[ $((SECONDS - start)) -le 5 ]]
+    }
+    expect ok "stop_server: SIGINT에 끝나는 서버는 통과" stop_ok
+    expect ok "stop_server: 신호를 무시하는 서버는 기한 뒤 SIGKILL, result=fail step=stop" stop_deaf
+    expect ok "cleanup: 신호를 무시하는 서버를 기한 뒤 SIGKILL로 거둔다" cleanup_deaf
+    expect ok "wait_until: 기한 안에 성공" wait_until 1 true
+    expect fail "wait_until: 기한을 넘기면 실패" wait_until 0.3 false
+
     # 실제 예시 파일에도 판정 함수가 기대대로 걸리는지 본다(빌드 없이).
     expect ok "예시: 표 안에 적은 키가 있다" test -n "$(configured_keys "$EXAMPLE")"
     expect ok "예시: key_dir가 하나다" set_key_dir "$EXAMPLE" /tmp/k
@@ -448,16 +536,23 @@ main_check() {
         step_ok "$probe_out"
     done
 
-    STEP=stop
-    kill -INT "$SERVER_PID"
-    local rc=0
-    wait "$SERVER_PID" || rc=$?
-    SERVER_PID=""
-    [[ "$rc" == 0 ]] || { cat "$TMP/server.log" >&2; fail_at "서버 종료 코드 $rc"; }
-    grep -q 'shutting down' "$TMP/server.log" || fail_at "종료 로그가 없다"
-    step_ok "rc=$rc"
+    stop_server "$TMP/server.log"
 
     echo "rendezvous-check result=ok"
+}
+
+# stop 단계: SERVER_PID에 SIGINT를 보내 STOP_SECONDS 안에 종료 코드 0으로 끝나고 서버 로그 $1에
+# 종료 줄이 있는지 본다. 기한을 넘기면 SIGKILL로 끝내고 거둔 뒤 실패한다.
+stop_server() {
+    STEP=stop
+    if ! stop_process "$SERVER_PID" INT "$STOP_SECONDS"; then
+        SERVER_PID=""
+        fail_at "서버가 SIGINT 뒤 ${STOP_SECONDS}s 안에 끝나지 않아 SIGKILL로 끝냈다"
+    fi
+    SERVER_PID=""
+    [[ "$STOP_RC" == 0 ]] || { cat "$1" >&2; fail_at "서버 종료 코드 $STOP_RC"; }
+    grep -q 'shutting down' "$1" || fail_at "종료 로그가 없다"
+    step_ok "rc=$STOP_RC"
 }
 
 case "${1:-}" in
