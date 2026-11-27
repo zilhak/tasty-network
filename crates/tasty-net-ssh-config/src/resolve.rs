@@ -482,11 +482,14 @@ impl ConfigSet {
                 ));
             }
             Ok(Some(u)) => {
-                if r.o.user.is_none()
-                    && let Some(user) = u.user
-                {
-                    push_source(r, Op::User, &user, &target_origin);
-                    r.o.user = Some(user);
+                // `ssh.c:1084`-`:1089`: with no user so far the URI's user (maybe none) is
+                // taken and counts as given on the command line, so a `User` from the files
+                // is not expanded.
+                if r.o.user.is_none() {
+                    if let Some(user) = u.user {
+                        push_source(r, Op::User, &user, &target_origin);
+                        r.o.user = Some(user);
+                    }
                     user_on_cmdline = true;
                 }
                 if r.o.port.is_none()

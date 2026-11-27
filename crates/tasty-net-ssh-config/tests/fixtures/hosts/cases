@@ -13,3 +13,5 @@ ssh://user@uri.example.com:2201
 -N web
 -N -o UpdateHostKeys=ask web
 -o RequestTTY=force -N web
+pct
+ssh://pct

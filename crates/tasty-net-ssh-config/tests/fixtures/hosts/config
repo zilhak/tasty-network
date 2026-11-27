@@ -21,3 +21,5 @@ Host *
     SetEnv TOKEN=%h-%p GREETING="hello world"
     ConnectTimeout 10
     ConnectionAttempts 2
+Host pct
+    User u%hx
