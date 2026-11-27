@@ -17,11 +17,11 @@ use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
-    AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionState,
-    ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, FORWARDED_SEPARATOR, Finish,
-    HandshakeError, Holder, LinkTimeouts, PathKind, Phase, RedialError, Redialer, RedialerConfig,
-    RejectReason, Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via,
-    dial_handshake, dial_request,
+    AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionId,
+    ConnectionState, ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport,
+    FORWARDED_SEPARATOR, Finish, HandshakeError, Holder, LinkTimeouts, PathKind, Phase,
+    RedialError, Redialer, RedialerConfig, RejectReason, Side, SshTransport, TooOldEvidence,
+    Transport, TransportKind, Via, dial_handshake, dial_request,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
@@ -933,11 +933,15 @@ fn a_parent_end_uncounts_a_bulk_channel_still_held() {
     let bulk = link.open_bulk(None).expect("bulk");
     let id = table.connections()[0].id;
     assert_eq!(table.connection(id).map(|e| e.bulk_channels), Some(1));
+    assert_eq!(forwarded_channels(&table, id), 3);
 
     drop(link);
     wait_until("the bulk channel is no longer counted", || {
         table.connection(id).is_some_and(|e| e.bulk_channels == 0)
     });
+    // The parent's end closed the bulk channel's socket: only the second link is listed,
+    // though the bulk channel is still held.
+    assert_eq!(forwarded_channels(&table, id), 1);
     let entry = table.connection(id).expect("the entry");
     assert_eq!(
         entry.state,
@@ -961,12 +965,15 @@ fn a_drain_cap_that_runs_out_ends_the_link_row_of_a_link_still_held() {
         dial_handshake(conn, &client(), Holder::Dialer, None, &cancel).expect("handshake");
     let id = table.connections()[0].id;
     assert_eq!(table.connection(id).map(|e| e.links.len()), Some(1));
+    assert_eq!(forwarded_channels(&table, id), 1);
     // The reader is kept and never read, so it does not end within the drain cap.
     let (reader, mut writer) = link.take_ordered().expect("the ordered channel");
     assert_eq!(writer.finish(), Finish::DrainCapReached { settled: true });
     let entry = table.connection(id).expect("the entry");
     assert!(entry.links.is_empty(), "{:?}", entry.links);
     assert_eq!(entry.last_cause, Some(Cause::Lost));
+    // The forced close closed the socket: it is off the list while its halves are held.
+    assert_eq!(forwarded_channels(&table, id), 0);
     drop((reader, writer, link));
 }
 
@@ -1091,4 +1098,13 @@ fn the_forwarding_segment_lists_the_open_channels_and_the_instance_is_verified()
     assert_eq!(failed.state, ConnectionState::Disconnected);
     assert_eq!(failed.peer.instance_id.as_deref(), Some("instance-2"));
     assert!(!failed.peer.instance_verified);
+}
+
+/// How many channels the `local_forward` segment of entry `id` lists.
+fn forwarded_channels(table: &ConnectionTable, id: ConnectionId) -> usize {
+    table
+        .connection(id)
+        .and_then(|e| e.segments.into_iter().find(|s| s.name == "local_forward"))
+        .and_then(|s| s.remote)
+        .map_or(0, |r| r.split(FORWARDED_SEPARATOR).count())
 }

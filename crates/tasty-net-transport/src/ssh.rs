@@ -16,7 +16,7 @@ use tasty_net_ssh::{
 };
 
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
-use crate::channel::RawChannel;
+use crate::channel::{ChannelControl, RawChannel};
 use crate::connection_table::{
     Cause, ConnectionInfo, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, Joined,
     NewEntry, PathKind, Phase, Segment, Via,
@@ -396,7 +396,10 @@ fn open_through(
     Ok(match &hold.entry {
         Some(entry) => {
             let channel = match local {
-                Ok(local) => channel.keep_alive(Arc::new(ForwardedChannel::open(entry, local))),
+                Ok(local) => {
+                    let listed = ForwardedChannel::open(entry, local);
+                    channel.wrap_control(|inner| Arc::new(ForwardedControl { inner, listed }))
+                }
                 Err(error) => {
                     tracing::debug!(%error, "no local address for a channel through the tunnel");
                     channel
@@ -412,10 +415,10 @@ fn open_through(
 const LOCAL_FORWARD: &str = "local_forward";
 
 /// A channel open on the tunnel's forwarding end: its local address is listed on the
-/// entry's `local_forward` segment while the channel lives.
+/// entry's `local_forward` segment until its socket is closed both ways or the channel goes.
 struct ForwardedChannel {
     entry: EntryRef,
-    addr: String,
+    addr: Mutex<Option<String>>,
 }
 
 impl ForwardedChannel {
@@ -424,21 +427,58 @@ impl ForwardedChannel {
         entry.update(|info| forwarded(info, |list| list.push(addr.clone())));
         Self {
             entry: entry.clone(),
-            addr,
+            addr: Mutex::new(Some(addr)),
         }
+    }
+
+    /// Takes the address off the list (once).
+    fn unlist(&self) {
+        let Some(addr) = lock(&self.addr).take() else {
+            return;
+        };
+        self.entry.update(|info| {
+            forwarded(info, |list| {
+                if let Some(at) = list.iter().position(|a| *a == addr) {
+                    list.remove(at);
+                }
+            });
+        });
     }
 }
 
 impl Drop for ForwardedChannel {
     fn drop(&mut self) {
-        let addr = &self.addr;
-        self.entry.update(|info| {
-            forwarded(info, |list| {
-                if let Some(at) = list.iter().position(|a| a == addr) {
-                    list.remove(at);
-                }
-            });
-        });
+        self.unlist();
+    }
+}
+
+/// The control of a channel through the forwarding end. Closing the socket both ways (a
+/// forced close, the parent link's end, a drain cap that ran out) takes the channel off the
+/// `local_forward` list at once, though the consumer may still hold its halves.
+struct ForwardedControl {
+    inner: Arc<dyn ChannelControl>,
+    listed: ForwardedChannel,
+}
+
+impl ChannelControl for ForwardedControl {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.inner.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.inner.set_write_timeout(timeout)
+    }
+
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.inner.shutdown_write()
+    }
+
+    fn shutdown_and_wake(&self) -> io::Result<()> {
+        self.listed.unlist();
+        self.inner.shutdown_and_wake()
+    }
+    fn close_reason(&self) -> Option<crate::reject::P2pCloseReason> {
+        self.inner.close_reason()
     }
 }
 

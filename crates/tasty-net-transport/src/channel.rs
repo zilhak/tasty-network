@@ -167,6 +167,15 @@ impl RawChannel {
         self
     }
 
+    /// Puts `wrap`'s control in place of the channel's (it delegates to the one it is given).
+    pub(crate) fn wrap_control(
+        mut self,
+        wrap: impl FnOnce(Arc<dyn ChannelControl>) -> Arc<dyn ChannelControl>,
+    ) -> Self {
+        self.control = wrap(self.control);
+        self
+    }
+
     pub(crate) fn with_verdict(mut self, verdict: ListenerVerdict) -> Self {
         self.verdict = Some(verdict);
         self
