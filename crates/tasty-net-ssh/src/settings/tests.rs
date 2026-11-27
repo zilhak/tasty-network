@@ -296,7 +296,7 @@ fn applied_options_show_which_value_wins() {
 /// launcher (with the launcher's source), and a value that cannot be read is shown as written
 /// while discovery classifies with the launcher value.
 #[test]
-fn the_target_connect_timeout_is_read_like_openssh() {
+fn the_target_connect_timeout_follows_the_lookup_contract() {
     use crate::{connect_timeout_for, parse_openssh_time};
     let mut configured = SshSettings::new();
     configured.set("ssh.connect_timeout", secs(20)).unwrap();
