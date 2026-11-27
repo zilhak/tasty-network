@@ -44,6 +44,7 @@ use windows_sys::Win32::{
 
 use super::{CreateFailure, DirFailure, OpenFailure};
 use crate::error::UnsafeReason;
+use crate::settings::IdentitySettings;
 
 /// Volume serial plus the complete 128-bit file ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +53,8 @@ pub(crate) struct FileId {
     file_id: [u8; 16],
 }
 
-pub(super) fn create_dir(dir: &Path) -> Result<(), DirFailure> {
+/// `settings` holds the Unix retries only; Windows creates the elements with `create_dir_all`.
+pub(super) fn create_dir(dir: &Path, _settings: &IdentitySettings) -> Result<(), DirFailure> {
     std::fs::create_dir_all(dir).map_err(|e| DirFailure::Io(dir.to_owned(), e))
 }
 

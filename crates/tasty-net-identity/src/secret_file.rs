@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::error::{FileOp, IdentityError, UnsafeReason};
+use crate::settings::IdentitySettings;
 
 #[cfg(unix)]
 #[allow(unsafe_code, reason = "reads the effective user ID from libc")]
@@ -31,9 +32,6 @@ pub(crate) mod windows;
 use windows as os;
 
 pub(crate) use os::FileId;
-
-/// Larger than any secret file this crate writes; a bigger file is not read whole.
-pub(crate) const MAX_SECRET_LEN: usize = 4096;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -85,15 +83,19 @@ pub(crate) fn classify_create_error(error: io::Error) -> CreateFailure {
 /// An existing secret file opened after the privacy checks, and its contents.
 pub(crate) struct PrivateFile {
     pub(crate) file: File,
-    /// At most `MAX_SECRET_LEN + 1` bytes, so an oversized file is visible as such.
+    /// At most the `max_len + 1` bytes given to [`open_private`], so an oversized file is
+    /// visible as such.
     pub(crate) contents: Vec<u8>,
 }
 
 /// Make sure `dir` is a private directory (Unix 0700) and return it without trailing
 /// separators. The last path element is checked before anything is created: a link (also a
 /// dangling one) or a non-directory there is [`IdentityError::UnsafeFile`]. A missing directory
-/// is created; a wider existing one is narrowed.
-pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
+/// is created (with the retries of `settings`); a wider existing one is narrowed.
+pub(crate) fn prepare_dir(
+    dir: &Path,
+    settings: &IdentitySettings,
+) -> Result<PathBuf, IdentityError> {
     // `a/link/` would let lstat follow the link; the components drop the trailing separator.
     let dir: PathBuf = match dir.components().collect::<PathBuf>() {
         p if p.as_os_str().is_empty() => PathBuf::from("."),
@@ -103,7 +105,7 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<PathBuf, IdentityError> {
     let (meta, created) = match lstat() {
         Ok(meta) => (meta, false),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            os::create_dir(&dir).map_err(|failure| match failure {
+            os::create_dir(&dir, settings).map_err(|failure| match failure {
                 DirFailure::Io(path, e) => IdentityError::io(FileOp::CreateDir, &path, e),
                 DirFailure::Unsafe(path, reason) => IdentityError::unsafe_file(&path, reason),
             })?;
@@ -216,9 +218,12 @@ pub(crate) fn fail_with_cleanup(path: &Path, cause: IdentityError) -> IdentityEr
     }
 }
 
-/// Open an existing secret file with the privacy checks and read it. `Ok(None)` means the
-/// file does not exist.
-pub(crate) fn open_private(path: &Path) -> Result<Option<PrivateFile>, IdentityError> {
+/// Open an existing secret file with the privacy checks and read at most `max_len + 1` bytes
+/// of it. `Ok(None)` means the file does not exist.
+pub(crate) fn open_private(
+    path: &Path,
+    max_len: usize,
+) -> Result<Option<PrivateFile>, IdentityError> {
     let file = match os::open_checked(path) {
         Ok(file) => file,
         Err(OpenFailure::NotFound) => return Ok(None),
@@ -232,7 +237,8 @@ pub(crate) fn open_private(path: &Path) -> Result<Option<PrivateFile>, IdentityE
     };
     let mut contents = Vec::new();
     (&file)
-        .take(MAX_SECRET_LEN as u64 + 1)
+        // One byte more than the limit, so that a longer file shows as longer.
+        .take(u64::try_from(max_len).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut contents)
         .map_err(|e| IdentityError::io(FileOp::Read, path, e))?;
     Ok(Some(PrivateFile { file, contents }))

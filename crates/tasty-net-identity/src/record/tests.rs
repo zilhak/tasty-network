@@ -1,10 +1,12 @@
 use std::fs;
 
 use super::*;
-use crate::{
-    FileOp,
-    secret_file::{self, fault},
-};
+use crate::{FileOp, secret_file::fault};
+
+/// The longest record line with the default settings.
+fn default_max_len() -> usize {
+    IdentitySettings::default().max_secret_bytes()
+}
 
 fn record(port: u16) -> ConnectionRecord {
     ConnectionRecord {
@@ -262,7 +264,7 @@ fn records_a_reader_would_refuse_are_not_published() {
     empty.instance_id.clear();
     assert_refused_and_kept(empty, RecordProblem::BadInstanceId);
     let mut long = record(1);
-    long.instance_id = "x".repeat(secret_file::MAX_SECRET_LEN);
+    long.instance_id = "x".repeat(default_max_len());
     assert_refused_and_kept(long, RecordProblem::TooLong);
 }
 
@@ -277,8 +279,8 @@ fn the_longest_accepted_record_round_trips() {
         one.instance_id = "x".to_owned();
         one.to_line().len() - 1
     };
-    r.instance_id = "x".repeat(secret_file::MAX_SECRET_LEN - overhead);
-    assert_eq!(r.to_line().len(), secret_file::MAX_SECRET_LEN);
+    r.instance_id = "x".repeat(default_max_len() - overhead);
+    assert_eq!(r.to_line().len(), default_max_len());
     let publication = r.publish(&path).unwrap();
     let text = fs::read_to_string(&path).unwrap();
     assert_eq!(ConnectionRecord::parse(&text), Ok(ParsedRecord::Record(r)));

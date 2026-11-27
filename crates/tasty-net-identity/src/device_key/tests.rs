@@ -3,6 +3,11 @@ use std::fs;
 use super::*;
 use crate::{UnsafeReason, secret_file::fault};
 
+/// The key file parser with the default limit.
+fn parse(bytes: &[u8]) -> Result<[u8; 32], CorruptKind> {
+    super::parse(bytes, IdentitySettings::default().max_secret_bytes())
+}
+
 fn temps_in(dir: &Path) -> Vec<String> {
     fs::read_dir(dir)
         .unwrap()

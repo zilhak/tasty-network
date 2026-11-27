@@ -14,6 +14,7 @@ mod error;
 mod hex;
 mod record;
 mod secret_file;
+pub mod settings;
 pub mod tofu;
 mod token;
 
@@ -25,6 +26,7 @@ pub use record::{
     ConnectionRecord, ParsedRecord, RecordField, RecordParseError, RecordPathProblem,
     RecordProblem, RecordPublication, RetireOutcome,
 };
+pub use settings::IdentitySettings;
 pub use tofu::{
     MemoryPeerKeyStore, PeerKeyStore, PeerRef, PinOutcome, StoreError, TofuVerdict, check_peer,
     reregister,

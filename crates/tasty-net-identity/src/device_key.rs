@@ -7,6 +7,7 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use crate::{
     error::{CorruptKind, FileOp, IdentityError, RandomError},
     hex, secret_file,
+    settings::IdentitySettings,
 };
 
 /// The file name of the device key inside the directory given to [`DeviceKey::load_or_create`].
@@ -30,10 +31,23 @@ impl DeviceKey {
     /// that won. A file in the wrong format is [`IdentityError::Corrupt`] and is left as it is;
     /// a file that is not private is [`IdentityError::UnsafeFile`]. A failure of the OS random
     /// source is [`IdentityError::Random`].
+    ///
+    /// The settings are the defaults; [`DeviceKey::load_or_create_with`] takes them.
     pub fn load_or_create(dir: &Path) -> Result<Self, IdentityError> {
-        let dir = &secret_file::prepare_dir(dir)?;
+        Self::load_or_create_with(dir, &IdentitySettings::default())
+    }
+
+    /// [`DeviceKey::load_or_create`] with `settings`: the retries of a new directory
+    /// (`new_parent_retries`, `new_parent_wait`) and the largest key file read whole
+    /// (`max_secret_bytes`, a longer one is [`CorruptKind::TooLarge`]).
+    pub fn load_or_create_with(
+        dir: &Path,
+        settings: &IdentitySettings,
+    ) -> Result<Self, IdentityError> {
+        let max_len = settings.max_secret_bytes();
+        let dir = &secret_file::prepare_dir(dir, settings)?;
         let path = dir.join(DEVICE_KEY_FILE);
-        if let Some(key) = read(&path)? {
+        if let Some(key) = read(&path, max_len)? {
             return Ok(key);
         }
         let mut text = Vec::with_capacity(HEADER.len() + 66);
@@ -58,7 +72,7 @@ impl DeviceKey {
             cause: None,
             cleanup,
         })?;
-        read(&path)?.ok_or_else(|| {
+        read(&path, max_len)?.ok_or_else(|| {
             IdentityError::io(
                 FileOp::Read,
                 &path,
@@ -106,19 +120,19 @@ impl fmt::Debug for DeviceKey {
     }
 }
 
-fn read(path: &Path) -> Result<Option<DeviceKey>, IdentityError> {
-    let Some(file) = secret_file::open_private(path)? else {
+fn read(path: &Path, max_len: usize) -> Result<Option<DeviceKey>, IdentityError> {
+    let Some(file) = secret_file::open_private(path, max_len)? else {
         return Ok(None);
     };
-    let seed = parse(&file.contents).map_err(|kind| IdentityError::Corrupt {
+    let seed = parse(&file.contents, max_len).map_err(|kind| IdentityError::Corrupt {
         path: path.to_path_buf(),
         kind,
     })?;
     Ok(Some(DeviceKey::from_seed(seed)))
 }
 
-fn parse(bytes: &[u8]) -> Result<[u8; 32], CorruptKind> {
-    if bytes.len() > secret_file::MAX_SECRET_LEN {
+fn parse(bytes: &[u8], max_len: usize) -> Result<[u8; 32], CorruptKind> {
+    if bytes.len() > max_len {
         return Err(CorruptKind::TooLarge);
     }
     let Some(rest) = bytes

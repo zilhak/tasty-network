@@ -12,6 +12,7 @@ use std::{
 use crate::{
     error::{FileOp, IdentityError, UnsafeReason},
     secret_file::{self, FileId},
+    settings::IdentitySettings,
     token::ConnectionToken,
 };
 
@@ -84,7 +85,8 @@ pub enum RecordProblem {
     BadToken,
     /// `instance_id` is not a non-empty string.
     BadInstanceId,
-    /// The record line is longer than the 4096 bytes a reader takes (refused on publication).
+    /// The record line is longer than `max_secret_bytes`, the most a reader of this crate takes
+    /// (refused on publication).
     TooLong,
 }
 
@@ -104,7 +106,7 @@ impl fmt::Display for RecordParseError {
             RecordProblem::BadPort => f.write_str("port: not an integer from 1 to 65535"),
             RecordProblem::BadToken => f.write_str("token: not 64 lowercase hex"),
             RecordProblem::BadInstanceId => f.write_str("instance_id: not a non-empty string"),
-            RecordProblem::TooLong => f.write_str("record: longer than 4096 bytes"),
+            RecordProblem::TooLong => f.write_str("record: longer than max_secret_bytes"),
         }
     }
 }
@@ -117,8 +119,8 @@ fn refuse(problem: RecordProblem) -> RecordParseError {
 
 impl ConnectionRecord {
     /// The line [`ConnectionRecord::publish`] writes, after the checks `parse` applies on the
-    /// reading side: port not 0, non-empty instance ID, at most `MAX_SECRET_LEN` bytes.
-    fn checked_line(&self) -> Result<String, RecordParseError> {
+    /// reading side: port not 0, non-empty instance ID, at most `max_len` bytes.
+    fn checked_line(&self, max_len: usize) -> Result<String, RecordParseError> {
         if self.port == 0 {
             return Err(refuse(RecordProblem::BadPort));
         }
@@ -126,7 +128,7 @@ impl ConnectionRecord {
             return Err(refuse(RecordProblem::BadInstanceId));
         }
         let line = self.to_line();
-        if line.len() > secret_file::MAX_SECRET_LEN {
+        if line.len() > max_len {
             return Err(refuse(RecordProblem::TooLong));
         }
         Ok(line)
@@ -189,20 +191,37 @@ impl ConnectionRecord {
     /// the key directory. A link or non-regular file at `path` is refused.
     ///
     /// A record that a reader would refuse (port 0, empty instance ID, a line longer than
-    /// 4096 bytes) is [`IdentityError::InvalidRecord`] before anything is written, and the
+    /// `max_secret_bytes`) is [`IdentityError::InvalidRecord`] before anything is written, and the
     /// existing file stays. When a step after the replacement fails, the new file is removed
     /// again under the lock before the error is returned.
     ///
     /// The returned handle is the only way to remove the record again
     /// ([`RecordPublication::retire`]).
+    ///
+    /// The settings are the defaults; [`ConnectionRecord::publish_with`] takes them.
     pub fn publish(&self, path: &Path) -> Result<RecordPublication, IdentityError> {
+        self.publish_with(path, &IdentitySettings::default())
+    }
+
+    /// [`ConnectionRecord::publish`] with `settings`: the retries of a new directory
+    /// (`new_parent_retries`, `new_parent_wait`) and the longest line published and read back
+    /// (`max_secret_bytes`). The returned handle keeps that limit for
+    /// [`RecordPublication::retire`].
+    pub fn publish_with(
+        &self,
+        path: &Path,
+        settings: &IdentitySettings,
+    ) -> Result<RecordPublication, IdentityError> {
+        let max_len = settings.max_secret_bytes();
         let name = record_name(path)?;
         let dir = parent_of(path);
-        let dir = &secret_file::prepare_dir(dir)?;
+        let dir = &secret_file::prepare_dir(dir, settings)?;
         let target = target_of(path)?;
         let _lock = secret_file::lock(&target)?;
         refuse_non_regular(&target)?;
-        let contents = self.checked_line().map_err(IdentityError::InvalidRecord)?;
+        let contents = self
+            .checked_line(max_len)
+            .map_err(IdentityError::InvalidRecord)?;
         let temp = secret_file::write_temp(dir, name, contents.as_bytes())?;
         // The ID of the written file, taken from its own handle; a rename keeps it.
         let id = match temp.id {
@@ -218,7 +237,7 @@ impl ConnectionRecord {
         }
         #[cfg(test)]
         secret_file::fault::replace_foreign(dir, name, &target);
-        let published = match confirm(&target, &contents, id) {
+        let published = match confirm(&target, &contents, id, max_len) {
             Ok(file) => file,
             // Remove only this publication's own file. The lock serializes this crate's
             // publishers only; a file with another ID was put there by someone else.
@@ -233,6 +252,7 @@ impl ConnectionRecord {
             target,
             contents,
             id,
+            max_len,
             _pin: published,
         })
     }
@@ -240,7 +260,12 @@ impl ConnectionRecord {
 
 /// Read the replaced target back through the privacy checks and return the open handle, which
 /// keeps this generation's file ID from being reused while the publication lives.
-fn confirm(target: &Path, contents: &str, id: FileId) -> Result<File, IdentityError> {
+fn confirm(
+    target: &Path,
+    contents: &str,
+    id: FileId,
+    max_len: usize,
+) -> Result<File, IdentityError> {
     #[cfg(test)]
     if secret_file::fault::after_replace_fails() {
         return Err(IdentityError::io(
@@ -249,7 +274,7 @@ fn confirm(target: &Path, contents: &str, id: FileId) -> Result<File, IdentityEr
             io::Error::other("injected failure after the replacement"),
         ));
     }
-    let published = secret_file::open_private(target)?.ok_or_else(|| {
+    let published = secret_file::open_private(target, max_len)?.ok_or_else(|| {
         IdentityError::io(
             FileOp::Read,
             target,
@@ -288,6 +313,8 @@ pub struct RecordPublication {
     target: PathBuf,
     contents: String,
     id: FileId,
+    /// `max_secret_bytes` of the publication, for reading the file back in `retire`.
+    max_len: usize,
     _pin: File,
 }
 
@@ -342,7 +369,7 @@ impl RecordPublication {
             }
             Err(e) => return Err(IdentityError::io(FileOp::Read, &self.target, e)),
         }
-        let current = match secret_file::open_private(&self.target) {
+        let current = match secret_file::open_private(&self.target, self.max_len) {
             Ok(Some(current)) => current,
             Ok(None) => return Ok(RetireOutcome::Missing),
             Err(IdentityError::UnsafeFile {

@@ -6,11 +6,11 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
     thread,
-    time::Duration,
 };
 
 use super::{CreateFailure, DirFailure, OpenFailure};
 use crate::error::UnsafeReason;
+use crate::settings::IdentitySettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileId {
@@ -18,16 +18,12 @@ pub(crate) struct FileId {
     ino: u64,
 }
 
-/// How long to wait for another thread to set a directory it just created to 0700.
-const NEW_PARENT_RETRIES: u32 = 50;
-const NEW_PARENT_WAIT: Duration = Duration::from_millis(10);
-
 /// Create the missing elements of `dir`. The deepest existing ancestor is found first (so `/`
 /// is never passed to mkdir, which macOS answers with `EISDIR`), then the elements below it are
 /// created from the top, one at a time. Each directory this call creates is set to 0700 before
 /// the next one is made, because the umask can take owner bits away (0500 under 0277 would keep
 /// the next element from being created). Existing elements keep their mode.
-pub(super) fn create_dir(dir: &Path) -> Result<(), DirFailure> {
+pub(super) fn create_dir(dir: &Path, settings: &IdentitySettings) -> Result<(), DirFailure> {
     let mut missing = Vec::new();
     for element in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
         match fs::symlink_metadata(element) {
@@ -37,15 +33,16 @@ pub(super) fn create_dir(dir: &Path) -> Result<(), DirFailure> {
         }
     }
     for element in missing.into_iter().rev() {
-        create_one_dir(element)?;
+        create_one_dir(element, settings)?;
     }
     Ok(())
 }
 
 /// Create one directory element. An element that appeared meanwhile must be a directory, not a
 /// link or a file. Another thread of the same creation may have made the parent and not yet set
-/// it to 0700; while the parent is a directory of the current user, `EACCES` is retried briefly.
-fn create_one_dir(element: &Path) -> Result<(), DirFailure> {
+/// it to 0700; while the parent is a directory of the current user, `EACCES` is retried
+/// `new_parent_retries` times, `new_parent_wait` apart.
+fn create_one_dir(element: &Path, settings: &IdentitySettings) -> Result<(), DirFailure> {
     let io_failure = |e| DirFailure::Io(element.to_owned(), e);
     let mut retries = 0;
     loop {
@@ -83,11 +80,11 @@ fn create_one_dir(element: &Path) -> Result<(), DirFailure> {
                 .is_some_and(|meta| meta.is_dir() && meta.uid() == effective_uid())
         };
         if error.kind() == io::ErrorKind::PermissionDenied
-            && retries < NEW_PARENT_RETRIES
+            && retries < settings.new_parent_retries()
             && parent_is_ours()
         {
             retries += 1;
-            thread::sleep(NEW_PARENT_WAIT);
+            thread::sleep(settings.new_parent_wait());
             continue;
         }
         return Err(io_failure(error));
