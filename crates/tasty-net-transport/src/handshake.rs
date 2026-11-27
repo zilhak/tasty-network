@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender, TryRecvError};
@@ -1056,7 +1057,7 @@ pub fn accept_handshake(
 /// The `ssh_inbound` entry of a loopback TCP channel, when the end reports in a table.
 fn inbound_entry(config: &AcceptConfig, ch: &RawChannel) -> Option<EntryRef> {
     let table = config.connections.as_ref()?;
-    let (local, peer) = ch.addrs().filter(|_| ch.kind() == TransportKind::Tcp)?;
+    let (local, peer) = inbound_addrs(ch.kind(), ch.addrs())?;
     Some(table.open(NewEntry {
         previous: None,
         parent: None,
@@ -1074,6 +1075,18 @@ fn inbound_entry(config: &AcceptConfig, ch: &RawChannel) -> Option<EntryRef> {
         held: false,
         path_fixed: true,
     }))
+}
+
+/// The address pair of a channel that is an `ssh_inbound` connection: TCP accepted on a
+/// loopback address from a loopback peer (the forwarding sshd). A TCP channel on another
+/// address is not one, and no entry is made for it.
+fn inbound_addrs(
+    kind: TransportKind,
+    addrs: Option<(SocketAddr, SocketAddr)>,
+) -> Option<(SocketAddr, SocketAddr)> {
+    addrs.filter(|(local, peer)| {
+        kind == TransportKind::Tcp && local.ip().is_loopback() && peer.ip().is_loopback()
+    })
 }
 
 fn accept_ssh(
@@ -1933,5 +1946,27 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn only_a_loopback_tcp_channel_is_an_ssh_inbound_connection() {
+        let at = |addr: &str| addr.parse::<SocketAddr>().expect("an address");
+        let loopback = Some((at("127.0.0.1:5000"), at("127.0.0.1:40000")));
+        assert_eq!(inbound_addrs(TransportKind::Tcp, loopback), loopback);
+        let v6 = Some((at("[::1]:5000"), at("[::1]:40000")));
+        assert_eq!(inbound_addrs(TransportKind::Tcp, v6), v6);
+        for addrs in [
+            (at("192.0.2.1:5000"), at("192.0.2.7:40000")),
+            (at("0.0.0.0:5000"), at("127.0.0.1:40000")),
+            (at("127.0.0.1:5000"), at("192.0.2.7:40000")),
+        ] {
+            assert_eq!(
+                inbound_addrs(TransportKind::Tcp, Some(addrs)),
+                None,
+                "{addrs:?}"
+            );
+        }
+        assert_eq!(inbound_addrs(TransportKind::Ssh, loopback), None);
+        assert_eq!(inbound_addrs(TransportKind::Tcp, None), None);
     }
 }
