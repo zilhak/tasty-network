@@ -509,6 +509,16 @@ async fn stun_rate_limit_per_source() {
     );
 }
 
+/// A STUN answer reaches `socket` within the deadline.
+async fn answered(socket: &UdpSocket) {
+    let mut buf = [0u8; 1500];
+    let (n, _) = tokio::time::timeout(DEADLINE, socket.recv_from(&mut buf))
+        .await
+        .expect("an answer in time")
+        .unwrap();
+    stun::parse(&buf[..n]).unwrap();
+}
+
 #[tokio::test]
 async fn stun_sources_per_window_are_capped() {
     let mut s = local_settings();
@@ -518,35 +528,31 @@ async fn stun_sources_per_window_are_capped() {
     let x = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let y = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let z = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    // x and y fill the window; z, a third source in the same window, is not answered. The
-    // window may turn over between two sends (then another socket is the third), so the
-    // rounds repeat and every unanswered request must be a counted drop.
-    let mut dropped = 0;
-    for round in 0..3u8 {
-        let request = stun::binding_request(&[round; 12], None);
-        for socket in [&x, &y, &z] {
-            socket.send_to(&request, to).await.unwrap();
-        }
-        let mut buf = [0u8; 256];
-        for socket in [&x, &y, &z] {
-            if tokio::time::timeout(Duration::from_millis(300), socket.recv_from(&mut buf))
-                .await
-                .is_err()
-            {
-                dropped += 1;
-            }
-        }
+    // The window (1 s, fixed) starts again at the first request after it has run out. Let the
+    // window the server started with run out, so the window starts at x's request and holds
+    // all three: x and y fill it and z, the third source, is not answered.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let request = stun::binding_request(&[1; 12], None);
+    for socket in [&x, &y, &z] {
+        socket.send_to(&request, to).await.unwrap();
     }
-    assert!(dropped >= 1, "{:?}", server.status());
-    assert_eq!(server.status().stun_sources_full, dropped);
-    assert_eq!(server.status().stun_rate_limited, 0);
+    answered(&x).await;
+    answered(&y).await;
+    // The drop is read from the server's count, not from a wait that ends without an answer.
+    eventually("the third source is counted as dropped", || {
+        server.status().stun_sources_full == 1
+    })
+    .await;
+    let status = server.status();
+    assert_eq!(status.stun_answered, 2, "{status:?}");
+    assert_eq!(status.stun_rate_limited, 0, "{status:?}");
     // In a later window z is counted again.
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert!(
-        stun_request(&z, to, &stun::binding_request(&[9; 12], None))
-            .await
-            .is_some()
-    );
+    z.send_to(&stun::binding_request(&[2; 12], None), to)
+        .await
+        .unwrap();
+    answered(&z).await;
+    assert_eq!(server.status().stun_sources_full, 1);
 }
 
 #[tokio::test]
