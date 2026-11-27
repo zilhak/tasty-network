@@ -30,11 +30,11 @@ API를 나눈다: `DeviceKey::load_or_create(dir) -> Result<DeviceKey, IdentityE
 - `publish`는 읽는 쪽이 거절할 레코드(포트 0, 빈 인스턴스 ID, 4096바이트를 넘는 줄)를 쓰기 전에 `IdentityError::InvalidRecord`로 거절하고 기존 레코드를 그대로 둔다. 파일 정체성은 교체 전 임시 파일의 핸들에서 얻는다. 교체 뒤 확인 단계가 실패하면 잠금을 쥔 채, 대상의 파일 정체성이 자기 게시분과 같을 때만 그 파일을 지우고 오류를 돌려준다. 핸들 없이 토큰이 든 레코드가 남지 않게 하기 위해서다. 정체성이 다르거나 알 수 없으면(잠금에 참여하지 않는 쪽이 대상을 바꿈) 그 파일은 남의 것이므로 지우지 않고 오류만 돌려준다. 알려진 한계: 이 정리는 파일 정체성을 확인한 뒤 경로 이름으로 지운다. 핸들로 지우는 이식 가능한 방법이 없어서다. 확인과 삭제 사이에 게시 잠금에 참여하지 않는 프로세스가 그 경로의 파일을 바꾸면 바뀐 파일이 지워질 수 있다. `retire`의 삭제도 같다.
 - 이 레포가 쓴 파일(임시 파일, 교체 뒤 실패한 레코드)을 지우지 못하면 `IdentityError::Leftover { leftover, cause, cleanup }`로 남은 경로와 처음 오류를 함께 돌려준다. 그 파일에는 비밀이 들어 있을 수 있다. 오류에는 비밀 원문을 담지 않는다.
 - 형식이 맞지 않는 파일은 손상으로 본다. `load_or_create`는 손상 파일을 만나면 `IdentityError::Corrupt`를 돌려주고 파일을 그대로 둔다. 새 키로 덮지 않는다. 덮으면 모든 상대가 이 기기를 다른 기기로 본다.
-- 키의 정본 표현은 32바이트 seed다. ed25519 구현은 `ed25519-dalek`(`SigningKey::from_bytes(&[u8; 32])`)이다. P2P는 같은 seed로 TLS 서명 키(PKCS#8)와 raw public key를 만든다([P2P](p2p.md#인증)). 그래서 P2P와 SSH에서 같은 기기 ID다. 지금 develop 코드는 `iroh-base` 1.5.0의 `SecretKey`를 거쳐 같은 `ed25519-dalek` 3.0.0을 쓰고 있고, 직접 의존으로 바꾸는 일은 후속 작업이다. 키 파일 형식과 기기 ID는 바뀌지 않는다.
+- 키의 정본 표현은 32바이트 seed다. ed25519 구현은 `ed25519-dalek`(`SigningKey::from_bytes(&[u8; 32])`)이다. P2P는 같은 seed로 TLS 서명 키(PKCS#8)와 raw public key를 만든다([P2P](p2p.md#인증)). 그래서 P2P와 SSH에서 같은 기기 ID다. identity는 `ed25519-dalek` 3.0.0을 직접 의존한다. 전에 거치던 `iroh-base` 1.5.0도 같은 판을 썼으므로 그 전에 만든 키 파일과 기기 ID, 서명 값은 그대로다(고정 seed 시험이 고정한다).
 
 ## 기기 ID 문자열
 
-기기 ID는 ed25519 공개키다. 문자열 표현은 소문자 hex 64자다. 같은 키가 handshake, 토폴로지, rendezvous 서버의 기기 조회 키(`punch_request.peer`, [rendezvous](rendezvous.md#기기-인증)), P2P 연결 정보에서 같은 전체 문자열로 보인다. 이 레포의 로그와 오류는 전체 ID를 쓴다. `DeviceId::from_str`은 와이어와 파일에서 소문자 hex 64자만 받는다(iroh-base를 거치던 지금 코드는 hex와 base32를 함께 받는 파서를 막으려 따로 검사한다. 직접 구현으로 바꾸면 그 검사가 파서 자체가 된다).
+기기 ID는 ed25519 공개키다. 문자열 표현은 소문자 hex 64자다. 같은 키가 handshake, 토폴로지, rendezvous 서버의 기기 조회 키(`punch_request.peer`, [rendezvous](rendezvous.md#기기-인증)), P2P 연결 정보에서 같은 전체 문자열로 보인다. 이 레포의 로그와 오류는 전체 ID를 쓴다. `DeviceId::from_str`은 와이어와 파일에서 소문자 hex 64자만 받는다(소문자 hex 디코더가 곧 파서다). 그 밖의 문자열(대문자, base32, 길이 틀림)은 `DeviceIdParseError::Format`, hex지만 곡선 위의 점이 아닌 32바이트는 `DeviceIdParseError::InvalidKey`다.
 
 ## 파일 권한
 
