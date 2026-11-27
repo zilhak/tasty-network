@@ -263,7 +263,7 @@ endpoint(서버 등록)와 연결 시도·연결이 각각 상태 기계다. 전
 | `RetryWait` → `Requesting` | `retry_elapsed` |
 | `Connected` → `Connected` | `remote_address_observed_change`(B에서만, 아래) |
 | `Connected` → `Closed` | `closed_by_local(code)`, `closed_by_peer(code)`, `idle_timeout`, `endpoint_off` |
-| 어느 상태든 → `Closed` | `cancelled`, `disabled` |
+| 어느 상태든 → `Closed` | `cancelled`, `disabled`, `endpoint_off`(endpoint가 끝남. 끝날 때 진행 중인 시도는 모두 취소되고 이 전이를 남긴 뒤 연결 목록에서 빠진다) |
 
 - `Connected`에서 끊긴 연결을 다시 맺는 일은 연결 목록을 가진 transport 쪽이 한다([전송 추상화](transport.md#연결-목록)). P2P 크레이트는 새 연결 시도(새 펀칭)로 받는다. 중계로 넘어가지 않는다.
 - transport 연결 목록의 네 상태와의 대응: `Requesting`·`Offered`·`Scheduled`·`Punching`·`Handshaking`·`RetryWait`는 `connecting`(재연결로 만든 항목이면 `reconnecting`), `Connected`는 `connected`, `Closed`는 `disconnected`다. 세부 상태는 항목의 `phase`에 그대로 보인다.

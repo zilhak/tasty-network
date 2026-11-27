@@ -847,6 +847,10 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
         handle.block_on(async move {
             lock(&core.calls).closing = true;
             core.shutdown.send_replace(true);
+            // The attempts in progress end now, each with its `Closed` transition: their
+            // tasks see the shutdown and stop, and the list does not keep them.
+            let off = Cause::named("endpoint_off");
+            core.tracker.close_attempts(&off);
             let limit = core.params.shutdown_timeout;
             let calls_left = async {
                 loop {
@@ -872,6 +876,8 @@ fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
             }
             let _released = core.gate.release();
             drop(lock(&core.key_hold).take());
+            // An attempt the server loop began while the shutdown started ends here too.
+            core.tracker.close_attempts(&off);
             core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
             core.events.end();
         });
@@ -1640,6 +1646,79 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(nat, None);
         ep.close();
+    }
+
+    /// `close` while an attempt waits in `RetryWait` (a long `punch.retry_delay`) ends that
+    /// attempt with a `Closed` transition caused by `endpoint_off` and takes it off the list:
+    /// after `Off`, `connections()` has no attempt.
+    #[test]
+    fn close_ends_an_attempt_in_progress_and_the_list_has_none() {
+        use crate::settings::Value;
+        let peer = DeviceKey::from_seed([33; 32]).id();
+        let StandIn {
+            ep,
+            core,
+            generation,
+            mut rx,
+        } = stand_in(
+            32,
+            peer,
+            &[(
+                "punch.retry_delay",
+                Value::Duration(Duration::from_secs(60)),
+            )],
+        );
+        let _before = ep.events();
+        let r = std::thread::scope(|s| {
+            let dial = s.spawn(|| ep.connect(peer));
+            let DeviceMessage::PunchRequest(asked) = next_sent(&mut rx) else {
+                panic!("punch_request first");
+            };
+            {
+                // Nobody answers the probes: the 300 ms window passes and a retry waits.
+                let _enter = core.handle.enter();
+                crate::server::dispatch(
+                    &core,
+                    generation,
+                    ServerMessage::PunchGo(punch_go(13, Some(asked.request_id), peer)),
+                );
+            }
+            let until = Instant::now() + Duration::from_secs(10);
+            while ep
+                .connections()
+                .iter()
+                .all(|c| c.state != AttemptPhase::RetryWait)
+            {
+                assert!(Instant::now() < until, "RetryWait: {:?}", ep.connections());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ep.close();
+            dial.join().unwrap()
+        });
+        assert!(matches!(r, Err(P2pError::Closed)), "{:?}", r.map(|_| ()));
+        assert_eq!(ep.status().state, EndpointPhase::Off);
+        assert!(ep.connections().is_empty(), "{:?}", ep.connections());
+        let closed: Vec<_> = ep
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                P2pEvent::Transition {
+                    subject: crate::events::Subject::Connection(_),
+                    from,
+                    to: Phase::Attempt(AttemptPhase::Closed),
+                    cause,
+                    ..
+                } => Some((from, cause.name)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            closed,
+            vec![(
+                Some(Phase::Attempt(AttemptPhase::RetryWait)),
+                "endpoint_off"
+            )]
+        );
     }
 
     /// A punch the acceptor took from one registration belongs to it: after the endpoint

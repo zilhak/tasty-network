@@ -282,6 +282,26 @@ impl Tracker {
     }
 
     /// Every tracked attempt and connection.
+    /// Close every attempt without a connection yet with `cause` (the endpoint's end): each
+    /// gets its `Closed` transition and leaves the list. A connection closes through its own
+    /// watcher.
+    pub(crate) fn close_attempts(self: &Arc<Self>, cause: &Cause) {
+        let records: Vec<_> = lock(&self.records)
+            .iter()
+            .map(|(id, rec)| (*id, Arc::clone(rec)))
+            .collect();
+        for (id, rec) in records {
+            let t = Tracked {
+                id,
+                rec,
+                tracker: Arc::clone(self),
+            };
+            if t.phase() != AttemptPhase::Connected {
+                t.to(AttemptPhase::Closed, cause.clone());
+            }
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<P2pConnectionInfo> {
         let records: Vec<_> = lock(&self.records).values().cloned().collect();
         let now = Instant::now();

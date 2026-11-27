@@ -291,9 +291,15 @@ pub(crate) async fn dial(
             i.rendezvous = Some(core.server);
         },
     );
+    // The endpoint's end cancels the attempt here too; its caller was already woken.
+    let mut down = core.shutdown.subscribe();
     let r = tokio::select! {
         r = dial_attempts(&core, &t, peer) => r,
         () = cancel.cancelled() => Err(Fail::new(P2pConnectError::Cancelled, "cancelled")),
+        _ = down.wait_for(|down| *down) => Err(Fail {
+            error: P2pConnectError::Cancelled,
+            cause: Cause::named("endpoint_off"),
+        }),
     };
     match r {
         Ok(conn) => Ok(conn),
@@ -628,6 +634,16 @@ async fn punch_once(
 
 /// The acceptor (B) of `punch_offer{punch_id, from}`.
 pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from: DeviceId) {
+    // The endpoint's end cancels the attempt: its guards clean up, and the shutdown closes its
+    // record with `endpoint_off`.
+    let mut down = core.shutdown.subscribe();
+    tokio::select! {
+        () = accept_punch(core.clone(), generation, punch_id, from) => {}
+        _ = down.wait_for(|down| *down) => {}
+    }
+}
+
+async fn accept_punch(core: Arc<Core>, generation: u64, punch_id: u64, from: DeviceId) {
     let p = &core.params;
     let key: PunchKey = (generation, punch_id);
     let (sig_tx, mut signals) = mpsc::unbounded_channel();
