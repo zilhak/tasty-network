@@ -289,6 +289,10 @@ def literals(toks):
         elif (k == "ident" and t in INT_CONSTS and i >= 2
               and toks[i - 1][1] == "::" and toks[i - 2][1] in INT_TYPES):
             out.append((i, toks[i - 2][1] + "::" + t, line))
+        elif (k == "ident" and t in INT_CONSTS and i >= 4 and toks[i - 1][1] == "::"
+              and toks[i - 2][1] == ">" and toks[i - 3][1] in INT_TYPES and toks[i - 4][1] == "<"):
+            # <usize>::MIN는 usize::MIN과 같은 상수다.
+            out.append((i, toks[i - 3][1] + "::" + t, line))
     return out
 
 
@@ -622,6 +626,10 @@ def self_test():
     files["src/intconst.rs"] = "fn f() -> (usize, u16, u8) { (usize::MIN, u16::MAX, u8::MAX) }\n"
     case("정수 타입의 MIN·MAX는 리터럴이고 허용 줄을 따른다(u16::MAX만 허용)",
          "target\tsrc\nallow\tsrc/intconst.rs\tu16::MAX\t길이 상한\n", {"src/intconst.rs"}, 2)
+    files["src/qualified.rs"] = "fn f() -> (usize, u16) { (<usize>::MIN, <u16>::MAX) }\n"
+    case("한정 경로 <usize>::MIN·<u16>::MAX도 정수 상수다", "target\tsrc\n", {"src/qualified.rs"}, 2)
+    case("한정 경로의 상수는 같은 이름의 허용 줄(u16::MAX)을 따른다",
+         "target\tsrc\nallow\tsrc/qualified.rs\tu16::MAX\t길이 상한\n", {"src/qualified.rs"}, 1)
     files["src/chain.rs"] = ("use std::time::Duration as D;\ntype Delay = D;\ntype Late = Delay;\n"
                              "fn f() -> (Delay, Late) { (Delay::ZERO, Late::MAX) }\n")
     case("별칭의 별칭(Duration as D → type Delay = D → type Late = Delay)의 상수", "target\tsrc\n",
