@@ -499,6 +499,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 - 채널 대응(순서 채널 = `purpose = attach`로 연 양방향 스트림, bulk = 같은 연결의 추가 양방향 스트림, 요청 채널 = `purpose = request` 스트림)과 P2P의 닫기 범위는 QUIC 일반의 성질이라 iroh 설계의 내용을 그대로 쓴다([전송 추상화](transport.md#순서-계약과-채널), [전송 추상화](transport.md#p2p의-닫기-범위)).
 - `P2pCloseReason`은 이 크레이트가 정의한다(QUIC 종료 코드가 이 크레이트의 와이어 값이기 때문이다). transport는 그것을 다시 내보내 `HandshakeError::Closed`와 `Link::close_reason()`에 쓴다([handshake v2](handshake.md#quic-종료-코드)).
 - 스트림 수 상한: 연결마다 양방향 스트림 동시 `quic.max_bidi_streams`(기본 64), 단방향 동시 `quic.max_uni_streams`(기본 0, 설정 가능)([설정값](#설정값)).
+- 연결 핸들을 놓는 것은 연결을 닫는 것이 아니다: 한 연결의 `P2pConnection`·스트림 핸들을 모두 놓아도 endpoint가 살아 있으면 그 QUIC 연결은 idle timeout(`quic.idle_timeout`)이나 `close`(연결의 `close` 또는 endpoint의 `close`) 전까지 남는다. 연결을 끝내려는 transport는 `P2pConnection::close`를 명시적으로 부른다.
 
 ## 페어링
 
