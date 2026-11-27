@@ -2,9 +2,8 @@
 //! (docs/design/handshake.md "QUIC 종료 코드").
 //!
 //! The numbers are this crate's wire values: a connection is closed with
-//! `Connection::close(code, reason)` and the reader decides by the code only. 2 and 3 were the
-//! iroh design's `direct_path_timeout`·`direct_path_lost`; they are not used again and read as
-//! `Unknown(2)`·`Unknown(3)`.
+//! `Connection::close(code, reason)` and the reader decides by the code only. 2 and 3 are
+//! values of an earlier design and are not used again; they read as `Unknown(2)`·`Unknown(3)`.
 
 use std::fmt;
 
