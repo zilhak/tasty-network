@@ -171,6 +171,20 @@ pub(crate) fn default_count(key: &str) -> u64 {
     }
 }
 
+pub(crate) fn default_duration(key: &str) -> Duration {
+    match default_of(key) {
+        SettingValue::Duration(d) => d,
+        other => panic!("the default of {key} is {other:?}, not a time"),
+    }
+}
+
+pub(crate) fn default_ratio(key: &str) -> f64 {
+    match default_of(key) {
+        SettingValue::Ratio(r) => r,
+        other => panic!("the default of {key} is {other:?}, not a ratio"),
+    }
+}
+
 /// The setting `key` with `configured` if given, else its default.
 pub(crate) fn shown(key: &'static str, configured: Option<SettingValue>) -> Setting {
     match configured {
@@ -249,6 +263,28 @@ impl fmt::Display for InvalidSetting {
 }
 
 impl std::error::Error for InvalidSetting {}
+
+/// The smallest multiplier: the waits never shrink.
+pub(crate) const MIN_MULTIPLIER: f64 = 1.0;
+/// The jitter is a fraction of the wait.
+pub(crate) const MAX_JITTER: f64 = 1.0;
+
+/// Checks the redial values: a finite multiplier of at least 1 and a jitter in [0, 1].
+pub(crate) fn check_redial(multiplier: f64, jitter: f64) -> Result<(), InvalidSetting> {
+    if !(multiplier.is_finite() && multiplier >= MIN_MULTIPLIER) {
+        return Err(InvalidSetting {
+            key: REDIAL_MULTIPLIER,
+            reason: "must be a finite number of at least 1",
+        });
+    }
+    if !(jitter.is_finite() && (0.0..=MAX_JITTER).contains(&jitter)) {
+        return Err(InvalidSetting {
+            key: REDIAL_JITTER,
+            reason: "must be between 0 and 1",
+        });
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

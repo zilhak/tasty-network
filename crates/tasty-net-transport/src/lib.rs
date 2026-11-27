@@ -30,7 +30,7 @@
 //! | [`RejectReason`] · [`HandshakeError`] · [`TooOldEvidence`] · [`P2pCloseReason`] | consumers that branch on why a handshake ended (`is_retryable`) |
 //! | [`Holder`] · [`Side`] · [`Roles`] · [`roles`] | consumers that act on the roles of a link |
 //! | [`Purpose`] · [`PROTO`] · [`STREAM_OPEN_METHOD`] · [`MAX_HANDSHAKE_LINE`] · [`LEGACY_PROTOCOL_ERROR`] · [`is_valid_capability`] · [`InvalidCapabilities`] | the wire constants |
-//! | [`ConnectionTable`] · [`ConnectionTableConfig`] · [`ConnectionInfo`] · [`ConnectionId`] · [`ConnectionEvent`] · [`ConnectionState`] · [`ConnectionPeer`] · [`PathKind`] · [`Direction`] · [`Phase`] · [`Cause`] · [`Segment`] · [`Via`] · [`HistoryEntry`] · [`LinkInfo`] · [`EdgeTransport`] · [`RedialProgress`] · [`settings`] | consumers that show which devices this one is connected with, over which path and addresses (docs/design/transport.md "연결 목록") |
+//! | [`ConnectionTable`] · [`ConnectionTableConfig`] · [`ConnectionInfo`] · [`ConnectionId`] · [`ConnectionEvent`] · [`ConnectionState`] · [`ConnectionPeer`] · [`PathKind`] · [`Direction`] · [`Phase`] · [`Cause`] · [`Segment`] · [`Via`] · [`HistoryEntry`] · [`LinkInfo`] · [`EdgeTransport`] · [`RedialProgress`] · [`settings`] · [`Redialer`] · [`RedialerConfig`] · [`RedialError`] | consumers that show which devices this one is connected with, over which path and addresses (docs/design/transport.md "연결 목록") |
 //! | [`SshTransport`] · [`LOCAL_CONNECT_TIMEOUT`] | consumers that reach a peer over SSH (port discovery, shared `-L` tunnel, loopback TCP channels) |
 //! | [`memory_channel_pair`] · [`memory_transport`] · [`MemoryTransport`] · [`MemoryListener`] | tests that run channels without sockets |
 #![deny(unsafe_code)]
@@ -48,6 +48,7 @@ mod link;
 mod link_id;
 mod lock;
 mod memory;
+mod redial;
 mod reject;
 mod request;
 mod role;
@@ -81,6 +82,7 @@ pub use heartbeat::HeartbeatPolicy;
 pub use link::{BulkChannel, Link, LinkTimeouts, PeerInfo};
 pub use link_id::LinkId;
 pub use memory::{MemoryListener, MemoryTransport, memory_channel_pair, memory_transport};
+pub use redial::{RedialError, Redialer, RedialerConfig};
 pub use reject::{HandshakeError, P2pCloseReason, RejectReason, TooOldEvidence};
 pub use request::{
     RESPONSE_TOO_LARGE, RequestClient, RequestError, RequestHandler, RequestServer, ServeError,

@@ -464,6 +464,16 @@ impl EntryRef {
         })
     }
 
+    /// Sets whether the redialer holds the entry, and when its next attempt starts.
+    pub(crate) fn hold(&self, held: bool, next_attempt_at: Option<Instant>) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                stored.held = held;
+                stored.next_attempt_at = next_attempt_at;
+            }
+        });
+    }
+
     /// An attach link stands on the entry: the peer the handshake proved, the link's row
     /// (until the link ends) and the applied timeouts; the entry is `connected`.
     pub(crate) fn link_up(

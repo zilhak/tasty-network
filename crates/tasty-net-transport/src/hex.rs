@@ -39,6 +39,15 @@ pub(crate) fn random_32() -> Result<[u8; 32], std::io::Error> {
     Ok(bytes)
 }
 
+/// A uniform random number in [0, 1) from the OS random source (the redialer's jitter).
+pub(crate) fn random_unit() -> Result<f64, std::io::Error> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
+    // The top 53 bits, the precision of an f64, over 2^53.
+    let bits = u64::from_le_bytes(bytes) >> (u64::BITS - f64::MANTISSA_DIGITS);
+    Ok(bits as f64 / (1u64 << f64::MANTISSA_DIGITS) as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

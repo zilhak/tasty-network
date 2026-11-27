@@ -2,10 +2,13 @@
 //! come from SSH connection attempts whose `ssh` cannot be started: each attempt is one
 //! entry that ends in port discovery, on every platform and without a network.
 
+use std::time::{Duration, Instant};
+
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionId,
-    ConnectionState, ConnectionTable, ConnectionTableConfig, Phase, SshTransport, Transport,
+    ConnectionState, ConnectionTable, ConnectionTableConfig, HandshakeError, Phase, RedialError,
+    Redialer, RedialerConfig, SshTransport, Transport,
 };
 
 /// A transport whose `ssh` program does not exist, reporting in `table`.
@@ -152,4 +155,186 @@ fn event_queue_reports_lag() {
             .map(|s| (s.value.to_string(), s.source.as_str())),
         Some(("3".to_string(), "configured"))
     );
+}
+
+/// Redials `lost` with attempts that fail in port discovery.
+fn redial_failing(
+    transport: &SshTransport,
+    config: RedialerConfig,
+    lost: ConnectionId,
+) -> Result<(), RedialError> {
+    let table = transport.connections().expect("a table");
+    let redialer = Redialer::new(table, config).expect("valid settings");
+    let cancel = AttemptCancel::new();
+    redialer.redial(lost, &cancel, |options| {
+        transport
+            .connect_with(&SshTarget::parse("nowhere"), &cancel, options)
+            .map(drop)
+            .map_err(HandshakeError::Connect)
+    })
+}
+
+#[test]
+fn history_is_capped() {
+    let table = ConnectionTable::new(ConnectionTableConfig::new().with_history_limit(2));
+    let transport = failing(&table);
+    let lost = fail_once(&transport, &ConnectOptions::new());
+    // Two attempts: retry_wait, port_discovery, retry_wait, port_discovery, disconnected.
+    let config = RedialerConfig::new()
+        .with_initial(Duration::from_millis(1))
+        .with_jitter(0.0)
+        .with_max_attempts(2);
+    match redial_failing(&transport, config, lost) {
+        Err(RedialError::Exhausted(Some(HandshakeError::Connect(ConnectError::Discovery(_))))) => {}
+        other => panic!("expected the attempts to run out: {other:?}"),
+    }
+    let entry = table.connections().pop().expect("the redial entry");
+    assert_eq!(entry.previous, Some(lost));
+    assert_eq!(entry.history.len(), 2);
+    assert_eq!(entry.history_dropped, 3);
+    let kept: Vec<_> = entry
+        .history
+        .iter()
+        .map(|h| (h.state, h.phase, h.cause.clone()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (
+                ConnectionState::Reconnecting,
+                Some(Phase::PortDiscovery),
+                None
+            ),
+            (
+                ConnectionState::Disconnected,
+                None,
+                Some(Cause::RedialExhausted)
+            ),
+        ]
+    );
+    assert_eq!(entry.last_cause, Some(Cause::RedialExhausted));
+}
+
+/// Records when each attempt starts and fails it with `error`.
+fn timed_redial(
+    config: RedialerConfig,
+    error: fn() -> HandshakeError,
+) -> (
+    Result<(), RedialError>,
+    Instant,
+    Vec<Instant>,
+    ConnectionTable,
+) {
+    let table = ConnectionTable::default();
+    let transport = failing(&table);
+    let lost = fail_once(&transport, &ConnectOptions::new());
+    let redialer = Redialer::new(&table, config).expect("valid settings");
+    let mut starts = Vec::new();
+    let started = Instant::now();
+    let result = redialer.redial(lost, &AttemptCancel::new(), |_| {
+        starts.push(Instant::now());
+        Err::<(), _>(error())
+    });
+    (result, started, starts, table)
+}
+
+#[test]
+fn redialer_follows_settings() {
+    let ms = Duration::from_millis;
+    // The waits: min(max_delay, initial × multiplier^(n−1)) × (1 + u × jitter), cut to
+    // [0, max_delay].
+    let config = RedialerConfig::new()
+        .with_initial(ms(40))
+        .with_multiplier(2.0)
+        .with_max_delay(ms(100))
+        .with_jitter(0.25)
+        .with_max_attempts(4);
+    assert_eq!(config.wait_before(1, 0.0), ms(40));
+    assert_eq!(config.wait_before(2, -1.0), ms(60));
+    assert_eq!(config.wait_before(3, 0.0), ms(100), "the base is capped");
+    assert_eq!(
+        config.wait_before(3, 1.0),
+        ms(100),
+        "and so is the jittered wait"
+    );
+    assert_eq!(config.wait_before(4, -1.0), ms(75));
+
+    // Four attempts with the waits within the random width, then the attempts run out.
+    let (result, started, starts, table) =
+        timed_redial(config.clone(), || HandshakeError::TimedOut);
+    assert!(
+        matches!(
+            result,
+            Err(RedialError::Exhausted(Some(HandshakeError::TimedOut)))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(starts.len(), 4);
+    let slack = ms(250);
+    let mut previous = started;
+    for (n, at) in (1u64..).zip(&starts) {
+        let gap = at.duration_since(previous);
+        let (low, high) = (config.wait_before(n, -1.0), config.wait_before(n, 1.0));
+        assert!(
+            gap >= low && gap <= high + slack,
+            "wait {n}: {gap:?} not in [{low:?}, {high:?}]"
+        );
+        previous = *at;
+    }
+    let entry = table.connections().pop().expect("the redial entry");
+    assert_eq!(entry.last_cause, Some(Cause::RedialExhausted));
+    assert_eq!(entry.redial.as_ref().map(|r| r.attempt), Some(4));
+
+    // give_up_after: waits of 100 ms end at 100, 200 and 300 ms; a fourth would end past
+    // 350 (and a late second attempt still has 50 ms before the third would not fit).
+    let config = RedialerConfig::new()
+        .with_initial(ms(100))
+        .with_multiplier(1.0)
+        .with_jitter(0.0)
+        .with_give_up_after(ms(350));
+    let (result, started, starts, table) = timed_redial(config, || HandshakeError::TimedOut);
+    assert!(
+        matches!(result, Err(RedialError::Exhausted(_))),
+        "{result:?}"
+    );
+    assert_eq!(starts.len(), 3);
+    assert!(
+        started.elapsed() < ms(350) + slack,
+        "{:?}",
+        started.elapsed()
+    );
+    let entry = table.connections().pop().expect("the redial entry");
+    assert_eq!(entry.state, ConnectionState::Disconnected);
+    assert_eq!(entry.last_cause, Some(Cause::RedialExhausted));
+
+    // An error connecting again does not change stops at once.
+    let config = RedialerConfig::new().with_initial(ms(1));
+    let (result, _, starts, table) = timed_redial(config, || HandshakeError::SelfAttach);
+    assert!(
+        matches!(result, Err(RedialError::Failed(HandshakeError::SelfAttach))),
+        "{result:?}"
+    );
+    assert_eq!(starts.len(), 1);
+    let entry = table.connections().pop().expect("the redial entry");
+    assert_eq!(entry.state, ConnectionState::Disconnected);
+    assert!(
+        matches!(entry.last_cause, Some(Cause::HandshakeFailed(_))),
+        "{:?}",
+        entry.last_cause
+    );
+
+    // give_up_after = 0: no redialing, no entry.
+    let config = RedialerConfig::new().with_give_up_after(Duration::ZERO);
+    let (result, _, starts, table) = timed_redial(config, || HandshakeError::TimedOut);
+    assert!(
+        matches!(result, Err(RedialError::NotRedialed)),
+        "{result:?}"
+    );
+    assert!(starts.is_empty());
+    assert_eq!(table.connections().len(), 1, "only the lost entry");
+
+    // Settings that cannot be used are refused.
+    let table = ConnectionTable::default();
+    assert!(Redialer::new(&table, RedialerConfig::new().with_multiplier(0.5)).is_err());
+    assert!(Redialer::new(&table, RedialerConfig::new().with_jitter(1.5)).is_err());
 }

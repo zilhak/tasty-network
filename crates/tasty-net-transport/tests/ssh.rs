@@ -18,8 +18,9 @@ use tasty_net_identity::{ConnectionRecord, ConnectionToken};
 use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionState, ConnectionTable,
-    Direction, EdgeTransport, HandshakeError, Holder, PathKind, Phase, RejectReason, Side,
-    SshTransport, TooOldEvidence, Transport, TransportKind, Via, dial_handshake,
+    Direction, EdgeTransport, HandshakeError, Holder, PathKind, Phase, Redialer, RedialerConfig,
+    RejectReason, Side, SshTransport, TooOldEvidence, Transport, TransportKind, Via,
+    dial_handshake,
 };
 
 use common::{client, echo_server, echo_server_reporting, token};
@@ -639,4 +640,74 @@ fn a_refused_handshake_ends_both_entries_with_the_reason() {
         far.connections()[0].last_cause,
         Some(Cause::Refused(RejectReason::TokenInvalid))
     );
+}
+
+/// The entry of a redialed SSH connection shows the settings applied to it: the link
+/// timeouts and the redial values, each `configured` where the consumer gave it and
+/// `default` where not.
+#[test]
+fn ssh_connection_reports_applied_sources() {
+    let server = echo_server(token('a'));
+    let fake = FakeSsh::new("applied");
+    fake.publish_record(server.addr.port(), token('a'), "instance-1");
+    let table = ConnectionTable::default();
+    let transport = fake.transport().with_connections(table.clone());
+    // The lost connection: an attempt whose ssh cannot start.
+    let broken = SshTransport::new(
+        SshLauncher::new(fake.script.with_extension("missing")),
+        PortDiscoveryConfig {
+            remote_program: "netprog".into(),
+            remote_args: vec!["port".into()],
+            data_dir: ".netprog".into(),
+            port_file: "record".into(),
+            explicit_port_file: None,
+        },
+        PortMode::FileUnix,
+    )
+    .with_connections(table.clone());
+    let cancel = AttemptCancel::new();
+    assert!(broken.connect(&target(), &cancel).is_err());
+    let lost = table.connections()[0].id;
+
+    let redialer = Redialer::new(
+        &table,
+        RedialerConfig::new().with_initial(Duration::from_millis(10)),
+    )
+    .expect("valid");
+    // common::timeouts() keeps the default handshake timeout and changes the others.
+    let link = redialer
+        .redial(lost, &cancel, |options| {
+            let conn = transport
+                .connect_with(&target(), &cancel, options)
+                .map_err(HandshakeError::Connect)?;
+            dial_handshake(conn, &client(), Holder::Dialer, None, &cancel)
+        })
+        .expect("redialed");
+    let entry = table.connections().pop().expect("the redialed entry");
+    assert_eq!(entry.previous, Some(lost));
+    assert_eq!(entry.state, ConnectionState::Connected);
+    assert_eq!(entry.links[0].link_id, link.link_id());
+    assert_eq!(entry.redial.as_ref().map(|r| r.attempt), Some(1));
+    let source = |key: &str| {
+        entry
+            .applied
+            .iter()
+            .find(|s| s.key == key)
+            .map(|s| s.source.as_str())
+            .unwrap_or_else(|| panic!("{key} is not applied: {:#?}", entry.applied))
+    };
+    assert_eq!(source("link.read_timeout"), "configured");
+    assert_eq!(source("link.role_proposal_timeout"), "configured");
+    assert_eq!(source("link.drain_cap"), "configured");
+    assert_eq!(source("link.handshake_timeout"), "default");
+    assert_eq!(source("redial.initial"), "configured");
+    for key in [
+        "redial.multiplier",
+        "redial.max_delay",
+        "redial.jitter",
+        "redial.give_up_after",
+        "redial.max_attempts",
+    ] {
+        assert_eq!(source(key), "default", "{key}");
+    }
 }
