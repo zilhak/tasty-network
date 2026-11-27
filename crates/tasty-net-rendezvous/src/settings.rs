@@ -9,8 +9,16 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::Duration;
+
+use tasty_net_identity::DeviceKey;
+
+use crate::wire::candidate::CandidateKind;
+use crate::wire::message::{
+    Candidate, NatMapping, PunchGo, PunchMode, PunchToken, Role, ServerMessage,
+};
+use crate::wire::stun::PUNCH_TOKEN_LEN;
 
 /// Where a value comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1005,6 +1013,22 @@ impl Resolver<'_> {
             "1 + max_reported_reflexive + max_host_candidates <= 64",
             &["max_reported_reflexive", "max_host_candidates"],
         )?;
+        let largest = largest_punch_go(
+            1 + max_reported_reflexive + max_host_candidates,
+            start_delay_max,
+            self.duration("punch_window"),
+            self.duration("quic_handshake_timeout"),
+        );
+        self.relation(
+            largest <= max_message_bytes,
+            "the largest punch_go (1 + max_reported_reflexive + max_host_candidates candidates of \
+             the longest address) fits in max_message_bytes",
+            &[
+                "max_message_bytes",
+                "max_reported_reflexive",
+                "max_host_candidates",
+            ],
+        )?;
         let advertise_primary_ip = self.opt_ip("advertise.primary_ip");
         self.relation(
             !listen_primary.ip().is_unspecified() || advertise_primary_ip.is_some(),
@@ -1191,6 +1215,43 @@ impl Resolver<'_> {
             tls_tickets: 0,
         })
     }
+}
+
+/// The body length of the largest `punch_go` the server can send with `candidates` candidates:
+/// every number at its largest, every enumeration at its longest name and every candidate the
+/// longest address text (IPv6 with a scope ID and port 65535) of the longest kind.
+fn largest_punch_go(
+    candidates: u64,
+    start_delay_max: Duration,
+    punch_window: Duration,
+    quic_handshake_timeout: Duration,
+) -> u64 {
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    let longest = Candidate {
+        addr: SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(u128::MAX),
+            u16::MAX,
+            u32::MIN,
+            u32::MAX,
+        )),
+        kind: CandidateKind::ReportedReflexive,
+    };
+    let go = ServerMessage::PunchGo(PunchGo {
+        punch_id: u64::MAX,
+        request_id: Some(u64::MAX),
+        peer: DeviceKey::from_seed([0; 32]).id(),
+        role: Role::Controlling,
+        mode: PunchMode::HostOnly,
+        candidates: vec![longest; usize::try_from(candidates).unwrap_or(usize::MAX)],
+        peer_nat: NatMapping::IndependentPortOnly,
+        token_local: PunchToken([u8::MAX; PUNCH_TOKEN_LEN]),
+        token_peer: PunchToken([u8::MAX; PUNCH_TOKEN_LEN]),
+        start_after_ms: ms(start_delay_max),
+        window_ms: ms(punch_window),
+        handshake_ms: ms(quic_handshake_timeout),
+    });
+    go.to_json()
+        .map_or(u64::MAX, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
 }
 
 impl ServerParams {
@@ -1438,6 +1499,13 @@ mod tests {
                 Value::Count(61),
                 "max_host_candidates",
             ),
+            // With the default 3 reported reflexive, 1 + 3 + 3 longest candidates are over
+            // 1 KiB.
+            (
+                "max_message_bytes_small",
+                Value::Bytes(1024),
+                "max_message_bytes",
+            ),
             ("max_message_bytes", Value::Bytes(1023), "max_message_bytes"),
             (
                 "max_message_bytes",
@@ -1469,6 +1537,12 @@ mod tests {
                 s.set("quic.initial_mtu", Value::Bytes(1300)).unwrap();
                 s.set("quic.min_mtu", Value::Bytes(1200)).unwrap();
             }
+            let key = if key == "max_message_bytes_small" {
+                s.set("max_host_candidates", Value::Count(3)).unwrap();
+                "max_message_bytes"
+            } else {
+                key
+            };
             s.set(key, value).unwrap();
             let err = s.resolve().expect_err(key);
             let text = err.to_string();
@@ -1492,8 +1566,50 @@ mod tests {
         s.set("punch_session_grace", d(1000)).unwrap();
         s.set("offer_timeout", d(100)).unwrap();
         s.set("max_host_candidates", Value::Count(60)).unwrap();
+        assert!(s.resolve().is_ok());
+        let mut s = local();
+        s.set("max_host_candidates", Value::Count(2)).unwrap();
         s.set("max_message_bytes", Value::Bytes(1024)).unwrap();
         assert!(s.resolve().is_ok());
+    }
+
+    #[test]
+    fn largest_punch_go_must_fit_the_message_limit() {
+        // 64 candidates of the longest address are over 1 KiB: the server would close its own
+        // connection while sending such a punch_go.
+        let mut s = ServerSettings::new();
+        s.set(
+            "listen.primary",
+            Value::Address("127.0.0.1:0".parse().unwrap()),
+        )
+        .unwrap();
+        s.set("max_message_bytes", Value::Bytes(1024)).unwrap();
+        s.set("max_host_candidates", Value::Count(60)).unwrap();
+        s.set("max_reported_reflexive", Value::Count(3)).unwrap();
+        match s.resolve() {
+            Err(SettingsError::Relation { rule, values }) => {
+                assert!(rule.contains("punch_go"), "{rule}");
+                let keys: Vec<&str> = values.iter().map(|(k, _)| *k).collect();
+                assert_eq!(
+                    keys,
+                    [
+                        "max_message_bytes",
+                        "max_reported_reflexive",
+                        "max_host_candidates"
+                    ]
+                );
+            }
+            other => panic!("expected the punch_go relation, got {other:?}"),
+        }
+        // The estimate covers what the server really sends: 64 longest candidates.
+        let big = largest_punch_go(
+            64,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert!(big > 5000, "{big}");
+        assert!(largest_punch_go(6, Duration::ZERO, Duration::ZERO, Duration::ZERO) <= 1024);
     }
 
     #[test]
