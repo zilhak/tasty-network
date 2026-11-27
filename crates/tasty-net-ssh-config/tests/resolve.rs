@@ -318,6 +318,9 @@ fn refuse_connection() {
     assert_eq!(refusal_kind(&other), None);
 }
 
+// Unix only: `Include` sees only `/` as a separator (portable OpenSSH), so a Windows temporary
+// path such as `C:\...` is relative there.
+#[cfg(unix)]
 /// A chain of `files` included files below the top file.
 fn include_chain(files: usize) -> Resolution {
     let dir = folder();
@@ -341,6 +344,9 @@ fn include_chain(files: usize) -> Resolution {
     .resolve("web", &context(Vec::new()))
 }
 
+// Unix only: `Include` sees only `/` as a separator (portable OpenSSH), so a Windows temporary
+// path such as `C:\...` is relative there.
+#[cfg(unix)]
 #[test]
 fn include_depth_limit() {
     let depth = tasty_net_ssh_config::settings::FIXED
@@ -364,6 +370,9 @@ fn include_depth_limit() {
     );
 }
 
+// Unix only: `Include` sees only `/` as a separator (portable OpenSSH), so a Windows temporary
+// path such as `C:\...` is relative there.
+#[cfg(unix)]
 #[test]
 fn include_cycle_stops_at_the_limit() {
     let dir = folder();

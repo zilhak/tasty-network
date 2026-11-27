@@ -218,6 +218,9 @@ mod tests {
         assert!(m("[x", "[x"));
     }
 
+    // Unix only: the glob sees only `/` as a separator (portable OpenSSH), and a Windows
+    // temporary path has `\`.
+    #[cfg(unix)]
     #[test]
     fn lists_files_sorted() {
         let dir =

@@ -404,6 +404,7 @@ OpenSSH와 같은 형식을 같은 뜻으로 읽는다(이식 크레이트). 위
 
 - `<ssh 폴더>`는 설정값 `embedded.ssh_dir`이다. 기본은 `~/.ssh`(`~`는 `embedded.home`)다. 모바일은 바인딩 층이 앱 저장소의 `ssh/` 폴더를 `configured`로 넣는다(tasty 설정으로 덮어쓸 수 있다).
 - `~` 펼침: 설정 파일 안의 `~/.ssh/` 로 시작하는 경로는 `<ssh 폴더>/`로, 그 밖의 `~/`는 `embedded.home`으로 펼친다. `embedded.ssh_dir`이 기본값이면 OpenSSH와 같다. 홈을 알 수 없고 설정도 없으면 `~`가 든 경로는 없는 파일로 다룬다.
+- 경로 구분자: 이식 크레이트의 절대 경로 판정(`path_absolute`, `misc.c:2668`–`:2672`)과 `Include`의 glob은 기준판(portable)대로 `/`만 본다. Windows에서도 같아서 `Include C:\...`·`C:/...`는 상대 경로가 되어 사용자 설정은 `~/.ssh/` 아래, 시스템 설정은 `/etc/ssh/` 아래로 바뀐다. Win32-OpenSSH 규칙을 따를지는 [후속 작업과 미정](#후속-작업과-미정)의 "Windows의 설정 경로 규칙"이다.
 
 ## 지시어 분류
 
@@ -668,6 +669,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | 이식 크레이트 `tasty-net-ssh-config` | 후속 작업(OpenSSH 해석 이식) |
 | 2단계 내장 백엔드·선택 규칙·exec·SFTP·cargo-audit | 후속 작업(내장 SSH 백엔드). 이식 크레이트 뒤 |
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
+| Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
 | 비교 시험의 기준 클라이언트 빌드 | 후속 작업(OpenSSH 해석 이식). 원격 빌드 머신에서 `scripts/install-openssh-ref.sh`가 도는지 처음 확인한다 |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |
