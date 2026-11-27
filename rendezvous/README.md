@@ -141,7 +141,9 @@ bash rendezvous/container-check.sh --self-test   # docker 없이 검사 자체�
 bash rendezvous/container-check.sh               # 이미지와 p2p_peer 예제를 빌드해 두 기기를 붙인다
 ```
 
-`container-check.sh`는 이 폴더의 `Dockerfile`로 이미지를 빌드하고, 예시 설정의 광고 주소만 바꿔 서버를 띄운 뒤 같은 머신의 `p2p_peer` 예제 두 프로세스(`crates/tasty-net-p2p/examples/p2p_peer.rs`)를 그 서버로 붙여 echo한다. 두 예제의 연결 정보 줄(경로·주소쌍·서버)과 서버 쪽 수신 카운터를 적고, 마지막 줄이 `rendezvous-check result=ok ...`면 통과다. 구성과 단계별 판정은 스크립트 머리 주석에 있다.
+`container-check.sh`는 이 폴더의 `Dockerfile`로 이미지를 빌드하고, 예시 설정의 광고 주소만 바꿔 서버를 띄운 뒤 같은 머신의 `p2p_peer` 예제 두 프로세스(`crates/tasty-net-p2p/examples/p2p_peer.rs`)를 그 서버로 붙여 echo한다. echo는 1바이트 대조 실행과 큰 메시지의 데이터 실행 두 번이고, 두 예제의 연결 정보 줄(경로·주소쌍·서버)과 실행마다의 서버 쪽 수신 카운터를 적는다. 정리(남은 예제, 이 실행의 컨테이너·볼륨·이미지)를 마친 뒤에 결과 줄을 쓰므로, 정리가 실패하면 `rendezvous-check result=fail step=cleanup`과 종료 코드 1이다. 마지막 줄이 `rendezvous-check result=ok ...`면 통과다. 구성과 단계별 판정은 스크립트 머리 주석에 있다.
+
+- D5 (b)의 증거는 `image=built peer=built`인 실행이다. `CONTAINER_CHECK_IMAGE`·`P2P_PEER`로 이미 있는 이미지나 예제를 주면 빌드하지 않고, build 줄과 결과 줄에 `image=given`·`peer=given`이 찍힌다. 실행 sha를 읽지 못하면 판정 불가로 끝난다.
 
 - Linux Docker Engine에서 돈다. 게시 포트는 호스트의 `127.0.0.1` 빈 UDP 포트를 골라 쓰므로 `check-config.sh`의 3478·3479와 겹치지 않는다.
 - 기기는 이 머신의 사설 IPv4를 호스트 후보로 알린다. 경로를 물어 정한 값이 사설 IPv4가 아니면 `CONTAINER_CHECK_HOST_IP`로 준다.
