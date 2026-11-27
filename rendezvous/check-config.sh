@@ -33,6 +33,11 @@ EXAMPLE="$HERE/rendezvous.toml"
 START_SECONDS="${RENDEZVOUS_START_SECONDS:-30}"
 STUN_TIMEOUT_MS="${RENDEZVOUS_STUN_TIMEOUT_MS:-2000}"
 
+# 빌드 명령. json-render-diagnostics는 산출물 JSON을 stdout에 내고 컴파일 오류 본문은 사람이 읽는
+# 형식으로 stderr에 남긴다(json만 쓰면 오류 본문이 stdout JSON에 묻혀 로그에서 사라진다).
+BUILD_CMD=(cargo build --locked --message-format=json-render-diagnostics -p tasty-net-rendezvous
+    --bin tasty-rendezvous --example stun_probe)
+
 log() { echo "[rendezvous-check] $*" >&2; }
 
 # 파일 머리의 주석 블록(둘째 줄부터 첫 비주석 줄 전까지)을 도움말로 출력한다.
@@ -301,6 +306,9 @@ access = everyone'
     expect ok "executable_of: 예제" test "$(executable_of "$cargo_json" stun_probe)" == /t/debug/examples/stun_probe
     expect ok "executable_of: 없는 이름은 빈 값" test -z "$(executable_of "$cargo_json" p2p_peer)"
 
+    expect ok "BUILD_CMD: 컴파일 오류 본문을 stderr에 남기는 형식" test "${BUILD_CMD[3]}" == --message-format=json-render-diagnostics
+    expect ok "BUILD_CMD: 산출물 줄을 함께 받는 json 계열 형식 하나만" test "$(printf '%s\n' "${BUILD_CMD[@]}" | grep -c '^--message-format=')" == 1
+
     expect ok "port_of: IPv4" test "$(port_of 0.0.0.0:3478)" == 3478
     expect ok "port_of: IPv6" test "$(port_of '[::]:3479')" == 3479
     expect ok "probe_ip: IPv4 wildcard는 루프백" test "$(probe_ip 0.0.0.0:3478)" == 127.0.0.1
@@ -348,9 +356,8 @@ build() {
         return
     fi
     local json
-    log "빌드: cargo build --locked -p tasty-net-rendezvous --bin tasty-rendezvous --example stun_probe"
-    json=$(cd "$ROOT" && cargo build --locked --message-format=json -p tasty-net-rendezvous \
-        --bin tasty-rendezvous --example stun_probe) \
+    log "빌드: ${BUILD_CMD[*]}"
+    json=$(cd "$ROOT" && "${BUILD_CMD[@]}") \
         || { log "빌드 실패"; echo "rendezvous-check result=fail step=build"; exit 2; }
     # 실행 파일 경로는 cargo 출력의 executable 값에서 얻는다(target 폴더 위치를 짐작하지 않는다).
     BIN=$(executable_of "$json" tasty-rendezvous)
