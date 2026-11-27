@@ -133,7 +133,8 @@ TMP="$(mktemp -d)"
 PIDS=()
 cleanup() {
     local p
-    for p in "${PIDS[@]}"; do
+    # bash 3.2(macOS)는 set -u에서 빈 배열의 "${PIDS[@]}"를 설정 안 된 변수로 본다.
+    for p in ${PIDS[@]+"${PIDS[@]}"}; do
         kill "$p" 2>/dev/null || true
     done
     rm -rf "${TMP:?}"
