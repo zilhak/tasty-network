@@ -250,9 +250,16 @@ fn readers_never_see_a_partial_key() {
                     })
                 })
                 .collect();
-            let ids: Vec<DeviceId> = creators.into_iter().map(|h| h.join().unwrap()).collect();
+            // Stop and join the reader before a creator's panic is passed on, so that a failed
+            // creation fails the test instead of leaving the reader waiting.
+            let joined: Vec<_> = creators.into_iter().map(|h| h.join()).collect();
             done.store(true, std::sync::atomic::Ordering::Release);
-            let seen = reader.join().unwrap();
+            let seen = reader.join();
+            let ids: Vec<DeviceId> = joined
+                .into_iter()
+                .map(|r| r.unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+                .collect();
+            let seen = seen.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
             assert_eq!(seen, Some(ids[0]));
         });
