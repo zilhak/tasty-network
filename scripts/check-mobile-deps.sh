@@ -24,6 +24,9 @@
 # 인자가 아닌 것 포함), cargo tree 실패(종료 코드가 0이 아님), 출력에 뿌리 패키지 줄이 없음, 출력에 모양을
 # 모르는 줄이 있음, 판정 실패. 통과는 0이다. cargo 명령은 --locked로 돌므로 Cargo.lock이 있어야 한다.
 set -euo pipefail
+# cd가 CDPATH로 폴더를 찾으면 그 경로를 stdout에 찍어 $(cd … && pwd -P)의 값이 두 줄이 되고, 다른 폴더로
+# 갈 수도 있다. 이 스크립트의 cd는 모두 주어진 경로 그대로 간다.
+unset CDPATH
 
 TAG="[mobile-deps]"
 SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
@@ -331,10 +334,11 @@ self_test() {
 # 인자 처리와 cargo를 부르는 자리의 자체 시험: PATH 앞에 둔 가짜 cargo로 이 스크립트를 따로 돌린다.
 # 가짜 cargo는 FAKE_CARGO_PWD가 있으면 지금 폴더가 그 폴더일 때만 뿌리 줄을 찍고, 아니면 101로 끝난다.
 cli_self_test() {
-    local tmp failed=0 c name want pwd_mode args got want_pwd
+    local tmp failed=0 c name want pwd_mode args got want_pwd cdpath
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/mobile-deps-test.XXXXXX")
-    mkdir -p "$tmp/bin" "$tmp/app" "$tmp/elsewhere"
+    mkdir -p "$tmp/bin" "$tmp/app" "$tmp/elsewhere/inner"
     : >"$tmp/app/Cargo.toml"
+    : >"$tmp/elsewhere/inner/Cargo.toml"
     cat >"$tmp/bin/cargo" <<'FAKE'
 #!/usr/bin/env bash
 if [[ -n "${FAKE_CARGO_PWD:-}" && "$(pwd -P)" != "$FAKE_CARGO_PWD" ]]; then
@@ -344,10 +348,13 @@ fi
 echo 'app v0.1.0 (/w/app)|default'
 FAKE
     chmod +x "$tmp/bin/cargo"
-    # 이름#기대 종료 코드#cargo의 폴더 확인(app·없음)#인자(공백으로 나눈다, @APP@은 앱 Cargo.toml)
+    # 이름#기대 종료 코드#cargo의 폴더 확인(app·inner-cdpath·없음)#인자(공백으로 나눈다, @APP@은 앱 Cargo.toml)
+    # (inner-cdpath는 부르는 폴더 아래 inner/에서 돌아야 하고 CDPATH=.을 준다. CDPATH는 ./·../로
+    # 시작하지 않는 상대 경로에만 쓰인다)
     local cases=(
         "다른 폴더에서 부른 --manifest-path는 그 폴더에서 cargo를 돌린다#0#app#--manifest-path @APP@ --app --target aarch64-linux-android -p app"
         "상대 경로 --manifest-path도 그 폴더에서 돈다#0#app#--manifest-path ../app/Cargo.toml --target aarch64-linux-android -p app"
+        "CDPATH=.에서도 상대 경로 --manifest-path가 그 폴더에서 돈다#0#inner-cdpath#--manifest-path inner/Cargo.toml --target aarch64-linux-android -p app"
         "없는 --manifest-path#2##--manifest-path ../none/Cargo.toml --target aarch64-linux-android -p app"
         "모바일 target 네 개#0##--target aarch64-linux-android --target x86_64-linux-android --target aarch64-apple-ios --target aarch64-apple-ios-sim -p app"
         "호스트 target#2##--target x86_64-unknown-linux-gnu -p app"
@@ -364,11 +371,15 @@ FAKE
     for c in "${cases[@]}"; do
         IFS='#' read -r name want pwd_mode args <<<"$c"
         args=${args//@APP@/$tmp/app/Cargo.toml}
-        want_pwd=""
+        want_pwd="" cdpath=""
         [[ "$pwd_mode" == app ]] && want_pwd=$(cd "$tmp/app" && pwd -P)
+        if [[ "$pwd_mode" == inner-cdpath ]]; then
+            want_pwd=$(cd "$tmp/elsewhere/inner" && pwd -P)
+            cdpath=.
+        fi
         got=0
         # shellcheck disable=SC2086  # 인자는 공백으로 나눈다
-        (cd "$tmp/elsewhere" && PATH="$tmp/bin:$PATH" FAKE_CARGO_PWD="$want_pwd" bash "$SELF" $args) \
+        (cd "$tmp/elsewhere" && PATH="$tmp/bin:$PATH" FAKE_CARGO_PWD="$want_pwd" CDPATH="$cdpath" bash "$SELF" $args) \
             >/dev/null 2>&1 || got=$?
         if [[ "$got" == "$want" ]]; then
             echo "$TAG 자체 시험 통과: $name" >&2
