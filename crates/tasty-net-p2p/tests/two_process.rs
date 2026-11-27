@@ -21,6 +21,12 @@ const CHILD: &str = "TASTY_P2P_TWO_PROCESS_CHILD";
 const SERVER: &str = "TASTY_P2P_TWO_PROCESS_SERVER";
 const SERVER_KEY: &str = "TASTY_P2P_TWO_PROCESS_SERVER_KEY";
 const PEER: &str = "TASTY_P2P_TWO_PROCESS_PEER";
+/// The bound of each stream read and write.
+const IO_LIMIT: Duration = Duration::from_secs(30);
+/// The bound of the wait for the child to end after the connection closed.
+const CHILD_LIMIT: Duration = Duration::from_secs(60);
+/// The interval of that wait.
+const CHILD_POLL: Duration = Duration::from_millis(50);
 
 /// Ends the child if the parent fails first.
 struct Reap(std::process::Child);
@@ -60,6 +66,8 @@ fn child() {
     let mut s = conn
         .accept_bi(Some(Duration::from_secs(30)))
         .expect("stream");
+    s.set_read_timeout(Some(IO_LIMIT));
+    s.set_write_timeout(Some(IO_LIMIT));
     let mut got = Vec::new();
     s.read_to_end(&mut got).unwrap();
     s.write_all(&got).unwrap();
@@ -158,6 +166,8 @@ fn two_process_punch_and_echo() {
     };
     assert_eq!(conn.remote_device_id(), peer);
     let mut s = conn.open_bi().unwrap();
+    s.set_read_timeout(Some(IO_LIMIT));
+    s.set_write_timeout(Some(IO_LIMIT));
     s.write_all(b"two processes").unwrap();
     s.finish().unwrap();
     let mut back = Vec::new();
@@ -166,7 +176,17 @@ fn two_process_punch_and_echo() {
     let info = conn.info().unwrap();
     assert!(info.remote_candidate.is_some());
     conn.close(P2pCloseReason::Closed);
-    let status = child.0.wait().expect("child ends");
+    let until = Instant::now() + CHILD_LIMIT;
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("child state") {
+            break status;
+        }
+        assert!(
+            Instant::now() < until,
+            "the child did not end in {CHILD_LIMIT:?}"
+        );
+        std::thread::sleep(CHILD_POLL);
+    };
     assert!(status.success(), "{status:?}");
     ep.close();
     rt.block_on(server.shutdown());

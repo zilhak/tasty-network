@@ -37,6 +37,9 @@ const USAGE: &str = "usage: p2p_peer id --key-dir <dir>
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The wait between two connect requests while the peer is not registered yet.
 const ASK_AGAIN: Duration = Duration::from_millis(200);
+/// Past `--timeout`, the time the steps with their own limits get to report before the run is
+/// ended anyway.
+const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 /// The default message.
 const DEFAULT_MESSAGE: &str = "hello over p2p";
 
@@ -125,6 +128,8 @@ fn listen(a: &Args, end: Instant) -> Result<String, String> {
         .accept_bi(Some(left))
         .map_err(|e| format!("accept stream: {e}"))?;
     let mut got = Vec::new();
+    s.set_read_timeout(Some(left));
+    s.set_write_timeout(Some(left));
     s.read_to_end(&mut got).map_err(|e| format!("read: {e}"))?;
     s.write_all(&got).map_err(|e| format!("write: {e}"))?;
     s.finish().map_err(|e| format!("finish: {e}"))?;
@@ -167,7 +172,9 @@ fn dial(a: &Args, peer: DeviceId, end: Instant) -> Result<String, String> {
         .clone()
         .unwrap_or_else(|| DEFAULT_MESSAGE.to_owned());
     let mut s = conn.open_bi().map_err(|e| format!("open stream: {e}"))?;
-    s.set_read_timeout(Some(end.saturating_duration_since(Instant::now())));
+    let left = end.saturating_duration_since(Instant::now());
+    s.set_read_timeout(Some(left));
+    s.set_write_timeout(Some(left));
     s.write_all(message.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
     s.finish().map_err(|e| format!("finish: {e}"))?;
@@ -215,11 +222,22 @@ fn run() -> Result<String, String> {
         return Ok(key.id().to_string());
     }
     let end = Instant::now() + a.timeout.unwrap_or(DEFAULT_TIMEOUT);
+    watchdog(end);
     match (a.listen, a.dial) {
         (true, None) => listen(&a, end),
         (false, Some(peer)) => dial(&a, peer, end),
         _ => Err("give one of id, --listen or --dial".to_owned()),
     }
+}
+
+/// Ends the process a little after `end`: a step without a limit of its own (opening a stream
+/// waits for the peer's credit) does not keep the run past `--timeout`.
+fn watchdog(end: Instant) {
+    std::thread::spawn(move || {
+        std::thread::sleep(end.saturating_duration_since(Instant::now()) + WATCHDOG_GRACE);
+        eprintln!("p2p_peer: the run passed its --timeout");
+        std::process::exit(1);
+    });
 }
 
 fn main() -> ExitCode {

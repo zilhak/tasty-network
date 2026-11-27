@@ -5,7 +5,7 @@
 # 실행 파일 경로는 cargo build --message-format=json 출력의 executable 값에서 얻는다
 # (OS마다 다른 경로를 짐작하지 않는다).
 #
-# 사용: bash scripts/check-p2p-example-pair.sh
+# 사용: bash scripts/check-p2p-example-pair.sh [--self-test]
 # 종료 코드: 통과 0, 실패 1, 판정 불가(도구 없음·빌드 실패·실행 파일 경로 없음) 2.
 
 set -euo pipefail
@@ -14,11 +14,58 @@ cd "$(dirname "$0")/.."
 
 # 예제 한 번의 상한(초). 예제 --timeout으로 넘긴다.
 PEER_TIMEOUT=60
+# 예제는 --timeout 뒤 5초 안에 스스로 끝난다(예제의 WATCHDOG_GRACE). 그 뒤에도 남으면 이
+# 검사가 실패로 끝낸다. 예제 두 개를 기다리는 상한(초).
+PEER_WAIT_LIMIT=$((PEER_TIMEOUT + 15))
 # 서버가 시작 줄을 쓸 때까지 기다리는 상한(초)과 서버 정지를 기다리는 상한(초).
 SERVER_START_LIMIT=30
 SERVER_STOP_LIMIT=15
 # 위 두 대기의 확인 간격(초).
 POLL=0.2
+
+# 프로세스 $2...가 모두 끝나기를 $1초까지 기다린다. 다 끝나면 0, 상한을 넘으면 1.
+wait_ended() {
+    local limit=$1 p alive deadline
+    shift
+    deadline=$((SECONDS + limit))
+    while :; do
+        alive=0
+        for p in "$@"; do
+            if kill -0 "$p" 2>/dev/null; then alive=1; fi
+        done
+        [ "$alive" -eq 1 ] || return 0
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep "$POLL"
+    done
+}
+
+# 자체 시험: 상한을 넘은 대기는 실패하고, 끝난 프로세스의 대기는 끝난다.
+self_test() {
+    local slow quick n=0
+    sleep 30 &
+    slow=$!
+    if wait_ended 1 "$slow"; then
+        kill "$slow" 2>/dev/null || true
+        echo "[p2p-example-pair] 자체 시험 실패: 끝나지 않는 프로세스를 끝났다고 보았다." >&2
+        exit 1
+    fi
+    kill "$slow" 2>/dev/null || true
+    wait "$slow" 2>/dev/null || true
+    n=$((n + 1))
+    true &
+    quick=$!
+    wait_ended 10 "$quick" || {
+        echo "[p2p-example-pair] 자체 시험 실패: 끝난 프로세스를 기다리다 상한을 넘었다." >&2
+        exit 1
+    }
+    n=$((n + 1))
+    echo "[p2p-example-pair] 자체 시험 통과 — 사례 ${n}개" >&2
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_test
+    exit 0
+fi
 
 PY=""
 for c in python3 python; do
@@ -124,6 +171,8 @@ PIDS+=("$LISTENER_PID")
 DIALER_PID=$!
 PIDS+=("$DIALER_PID")
 
+wait_ended "$PEER_WAIT_LIMIT" "$DIALER_PID" "$LISTENER_PID" \
+    || fail "예제가 ${PEER_WAIT_LIMIT}초 안에 끝나지 않았다"
 dial_rc=0
 wait "$DIALER_PID" || dial_rc=$?
 listen_rc=0
