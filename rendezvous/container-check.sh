@@ -31,7 +31,10 @@
 #   7. no-forward: 서버 쪽 수신 바이트의 증가가 메시지 크기보다 작은지 본다. 기기 사이에는 메시지와
 #      그 echo로 메시지 크기의 두 배 이상이 오갔으므로, 그 데이터가 서버를 지났다면 증가가 이보다 크다.
 #   8. stop: docker stop(SIGINT)으로 멈추고 종료 코드 0과 종료 로그를 본다.
-#   9. 결과를 rendezvous-check step=<단계> ok 줄들과 마지막 줄 rendezvous-check result=ok|fail로 쓴다.
+#   9. cleanup: 예제가 남았으면 SIGTERM 뒤 기한 안에 끝나는지 보고 남으면 SIGKILL로 끝내 거둔다. 이 실행의
+#      컨테이너·볼륨·이미지를 지우고 남지 않았는지 본다. 하나라도 실패하면 result=fail step=cleanup이고
+#      종료 코드 1이다. 결과 줄은 정리가 끝난 뒤에 쓴다.
+#  10. 결과를 rendezvous-check step=<단계> ok 줄들과 마지막 줄 rendezvous-check result=ok|fail로 쓴다.
 #      result=ok 줄에 기기 구성(devices=same-host-processes), 경로, 실행 sha를 함께 적는다.
 # 컨테이너·볼륨·이미지 이름은 실행마다 /dev/urandom에서 얻은 조각을 붙여 정하고, 만들기 전에 같은 이름이
 # 없는지 본다. 셋 모두 그 조각을 값으로 한 라벨(tasty.container-check)을 달고, 지울 때는 라벨이 이 실행의
@@ -70,6 +73,8 @@ MESSAGE_BYTES_MAX=120000
 # 컨테이너 안의 듣는 포트(예시 설정의 listen.* 기본값, Dockerfile의 EXPOSE).
 CONTAINER_PRIMARY_PORT=3478
 CONTAINER_ALTERNATE_PORT=3479
+# 정리에서 예제에 SIGTERM을 보낸 뒤 끝나기를 기다리는 시간(초). 넘으면 SIGKILL로 끝낸다.
+CLEANUP_SECONDS=5
 # 기본 호스트 IP를 고를 때 경로를 묻는 대상(문서용 주소. 패킷은 보내지 않는다).
 ROUTE_PROBE_IP=192.0.2.1
 
@@ -241,24 +246,48 @@ remove_owned() {
     esac || { log "정리: $kind $name을 지우지 못했다"; return 1; }
 }
 
-cleanup() {
-    local p
+# 프로세스 $1이 없다(bash는 끝난 자식을 바로 거두므로 끝난 자식도 없는 것으로 보인다).
+gone() { ! kill -0 "$1" 2>/dev/null; }
+
+# stop_peer <pid>: SIGTERM을 보내고 CLEANUP_SECONDS 안에 끝나기를 기다린다. 남으면 SIGKILL로 끝낸다.
+# 어느 쪽이든 거둔다. SIGKILL 뒤에도 남으면 실패한다.
+stop_peer() {
+    local pid=$1
+    gone "$pid" && { wait "$pid" 2>/dev/null; return 0; }
+    kill -s TERM "$pid" 2>/dev/null
+    if ! wait_until "$CLEANUP_SECONDS" gone "$pid"; then
+        log "정리: 예제(pid $pid)가 SIGTERM 뒤 ${CLEANUP_SECONDS}s 안에 끝나지 않아 SIGKILL로 끝낸다"
+        kill -s KILL "$pid" 2>/dev/null
+    fi
+    wait "$pid" 2>/dev/null
+    gone "$pid" || { log "정리: 예제(pid $pid)가 끝나지 않았다"; return 1; }
+}
+
+# release: 남은 예제를 끝내고 이 실행의 컨테이너·볼륨·이미지와 임시 폴더를 지운 뒤 남지 않았는지 본다.
+# 다 되면 0, 하나라도 안 되면 1. 다시 불러도 된다(지운 것은 잊는다).
+release() {
+    local p bad=0
     for p in ${PEER_PIDS[@]+"${PEER_PIDS[@]}"}; do
-        kill "$p" 2>/dev/null || true
+        stop_peer "$p" || bad=1
     done
+    PEER_PIDS=()
     if [[ -n "$CONTAINER" ]]; then
-        remove_owned container "$CONTAINER"
+        if remove_owned container "$CONTAINER" && ! exists container "$CONTAINER"; then CONTAINER=""; else bad=1; fi
     fi
     if [[ -n "$VOLUME" ]]; then
-        remove_owned volume "$VOLUME"
+        if remove_owned volume "$VOLUME" && ! exists volume "$VOLUME"; then VOLUME=""; else bad=1; fi
     fi
     if [[ -n "$BUILT_IMAGE" ]]; then
-        remove_owned image "$BUILT_IMAGE"
+        if remove_owned image "$BUILT_IMAGE" && ! exists image "$BUILT_IMAGE"; then BUILT_IMAGE=""; else bad=1; fi
     fi
     if [[ -n "$TMP" ]]; then
-        rm -rf "${TMP:?}"
+        if rm -rf "${TMP:?}" && [[ ! -e "$TMP" ]]; then TMP=""; else bad=1; fi
     fi
+    return "$bad"
 }
+
+# 실패 경로의 정리. 이미 실패로 끝나는 중이라 정리 실패는 로그로만 남긴다(종료 코드는 0이 아니다).
+cleanup() { release || log "정리: 남은 것이 있다(위 줄)"; }
 trap cleanup EXIT
 
 STEP=""
@@ -505,6 +534,10 @@ main_check() {
     [[ "$rc" == 0 ]] || fail_at "서버 종료 코드 $rc(SIGINT 뒤 ${STOP_SECONDS}s)"
     server_logs | grep -q 'shutting down' || fail_at "종료 로그가 없다"
     step_ok "rc=$rc"
+
+    STEP=cleanup
+    release || { echo "rendezvous-check result=fail step=$STEP"; exit 1; }
+    step_ok
 
     echo "rendezvous-check result=ok devices=same-host-processes path=host sha=$sha"
 }
