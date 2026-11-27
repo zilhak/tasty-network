@@ -1158,4 +1158,91 @@ mod tests {
             let _done = accepting.await;
         });
     }
+
+    /// A dial cancelled while it waits for `punch_go` leaves no request waiter behind, and a
+    /// `punch_go` for it that comes after the cancel leaves no punch channel behind.
+    #[test]
+    fn a_cancelled_request_leaves_no_waiter_behind() {
+        use tasty_net_rendezvous::wire::message::{
+            NatMapping, PunchGo, PunchMode, PunchToken, Role, ServerMessage,
+        };
+        let peer = DeviceKey::from_seed([22; 32]).id();
+        let pairing = Arc::new(crate::pairing::PairingList::new());
+        pairing.add(peer);
+        let mut config = P2pConfig::new(DeviceKey::from_seed([21; 32]), pairing);
+        config.enabled = true;
+        config.server = Some(RendezvousServer {
+            addr: "192.0.2.10:3478".parse().unwrap(),
+            public_key: DeviceKey::from_seed([23; 32]).id(),
+        });
+        config.packet_io = Some(Arc::new(crate::probe::tests_support::Sink));
+        // The server is never reached: registration stays Connecting while the test stands
+        // in for it.
+        config.settings.set(
+            "rendezvous.connect_timeout",
+            crate::settings::Value::Duration(Duration::from_secs(60)),
+        );
+        let ep = P2pEndpoint::bind(config).expect("bind");
+        let core = ep.core().unwrap().clone();
+        let until = Instant::now() + Duration::from_secs(10);
+        while lock(&core.reg).phase != Some(EndpointPhase::Connecting) {
+            assert!(Instant::now() < until, "connecting");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        {
+            let mut r = lock(&core.reg);
+            r.phase = Some(EndpointPhase::Registered);
+            r.limits = Some(Limits {
+                offer_timeout_ms: 5_000,
+                start_delay_max_ms: 1_000,
+                punch_window_ms: 5_000,
+                quic_handshake_ms: 5_000,
+                punch_session_ttl_ms: 30_000,
+                max_host_candidates: 8,
+                max_reported_reflexive: 4,
+                max_message_bytes: 65_536,
+            });
+        }
+        *lock(&core.link) = Some(Link { tx });
+        let cancel = P2pCancel::new();
+        let request_id = std::thread::scope(|s| {
+            let dial = s.spawn(|| ep.connect_with_cancel(peer, &cancel));
+            let asked = loop {
+                assert!(Instant::now() < until, "punch_request");
+                match rx.try_recv() {
+                    Ok(DeviceMessage::PunchRequest(r)) => break r.request_id,
+                    Ok(_) | Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            assert_eq!(lock(&core.requests).len(), 1);
+            cancel.cancel();
+            let r = dial.join().unwrap();
+            assert_eq!(
+                r.err().and_then(|e| e.connect_error().copied()),
+                Some(P2pConnectError::Cancelled)
+            );
+            asked
+        });
+        assert!(lock(&core.requests).is_empty());
+        let go = PunchGo {
+            punch_id: 7,
+            request_id: Some(request_id),
+            peer,
+            role: Role::Controlling,
+            mode: PunchMode::All,
+            candidates: Vec::new(),
+            peer_nat: NatMapping::default(),
+            token_local: PunchToken([1; 16]),
+            token_peer: PunchToken([2; 16]),
+            start_after_ms: 0,
+            window_ms: 1_000,
+            handshake_ms: 1_000,
+        };
+        let _enter = core.handle.enter();
+        crate::server::dispatch(&core, ServerMessage::PunchGo(go));
+        assert!(lock(&core.punches).is_empty());
+        drop(_enter);
+        ep.close();
+    }
 }

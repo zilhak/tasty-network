@@ -453,7 +453,7 @@ fn limits_detail(core: &Core, key: &'static str, l: &Limits) -> CauseDetail {
     }
 }
 
-fn dispatch(core: &Arc<Core>, m: ServerMessage) {
+pub(crate) fn dispatch(core: &Arc<Core>, m: ServerMessage) {
     match m {
         ServerMessage::Welcome(_) => debug!("a second welcome ignored"),
         ServerMessage::ReflexiveChanged(c) => {
@@ -471,8 +471,12 @@ fn dispatch(core: &Arc<Core>, m: ServerMessage) {
                     // The punch's channel exists before the dialer wakes, so a cancel that
                     // follows at once is not lost.
                     let (sig_tx, sig_rx) = tokio::sync::mpsc::unbounded_channel();
-                    lock(&core.punches).insert(go.punch_id, sig_tx);
-                    let _sent = tx.send(RequestOutcome::Go(go, sig_rx)).is_ok();
+                    let punch_id = go.punch_id;
+                    lock(&core.punches).insert(punch_id, sig_tx);
+                    if tx.send(RequestOutcome::Go(go, sig_rx)).is_err() {
+                        // The dialer gave the request up: nothing will remove the channel.
+                        lock(&core.punches).remove(&punch_id);
+                    }
                 }
             }
             None => {

@@ -6,14 +6,13 @@
 //! XOR-MAPPED-ADDRESS of the answers. An answer counts only with the request's transaction ID
 //! and from the address the request went to (RFC 8489 §6.3).
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tasty_net_rendezvous::packet_io::PacketIo;
 use tasty_net_rendezvous::wire::message::NatMapping;
-use tasty_net_rendezvous::wire::stun::{self, StunClass, TransactionId};
+use tasty_net_rendezvous::wire::stun::{self, StunClass};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -84,7 +83,7 @@ pub(crate) async fn detect(
     attempts: u32,
 ) -> NatJudgement {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut asked: HashMap<TransactionId, SocketAddr> = HashMap::new();
+    let mut asked = sock::Waiting::new(router.clone(), tx);
     let mut answers: Vec<StunAnswer> = targets
         .iter()
         .map(|t| StunAnswer {
@@ -96,8 +95,7 @@ pub(crate) async fn detect(
     for t in targets {
         match stun::random_transaction_id() {
             Ok(txid) => {
-                router.wait_for(txid, tx.clone());
-                asked.insert(txid, canonical(*t));
+                asked.add(txid, canonical(*t));
                 txids.push((txid, *t));
             }
             Err(e) => debug!(error = %e, "no random transaction ID"),
@@ -124,7 +122,7 @@ pub(crate) async fn detect(
             Some(reply) = rx.recv() => {
                 let from = canonical(reply.from);
                 if reply.msg.class == StunClass::BindingSuccess
-                    && asked.get(&reply.msg.transaction_id) == Some(&from)
+                    && asked.sent().get(&reply.msg.transaction_id) == Some(&from)
                     && let Some(mapped) = reply.msg.mapped
                     && let Some(a) = answers.iter_mut().find(|a| a.server == from)
                 {
@@ -136,7 +134,7 @@ pub(crate) async fn detect(
             }
         }
     }
-    router.forget(asked.keys());
+    drop(asked);
     NatJudgement {
         mapping: judge(&answers),
         answers,
@@ -208,5 +206,20 @@ mod tests {
             answers: vec![ans(p1, m), ans(q1, None)],
         };
         assert_eq!(j.missing(), vec![a(q1)]);
+    }
+
+    /// A judgement cut short (its future dropped) leaves no transaction ID waited for.
+    #[tokio::test]
+    async fn a_dropped_judgement_forgets_its_transaction_ids() {
+        let router = Arc::new(StunRouter::default());
+        let io: Arc<dyn PacketIo> = Arc::new(crate::probe::tests_support::Sink);
+        let targets = [a("198.51.100.1:3478"), a("198.51.100.2:3478")];
+        let detect = detect(&router, &io, &targets, Duration::from_millis(10), 100);
+        tokio::pin!(detect);
+        let cut = tokio::time::timeout(Duration::from_millis(50), &mut detect).await;
+        assert!(cut.is_err(), "no answers, so it runs on");
+        assert_eq!(router.waiting(), 2);
+        drop(detect);
+        assert_eq!(router.waiting(), 0);
     }
 }

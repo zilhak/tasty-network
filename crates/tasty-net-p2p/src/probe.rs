@@ -57,7 +57,7 @@ pub(crate) async fn run(
     stop_on_success: bool,
 ) -> Option<RemoteCandidate> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut sent: HashMap<TransactionId, SocketAddr> = HashMap::new();
+    let mut sent = sock::Waiting::new(router.clone(), tx);
     let mut tick = tokio::time::interval(interval);
     let mut next = usize::MIN;
     let found = loop {
@@ -73,8 +73,7 @@ pub(crate) async fn run(
                 let Ok(txid) = stun::random_transaction_id() else {
                     continue;
                 };
-                router.wait_for(txid, tx.clone());
-                sent.insert(txid, canonical(target.addr));
+                sent.add(txid, canonical(target.addr));
                 let probe = stun::binding_request(&txid, Some(&session.token_local));
                 if let Err(e) = sock::send(io.as_ref(), &probe, target.addr) {
                     debug!(error = %e, to = %target.addr, "probe not sent");
@@ -82,7 +81,7 @@ pub(crate) async fn run(
             }
             Some(reply) = rx.recv() => {
                 if stop_on_success
-                    && probe_succeeded(&sent, &reply.msg, reply.from, &session.token_peer)
+                    && probe_succeeded(sent.sent(), &reply.msg, reply.from, &session.token_peer)
                     && let Some(c) = session.candidate(reply.from)
                 {
                     break Some(c);
@@ -90,7 +89,6 @@ pub(crate) async fn run(
             }
         }
     };
-    router.forget(sent.keys());
     found
 }
 
@@ -194,6 +192,74 @@ mod tests {
         for (got, (addr, kind)) in kept.iter().zip(want) {
             assert_eq!(got.addr, addr.parse::<SocketAddr>().unwrap());
             assert_eq!(got.kind, kind);
+        }
+    }
+
+    /// A probe run cut short (its future dropped by a cancel) leaves no transaction ID waited
+    /// for.
+    #[tokio::test]
+    async fn a_dropped_probe_run_forgets_its_transaction_ids() {
+        let router = Arc::new(StunRouter::default());
+        let io: Arc<dyn PacketIo> = Arc::new(tests_support::Sink);
+        let peer = DeviceKey::from_seed([3; 32]).id();
+        let session = Arc::new(ProbeSession::new(
+            peer,
+            PunchToken([1; 16]),
+            PunchToken([2; 16]),
+            PunchMode::All,
+            Duration::from_secs(1),
+            vec![RemoteCandidate {
+                addr: "203.0.113.9:40000".parse().unwrap(),
+                kind: RemoteKind::ServerReflexive,
+            }],
+            8,
+        ));
+        let until = Instant::now() + Duration::from_secs(60);
+        let run = run(
+            &router,
+            &io,
+            &session,
+            Duration::from_millis(5),
+            until,
+            true,
+        );
+        tokio::pin!(run);
+        let cut = tokio::time::timeout(Duration::from_millis(50), &mut run).await;
+        assert!(cut.is_err(), "no answers, so it runs on");
+        assert!(router.waiting() > 0);
+        drop(run);
+        assert_eq!(router.waiting(), 0);
+    }
+}
+
+/// Packet I/O for the unit tests of the STUN side: every send is taken, nothing comes in.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use std::io;
+    use std::net::SocketAddr;
+    use std::task::{Context, Poll};
+
+    use tasty_net_rendezvous::packet_io::PacketIo;
+
+    #[derive(Debug)]
+    pub(crate) struct Sink;
+
+    impl PacketIo for Sink {
+        fn poll_recv_from(
+            &self,
+            _: &mut Context<'_>,
+            _: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
+            Poll::Pending
+        }
+        fn poll_send_ready(&self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn try_send_to(&self, _: &[u8], _: SocketAddr) -> io::Result<()> {
+            Ok(())
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([10, 0, 0, 2], 5000)))
         }
     }
 }

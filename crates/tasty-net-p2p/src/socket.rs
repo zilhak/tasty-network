@@ -362,6 +362,41 @@ impl ProbeSession {
     }
 }
 
+/// The transaction IDs one task waits for, with where each request went. They are forgotten
+/// when the task ends, also when its future is dropped (a cancel), so no waiter is left.
+pub(crate) struct Waiting {
+    router: Arc<StunRouter>,
+    to: mpsc::UnboundedSender<Reply>,
+    sent: HashMap<TransactionId, SocketAddr>,
+}
+
+impl Waiting {
+    pub(crate) fn new(router: Arc<StunRouter>, to: mpsc::UnboundedSender<Reply>) -> Self {
+        Waiting {
+            router,
+            to,
+            sent: HashMap::new(),
+        }
+    }
+
+    /// Deliver responses with `txid`, a request sent to `to`.
+    pub(crate) fn add(&mut self, txid: TransactionId, to: SocketAddr) {
+        self.router.wait_for(txid, self.to.clone());
+        self.sent.insert(txid, to);
+    }
+
+    /// Where the request with `txid` went.
+    pub(crate) fn sent(&self) -> &HashMap<TransactionId, SocketAddr> {
+        &self.sent
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.router.forget(self.sent.keys());
+    }
+}
+
 /// Where the socket's STUN packets go.
 #[derive(Debug, Default)]
 pub(crate) struct StunRouter {
@@ -381,12 +416,18 @@ impl StunRouter {
     }
 
     /// Deliver responses with `txid` to `to`.
-    pub(crate) fn wait_for(&self, txid: TransactionId, to: mpsc::UnboundedSender<Reply>) {
+    fn wait_for(&self, txid: TransactionId, to: mpsc::UnboundedSender<Reply>) {
         self.lock().waiters.insert(txid, to);
     }
 
+    /// How many transaction IDs are waited for.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.lock().waiters.len()
+    }
+
     /// Stop delivering responses with these transaction IDs.
-    pub(crate) fn forget<'a>(&self, txids: impl IntoIterator<Item = &'a TransactionId>) {
+    fn forget<'a>(&self, txids: impl IntoIterator<Item = &'a TransactionId>) {
         let mut s = self.lock();
         for t in txids {
             s.waiters.remove(t);

@@ -151,6 +151,19 @@ impl Drop for Cleanup {
     }
 }
 
+/// Removes a punch request's waiter when the request ends, also when its future is dropped
+/// (a cancel while `Requesting`).
+struct Asked {
+    core: Arc<Core>,
+    request_id: u64,
+}
+
+impl Drop for Asked {
+    fn drop(&mut self) {
+        lock(&self.core.requests).remove(&self.request_id);
+    }
+}
+
 /// The next cancel reason from the server; signals that are not cancels are skipped, and a
 /// closed channel never ends.
 async fn next_cancel(rx: &mut mpsc::UnboundedReceiver<PunchSignal>) -> CancelReason {
@@ -332,11 +345,14 @@ async fn punch_once(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     lock(&core.requests).insert(request_id, tx);
+    let asked = Asked {
+        core: core.clone(),
+        request_id,
+    };
     if !core.send(DeviceMessage::PunchRequest(PunchRequest {
         request_id,
         peer,
     })) {
-        lock(&core.requests).remove(&request_id);
         return Err(fail(Fail::new(
             P2pConnectError::RendezvousLost,
             "rendezvous_lost",
@@ -344,7 +360,6 @@ async fn punch_once(
     }
     let (go, mut signals) = match tokio::time::timeout(p.request_timeout, rx).await {
         Err(_) => {
-            lock(&core.requests).remove(&request_id);
             return Err(fail(Fail::new(
                 P2pConnectError::RequestTimeout,
                 "request_timeout",
@@ -359,6 +374,7 @@ async fn punch_once(
         Ok(Ok(RequestOutcome::Refused(reason))) => return Err(fail(refused(reason))),
         Ok(Ok(RequestOutcome::Go(go, signals))) => (go, signals),
     };
+    drop(asked);
     let mode = Some(go.mode);
     let mut cleanup = Cleanup {
         core: core.clone(),
