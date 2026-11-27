@@ -127,7 +127,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 ```
 
 - `AppEvent`는 `tasty-net-p2p`가 정의하고 transport가 다시 내보낸다(`P2pCloseReason`과 같은 방식, [크레이트 구성](crates.md#p2p-크레이트-격리)).
-- 이벤트는 연결 목록과 P2P 상태 기계의 전이 원인(`app_background`, `app_foreground`, `network_changed`, `network_lost`, 붙들기의 `background_hold`·`background_hold_released`)으로 기록된다.
+- 이벤트는 연결 목록과 P2P 상태 기계의 전이 원인(`app_background`, `app_foreground`, `network_changed`, `network_lost`, 붙들기의 `background_hold`·`background_hold_released`, 설정 바뀜의 `setting_changed`)으로 기록된다.
 - 데스크톱 소비자는 부르지 않아도 된다. 부르지 않으면 지금의 동작 그대로다.
 - 이 API의 구현은 후속 작업이다. P2P 상태 기계에 아래 `Paused` 상태와 전이를 더하는 일, [P2P](p2p.md#상태-기계) 표를 고치는 일도 그 작업이 한다.
 
@@ -136,7 +136,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 - 이벤트는 들어온 순서대로 두 값을 바꾼다: 앞·뒤(`Foreground`·`Background`), 망 있음·없음(`NetworkChanged`는 있음, `NetworkLost`는 없음). 처음 값은 앞·망 있음이다. 같은 값이 다시 오면 값은 그대로이고, `NetworkChanged`만은 값이 같아도 "망 바뀜" 처리를 한다.
 - endpoint는 이벤트마다 두 값과 붙들기 값 하나로 목표를 다시 계산한다. 목표가 "등록"인 조건은 `망 있음 && (앞 || lifecycle.background_registration = keep || 붙들기)`이고, 아니면 "멈춤"이다. 늦게 온 `NetworkChanged`가 백그라운드에서 등록을 다시 켜지 않는 것은 이 규칙 때문이다.
 - 붙들기 값은 transport가 준다. p2p는 어느 대상이 `home`인지 모르기 때문이다(`home`은 transport의 연결 옵션이다). transport는 `home` 표시가 있는 P2P 대상이 하나라도 있고 `lifecycle.home_background = keep`일 때 `P2pEndpoint::hold_background_registration(true)`를, 그 조건이 풀리면 `false`를 부른다. 처음 값은 `false`다. 이 호출도 이벤트처럼 목표를 다시 계산하고, 전이 원인은 `background_hold`(켜짐)·`background_hold_released`(꺼짐)다.
-- 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`·`Backoff`로 가지 않고(재시도할 오류도 `Paused`로 간다), 목표가 "등록"인 동안에는 `Paused`로 가지 않는다. 실행 중의 설정 바뀜(`lifecycle.background_registration`)도 목표를 다시 계산한다.
+- 전이는 목표로 정한다. 아래 표의 원인은 모두 "그 이벤트 뒤 다시 계산한 목표"로 걸러진다: 목표가 "멈춤"인 동안에는 어떤 원인으로도 `Connecting`·`Backoff`로 가지 않고(재시도할 오류도 `Paused`로 간다), 목표가 "등록"인 동안에는 `Paused`로 가지 않는다. 실행 중에 `lifecycle.background_registration`이 어느 방향으로 바뀌든 목표를 다시 계산하고 그 목표의 기존 행을 따른다(원인 `setting_changed`).
 - 예정된 닫기: `Registered`에서 목표가 "멈춤"이 되면(`app_background`, `background_hold_released`) 바로 닫지 않고 `lifecycle.background_grace` 뒤로 닫기를 예약한다(`network_lost`는 예약 없이 바로 `Paused`). 예약이 끝나기 전에 목표가 다시 "등록"이 되면(`app_foreground`, `background_hold`, 설정 바뀜) 예약을 취소한다. endpoint는 `Registered` 그대로이고 이력에는 취소한 원인만 남는다. 예약이 끝나는 때에 목표를 한 번 더 보고, 그때도 "멈춤"일 때만 닫는다.
 
 ### endpoint 상태 (p2p.md에 더할 것)
@@ -147,7 +147,7 @@ TastyNet::app_event(AppEvent)         // tasty-net-ffi: 위 둘에 차례로 넘
 | `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | 조정 연결이 예약보다 먼저 끊김(`idle_timeout`, `io` 등 P2P 정본이 `Backoff`로 보내는 원인). 목표가 "멈춤"이므로 `Backoff`로 가지 않는다. 예약을 지우고 backoff 대기도 만들지 않는다. 원인은 끊긴 원인 그대로 남긴다. `Stopped`로 가는 재시도하지 않는 원인(`superseded`·`access_denied` 등)은 P2P 정본 그대로 `Stopped`다 |
 | `Registered`(닫기 예약 중, 목표 "멈춤") → `Paused` | `network_changed`. 옛 망의 조정 연결을 예약 끝까지 둘 까닭이 없으므로 예약을 지우고 바로 코드 0으로 닫는다. 다시 등록은 목표가 "등록"이 될 때(`Paused → Connecting`)다 |
 | `Connecting`·`Backoff` → `Paused` | `app_background`, `background_hold_released`, `network_lost`(모두 목표 "멈춤"일 때, 바로). 하던 시도와 backoff 대기를 멈춘다 |
-| `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`, 설정 바뀜(`lifecycle.background_registration`을 `keep`으로, 원인 `setting_changed`)(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
+| `Paused` → `Connecting` | `app_foreground`, `background_hold`, `network_changed`, `setting_changed`(목표 "등록"일 때). backoff 시도 번호를 1로 되돌린다. `network_lost` 뒤 망이 없으면 `app_foreground`로도 나가지 않는다 |
 | `Backoff` → `Connecting` | `network_changed`(목표 "등록"일 때, 대기를 끝내고 바로, 시도 번호 1). 목표가 "멈춤"이면 위 `Paused` 행이다 |
 | `Registered` → `Connecting` | `network_changed`(목표 "등록"일 때, 아래 "망 바뀜") |
 
@@ -159,7 +159,7 @@ P2P 정본의 흐름 번호([P2P 흐름](p2p.md#흐름))로 적는다.
 
 | 상태 | 하는 일 |
 |---|---|
-| `Registered` | 조정 연결(서버와의 QUIC 연결)을 코드 0(`closed`)으로 닫고 backoff 없이 흐름 1~4(흐름 14와 같다, 시도 번호 1)를 한다. 옛 연결은 로컬에서 먼저 닫고 퇴역시킨다. 옛 경로가 이미 죽어 CLOSE가 서버에 가지 않으면 서버는 새 등록 때 옛 연결에 `superseded`(코드 2)를 보낼 수 있다([rendezvous](rendezvous.md#메시지-표)). 퇴역한 조정 연결에서 오는 종료는 원인과 관계없이 endpoint 전이에 반영하지 않으므로, 그 `superseded`가 endpoint를 `Stopped`로 보내지 않는다. 서버는 등록 제거를 연결로 가려서 하므로 새 등록은 지워지지 않는다. 조정 연결이 새 망에서 살아 있는지 판정하지 않고 늘 다시 맺는다. 근거: rendezvous 프로토콜에는 등록 뒤 서버가 답하는 요청이 없어(흐름 4 `nat_report`도 응답이 없다) 새 망으로 보낸 것이 전달됐다는 증거를 받을 수 없다. quinn `Connection`에는 ping API가 없고, `Connection::stats()`의 `udp_rx.datagrams`는 패킷 인증 전에 늘고 같은 연결의 아무 패킷이나 세므로 증거가 아니다. 흐름 3(STUN)은 조정 연결 밖이다. 다시 맺는 비용은 QUIC handshake와 `hello`·`welcome` 한 번이고 망 바뀜은 드물다 |
+| `Registered` | 목표가 "등록"이면 조정 연결(서버와의 QUIC 연결)을 코드 0(`closed`)으로 닫고 backoff 없이 흐름 1~4(흐름 14와 같다, 시도 번호 1)를 한다. 옛 연결은 로컬에서 먼저 닫고 퇴역시킨다. 옛 경로가 이미 죽어 CLOSE가 서버에 가지 않으면 서버는 새 등록 때 옛 연결에 `superseded`(코드 2)를 보낼 수 있다([rendezvous](rendezvous.md#메시지-표)). 퇴역한 조정 연결에서 오는 종료는 원인과 관계없이 endpoint 전이에 반영하지 않으므로, 그 `superseded`가 endpoint를 `Stopped`로 보내지 않는다. 서버는 등록 제거를 연결로 가려서 하므로 새 등록은 지워지지 않는다. 조정 연결이 새 망에서 살아 있는지 판정하지 않고 늘 다시 맺는다. 근거: rendezvous 프로토콜에는 등록 뒤 서버가 답하는 요청이 없어(흐름 4 `nat_report`도 응답이 없다) 새 망으로 보낸 것이 전달됐다는 증거를 받을 수 없다. quinn `Connection`에는 ping API가 없고, `Connection::stats()`의 `udp_rx.datagrams`는 패킷 인증 전에 늘고 같은 연결의 아무 패킷이나 세므로 증거가 아니다. 흐름 3(STUN)은 조정 연결 밖이다. 다시 맺는 비용은 QUIC handshake와 `hello`·`welcome` 한 번이고 망 바뀜은 드물다 목표가 "멈춤"(닫기 예약 중)이면 위 전이 표의 `network_changed` → `Paused` 행대로 바로 닫고 다시 맺지 않는다 |
 | `Connecting` | 하던 시도를 그대로 둔다(새 망에서 흐름 1부터 하고 있다) |
 | `Backoff`·`Paused` | 위 전이 표대로 흐름 1~4를 한다 |
 
@@ -335,6 +335,7 @@ CI 잡 둘을 더한다. 구현은 후속 작업이고, 자세한 잡 설정은 
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
 | `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 앱 쪽 알림 | 후속 작업(내장 백엔드 뒤, 바인딩 크레이트). 이 문서 "바인딩 층" |
+| tasty 전환 뒤 태그의 모바일 조건 | 후속 작업(모바일 cross check). tasty 전환 태그 뒤의 태그에도 모바일 cross check 통과를 요구할지 |
 | FFI의 SSH 세션 조회 | 후속 작업(바인딩 크레이트). 경계는 "android 요구의 자리" #6b(이벤트 병합과 `sessions()` 스냅샷 조회). 메서드 이름·레코드 필드·보관 상한 |
 | 바인딩 API 목록 | 요구 받음(director 2865). 경계는 "android 요구의 자리", 메서드 모양은 바인딩 크레이트 작업이 정한다 |
 | `File::lock`이 Android·iOS에서 잠그는지 | 확인하지 않음. 기기나 에뮬레이터에서 identity·p2p 잠금 시험을 돌려야 안다. 안 잠그면 대안을 그때 정한다. 기준은 identity의 파일 갱신과 P2P 키 디렉터리에서 필요한 프로세스 사이 배타성을 지키는지다 |
