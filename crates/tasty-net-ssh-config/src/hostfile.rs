@@ -1903,6 +1903,61 @@ mod tests {
         );
     }
 
+    /// Two files in order: `(entries, verdict)` for the host `h.example`.
+    fn two_files(
+        first: &str,
+        second: &str,
+        key: &[u8],
+    ) -> (Vec<(PathBuf, usize)>, HostKeyVerdict, [PathBuf; 2]) {
+        let dir = tempdir::Dir::new();
+        let paths = [dir.0.join("first"), dir.0.join("second")];
+        std::fs::write(&paths[0], first).unwrap();
+        std::fs::write(&paths[1], second).unwrap();
+        let kh = KnownHosts::load(&paths);
+        let entries = kh
+            .entries(&q("h.example"))
+            .into_iter()
+            .map(|e| (e.file, e.line))
+            .collect();
+        let verdict = kh.check(&q("h.example"), key);
+        (entries, verdict, paths)
+    }
+
+    #[test]
+    fn files_are_read_in_order() {
+        let a = ed25519_blob(9);
+        let b = ed25519_blob(10);
+        let (ka, kb) = (line("ssh-ed25519", &a), line("ssh-ed25519", &b));
+        // Another key in the first file, the key in the second: the key is found.
+        let (entries, verdict, [first, second]) = two_files(
+            &format!("# one\nh.example {kb}\n"),
+            &format!("h.example {ka}\n"),
+            &a,
+        );
+        assert_eq!(entries, vec![(first.clone(), 2), (second.clone(), 1)]);
+        assert_eq!(
+            verdict,
+            HostKeyVerdict::Match {
+                file: second,
+                line: 1
+            }
+        );
+        // The key in the first file, revoked in the second: revoked.
+        let (entries, verdict, [first, second]) = two_files(
+            &format!("h.example {ka}\n"),
+            &format!("\n@revoked h.example {ka}\n"),
+            &a,
+        );
+        assert_eq!(entries, vec![(first, 1), (second.clone(), 2)]);
+        assert_eq!(
+            verdict,
+            HostKeyVerdict::Revoked {
+                file: second,
+                line: 2
+            }
+        );
+    }
+
     #[test]
     fn host_fields_match_as_bytes() {
         let a = ed25519_blob(11);
