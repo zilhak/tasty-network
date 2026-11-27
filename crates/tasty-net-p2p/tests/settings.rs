@@ -71,6 +71,7 @@ fn connection_reports_applied_settings() {
     let cb =
         b.ep.accept_timeout(Some(Duration::from_secs(10)))
             .expect("accept");
+    let server = w.running(&s).settings();
     for (ep, conn) in [(&a.ep, &ca), (&b.ep, &cb)] {
         let shown = ep.settings();
         let info = conn.info().expect("info");
@@ -110,10 +111,64 @@ fn connection_reports_applied_settings() {
         assert_eq!(h.source, Source::Server);
         assert_eq!(h.value, Value::Duration(Duration::from_secs(1)));
         assert_eq!(get("punch_go.start_after_ms").source, Source::Server);
-        assert!(
-            info.applied
-                .iter()
-                .any(|e| e.key.starts_with("welcome.limits.") && e.source == Source::Server)
+        // Every welcome.limits value with its source, each against the server's own setting;
+        // the session TTL, which the server derives, against the welcome the endpoint got.
+        let of_server = |key: &str| match server
+            .iter()
+            .find(|e| e.key == key)
+            .unwrap_or_else(|| panic!("no server setting {key}"))
+            .value
+        {
+            ServerValue::Duration(d) => Value::Duration(d),
+            ServerValue::Count(n) => Value::Count(n),
+            ServerValue::Bytes(n) => Value::Bytes(n),
+            other => panic!("{key}: {other:?}"),
+        };
+        let limits = ep.status().limits.expect("limits");
+        let want: Vec<_> = [
+            (
+                "welcome.limits.offer_timeout_ms",
+                of_server("offer_timeout"),
+            ),
+            (
+                "welcome.limits.start_delay_max_ms",
+                of_server("start_delay_max"),
+            ),
+            ("welcome.limits.punch_window_ms", of_server("punch_window")),
+            (
+                "welcome.limits.quic_handshake_ms",
+                of_server("quic_handshake_timeout"),
+            ),
+            (
+                "welcome.limits.punch_session_ttl_ms",
+                Value::Duration(Duration::from_millis(limits.punch_session_ttl_ms)),
+            ),
+            (
+                "welcome.limits.max_host_candidates",
+                of_server("max_host_candidates"),
+            ),
+            (
+                "welcome.limits.max_reported_reflexive",
+                of_server("max_reported_reflexive"),
+            ),
+            (
+                "welcome.limits.max_message_bytes",
+                of_server("max_message_bytes"),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key, value, Source::Server))
+        .collect();
+        let got: Vec<_> = info
+            .applied
+            .iter()
+            .filter(|e| e.key.starts_with("welcome.limits."))
+            .map(|e| (e.key, e.value, e.source))
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(
+            get("welcome.limits.punch_window_ms").value,
+            Value::Duration(window)
         );
     }
     let info = ca.info().unwrap();

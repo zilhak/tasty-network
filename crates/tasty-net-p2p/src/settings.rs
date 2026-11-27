@@ -1790,4 +1790,95 @@ mod tests {
         );
         assert!(opens(1));
     }
+
+    /// The two values quinn only takes through a factory reach the real objects of
+    /// `tasty_net_rendezvous::quic`: the CUBIC initial window that `transport_config` puts in
+    /// the transport configuration is the congestion window of a new connection, and the
+    /// connection ID lifetime that `endpoint_config` puts in the endpoint configuration makes
+    /// the server endpoint issue new IDs while the connection is idle. quinn shows neither
+    /// value in `Debug` or a getter, so the test reads the connection's statistics; each run
+    /// has a control with the default.
+    #[test]
+    fn the_quic_configs_carry_the_congestion_window_and_the_cid_lifetime() {
+        use tasty_net_rendezvous::tls::{self, TlsOptions};
+        use tasty_net_rendezvous::wire::ALPN_P2P;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let idle = Duration::from_millis(1500);
+        // (congestion window at the start, new connection IDs the client got while idle).
+        let run = |set: &[(&str, Value)]| {
+            let mut s = P2pSettings::new();
+            for (k, v) in set {
+                s.set(k, *v);
+            }
+            let p = s.resolve().unwrap();
+            let options = TlsOptions {
+                max_fragment_size: p.quic.tls_max_fragment_size,
+            };
+            rt.block_on(async move {
+                let runtime = quinn::default_runtime().expect("tokio runtime");
+                let server_key = DeviceKey::from_seed([7; 32]);
+                let client_key = DeviceKey::from_seed([8; 32]);
+                let tls = tls::server_config(&server_key, ALPN_P2P, options).unwrap();
+                let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+                let server = quinn::Endpoint::new(
+                    quic::endpoint_config(&p.quic),
+                    Some(quic::server_config(&p.quic, crypto)),
+                    std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                    runtime.clone(),
+                )
+                .unwrap();
+                let addr = server.local_addr().unwrap();
+                let accepting = tokio::spawn(async move {
+                    let c = server.accept().await.unwrap().await.unwrap();
+                    c.closed().await;
+                });
+                let client = quinn::Endpoint::new(
+                    quic::endpoint_config(&p.quic),
+                    None,
+                    std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                    runtime,
+                )
+                .unwrap();
+                let tls =
+                    tls::client_config(&client_key, server_key.id(), ALPN_P2P, options).unwrap();
+                let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+                let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+                config.transport_config(Arc::new(quic::transport_config(&p.quic)));
+                let conn = client
+                    .connect_with(config, addr, tls::SERVER_NAME)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                let cwnd = conn.stats().path.cwnd;
+                let before = conn.stats().frame_rx.new_connection_id;
+                tokio::time::sleep(idle).await;
+                let issued = conn.stats().frame_rx.new_connection_id - before;
+                conn.close(quinn::VarInt::from_u32(0), b"");
+                let _done = accepting.await;
+                (cwnd, issued)
+            })
+        };
+        let big = 1_000_000;
+        let (cwnd, issued) = run(&[
+            ("quic.cubic.initial_window", Value::Bytes(big)),
+            (
+                "quic.cid_lifetime",
+                Value::Duration(Duration::from_millis(200)),
+            ),
+        ]);
+        let (default_cwnd, default_issued) = run(&[]);
+        assert!(cwnd >= big, "congestion window {cwnd}");
+        assert!(
+            default_cwnd < big,
+            "default congestion window {default_cwnd}"
+        );
+        assert!(
+            issued > default_issued,
+            "new connection IDs while idle: {issued} with a 200 ms lifetime, \
+             {default_issued} without"
+        );
+    }
 }
