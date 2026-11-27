@@ -440,6 +440,11 @@ impl Io<'_> {
         otherwise
     }
 
+    /// What a failed I/O call on the channel means, setting a socket timeout included: the
+    /// cancel and the P2P close shut the channel, and a call after that fails with what the
+    /// OS says about a shut socket. On macOS that is `EINVAL` from `setsockopt` (XNU refuses
+    /// options on a socket shut in both directions; Linux takes them), so a cancel between
+    /// the cancel check and the next timeout must still come out as `Cancelled`.
     fn fail(&self, error: io::Error) -> HandshakeError {
         if self.cancel.is_cancelled() {
             return HandshakeError::Cancelled;
@@ -467,7 +472,7 @@ impl Io<'_> {
             self.ch
                 .control()
                 .set_read_timeout(Some(left))
-                .map_err(HandshakeError::Io)?;
+                .map_err(|e| self.fail(e))?;
             match read_frame(&mut *self.ch) {
                 Ok(frame) if frame.tag == StreamTag::Control => {
                     self.left()?;
@@ -485,7 +490,7 @@ impl Io<'_> {
         self.ch
             .control()
             .set_write_timeout(Some(left))
-            .map_err(HandshakeError::Io)?;
+            .map_err(|e| self.fail(e))?;
         write_frame(&mut *self.ch, StreamTag::Control, payload).map_err(|e| self.fail(e))?;
         // A frame whose partial writes ran past the deadline is not taken as sent in time: the
         // handshake ends with `TimedOut` (an accepting attach then revokes its credential).
@@ -497,7 +502,7 @@ impl Io<'_> {
         self.ch
             .control()
             .set_write_timeout(Some(left))
-            .map_err(HandshakeError::Io)?;
+            .map_err(|e| self.fail(e))?;
         self.ch
             .write_all(line)
             .and_then(|()| self.ch.flush())
@@ -1408,7 +1413,7 @@ fn peer_still_there(io: &mut Io<'_>, wait: Duration) -> Result<(), HandshakeErro
     io.ch
         .control()
         .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
-        .map_err(HandshakeError::Io)?;
+        .map_err(|e| io.fail(e))?;
     let mut byte = [0u8; 1];
     match io.ch.read(&mut byte) {
         Ok(0) => Err(io.ended_by(HandshakeError::PeerClosed)),
@@ -1481,7 +1486,10 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use tasty_net_identity::DeviceKey;
+
+    use crate::channel::ChannelControl;
 
     /// An approval given inside the last channel watch, before the approval deadline, counts
     /// although the wait takes it only when that watch returns after the deadline. The hook
@@ -1531,6 +1539,106 @@ mod tests {
             "the last watch returned before the deadline"
         );
         assert!(matches!(decision, Ok(RoleDecision::Accepted)));
+    }
+
+    /// A channel control that refuses socket options once it was shut in both directions, as
+    /// XNU (macOS) does with `EINVAL`, and runs a hook in the first option call before it
+    /// answers.
+    struct ShutRefusesOptions {
+        shut: AtomicBool,
+        before_option: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl ShutRefusesOptions {
+        fn option(&self) -> io::Result<()> {
+            let hook = self.before_option.lock().expect("lock").take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            if self.shut.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid argument",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    impl ChannelControl for ShutRefusesOptions {
+        fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+            self.option()
+        }
+        fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+            self.option()
+        }
+        fn shutdown_write(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn shutdown_and_wake(&self) -> io::Result<()> {
+            self.shut.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A cancel that lands after the handshake's cancel check and before its next socket
+    /// timeout is `Cancelled`, also where the OS then refuses the option on the shut socket
+    /// (macOS CI: `Io(Os { code: 22 })` from the approval wait). Each case cancels from inside
+    /// the first option call: the approval wait's channel watch, a Control read and a write.
+    #[test]
+    fn a_cancel_before_a_refused_socket_option_is_cancelled() {
+        let peer = PeerInfo {
+            device_id: DeviceKey::from_seed([1; 32]).id(),
+            instance_id: "peer".into(),
+            holder: Some(Holder::Acceptor),
+            caps: Vec::new(),
+            transport: TransportKind::Tcp,
+            local_side: Side::Acceptor,
+        };
+        type Step = fn(&mut Io<'_>, &PeerInfo) -> Result<(), HandshakeError>;
+        let steps: [(&str, Step); 3] = [
+            ("approval wait", |io, peer| {
+                // A handler that keeps the proposal open: the wait reaches its channel watch.
+                let kept: Arc<Mutex<Vec<RoleProposal>>> = Arc::default();
+                let keep = Arc::clone(&kept);
+                let open: ProposalHandler =
+                    Arc::new(move |proposal| keep.lock().expect("lock").push(proposal));
+                await_proposal(io, &open, peer, Duration::from_secs(5)).map(drop)
+            }),
+            ("control read", |io, _| io.read_control().map(drop)),
+            ("control write", |io, _| io.write_control(b"{}")),
+        ];
+        for (what, step) in steps {
+            let control = Arc::new(ShutRefusesOptions {
+                shut: AtomicBool::new(false),
+                before_option: Mutex::new(None),
+            });
+            let mut ch = RawChannel::new(
+                Box::new(io::empty()),
+                Box::new(io::sink()),
+                control.clone(),
+                TransportKind::Tcp,
+            );
+            let cancel = AttemptCancel::new();
+            let _registration = cancel.register_channel(ch.control()).expect("register");
+            let canceller = cancel.clone();
+            *control.before_option.lock().expect("lock") =
+                Some(Box::new(move || canceller.cancel()));
+            let mut io = Io {
+                ch: &mut ch,
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancel: &cancel,
+            };
+            let result = step(&mut io, &peer);
+            assert!(
+                control.shut.load(std::sync::atomic::Ordering::SeqCst),
+                "{what}: the cancel shut the channel"
+            );
+            assert!(
+                matches!(result, Err(HandshakeError::Cancelled)),
+                "{what}: {result:?}"
+            );
+        }
     }
 
     fn refusal(value: Value) -> HandshakeError {
