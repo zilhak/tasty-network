@@ -21,7 +21,7 @@ use tasty_net_p2p::{
     P2pCancel, P2pCloseReason, P2pConnection, P2pError, P2pRecvStream, P2pSendStream, P2pStream,
 };
 
-use crate::cancel::{AttemptCancel, Cancellable};
+use crate::cancel::{AttemptCancel, Cancellable, Registration};
 use crate::channel::{ChannelControl, RawChannel};
 use crate::lock::lock;
 use crate::transport::{ConnectError, TransportKind};
@@ -376,17 +376,20 @@ pub(crate) fn channel(
 /// cancel ends the wait here. A stream that opens after its attempt was cancelled is refused at
 /// once; the thread ends with the open, which the connection's close ends too. Without a thread
 /// for it the open fails with the error of the thread's start.
-pub(crate) fn open(
+///
+/// A failure here comes before the open ran (a call in an async task, the attempt's cancel, no
+/// thread); [`PendingOpen::wait`] gives the open's own result.
+pub(crate) fn start_open(
     conn: &P2pConnection,
     cancel: &AttemptCancel,
-) -> Result<P2pStream, ConnectError> {
+) -> Result<PendingOpen, ConnectError> {
     if in_async_task(conn) {
         // The open waits on another thread, which `tasty-net-p2p` would not refuse: refused
         // here as it refuses its own blocking calls (docs/design/transport.md "동기·비동기 경계").
         return Err(ConnectError::P2p(P2pError::InAsyncContext));
     }
     let opening = Arc::new(Opening::default());
-    let _registration = cancel
+    let registration = cancel
         .register(Arc::clone(&opening) as Arc<dyn Cancellable>)
         .map_err(|_| ConnectError::Cancelled)?;
     let spawned = {
@@ -402,7 +405,23 @@ pub(crate) fn open(
         tracing::debug!(%error, "no thread for a P2P stream open");
         return Err(ConnectError::Io(error));
     }
-    opening.wait()
+    Ok(PendingOpen {
+        opening,
+        _registration: registration,
+    })
+}
+
+/// A stream open that runs on its thread (from [`start_open`]).
+pub(crate) struct PendingOpen {
+    opening: Arc<Opening>,
+    _registration: Registration,
+}
+
+impl PendingOpen {
+    /// Waits for the open or the attempt's cancel, whichever comes first.
+    pub(crate) fn wait(self) -> Result<P2pStream, ConnectError> {
+        self.opening.wait()
+    }
 }
 
 /// Whether the caller runs an async task, judged as `tasty-net-p2p` judges its blocking calls:

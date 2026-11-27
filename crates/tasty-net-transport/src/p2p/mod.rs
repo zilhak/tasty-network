@@ -185,13 +185,13 @@ impl P2pTransport {
         let Some(state) = self.shared_conn(peer) else {
             return Ok(None);
         };
-        match open_channel(&state, cancel) {
+        match open_on(&state, cancel) {
             Ok(channel) => Ok(Some((channel, state))),
-            Err(error) if passed_over(&state, cancel) => {
+            Err(OpenError::Closed(error)) => {
                 tracing::debug!(%error, "a shared P2P connection closed: a new one is punched");
                 Ok(None)
             }
-            Err(error) => Err(error),
+            Err(OpenError::Failed(error)) => Err(error),
         }
     }
 
@@ -363,12 +363,6 @@ fn connect_error(error: P2pError, cancel: &AttemptCancel) -> ConnectError {
     }
 }
 
-/// Whether a failed open on the shared connection `state` passes it over for a new one: the
-/// connection closed (or this end closes it), and the attempt goes on.
-fn passed_over(state: &ConnState, cancel: &AttemptCancel) -> bool {
-    !cancel.is_cancelled() && (!state.is_usable() || state.is_closed())
-}
-
 /// The error of a channel on a connection that closed.
 fn closed() -> ConnectError {
     ConnectError::Io(io::Error::new(
@@ -382,18 +376,60 @@ fn open_channel(
     state: &Arc<ConnState>,
     cancel: &AttemptCancel,
 ) -> Result<RawChannel, ConnectError> {
-    if cancel.is_cancelled() {
-        return Err(ConnectError::Cancelled);
+    open_on(state, cancel).map_err(OpenError::into_error)
+}
+
+/// Why a channel did not open on a connection, judged when the open failed: the release of
+/// the channel's slot that follows may close the connection, and that close is no cause.
+#[derive(Debug)]
+enum OpenError {
+    /// The connection was closed then: no place for a channel, or the open itself failed on
+    /// a connection that had ended.
+    Closed(ConnectError),
+    /// Any other failure (the attempt's cancel, a call in an async task, no thread for the
+    /// open, an open that failed on a live connection) is the attempt's.
+    Failed(ConnectError),
+}
+
+impl OpenError {
+    fn into_error(self) -> ConnectError {
+        match self {
+            Self::Closed(error) | Self::Failed(error) => error,
+        }
     }
-    let slot = state.acquire().ok_or_else(closed)?;
-    let stream = stream::open(&state.conn, cancel)?;
-    Ok(state.entered(stream::channel(
-        stream,
-        &state.conn,
-        state.side,
-        state.drain_cap,
-        slot,
-    )))
+
+    /// The failure of an open that ran on its thread, with whether the connection had ended
+    /// while the channel's slot was still held.
+    fn of_open(error: ConnectError, ended: bool) -> Self {
+        match error {
+            ConnectError::Cancelled => Self::Failed(error),
+            error if ended => Self::Closed(error),
+            error => Self::Failed(error),
+        }
+    }
+}
+
+/// [`open_channel`] that tells a closed connection from the attempt's own failure.
+fn open_on(state: &Arc<ConnState>, cancel: &AttemptCancel) -> Result<RawChannel, OpenError> {
+    if cancel.is_cancelled() {
+        return Err(OpenError::Failed(ConnectError::Cancelled));
+    }
+    let slot = state.acquire().ok_or_else(|| OpenError::Closed(closed()))?;
+    let opening = stream::start_open(&state.conn, cancel).map_err(OpenError::Failed)?;
+    match opening.wait() {
+        Ok(stream) => Ok(state.entered(stream::channel(
+            stream,
+            &state.conn,
+            state.side,
+            state.drain_cap,
+            slot,
+        ))),
+        // Read while the slot holds the connection: no release of this end closed it yet.
+        Err(error) => Err(OpenError::of_open(
+            error,
+            state.conn.close_reason().is_some(),
+        )),
+    }
 }
 
 impl Transport for P2pTransport {
@@ -450,21 +486,26 @@ impl Transport for P2pTransport {
                             // would close the connection here, and that close is no code of
                             // the peer's.
                             let hold = state.acquire();
-                            let error = match &hold {
-                                Some(_) => match open_channel(&state, cancel) {
+                            let failure = match &hold {
+                                Some(_) => match open_on(&state, cancel) {
                                     Ok(channel) => return Ok((channel, state, owned, hold)),
-                                    Err(error) => error,
+                                    Err(failure) => failure,
                                 },
-                                None => closed(),
+                                None => OpenError::Closed(closed()),
                             };
                             // The peer closed the new connection with a code before its first
                             // stream (a refused pairing): the first channel is a closed one, so
                             // its handshake ends with that code (docs/design/handshake.md "흐름
-                            // (P2P 경로)"). A close of this end (the attempt's cancel) is not.
-                            let peer_code = state
-                                .conn
-                                .close_reason()
-                                .filter(|_| !cancel.is_cancelled() && !state.closed_here());
+                            // (P2P 경로)"). A close of this end (the attempt's cancel) is not,
+                            // nor a failure of the attempt's own on a live connection.
+                            let peer_code = match &failure {
+                                OpenError::Closed(_) => state
+                                    .conn
+                                    .close_reason()
+                                    .filter(|_| !cancel.is_cancelled() && !state.closed_here()),
+                                OpenError::Failed(_) => None,
+                            };
+                            let error = failure.into_error();
                             drop(hold);
                             match peer_code {
                                 Some(reason) => {
@@ -573,5 +614,28 @@ mod tests {
         ))
         .expect("an endpoint that is off");
         assert_eq!(Value::Duration(poll_interval(&off)), default.default);
+    }
+
+    /// An open that ran and failed is the connection's close only when the connection had
+    /// ended while the channel's slot still held it; the attempt's cancel never is. A failure
+    /// before the open ran (a call in an async task, no thread) never reaches this judgement:
+    /// `open_on` gives it as the attempt's.
+    #[test]
+    fn a_failed_open_is_a_closed_connection_only_if_it_had_ended() {
+        let failed = || ConnectError::Io(io::Error::other("the open failed"));
+        assert!(matches!(
+            OpenError::of_open(failed(), true),
+            OpenError::Closed(ConnectError::Io(_))
+        ));
+        assert!(matches!(
+            OpenError::of_open(failed(), false),
+            OpenError::Failed(ConnectError::Io(_))
+        ));
+        for ended in [true, false] {
+            assert!(matches!(
+                OpenError::of_open(ConnectError::Cancelled, ended),
+                OpenError::Failed(ConnectError::Cancelled)
+            ));
+        }
     }
 }
