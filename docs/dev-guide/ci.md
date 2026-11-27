@@ -10,6 +10,8 @@
 | `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `ssh -G` 기준 클라이언트 준비(아래 "`ssh -G` 대조의 기준 클라이언트", Linux·macOS), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`), `p2p-isolation`(`scripts/check.sh p2p-isolation`), `no-hidden-constants`(`scripts/check.sh no-hidden-constants`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
+| `mobile-android` | `ubuntu-latest` | Android target 둘 추가, NDK 설치(`scripts/install-ndk.sh`), `scripts/check.sh no-process-spawn`, `scripts/check.sh mobile-check aarch64-linux-android`, `scripts/check.sh mobile-check x86_64-linux-android`(아래 "모바일 cross check") |
+| `mobile-ios` | `macos-latest` | iOS target 둘 추가, `scripts/check.sh mobile-check aarch64-apple-ios`, `scripts/check.sh mobile-check aarch64-apple-ios-sim` |
 | `rendezvous-check` (`rendezvous.yml`) | `ubuntu-latest` | `bash rendezvous/check-config.sh --self-test`, `bash rendezvous/check-config.sh`, `bash rendezvous/container-check.sh --self-test`(D5 (b) 검사의 판정 함수만. docker 없이 돈다) |
 
 - 러너는 GitHub 호스트 러너다([시험](../design/testing.md)). 잡마다 `timeout-minutes`가 있고 권한은 `contents: read`뿐이다.
@@ -22,6 +24,45 @@
 ## SSH 없는 transport
 
 `clippy-test` 세 잡의 `transport without ssh` 단계가 `scripts/check.sh transport-no-ssh`를 부른다. `tasty-net-transport`를 `--no-default-features`(SSH 없음)로 clippy(`-D warnings`)와 시험, 문서(`cargo doc --no-deps`, `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`라 SSH 항목을 무조건 가리키는 문서 링크는 실패)를 돌리고, 그 빌드의 `cargo tree`(모든 target, 일반·빌드·dev 의존)에 `tasty-net-ssh`가 없는지 본다. 같은 `cargo tree`를 기본 feature로 먼저 읽어 `tasty-net-ssh`가 보이는지 확인하므로, 판정이 그 줄을 찾지 못하는 고장은 실패로 드러난다. `cargo tree`가 실패하면(종료 코드가 0이 아니면) 출력과 관계없이 실패다. 판정은 먼저 자체 시험(가짜 `cargo tree`의 출력과 종료 코드 여섯 사례)을 돈다. 조합의 정본은 [SSH 백엔드](../design/ssh-backends.md#feature-계약)다. 세 OS에서 도는 것은 `cfg(windows)` 코드도 SSH 없이 컴파일되는지 보기 위해서다.
+
+## 모바일 cross check
+
+`mobile-android`·`mobile-ios` 잡이 target마다 `scripts/check.sh mobile-check <target>`을 부른다. 러너·target·크레이트 목록·feature 조합의 정본은 [모바일](../design/mobile.md#모바일-cross-check)이고, 그 표에서 지금 목록에 든 행은 `scripts/mobile-crates.list` 한 파일이다(행이 목록에 들 때 한 줄을 더한다).
+
+- 단계는 먼저 의존 쪽 검사의 자체 시험을 돈 뒤, 목록의 조합마다 `cargo check --locked --target <t> -p <크레이트> --lib <feature 인자>`와 같은 인자의 의존 쪽 검사(`scripts/check-mobile-deps.sh`)를 돌린다. 한 조합이 실패해도 남은 조합을 돌리고 끝에 실패한다.
+- target의 std(`rustup target add`), Android의 NDK(`ANDROID_NDK_ROOT` 또는 `ANDROID_NDK_HOME`), iOS의 Xcode iOS SDK 중 하나가 없으면 그 target을 건너뛰고 `mobile-check: target 없음 — 건너뛴 target: …` 한 줄을 남긴다. 로컬에서는 종료 코드 0이다. 두 잡은 `MOBILE_CHECK_REQUIRE=1`을 주므로 건너뛰기가 실패다.
+- Android는 NDK의 `toolchains/llvm/prebuilt/<호스트>/bin/` 아래 `<target>29-clang`을 `CC_<target>`·`CARGO_TARGET_<TARGET>_LINKER`로, `llvm-ar`을 `AR_<target>`으로 준다(API 수준 29는 [모바일](../design/mobile.md#대상-target) "대상 target"). 쓴 NDK 경로와 `Pkg.Revision`, 세 변수의 값을 로그에 남긴다. iOS는 `xcrun`이 찾은 iOS SDK 판과 clang 판을 남긴다.
+- 정적 검사 `no-process-spawn`은 소스만 읽으므로 `mobile-android` 잡 하나에서 돈다.
+
+### NDK 판
+
+`scripts/install-ndk.sh`가 NDK r30(`Pkg.Revision` 30.0.16248370, Linux x86_64 아카이브)을 받아 잡의 임시 폴더에 푼다. 러너 이미지에 들어 있는 NDK는 이미지가 바뀔 때 함께 바뀌므로 쓰지 않는다.
+
+- 판의 근거: 2026-11-28 Google SDK 저장소 목록(`https://dl.google.com/android/repository/repository2-3.xml`)의 NDK 가운데 가장 새 안정판(beta 아님)이다. 모바일 설계의 판정 기록(director 확인)이 같은 판으로 했고, 설계가 근거로 든 `android_getnetworkblockedreason`(API 37) 헤더도 r30의 것이다. 빌드 대상 API 수준(29)은 NDK 판과 따로 설계가 정한다.
+- 대조: 저장소 목록에 실린 그 아카이브의 SHA-1과, 같은 아카이브를 받아 잰 SHA-256을 함께 스크립트에 고정한다. 둘 중 하나라도 다르면 설치가 실패한다. 푼 뒤 `source.properties`의 `Pkg.Revision`도 본다.
+- 설치 action을 쓰지 않는 근거: 원격 빌드 환경과 로컬에서도 같은 판을 같은 명령으로 받는다. cargo-deny·shellcheck를 고정 판과 고정 합으로 받는 것과 같은 방식이다. 압축은 `unzip`(없으면 `bsdtar`)으로 풀어 실행 권한과 심볼릭 링크를 지킨다.
+- 판을 올릴 때: 저장소 목록에서 새 판의 `ndk;<판>` linux 아카이브 이름과 checksum을 옮기고, 받아서 SHA-256을 다시 잰다. 이 절의 근거도 고친다.
+
+### iOS
+
+`macos-latest` 러너의 기본 Xcode를 쓴다. Xcode 판은 러너 이미지가 정하고 이 워크플로가 고정하지 않는다. 로그의 SDK·clang 판 줄로 어느 판에서 돌았는지 본다. 배포 대상은 rustc 기본값 그대로다([모바일](../design/mobile.md#대상-target)).
+
+### 앱 작업 공간에서 의존 쪽 검사
+
+`scripts/check-mobile-deps.sh`는 이 파일 하나로 돈다(bash, cargo, awk, grep). 앱 레포는 tasty-network 의존과 같은 rev의 파일을 받아 앱의 최종 의존 그래프에 같은 기준을 적용한다. 기준의 정본은 [모바일](../design/mobile.md#의존-쪽-검사) "의존 쪽 검사"의 앱 그래프 기준이다.
+
+```bash
+rev=<Cargo.toml의 tasty-network rev>
+curl -fsSL -o check-mobile-deps.sh "https://raw.githubusercontent.com/zilhak/tasty-network/$rev/scripts/check-mobile-deps.sh"
+bash check-mobile-deps.sh --manifest-path <앱 작업 공간>/Cargo.toml --app \
+    --target aarch64-linux-android --target x86_64-linux-android \
+    -p <앱 cdylib 크레이트> -- <배포 빌드의 feature 인자>
+```
+
+- 인자: `--manifest-path`(앱 작업 공간의 `Cargo.toml`), `--app`(앱 그래프 기준), `--target`(여러 번), `-p`(앱 cdylib 크레이트), `--` 뒤의 feature 인자(`--no-default-features`, `--features a,b` 등, 배포 빌드와 같게). `--app`이 없으면 이 레포 기준이다. 모든 cargo 명령이 `--locked`라 앱의 `Cargo.lock`이 있어야 한다.
+- 종료 코드: 통과 0, 위반 1, 판정 불가 2(인자 오류, `cargo tree` 실패, 출력에 뿌리 패키지 줄이 없음). target마다 `[mobile-deps] 통과|위반 — <target> <크레이트> <feature 인자> (…, 패키지 <수>개)` 줄을 남기고, 위반이면 그 앞에 `위반: …` 줄을 남긴다. 앱 기준에서 tokio의 `process`가 tasty-net 크레이트를 거쳐 켜지면 그 경로(`tokio feature "process" <- … <- <앱>`)를 찍는다.
+- 그래프에 tokio가 여러 판이면 `process`가 켜진 판마다 `-i tokio@<판>`으로 거꾸로 본다. tokio가 없거나 `process`가 꺼져 있으면 거꾸로 보지 않는다.
+- 앱 레포 CI에서는 Android 빌드 잡(또는 따로 둔 잡)의 한 단계로 부른다. target의 std나 NDK는 필요 없다(`cargo tree`는 빌드하지 않는다).
 
 ## SSH 통합 시험의 sshd
 
@@ -62,6 +103,7 @@
 - D7(tasty 의존 없음)은 `repo-checks` 잡의 `no-tasty-deps` 단계 결론으로 본다.
 - D8(P2P 크레이트 격리)의 격리 부분은 `repo-checks` 잡의 `p2p-isolation` 단계 결론으로 본다. 단독 실행 부분은 `clippy-test` 세 잡의 `test tasty-net-rendezvous alone`·`test tasty-net-p2p alone` 단계 로그로 본다. 의존 그래프는 OS와 무관하게 `cargo metadata` 하나로 정해지므로(선택 의존과 모든 target을 넣어 읽는다) ubuntu 잡 하나에서 돈다.
 - D10(설정값 노출)의 정적 검사 부분은 `repo-checks` 잡의 `no-hidden-constants` 단계 결론으로 본다. 소스와 설계 문서만 읽으므로 ubuntu 잡 하나에서 돈다. 대상·허용 목록·표 대응은 `scripts/no-hidden-constants.list` 한 파일이다.
+- D11(모바일 target 빌드 검사)은 같은 실행의 `mobile-android`·`mobile-ios` 잡 결론으로 본다. 잡마다 target별 `mobile-check` 단계와 `mobile-android`의 `no-process-spawn` 단계다.
 - D5 (a)(rendezvous 설정 기동)는 `rendezvous.yml`의 `rendezvous-check` 잡 결론과 로그의 `rendezvous-check result=ok` 줄로 본다.
 - D5 (b)(이미지로 띄운 서버로 두 기기 연결)는 CI 잡이 아니다. 원격 빌드 환경에서 돌린 `bash rendezvous/container-check.sh`의 종료 코드와 출력(`rendezvous-check result=ok` 줄, 예제의 연결 정보 줄, 실행 sha)으로 본다. 증거는 `image=built peer=built`인 실행이다(이미지나 예제를 덮어쓴 실행은 `given`으로 찍힌다, [rendezvous 패키지 안내](../../rendezvous/README.md#연결-확인)).
 - 기준과 증거 형식의 정본은 [동작 수준 기준](../design/done-criteria.md)이다.

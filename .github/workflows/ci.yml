@@ -184,3 +184,50 @@ jobs:
           echo "$dir/$name" >> "$GITHUB_PATH"
       - name: cargo deny
         run: scripts/check.sh deny
+
+  # Mobile cross check (docs/design/mobile.md "모바일 cross check"): cargo check of the
+  # crate and feature combinations in scripts/mobile-crates.list for each mobile target,
+  # with the dependency check on the same arguments. MOBILE_CHECK_REQUIRE makes a target
+  # without its std, NDK or Xcode SDK a failure instead of a skip.
+  mobile-android:
+    name: mobile cross check (Android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      MOBILE_CHECK_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: Add Android targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+      # The NDK version and archive sums pinned in scripts/install-ndk.sh
+      # (docs/dev-guide/ci.md). The runner image has its own NDK, which this replaces.
+      - name: Install Android NDK
+        run: |
+          ndk=$(PREFIX="$RUNNER_TEMP/ndk" bash scripts/install-ndk.sh | tail -n 1)
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+      - name: no-process-spawn
+        run: scripts/check.sh no-process-spawn
+      - name: mobile-check aarch64-linux-android
+        run: scripts/check.sh mobile-check aarch64-linux-android
+      - name: mobile-check x86_64-linux-android
+        run: scripts/check.sh mobile-check x86_64-linux-android
+
+  mobile-ios:
+    name: mobile cross check (iOS)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      MOBILE_CHECK_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: Add iOS targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - name: mobile-check aarch64-apple-ios
+        run: scripts/check.sh mobile-check aarch64-apple-ios
+      - name: mobile-check aarch64-apple-ios-sim
+        run: scripts/check.sh mobile-check aarch64-apple-ios-sim
