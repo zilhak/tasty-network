@@ -20,10 +20,9 @@ use tasty_net_identity::DeviceId;
 use tokio::sync::Notify;
 
 use crate::close::P2pCloseReason;
-use crate::endpoint::Core;
+use crate::endpoint::{Blocked, Life};
 use crate::error::P2pError;
 use crate::info::P2pConnectionInfo;
-use crate::runtime::block_on;
 
 /// A signal that cancels a connection attempt or wakes the blocked calls of a stream. Clones
 /// share the signal.
@@ -67,8 +66,12 @@ impl P2pCancel {
     }
 }
 
-fn in_async() -> io::Error {
-    io::Error::other(P2pError::InAsyncContext)
+/// The I/O error of a blocking call the endpoint did not run.
+fn blocked(b: Blocked) -> io::Error {
+    match b {
+        Blocked::InAsyncContext => io::Error::other(P2pError::InAsyncContext),
+        Blocked::Closed => io::Error::new(io::ErrorKind::ConnectionAborted, P2pError::Closed),
+    }
 }
 
 fn aborted() -> io::Error {
@@ -134,19 +137,47 @@ async fn bounded<T>(
     }
 }
 
-/// A device-to-device QUIC connection. Clones share the connection; it stays usable while any
-/// clone lives, and keeps the endpoint's runtime alive.
+/// A device-to-device QUIC connection. Clones share the connection. It and its streams keep
+/// the endpoint running: the endpoint ends when its last clone and the last connection and
+/// stream are dropped, or at [`crate::P2pEndpoint::close`].
 #[derive(Clone)]
 pub struct P2pConnection {
+    life: Arc<Life>,
     inner: Arc<ConnInner>,
 }
 
-struct ConnInner {
-    core: Arc<Core>,
-    conn: quinn::Connection,
+/// The connection without the endpoint's life: what the endpoint's own queue and watcher hold,
+/// so that they do not keep the endpoint running.
+pub(crate) struct ConnInner {
+    pub(crate) conn: quinn::Connection,
     id: u64,
     peer: DeviceId,
     local_close: Mutex<Option<P2pCloseReason>>,
+}
+
+impl ConnInner {
+    pub(crate) fn new(conn: quinn::Connection, id: u64, peer: DeviceId) -> Arc<Self> {
+        Arc::new(ConnInner {
+            conn,
+            id,
+            peer,
+            local_close: Mutex::new(None),
+        })
+    }
+
+    /// Why the connection closed ([`P2pConnection::close_reason`]).
+    pub(crate) fn close_reason(&self) -> Option<P2pCloseReason> {
+        match self.conn.close_reason()? {
+            ConnectionError::ApplicationClosed(c) => {
+                Some(P2pCloseReason::from_code(c.error_code.into_inner()))
+            }
+            ConnectionError::LocallyClosed => *self
+                .local_close
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for P2pConnection {
@@ -160,20 +191,12 @@ impl fmt::Debug for P2pConnection {
 }
 
 impl P2pConnection {
-    pub(crate) fn new(core: Arc<Core>, conn: quinn::Connection, id: u64, peer: DeviceId) -> Self {
-        P2pConnection {
-            inner: Arc::new(ConnInner {
-                core,
-                conn,
-                id,
-                peer,
-                local_close: Mutex::new(None),
-            }),
-        }
+    pub(crate) fn new(life: Arc<Life>, inner: Arc<ConnInner>) -> Self {
+        P2pConnection { life, inner }
     }
 
     fn block<T>(&self, fut: impl std::future::Future<Output = io::Result<T>>) -> io::Result<T> {
-        block_on(&self.inner.core.handle, fut).map_err(|_| in_async())?
+        self.life.core.block(fut).map_err(blocked)?
     }
 
     /// The connection number ([`P2pConnectionInfo::id`]).
@@ -198,7 +221,7 @@ impl P2pConnection {
 
     /// The connection's information, while the endpoint tracks it.
     pub fn info(&self) -> Option<P2pConnectionInfo> {
-        self.inner
+        self.life
             .core
             .tracker
             .snapshot()
@@ -240,13 +263,13 @@ impl P2pConnection {
         let cancel = P2pCancel::new();
         P2pStream {
             send: P2pSendStream {
-                core: self.inner.core.clone(),
+                life: self.life.clone(),
                 stream: send,
                 limit: None,
                 cancel: cancel.clone(),
             },
             recv: P2pRecvStream {
-                core: self.inner.core.clone(),
+                life: self.life.clone(),
                 stream: recv,
                 limit: None,
                 cancel,
@@ -268,22 +291,16 @@ impl P2pConnection {
     /// Why the connection closed: the reason this side sent, or the code the peer sent.
     /// `None` while it is open, and when it ended without a CONNECTION_CLOSE (idle timeout).
     pub fn close_reason(&self) -> Option<P2pCloseReason> {
-        match self.inner.conn.close_reason()? {
-            ConnectionError::ApplicationClosed(c) => {
-                Some(P2pCloseReason::from_code(c.error_code.into_inner()))
-            }
-            ConnectionError::LocallyClosed => *self
-                .inner
-                .local_close
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            _ => None,
-        }
+        self.inner.close_reason()
     }
 
     /// Wait until the connection is closed, up to `limit`; the I/O class of the end
-    /// (`TimedOut` for the idle timeout). `None` when it is still open at `limit`.
+    /// (`TimedOut` for the idle timeout). `None` when it is still open at `limit`. A
+    /// connection already closed answers without waiting, also after the endpoint closed.
     pub fn wait_closed(&self, limit: Duration) -> io::Result<Option<io::Error>> {
+        if let Some(e) = self.inner.conn.close_reason() {
+            return Ok(Some(connection_io(e)));
+        }
         self.block(async {
             match tokio::time::timeout(limit, self.inner.conn.closed()).await {
                 Ok(e) => Ok(Some(connection_io(e))),
@@ -345,7 +362,7 @@ impl io::Write for P2pStream {
 
 /// The sending half.
 pub struct P2pSendStream {
-    core: Arc<Core>,
+    life: Arc<Life>,
     stream: quinn::SendStream,
     limit: Option<Duration>,
     cancel: P2pCancel,
@@ -396,7 +413,7 @@ impl io::Write for P2pSendStream {
             self.limit,
             &self.cancel,
         );
-        block_on(&self.core.handle, fut).map_err(|_| in_async())?
+        self.life.core.block(fut).map_err(blocked)?
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -406,7 +423,7 @@ impl io::Write for P2pSendStream {
 
 /// The receiving half.
 pub struct P2pRecvStream {
-    core: Arc<Core>,
+    life: Arc<Life>,
     stream: quinn::RecvStream,
     limit: Option<Duration>,
     cancel: P2pCancel,
@@ -456,6 +473,6 @@ impl io::Read for P2pRecvStream {
             self.limit,
             &self.cancel,
         );
-        block_on(&self.core.handle, fut).map_err(|_| in_async())?
+        self.life.core.block(fut).map_err(blocked)?
     }
 }

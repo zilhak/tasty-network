@@ -22,15 +22,15 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::debug;
 
 use crate::close::P2pCloseReason;
-use crate::conn::{P2pCancel, P2pConnection};
+use crate::conn::{ConnInner, P2pCancel, P2pConnection};
 use crate::error::{P2pConnectError, P2pError, StopCause};
 use crate::events::{AttemptPhase, Cause, CauseDetail, EndpointPhase, Events, P2pEvent, Phase};
 use crate::info::{P2pConnectionInfo, P2pStatus, RendezvousServer, Tracked, Tracker};
 use crate::nat::NatJudgement;
 use crate::pairing::PairingStore;
-use crate::runtime::{Owner, block_on};
+use crate::runtime::{Finished, Owner};
 use crate::settings::{OsValues, P2pParams, P2pSettings, SettingEntry};
-use crate::socket::{ProbeSession, StunCounters, StunRouter, canonical};
+use crate::socket::{Gate, ProbeSession, StunCounters, StunRouter, canonical};
 
 /// The name of the lock file in the key directory.
 const LOCK_FILE: &str = "p2p.lock";
@@ -158,10 +158,14 @@ pub(crate) struct Core {
     pub(crate) server: RendezvousServer,
     pub(crate) pairing: Arc<dyn PairingStore>,
     pub(crate) host_ips: Vec<IpAddr>,
+    /// The socket through its gate.
     pub(crate) io: Arc<dyn PacketIo>,
+    /// The gate, closed at `Off`.
+    gate: Arc<Gate>,
     pub(crate) router: Arc<StunRouter>,
     pub(crate) demux: Arc<DemuxCounters>,
-    pub(crate) endpoint: quinn::Endpoint,
+    /// The QUIC endpoint, given up at `Off`.
+    quic: Mutex<Option<quinn::Endpoint>>,
     pub(crate) handle: Handle,
     pub(crate) events: Arc<Events>,
     pub(crate) tracker: Arc<Tracker>,
@@ -173,10 +177,38 @@ pub(crate) struct Core {
     pub(crate) punches: Mutex<HashMap<u64, mpsc::UnboundedSender<PunchSignal>>>,
     pub(crate) next_request: AtomicU64,
     pub(crate) accepting: Mutex<Vec<AcceptSession>>,
-    pub(crate) accepted_tx: mpsc::UnboundedSender<P2pConnection>,
-    pub(crate) accepted_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<P2pConnection>>,
+    pub(crate) accepted_tx: mpsc::UnboundedSender<Arc<ConnInner>>,
+    pub(crate) accepted_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Arc<ConnInner>>>,
     /// Set when the endpoint shuts down.
     pub(crate) shutdown: watch::Sender<bool>,
+    /// The blocking calls in the runtime now, and whether new ones are refused.
+    calls: Mutex<Calls>,
+    /// A blocking call left the runtime.
+    call_left: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct Calls {
+    closing: bool,
+    active: usize,
+}
+
+/// Why [`Core::block`] did not run a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blocked {
+    /// The caller runs an async task.
+    InAsyncContext,
+    /// The endpoint is closed or closing.
+    Closed,
+}
+
+impl From<Blocked> for P2pError {
+    fn from(b: Blocked) -> Self {
+        match b {
+            Blocked::InAsyncContext => P2pError::InAsyncContext,
+            Blocked::Closed => P2pError::Closed,
+        }
+    }
 }
 
 impl fmt::Debug for Core {
@@ -193,6 +225,47 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Core {
+    /// Run `fut` on the runtime and block the calling thread until it ends: the bridge of every
+    /// blocking call. Refused inside an async task, and once the endpoint is closing, before
+    /// the runtime is entered. A call in the runtime when the shutdown begins returns
+    /// [`Blocked::Closed`] at once, and the shutdown waits for it to leave before it ends the
+    /// runtime, so no call polls the runtime's timers after the runtime is gone.
+    pub(crate) fn block<F: std::future::Future>(&self, fut: F) -> Result<F::Output, Blocked> {
+        if crate::runtime::in_async_task() {
+            return Err(Blocked::InAsyncContext);
+        }
+        {
+            let mut c = lock(&self.calls);
+            if c.closing {
+                return Err(Blocked::Closed);
+            }
+            c.active += 1;
+        }
+        struct Leave<'a>(&'a Core);
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                lock(&self.0.calls).active -= 1;
+                self.0.call_left.notify_one();
+            }
+        }
+        let _leave = Leave(self);
+        let mut shutdown = self.shutdown.subscribe();
+        self.handle
+            .block_on(async move {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait_for(|down| *down) => None,
+                    out = fut => Some(out),
+                }
+            })
+            .ok_or(Blocked::Closed)
+    }
+
+    /// The QUIC endpoint, until `Off`.
+    pub(crate) fn quic(&self) -> Option<quinn::Endpoint> {
+        lock(&self.quic).clone()
+    }
+
     /// Move the endpoint state machine.
     pub(crate) fn endpoint_to(&self, to: EndpointPhase, cause: Cause) {
         let from = {
@@ -253,7 +326,7 @@ impl Core {
 }
 
 /// The P2P endpoint. Clones share it; it ends when the last clone and the last
-/// [`P2pConnection`] are dropped, or at [`P2pEndpoint::close`].
+/// [`P2pConnection`] and stream are dropped, or at [`P2pEndpoint::close`].
 #[derive(Clone)]
 pub struct P2pEndpoint {
     inner: Arc<Inner>,
@@ -262,13 +335,33 @@ pub struct P2pEndpoint {
 struct Inner {
     id: DeviceId,
     settings: P2pSettings,
-    on: Option<On>,
+    on: Option<Arc<Life>>,
 }
 
-struct On {
-    core: Arc<Core>,
+/// The life of an endpoint that is on: the runtime's owner and the key directory's lock. The
+/// endpoint's clones, its connections and their streams hold it; the endpoint shuts down when
+/// the last of them is dropped, or at [`P2pEndpoint::close`].
+pub(crate) struct Life {
+    pub(crate) core: Arc<Core>,
     owner: Mutex<Option<Owner>>,
     _lock: Option<File>,
+}
+
+impl Life {
+    /// Hand the shutdown to the owner thread, once; the signal of that thread's end.
+    fn stop(&self) -> Option<Arc<Finished>> {
+        let mut o = lock(&self.owner).take()?;
+        let finished = o.finished();
+        o.stop(shutdown_work(self.core.clone()));
+        Some(finished)
+    }
+}
+
+impl Drop for Life {
+    fn drop(&mut self) {
+        // Only signals: the last handle may drop inside an async task.
+        let _stopping = self.stop();
+    }
 }
 
 impl fmt::Debug for P2pEndpoint {
@@ -343,6 +436,8 @@ impl P2pEndpoint {
         host_ips.dedup();
         let router = Arc::new(StunRouter::default());
         let demux = Arc::new(DemuxCounters::default());
+        let gate = Arc::new(Gate::new(io));
+        let io: Arc<dyn PacketIo> = gate.clone();
         let socket = Arc::new(DemuxSocket::with_counters(
             io.clone(),
             router.clone(),
@@ -383,9 +478,10 @@ impl P2pEndpoint {
             pairing: config.pairing,
             host_ips,
             io,
+            gate,
             router,
             demux,
-            endpoint,
+            quic: Mutex::new(Some(endpoint)),
             handle: handle.clone(),
             events,
             tracker,
@@ -399,6 +495,8 @@ impl P2pEndpoint {
             accepted_tx,
             accepted_rx: tokio::sync::Mutex::new(accepted_rx),
             shutdown: watch::channel(false).0,
+            calls: Mutex::default(),
+            call_left: tokio::sync::Notify::new(),
         });
         lock(&core.reg).phase = Some(EndpointPhase::Off);
         handle.spawn(crate::server::run(core.clone()));
@@ -407,11 +505,11 @@ impl P2pEndpoint {
             inner: Arc::new(Inner {
                 id,
                 settings: config.settings,
-                on: Some(On {
+                on: Some(Arc::new(Life {
                     core,
                     owner: Mutex::new(Some(owner)),
                     _lock: lock_file,
-                }),
+                })),
             }),
         })
     }
@@ -447,20 +545,20 @@ impl P2pEndpoint {
         peer: DeviceId,
         cancel: &P2pCancel,
     ) -> Result<P2pConnection, P2pError> {
-        let Some(core) = self.core() else {
+        let Some(life) = &self.inner.on else {
             return Err(P2pConnectError::Disabled.into());
         };
+        let core = &life.core;
         if peer == core.id {
             return Err(P2pConnectError::SelfAttach.into());
         }
-        let core = core.clone();
-        let cancel = cancel.clone();
-        let fut = async move { crate::attempt::dial(core, peer, cancel).await };
-        let handle = &self.core().expect("checked").handle;
-        let task = block_on(handle, async { handle.spawn(fut).await })
-            .map_err(|_| P2pError::InAsyncContext)?;
+        let fut = crate::attempt::dial(core.clone(), peer, cancel.clone());
+        let task = core.block(async { core.handle.spawn(fut).await })?;
         match task {
-            Ok(r) => r.map_err(P2pError::Connect),
+            Ok(r) => Ok(P2pConnection::new(
+                life.clone(),
+                r.map_err(P2pError::Connect)?,
+            )),
             Err(_) => Err(P2pError::Closed),
         }
     }
@@ -470,22 +568,27 @@ impl P2pEndpoint {
         self.accept_timeout(None)
     }
 
-    /// Wait for the next incoming connection up to `limit`.
+    /// Wait for the next incoming connection up to `limit` (the wait for another caller's
+    /// accept counts in it). A close wakes it with [`P2pError::Closed`].
     pub fn accept_timeout(&self, limit: Option<Duration>) -> Result<P2pConnection, P2pError> {
-        let Some(core) = self.core() else {
+        let Some(life) = &self.inner.on else {
             return Err(P2pError::Disabled);
         };
-        let wait = async {
+        let core = &life.core;
+        let take = async {
             let mut rx = core.accepted_rx.lock().await;
+            rx.recv().await.ok_or(P2pError::Closed)
+        };
+        let wait = async {
             match limit {
-                Some(t) => tokio::time::timeout(t, rx.recv())
+                Some(t) => tokio::time::timeout(t, take)
                     .await
-                    .map_err(|_| P2pError::TimedOut)?
-                    .ok_or(P2pError::Closed),
-                None => rx.recv().await.ok_or(P2pError::Closed),
+                    .map_err(|_| P2pError::TimedOut)?,
+                None => take.await,
             }
         };
-        block_on(&core.handle, wait).map_err(|_| P2pError::InAsyncContext)?
+        let inner = core.block(wait)??;
+        Ok(P2pConnection::new(life.clone(), inner))
     }
 
     /// The endpoint's state and registration.
@@ -572,47 +675,53 @@ impl P2pEndpoint {
     /// `closed`, close the socket and end the runtime. Waits up to `runtime.shutdown_timeout`
     /// for the end.
     pub fn close(&self) {
-        let Some(on) = &self.inner.on else {
+        let Some(life) = &self.inner.on else {
             return;
         };
-        let finished = {
-            let mut owner = lock(&on.owner);
-            let Some(mut o) = owner.take() else {
-                return;
-            };
-            let finished = o.finished();
-            o.stop(shutdown_work(on.core.clone()));
-            finished
+        let Some(finished) = life.stop() else {
+            return;
         };
         if !crate::runtime::in_async_task() {
-            finished.wait(on.core.params.shutdown_timeout);
+            finished.wait(life.core.params.shutdown_timeout);
         }
     }
 }
 
+/// The shutdown the owner thread runs before it ends the runtime: refuse new blocking calls
+/// and wake the ones in the runtime, close QUIC with `closed`, then give up the QUIC endpoint,
+/// the connections nobody took and the socket (`Off`: no socket), and report `Off`.
 fn shutdown_work(core: Arc<Core>) -> crate::runtime::Shutdown {
     Box::new(move |handle: &Handle| {
         handle.block_on(async move {
+            lock(&core.calls).closing = true;
             core.shutdown.send_replace(true);
+            let limit = core.params.shutdown_timeout;
+            let calls_left = async {
+                loop {
+                    let left = core.call_left.notified();
+                    if lock(&core.calls).active == usize::MIN {
+                        return;
+                    }
+                    left.await;
+                }
+            };
+            let _left = tokio::time::timeout(limit, calls_left).await.is_ok();
+            let quic = lock(&core.quic).take();
+            if let Some(quic) = quic {
+                quic.close(
+                    P2pCloseReason::Closed.var_int(),
+                    P2pCloseReason::Closed.reason(),
+                );
+                let _idle = tokio::time::timeout(limit, quic.wait_idle()).await.is_ok();
+            }
+            if let Ok(mut queued) = core.accepted_rx.try_lock() {
+                queued.close();
+                while queued.try_recv().is_ok() {}
+            }
+            let _released = core.gate.release();
             core.endpoint_to(EndpointPhase::Off, Cause::named("disabled"));
-            core.endpoint.close(
-                P2pCloseReason::Closed.var_int(),
-                P2pCloseReason::Closed.reason(),
-            );
-            let _done =
-                tokio::time::timeout(core.params.shutdown_timeout, core.endpoint.wait_idle())
-                    .await
-                    .is_ok();
         });
     })
-}
-
-impl Drop for On {
-    fn drop(&mut self) {
-        if let Some(mut o) = lock(&self.owner).take() {
-            o.stop(shutdown_work(self.core.clone()));
-        }
-    }
 }
 
 /// The session a connection from `addr` whose TLS device ID is `id` belongs to: among the
@@ -624,10 +733,13 @@ pub(crate) fn pick_session(sessions: &[AcceptSession], id: &DeviceId) -> Option<
 /// Take QUIC Initials only from addresses of active punch sessions; bind every connection to
 /// its session by device ID.
 async fn accept_loop(core: Arc<Core>) {
+    let Some(quic) = core.quic() else {
+        return;
+    };
     let mut shutdown = core.shutdown.subscribe();
     loop {
         let incoming = tokio::select! {
-            i = core.endpoint.accept() => i,
+            i = quic.accept() => i,
             _ = shutdown.changed() => None,
         };
         let Some(incoming) = incoming else { break };
@@ -721,7 +833,7 @@ fn ended(sessions: &[AcceptSession]) {
 pub(crate) async fn watch_connection(
     core: Arc<Core>,
     tracked: Tracked,
-    conn: P2pConnection,
+    conn: Arc<ConnInner>,
     quic: quinn::Connection,
     poll_address: bool,
 ) {
@@ -758,7 +870,7 @@ pub(crate) async fn watch_connection(
     tracked.to(AttemptPhase::Closed, cause);
 }
 
-fn close_cause(e: &ConnectionError, conn: &P2pConnection) -> Cause {
+fn close_cause(e: &ConnectionError, conn: &ConnInner) -> Cause {
     match e {
         ConnectionError::ApplicationClosed(c) => Cause::with(
             "closed_by_peer",

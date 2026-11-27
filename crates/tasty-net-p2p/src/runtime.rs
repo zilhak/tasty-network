@@ -6,34 +6,19 @@
 //! [`crate::P2pEndpoint`] only signals that thread, so the runtime is never dropped inside an
 //! async context.
 
-use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use tokio::runtime::Handle;
 
-/// The blocking API was called while the thread runs an async task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InAsyncContext;
-
-/// Runs `fut` on `handle` and blocks the calling thread until it ends.
-///
-/// Refused inside an async task ([`in_async_task`]), where blocking would stall the runtime
-/// and tokio's `block_on` panics.
-pub(crate) fn block_on<F: Future>(handle: &Handle, fut: F) -> Result<F::Output, InAsyncContext> {
-    if in_async_task() {
-        return Err(InAsyncContext);
-    }
-    Ok(handle.block_on(fut))
-}
-
 /// More budget units than tokio gives one poll of a task (128 in tokio 1.54): a probe that
 /// takes this many without running out runs without a budget.
 const BUDGET_PROBE: usize = u8::MAX as usize;
 
-/// Whether this thread runs an async task now (docs/design/transport.md "동기·비동기 경계":
-/// the test is "does this thread run a task now", not "is there a current runtime").
+/// Whether this thread runs an async task now, where the blocking API is refused
+/// (docs/design/transport.md "동기·비동기 경계": the test is "does this thread run a task
+/// now", not "is there a current runtime").
 ///
 /// tokio has no public call for it. A thread outside the runtime has no current runtime. On a
 /// thread of the runtime, tokio gives the poll of a task (and `Runtime::block_on`) a
@@ -209,26 +194,23 @@ mod tests {
     fn blocking_is_refused_in_a_task_and_allowed_in_spawn_blocking() {
         let mut owner = Owner::start(2, Duration::from_secs(5)).expect("runtime");
         let handle = owner.handle().clone();
-        assert_eq!(block_on(&handle, async { 1 }), Ok(1));
-        // A task on the runtime's worker, polled on that thread: the refusal must not come
-        // from a panic, so the hook watches the worker thread too.
-        let inner = handle.clone();
-        let in_task = handle.block_on(async move {
-            let h = inner.clone();
-            tokio::spawn(async move {
+        assert!(!in_async_task());
+        // A task on the runtime's worker: the answer must not come from a panic, so the hook
+        // watches the worker thread.
+        let in_task = handle.block_on(async {
+            tokio::spawn(async {
                 let mut got = None;
-                let panics = panics_here(|| got = Some(block_on(&h, async { 2 })));
+                let panics = panics_here(|| got = Some(in_async_task()));
                 (got, panics)
             })
             .await
             .expect("task")
         });
-        assert_eq!(in_task, (Some(Err(InAsyncContext)), 0));
-        // The budget the probe took is back: the task still runs as many budgeted polls.
-        let inner = handle.clone();
-        let left = handle.block_on(async move {
-            tokio::spawn(async move {
-                let _refused = block_on(&inner, async {});
+        assert_eq!(in_task, (Some(true), 0));
+        // The budget the probe took is back: the task still has its budget.
+        let left = handle.block_on(async {
+            tokio::spawn(async {
+                let _probed = in_async_task();
                 tokio::task::coop::has_budget_remaining()
             })
             .await
@@ -237,21 +219,18 @@ mod tests {
         assert!(left);
         // Inside the caller's own block_on (a budgeted poll too).
         let mut nested = None;
-        let panics = panics_here(|| {
-            nested = Some(handle.block_on(async { block_on(&handle, async { 4 }) }));
-        });
-        assert_eq!((nested, panics), (Some(Err(InAsyncContext)), 0));
-        let inner = handle.clone();
-        let in_blocking = handle.block_on(async move {
-            tokio::task::spawn_blocking(move || block_on(&inner, async { 3 }))
+        let panics = panics_here(|| nested = Some(handle.block_on(async { in_async_task() })));
+        assert_eq!((nested, panics), (Some(true), 0));
+        let in_blocking = handle.block_on(async {
+            tokio::task::spawn_blocking(in_async_task)
                 .await
                 .expect("blocking")
         });
-        assert_eq!(in_blocking, Ok(3));
+        assert!(!in_blocking);
         // A thread that entered the runtime without running a task may block.
-        let _entered = handle.enter();
-        assert_eq!(block_on(&handle, async { 5 }), Ok(5));
-        drop(_entered);
+        let entered = handle.enter();
+        assert!(!in_async_task());
+        drop(entered);
         let finished = owner.finished();
         owner.stop(Box::new(|_| {}));
         assert!(

@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::close::P2pCloseReason;
-use crate::conn::{P2pCancel, P2pConnection};
+use crate::conn::{ConnInner, P2pCancel};
 use crate::endpoint::{AcceptSession, Core, Incoming, PunchSignal, RequestOutcome, lock};
 use crate::error::P2pConnectError;
 use crate::events::{AttemptPhase, Cause, CauseDetail, EndpointPhase};
@@ -202,7 +202,7 @@ pub(crate) async fn dial(
     core: Arc<Core>,
     peer: DeviceId,
     cancel: P2pCancel,
-) -> Result<P2pConnection, P2pConnectError> {
+) -> Result<Arc<ConnInner>, P2pConnectError> {
     {
         let r = lock(&core.reg);
         if r.phase != Some(EndpointPhase::Registered) {
@@ -236,7 +236,7 @@ async fn dial_attempts(
     core: &Arc<Core>,
     t: &Tracked,
     peer: DeviceId,
-) -> Result<P2pConnection, Fail> {
+) -> Result<Arc<ConnInner>, Fail> {
     let p = &core.params;
     let mut last_mode = PunchMode::All;
     for n in 1..=p.punch_attempts {
@@ -324,7 +324,7 @@ async fn punch_once(
     limits: &Limits,
     local_nat: tasty_net_rendezvous::wire::message::NatMapping,
     n: u32,
-) -> Result<P2pConnection, (Option<PunchMode>, Retry)> {
+) -> Result<Arc<ConnInner>, (Option<PunchMode>, Retry)> {
     let p = &core.params;
     let fail = |f: Fail| (None, Retry::Fail(f));
     let request_id = core
@@ -440,9 +440,11 @@ async fn punch_once(
     let config = core
         .client_config(peer, ALPN_P2P, &p.quic)
         .map_err(|_| fail(Fail::new(P2pConnectError::PunchFailed, "handshake_timeout")))?;
+    // The QUIC endpoint is gone only while the endpoint shuts down.
     let connecting = core
-        .endpoint
-        .connect_with(config, found.addr, SERVER_NAME)
+        .quic()
+        .ok_or(quinn::ConnectError::EndpointStopping)
+        .and_then(|q| q.connect_with(config, found.addr, SERVER_NAME))
         .map_err(|_| (mode, Retry::Again(Cause::named("handshake_timeout"))))?;
     let handshake = tokio::time::timeout(Duration::from_millis(go.handshake_ms), connecting);
     tokio::pin!(handshake);
@@ -483,7 +485,7 @@ async fn punch_once(
     };
     result(core, go.punch_id, None);
     drop(cleanup);
-    let wrapped = P2pConnection::new(core.clone(), conn.clone(), t.id, peer);
+    let wrapped = ConnInner::new(conn.clone(), t.id, peer);
     t.update(|r| r.conn = Some(conn.clone()));
     t.to(AttemptPhase::Connected, Cause::named("quic_established"));
     tokio::spawn(crate::endpoint::watch_connection(
@@ -644,7 +646,7 @@ pub(crate) async fn accept(core: Arc<Core>, punch_id: u64, from: DeviceId) {
                     result(&core, punch_id, None);
                     drop(cleanup);
                     let addr = crate::socket::canonical(conn.remote_address());
-                    let wrapped = P2pConnection::new(core.clone(), conn.clone(), t.id, from);
+                    let wrapped = ConnInner::new(conn.clone(), t.id, from);
                     t.update(|r| {
                         r.conn = Some(conn.clone());
                         r.info.remote_candidate = session.candidate(addr);

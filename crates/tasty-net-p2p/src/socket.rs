@@ -132,6 +132,95 @@ fn bind(addr: SocketAddr, dual: bool, params: &P2pParams) -> io::Result<std::net
     Ok(socket.into())
 }
 
+/// The endpoint's packet I/O, given up when the endpoint turns off: `Off` has no socket
+/// (docs/design/p2p.md "상태 기계"). quinn, its connections and the STUN side hold this gate
+/// rather than the socket, so that the socket closes at `Off` even while endpoint and
+/// connection handles live on. Once released, receives and sends fail with `NotConnected`.
+#[derive(Debug)]
+pub(crate) struct Gate {
+    io: Mutex<Option<Arc<dyn PacketIo>>>,
+    may_fragment: bool,
+    dual_stack: bool,
+}
+
+fn released() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "the P2P socket is closed")
+}
+
+impl Gate {
+    pub(crate) fn new(io: Arc<dyn PacketIo>) -> Self {
+        Gate {
+            may_fragment: io.may_fragment(),
+            dual_stack: io.dual_stack(),
+            io: Mutex::new(Some(io)),
+        }
+    }
+
+    fn io(&self) -> io::Result<Arc<dyn PacketIo>> {
+        self.io
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(released)
+    }
+
+    /// Give up the packet I/O; whether it was still held.
+    pub(crate) fn release(&self) -> bool {
+        self.io
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .is_some()
+    }
+}
+
+impl PacketIo for Gate {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+        match self.io() {
+            Ok(io) => io.poll_recv_from(cx, buf),
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<(usize, SocketAddr, Option<IpAddr>)>> {
+        match self.io() {
+            Ok(io) => io.poll_recv_with_dst(cx, buf),
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+
+    fn poll_send_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match self.io() {
+            Ok(io) => io.poll_send_ready(cx),
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<()> {
+        self.io()?.try_send_to(buf, dest)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.io()?.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.may_fragment
+    }
+
+    fn dual_stack(&self) -> bool {
+        self.dual_stack
+    }
+}
+
 /// A STUN response delivered to the sender of the request.
 #[derive(Clone, Debug)]
 pub(crate) struct Reply {

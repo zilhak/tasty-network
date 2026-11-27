@@ -272,6 +272,9 @@ allow	crates/tasty-net-p2p/src/endpoint.rs	wrapping_add(1)	등록 변화 알림 
 allow	crates/tasty-net-p2p/src/endpoint.rs	u16::MIN	포트 0: 보내지 않고 경로만 묻는 소켓은 OS가 포트를 고른다
 allow	crates/tasty-net-p2p/src/endpoint.rs	u64::MIN	세기·번호의 시작 0
 allow	crates/tasty-net-p2p/src/endpoint.rs	fetch_add(1,	세기: 사건 하나
+allow	crates/tasty-net-p2p/src/endpoint.rs	active += 1	세기: 런타임 안의 블로킹 호출 하나
+allow	crates/tasty-net-p2p/src/endpoint.rs	active -= 1	세기: 런타임을 떠난 블로킹 호출 하나
+allow	crates/tasty-net-p2p/src/endpoint.rs	usize::MIN	런타임 안의 블로킹 호출이 없음(0)
 allow	crates/tasty-net-p2p/src/events.rs	+= 1	세기: 버린 이벤트 하나
 allow	crates/tasty-net-p2p/src/events.rs	u64::MIN	버린 이벤트가 없으면(0) Lagged를 내지 않는다
 allow	crates/tasty-net-p2p/src/info.rs	u64::MIN	연결 ID·버린 기록 수의 시작 0

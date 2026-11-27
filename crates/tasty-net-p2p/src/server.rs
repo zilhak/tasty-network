@@ -172,10 +172,10 @@ async fn session(core: &Arc<Core>) -> End {
         Ok(c) => c,
         Err(e) => return End::Retry(io_cause(std::io::ErrorKind::Other, e)),
     };
-    let connecting = match core
-        .endpoint
-        .connect_with(config, core.server.addr, SERVER_NAME)
-    {
+    let Some(quic) = core.quic() else {
+        return End::Shutdown;
+    };
+    let connecting = match quic.connect_with(config, core.server.addr, SERVER_NAME) {
         Ok(c) => c,
         Err(e) => return End::Retry(io_cause(std::io::ErrorKind::Other, e)),
     };

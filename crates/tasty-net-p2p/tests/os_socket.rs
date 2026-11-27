@@ -114,3 +114,18 @@ fn the_acceptor_reports_the_local_ip_of_its_connection() {
     a.close();
     b.close();
 }
+
+/// `close` gives the OS socket up while the endpoint handle lives: its address can be bound
+/// again (docs/design/p2p.md "상태 기계", `Off`: no socket).
+#[test]
+fn close_gives_the_os_socket_up() {
+    let server = Rendezvous::start();
+    let ep = endpoint(3, server.info, DeviceKey::from_seed([4; 32]).id());
+    let addr = ep.local_addr().expect("bound");
+    // While the endpoint is on, the address is taken.
+    assert!(std::net::UdpSocket::bind(addr).is_err());
+    let handle = ep.clone();
+    ep.close();
+    assert_eq!(handle.local_addr(), None);
+    std::net::UdpSocket::bind(addr).expect("the address is free again");
+}

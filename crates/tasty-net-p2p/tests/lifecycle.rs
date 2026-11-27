@@ -803,3 +803,165 @@ fn blocking_calls_in_a_task_are_refused_without_a_panic() {
     assert!(blocking.is_ok(), "{blocking:?}");
     d.ep.close();
 }
+
+/// A device whose socket the test also holds, and the socket's reference count before the
+/// endpoint took it: the count comes back when the endpoint gives the socket up.
+fn counted_device(
+    nat: &support::NatHandle,
+    host: u8,
+    seed: u8,
+    server: &support::TestServer,
+) -> (Device, Arc<support::Port>, usize) {
+    let port = nat.socket(host);
+    let before = Arc::strong_count(&port);
+    let d = device_with(port.clone(), seed, server.info, settings(&[]), true);
+    (d, port, before)
+}
+
+/// A connects to B; both sides of the connection.
+fn connected(
+    a: &Device,
+    b: &Device,
+) -> (tasty_net_p2p::P2pConnection, tasty_net_p2p::P2pConnection) {
+    pair(a, b);
+    registered(a);
+    registered(b);
+    std::thread::scope(|s| {
+        let accepted = s.spawn(|| b.ep.accept_timeout(Some(LONG)));
+        let ca = a.ep.connect(b.id()).expect("connect");
+        (ca, accepted.join().unwrap().expect("accept"))
+    })
+}
+
+/// `close` wakes a blocked `accept` and `accept_timeout` with `Closed`; the limit of
+/// `accept_timeout` counts the wait behind another caller's `accept`; after the close, every
+/// blocking call returns `Closed` without entering the runtime (no panic of a timer on a
+/// runtime that is gone) and the socket is given up (`Off`: no socket).
+#[test]
+fn close_wakes_blocked_accepts_and_later_calls_are_closed() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let n = w.net.nat(1, NatSpec::eim());
+    let (d, port, before) = counted_device(&n, 2, 1, &s);
+    registered(&d);
+    std::thread::scope(|sc| {
+        let forever = sc.spawn(|| d.ep.accept().err());
+        let limited = sc.spawn(|| d.ep.accept_timeout(Some(LONG)).err());
+        std::thread::sleep(Duration::from_millis(200));
+        // Behind the blocked accepts the limit still holds.
+        let started = Instant::now();
+        let r = d.ep.accept_timeout(Some(Duration::from_millis(200)));
+        assert!(matches!(r, Err(tasty_net_p2p::P2pError::TimedOut)), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let closing = Instant::now();
+        d.ep.close();
+        let (forever, limited) = (forever.join().unwrap(), limited.join().unwrap());
+        assert!(
+            matches!(forever, Some(tasty_net_p2p::P2pError::Closed)),
+            "{forever:?}"
+        );
+        assert!(
+            matches!(limited, Some(tasty_net_p2p::P2pError::Closed)),
+            "{limited:?}"
+        );
+        assert!(
+            closing.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            closing.elapsed()
+        );
+    });
+    let started = Instant::now();
+    let r = d.ep.accept_timeout(Some(LONG));
+    assert!(matches!(r, Err(tasty_net_p2p::P2pError::Closed)), "{r:?}");
+    assert!(matches!(
+        d.ep.accept(),
+        Err(tasty_net_p2p::P2pError::Closed)
+    ));
+    let r = d.ep.connect(key(9).id());
+    assert!(matches!(r, Err(tasty_net_p2p::P2pError::Closed)), "{r:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(d.ep.status().state, EndpointPhase::Off);
+    assert_eq!(d.ep.local_addr(), None);
+    // The endpoint handle lives on, the socket does not.
+    assert!(
+        wait_until(Duration::from_secs(5), || Arc::strong_count(&port)
+            == before + 1),
+        "socket references: {} (before the endpoint {before}, one held by the device)",
+        Arc::strong_count(&port)
+    );
+}
+
+/// A connection keeps the endpoint running after every endpoint handle is dropped; the
+/// endpoint ends (and gives its socket up) when the connection is dropped too.
+#[test]
+fn a_connection_outlives_the_endpoint_handles() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    let (a, port_a, before_a) = counted_device(&n1, 2, 1, &s);
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    let (ca, cb) = connected(&a, &b);
+    let Device { ep, port, .. } = a;
+    drop((ep, port));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(ca.close_reason().is_none(), "{:?}", ca.close_reason());
+    echo(&ca, &cb);
+    assert_eq!(ca.info().map(|i| i.state), Some(AttemptPhase::Connected));
+    // The socket is still the endpoint's: the device's handle is dropped, the gate holds one.
+    assert_eq!(Arc::strong_count(&port_a), before_a + 1);
+    drop(ca);
+    assert!(
+        wait_until(Duration::from_secs(10), || Arc::strong_count(&port_a)
+            == before_a),
+        "socket references: {} (before the endpoint {before_a})",
+        Arc::strong_count(&port_a)
+    );
+    assert!(
+        cb.wait_closed(LONG).expect("wait").is_some(),
+        "B sees the end"
+    );
+    b.ep.close();
+}
+
+/// After `close`, a connection handle still held answers without a panic and its calls end at
+/// once; the socket is given up although the endpoint and the connection handles live.
+#[test]
+fn connection_calls_after_close_end_at_once() {
+    let w = World::new();
+    let s = w.server(1, server_settings());
+    let (n1, n2) = (w.net.nat(1, NatSpec::eim()), w.net.nat(2, NatSpec::eim()));
+    let (a, port_a, before_a) = counted_device(&n1, 2, 1, &s);
+    let b = device(&n2, 2, 2, &s, settings(&[]));
+    let (ca, _cb) = connected(&a, &b);
+    let mut stream = ca.open_bi().expect("stream");
+    a.ep.close();
+    let started = Instant::now();
+    assert!(ca.open_bi().is_err());
+    assert!(ca.accept_bi(Some(LONG)).is_err());
+    assert!(ca.wait_closed(LONG).expect("closed").is_some());
+    let mut buf = [0u8; 4];
+    stream.set_read_timeout(Some(LONG));
+    assert!(std::io::Read::read(&mut stream, &mut buf).is_err());
+    stream.set_write_timeout(Some(LONG));
+    assert!(std::io::Write::write(&mut stream, b"late").is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || Arc::strong_count(&port_a)
+            == before_a + 1),
+        "socket references: {} (before the endpoint {before_a}, one held by the device)",
+        Arc::strong_count(&port_a)
+    );
+    b.ep.close();
+}
