@@ -776,6 +776,7 @@ mod tests {
         ];
         let p2p = [
             P2pError::Disabled,
+            P2pError::Connect(P2pConnectError::Disabled),
             P2pError::Connect(P2pConnectError::Busy),
             P2pError::Connect(P2pConnectError::RendezvousLost),
             P2pError::Connect(P2pConnectError::Declined),
@@ -807,11 +808,20 @@ mod tests {
                     "{connect}"
                 );
             }
-            // A QUIC close keeps its code unless it is the plain close of a peer.
-            if let HandshakeError::Closed(reason) = &error
-                && !reason.is_retryable()
-            {
+            // A QUIC close keeps its code, the plain close too.
+            if let HandshakeError::Closed(reason) = &error {
                 assert_eq!(cause, Cause::P2pClosed(*reason), "{error}");
+            }
+            // An endpoint that is off fails the attempt as a connect error.
+            if let HandshakeError::Connect(ConnectError::P2p(P2pError::Connect(
+                P2pConnectError::Disabled,
+            ))) = &error
+            {
+                assert_eq!(
+                    cause,
+                    Cause::P2pConnect(P2pConnectError::Disabled),
+                    "{error}"
+                );
             }
         }
     }

@@ -1528,6 +1528,69 @@ fn a_not_paired_close_ends_the_handshake_with_its_code() {
     b.close();
 }
 
+/// The peer closes the connection with code 0 during the first handshake: the connection's
+/// entry ends with that code (`p2p_closed`, `closed`), which may be retried.
+#[test]
+fn a_plain_close_during_the_first_handshake_keeps_its_code_in_the_entry() {
+    let server = Rendezvous::start();
+    let (ka, kb) = (key(78), key(79));
+    let a = endpoint(&server, 78, kb.id());
+    let b = endpoint(&server, 79, ka.id());
+    let closer = {
+        let b = b.clone();
+        std::thread::spawn(move || {
+            let conn = b
+                .accept_timeout(Some(PATIENCE))
+                .expect("the dialer's connection");
+            let stream = conn.accept_bi(Some(PATIENCE)).expect("the first stream");
+            conn.close(P2pCloseReason::Closed);
+            drop(stream);
+        })
+    };
+    let table = ConnectionTable::default();
+    let transport = P2pTransport::new(a.clone()).with_connections(table.clone());
+    let dial = DialConfig::new(ka, "dialer-78").with_timeouts(timeouts());
+    let started = Instant::now();
+    let error = loop {
+        let cancel = AttemptCancel::new();
+        let result = transport
+            .connect(&b.id(), &cancel)
+            .map_err(HandshakeError::Connect)
+            .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &cancel));
+        match result {
+            Err(HandshakeError::Connect(ConnectError::P2p(_))) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => break error,
+            Ok(_) => panic!("a link on a closed connection"),
+        }
+    };
+    assert!(
+        matches!(error, HandshakeError::Closed(P2pCloseReason::Closed)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable());
+    closer.join().expect("closer");
+    let ended = table.connections().last().cloned().expect("the entry");
+    wait_until("the entry's end", || {
+        entry(&table, ended.id).state == ConnectionState::Disconnected
+    });
+    let ended = entry(&table, ended.id);
+    let closed = Cause::P2pClosed(P2pCloseReason::Closed);
+    assert_eq!(
+        ended.last_cause,
+        Some(closed.clone()),
+        "{:#?}",
+        ended.history
+    );
+    assert_eq!(
+        ended.history.last().and_then(|h| h.cause.clone()),
+        Some(closed)
+    );
+    a.close();
+    b.close();
+}
+
 /// The accepting side closes the connection with `not_paired` as soon as it takes it, before
 /// any stream (as `tasty-net-p2p` does for a peer off its pairing list): the code still ends
 /// the handshake, not retried, whether it came before or after the dialer's first stream.

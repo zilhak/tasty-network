@@ -303,9 +303,8 @@ impl Cause {
             HandshakeError::RemoteListenerAbsent(_) => Self::RemoteListenerAbsent,
             HandshakeError::Connect(e) => Self::of_connect(e),
             HandshakeError::Io(e) => Self::ConnectFailed(e.to_string()),
-            // A plain QUIC close during the handshake: the peer closed the channel.
-            HandshakeError::Closed(reason) if reason.is_retryable() => Self::PeerClosed,
-            // Another code (a refused pairing, a session mismatch): the code stays.
+            // A QUIC close during the handshake keeps its code, the plain close (code 0)
+            // too (docs/design/transport.md "필드", `last_cause`).
             HandshakeError::Closed(reason) => Self::P2pClosed(*reason),
             other => Self::HandshakeFailed(other.to_string()),
         }
