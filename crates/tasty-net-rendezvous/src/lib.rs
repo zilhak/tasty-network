@@ -8,7 +8,9 @@
 //! - [`wire`]: the format shared with `tasty-net-p2p` (frames, messages, STUN subset, punch
 //!   probe, first-byte packet classes, candidate rule).
 //! - [`tls`]: RFC 7250 raw public key TLS 1.3 with device keys.
+//! - [`settings`]: every server time, count and limit, with defaults and sources.
 #![deny(unsafe_code)]
 
+pub mod settings;
 pub mod tls;
 pub mod wire;
