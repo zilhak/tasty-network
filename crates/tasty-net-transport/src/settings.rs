@@ -115,45 +115,34 @@ pub struct DefaultSetting {
 }
 
 /// The defaults of the connection table and the redialer, the rows of the design table in
-/// its order.
+/// its order. The keys are written out here (not as the key constants) so that the
+/// `no-hidden-constants` check can compare them with the design table; the
+/// `settings_list_matches_query` test keeps them equal to the constants.
 pub const DEFAULTS: &[DefaultSetting] = &[
-    DefaultSetting {
-        key: HISTORY_LIMIT,
-        value: SettingValue::Count(32),
-    },
-    DefaultSetting {
-        key: KEEP_CLOSED,
-        value: SettingValue::Count(16),
-    },
-    DefaultSetting {
-        key: EVENT_QUEUE_LIMIT,
-        value: SettingValue::Count(256),
-    },
-    DefaultSetting {
-        key: REDIAL_INITIAL,
-        value: SettingValue::Duration(Duration::from_millis(500)),
-    },
-    DefaultSetting {
-        key: REDIAL_MULTIPLIER,
-        value: SettingValue::Ratio(2.0),
-    },
-    DefaultSetting {
-        key: REDIAL_MAX_DELAY,
-        value: SettingValue::Duration(Duration::from_secs(30)),
-    },
-    DefaultSetting {
-        key: REDIAL_JITTER,
-        value: SettingValue::Ratio(0.2),
-    },
-    DefaultSetting {
-        key: REDIAL_GIVE_UP_AFTER,
-        value: SettingValue::Duration(Duration::from_secs(300)),
-    },
-    DefaultSetting {
-        key: REDIAL_MAX_ATTEMPTS,
-        value: SettingValue::Count(0),
-    },
+    entry("connections.history_limit", SettingValue::Count(32)),
+    entry("connections.keep_closed", SettingValue::Count(16)),
+    entry("connections.event_queue_limit", SettingValue::Count(256)),
+    entry(
+        "redial.initial",
+        SettingValue::Duration(Duration::from_millis(500)),
+    ),
+    entry("redial.multiplier", SettingValue::Ratio(2.0)),
+    entry(
+        "redial.max_delay",
+        SettingValue::Duration(Duration::from_secs(30)),
+    ),
+    entry("redial.jitter", SettingValue::Ratio(0.2)),
+    entry(
+        "redial.give_up_after",
+        SettingValue::Duration(Duration::from_secs(300)),
+    ),
+    entry("redial.max_attempts", SettingValue::Count(0)),
 ];
+
+/// One row of [`DEFAULTS`].
+const fn entry(key: &'static str, value: SettingValue) -> DefaultSetting {
+    DefaultSetting { key, value }
+}
 
 /// The default of `key`. Every key this crate reads is in [`DEFAULTS`] with the type its
 /// reader asks for (the `defaults_*` tests read every one).
