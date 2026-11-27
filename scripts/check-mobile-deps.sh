@@ -139,8 +139,10 @@ judge_features() {
 # 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지나 그 feature 노드가 있으면 그 경로를
 # "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍고, 모양을 모르는 줄(깊이 숫자로 시작하지
 # 않음, 노드가 "<이름> v<판>…"이나 "<이름> feature \"<f>\"[ (<표시>)]"가 아님, 깊이가 한 번에 둘 이상 늘어남)은
-# "unknown <줄 번호>: <줄>"로 찍고, 끝에 "end"를 찍는다. 빈 줄만 건너뛴다. 뿌리(깊이 0)는 꼭 하나이고
-# 요청한 판의 tokio(인자 $1)여야 한다. 아니면 그 줄이나 "unknown roots <수>"를 찍는다.
+# "unknown <줄 번호>: <줄>"로 찍고, 끝에 "end"를 찍는다. 빈 줄만 건너뛴다. 뿌리(깊이 0)는 하나 이상이고
+# 모두 요청한 판의 tokio(인자 $1)여야 한다. 같은 판이 대상용과 호스트용(proc-macro·빌드 의존 쪽)으로
+# 나뉘면 Cargo는 같은 패키지의 뿌리를 둘 찍으므로, 뿌리마다 그 아래 경로를 따로 읽는다. 아니면 그 줄이나
+# "unknown roots 0"을 찍는다.
 judge_inverted() {
     awk -v want="$1" '
         BEGIN { prev = -1 }
@@ -174,7 +176,7 @@ judge_inverted() {
             }
         }
         END {
-            if (roots != 1) print "unknown roots " roots + 0
+            if (roots < 1) print "unknown roots 0"
             if (!found) print "no-process-node"
             print "end"
         }
@@ -274,6 +276,8 @@ self_test() {
     local inv_badroot='0not-tokio v2.0.0;1tokio feature "process";2app v0.1.0 (/w/app)'
     local inv_badver='0tokio v1.0.0;1tokio feature "process";2app v0.1.0 (/w/app)'
     local inv_tworoots='0tokio v1.54.1;1tokio feature "process";2app v0.1.0 (/w/app);0tokio v1.54.1;1tokio feature "rt"'
+    local inv_tworoots_net='0tokio v1.54.1;1tokio feature "rt";2app v0.1.0 (/w/app);0tokio v1.54.1;1tokio feature "process";2tasty-net-transport v0.1.0 (/w/t);3app v0.1.0 (/w/app)'
+    local inv_tworoots_bad='0tokio v1.54.1;1tokio feature "process";2app v0.1.0 (/w/app);0tokio v1.0.0;1tokio feature "rt"'
     local root_uni='app v0.1.0 (/project)|모바일'
     local root_paren='app v0.1.0 (/project (iOS)/app)|default'
     local inv_paren='0tokio v1.54.1;1tokio feature "process";2app feature "모바일";3app v0.1.0 (/project (iOS)/app)'
@@ -310,7 +314,9 @@ self_test() {
         "거꾸로 본 나무에 단독 (*) 줄(앱 기준)#1#2#$root;$tkp#0#$inv_app; (*)#0"
         "거꾸로 본 나무의 뿌리가 tokio가 아니다(앱 기준)#1#2#$root;$tkp#0#$inv_badroot#0"
         "거꾸로 본 나무의 뿌리가 다른 판의 tokio다(앱 기준)#1#2#$root;$tkp#0#$inv_badver#0"
-        "거꾸로 본 나무의 뿌리가 둘이다(앱 기준)#1#2#$root;$tkp#0#$inv_tworoots#0"
+        "거꾸로 본 나무에 같은 판 tokio 뿌리가 둘(대상용·호스트용, 앱 기준)#1#0#$root;$tkp#0#$inv_tworoots#0"
+        "같은 판 tokio 뿌리 둘 중 둘째 아래 tasty-net 경로(앱 기준)#1#1#$root;$tkp#0#$inv_tworoots_net#0"
+        "tokio 뿌리 둘 중 하나가 다른 판(앱 기준)#1#2#$root;$tkp#0#$inv_tworoots_bad#0"
         "tokio 판을 뽑는 sed가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-sed"
         "위반 줄을 찾는 grep이 실패한다#0#2#$root;$tkp#0##0#fail-grep"
     )
