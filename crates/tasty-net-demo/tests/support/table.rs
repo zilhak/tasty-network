@@ -2,6 +2,7 @@
 //! (docs/design/testing.md "연결 목록 시험"): the stdin line `table` and its snapshot lines
 //! (`tasty_net_demo::table`), and the checks the forward and the role reversed tests share.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use super::process::{Proc, log};
@@ -67,6 +68,22 @@ pub fn in_state<'a>(view: &'a TableView, state: &str) -> Vec<&'a EntryView> {
 /// Whether `entry` carries one attach link, one bulk channel and one request channel.
 pub fn carries_all_channels(entry: &EntryView) -> bool {
     entry.links.len() == 1 && entry.get("bulk") == Some("1") && entry.get("requests") == Some("1")
+}
+
+/// `text` as a loopback socket address with a port that is not 0.
+pub fn loopback_addr(text: &str) -> SocketAddr {
+    let addr: SocketAddr = text
+        .parse()
+        .unwrap_or_else(|e| panic!("{text:?} is not a socket address: {e}"));
+    assert_eq!(addr.ip(), Ipv4Addr::LOCALHOST, "{text}");
+    assert_ne!(addr.port(), 0, "{text}");
+    addr
+}
+
+/// Checks the open time and the RTT of an SSH link row: an open time, and no RTT.
+fn check_link_times(link: &tasty_net_demo::table::Row) {
+    assert!(link.number("opened_at_ms") > 0, "{link:?}");
+    assert_eq!(link.get("rtt_ms"), None, "SSH measures no RTT: {link:?}");
 }
 
 /// What one direction's entries show (docs/design/transport.md "필드").
@@ -163,14 +180,17 @@ pub fn check_tunnel_entries(
     assert_eq!(entry.value("peer_instance"), ready.instance);
     assert_eq!(entry.value("instance_verified"), "true");
     assert_eq!(entry.value("segments"), "local_forward,ssh,remote_listener");
-    let forward_end = entry.value("seg.local_forward.local");
-    assert!(forward_end.starts_with("127.0.0.1:"), "{forward_end}");
-    let open: Vec<&str> = entry
+    let forward_end = loopback_addr(entry.value("seg.local_forward.local"));
+    let mut open: Vec<SocketAddr> = entry
         .value("seg.local_forward.remote")
         .split(", ")
+        .map(loopback_addr)
         .collect();
     assert_eq!(open.len(), 3, "attach, bulk and request channels: {open:?}");
-    assert!(open.iter().all(|a| a.starts_with("127.0.0.1:")), "{open:?}");
+    open.sort_unstable();
+    open.dedup();
+    assert_eq!(open.len(), 3, "three channels, three addresses: {open:?}");
+    assert!(!open.contains(&forward_end), "{open:?} {forward_end}");
     assert_eq!(entry.get("seg.ssh.local"), None);
     assert_eq!(entry.value("seg.ssh.remote"), ssh_target);
     assert_eq!(entry.get("seg.remote_listener.local"), None);
@@ -203,8 +223,7 @@ pub fn check_tunnel_entries(
         "this end opened the link"
     );
     assert_eq!(link.value("transport"), shape.transport);
-    assert!(link.number("opened_at_ms") > 0, "{link:?}");
-    assert_eq!(link.get("rtt_ms"), None);
+    check_link_times(link);
 
     // The end that accepted the loopback connections: one entry per channel.
     let entries = in_state(&far, "connected");
@@ -215,10 +234,7 @@ pub fn check_tunnel_entries(
         assert_eq!(e.value("via"), "loopback");
         assert_eq!(e.value("segments"), "loopback");
         assert_eq!(e.value("seg.loopback.local"), remote);
-        assert!(
-            e.value("seg.loopback.remote").starts_with("127.0.0.1:"),
-            "{e:?}"
-        );
+        loopback_addr(e.value("seg.loopback.remote"));
         assert_eq!(e.value("peer_device"), near.device, "the dialer's device");
         assert_eq!(e.value("peer_instance"), dialer_instance);
         assert_eq!(e.value("instance_verified"), "true");
@@ -239,6 +255,18 @@ pub fn check_tunnel_entries(
     assert_eq!(far_link.value("holder"), shape.holder);
     assert_eq!(far_link.value("local_side"), "acceptor");
     assert_eq!(far_link.value("transport"), shape.transport);
+    check_link_times(far_link);
+    let mut peers: Vec<SocketAddr> = entries
+        .iter()
+        .map(|e| loopback_addr(e.value("seg.loopback.remote")))
+        .collect();
+    peers.sort_unstable();
+    peers.dedup();
+    assert_eq!(
+        peers.len(),
+        3,
+        "one loopback connection per channel: {peers:?}"
+    );
     let bulk = entries
         .iter()
         .find(|e| e.get("bulk") == Some("1"))
@@ -294,11 +322,28 @@ pub fn check_reconnected(server: &mut Proc, dialer: &mut Proc, tunnel: &Tunnel, 
         "a killed tunnel ends its entry as exited or lost: {ended:?}"
     );
     assert!(ended.links.is_empty(), "{ended:?}");
-    let new = near
+    // The redial may first have joined the old tunnel while it still ran: that entry names
+    // the old one too, and ended as a shared tunnel. The new connection is the connected one.
+    let naming: Vec<&EntryView> = near
         .entries
         .iter()
-        .find(|e| e.get("previous") == Some(old.to_string().as_str()))
-        .expect("the new entry");
+        .filter(|e| e.get("previous") == Some(old.to_string().as_str()))
+        .collect();
+    let connected: Vec<&&EntryView> = naming
+        .iter()
+        .filter(|e| e.get("state") == Some("connected"))
+        .collect();
+    assert_eq!(
+        connected.len(),
+        1,
+        "one connected reconnection: {naming:#?}"
+    );
+    let new = *connected[0];
+    for other in naming.iter().filter(|e| e.id() != new.id()) {
+        log(&format!("another entry naming {old}: {:?}", other.row));
+        assert_eq!(other.value("state"), "disconnected", "{other:?}");
+        assert!(other.get("last_cause").is_some(), "{other:?}");
+    }
     log(&format!("the new entry: {:?}", new.row));
     assert!(new.id() > old, "a new ID: {new:?}");
     assert_eq!(new.value("previous_dropped"), "false");

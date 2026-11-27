@@ -500,6 +500,35 @@ fn mixed_holders_on_one_tunnel() {
     directions.sort_unstable();
     assert_eq!(directions, ["forward", "role_reversed"], "{far:#?}");
 
+    // Link by link: two IDs, and the holder, the edge value and the server entry's direction
+    // of each ID belong to one direction (docs/design/transport.md "토폴로지와의 관계").
+    let ids: Vec<&str> = entry.links.iter().map(|l| l.value("link_id")).collect();
+    assert_ne!(ids[0], ids[1], "two links, two IDs: {ids:?}");
+    for link in &entry.links {
+        let id = link.value("link_id");
+        let (transport, direction) = match link.value("holder") {
+            "dialer" => ("ssh_forward", "forward"),
+            "acceptor" => ("ssh_role_reversed", "role_reversed"),
+            other => panic!("holder {other:?} in {link:?}"),
+        };
+        assert_eq!(link.value("transport"), transport, "{link:?}");
+        let far_entry = in_state(&far, "connected")
+            .into_iter()
+            .find(|e| e.links.iter().any(|l| l.value("link_id") == id))
+            .unwrap_or_else(|| panic!("no server entry with link {id}: {far:#?}"));
+        assert_eq!(far_entry.links.len(), 1, "{far_entry:?}");
+        let far_link = &far_entry.links[0];
+        assert_eq!(
+            far_link.value("holder"),
+            link.value("holder"),
+            "{far_link:?}"
+        );
+        assert_eq!(far_link.value("transport"), transport, "{far_link:?}");
+        assert_eq!(far_entry.value("direction"), direction, "{far_entry:?}");
+        assert!(link.number("opened_at_ms") > 0 && far_link.number("opened_at_ms") > 0);
+        assert_eq!((link.get("rtt_ms"), far_link.get("rtt_ms")), (None, None));
+    }
+
     scene.quit_dialer(dialer);
     Scene::stop_server(server);
     scene.finish();
