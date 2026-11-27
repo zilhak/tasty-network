@@ -222,42 +222,63 @@ def judge_source(text):
     return sorted(out), len(items)
 
 
+def attrs_before(toks, i):
+    """toks[i](mod 등) 앞에 붙은 속성들의 글자 목록. pub·pub(…)는 건너뛴다."""
+    j = i - 1
+    if j >= 0 and toks[j][1] == ")":
+        depth = 0
+        while j >= 0:
+            if toks[j][1] == ")":
+                depth += 1
+            elif toks[j][1] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        j -= 1
+    if j >= 0 and toks[j][1] == "pub":
+        j -= 1
+    out = []
+    while j >= 1 and toks[j][1] == "]":
+        depth, k = 0, j
+        while k >= 0:
+            if toks[k][1] == "]":
+                depth += 1
+            elif toks[k][1] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 1 or toks[k - 1][1] != "#":
+            break
+        out.append([t[1] for t in toks[k + 1:j]])
+        j = k - 2
+    return out
+
+
 def system_mod_guarded(text):
-    """src/lib.rs의 mod system; 선언에 #[cfg(feature = "system-ssh")]가 붙어 있는지."""
-    toks = tokenize(text)
-    for i in range(len(toks) - 2):
-        if toks[i][:2] == ("ident", "mod") and toks[i + 1][1] == "system" and toks[i + 2][1] == ";":
-            j = i - 1
-            if j >= 0 and toks[j][1] == ")":
-                # pub(crate) mod system;
-                depth = 0
-                while j >= 0:
-                    if toks[j][1] == ")":
-                        depth += 1
-                    elif toks[j][1] == "(":
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    j -= 1
-                j -= 1
-            if j >= 0 and toks[j][1] == "pub":
-                j -= 1
-            while j >= 0 and toks[j][1] == "]":
-                depth, k = 0, j
-                while k >= 0:
-                    if toks[k][1] == "]":
-                        depth += 1
-                    elif toks[k][1] == "[":
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    k -= 1
-                attr = [t[1] for t in toks[k + 1:j]]
-                if attr == ["cfg", "(", "feature", "=", f'"{SSH_SYSTEM_FEATURE}"', ")"]:
-                    return True
-                j = k - 2  # #[ 앞으로
-            return False
-    return False
+    """src/lib.rs의 제품 코드(시험 항목을 지운 뒤)에 mod system 선언이 꼭 하나이고 그것이 파일 모듈
+    선언(mod system;)이면, 그 선언에 #[cfg(feature = "system-ssh")]가 붙어 있는지를 돌려준다. 선언이
+    둘 이상이거나 인라인(mod system { … })이면 src/system/ 제외가 그 feature로만 켜지는지 말할 수
+    없으므로 ScanError."""
+    toks = strip_cfg_test(tokenize(text))
+    decls = [i for i in range(len(toks) - 2)
+             if toks[i][:2] == ("ident", "mod") and toks[i + 1][1] == "system"]
+    if not decls:
+        return False
+    if len(decls) > 1:
+        raise ScanError(f"{toks[decls[1]][2]}행: mod system 선언이 {len(decls)}개다")
+    i = decls[0]
+    if toks[i + 2][1] != ";":
+        raise ScanError(f"{toks[i][2]}행: mod system이 인라인 모듈이다(안의 선언이 src/system/을 가리킨다)")
+    want = ["cfg", "(", "feature", "=", f'"{SSH_SYSTEM_FEATURE}"', ")"]
+    return want in attrs_before(toks, i)
+
+
+def path_attr_lines(toks):
+    """제품 코드의 #[path = …] 속성 줄 목록."""
+    return [toks[i][2] for i in range(len(toks) - 2)
+            if toks[i][1] == "#" and toks[i + 1][1] == "[" and toks[i + 2][:2] == ("ident", "path")]
 
 
 def crate_files(crate, listing):
@@ -292,6 +313,11 @@ def collect(read, listing, exists):
         tests = test_module_files(read, files)
         checked = [f for f in files if f not in tests]
         for f in checked:
+            # #[path]는 모듈 파일을 폴더 규칙 밖에서 고른다. 그러면 src/system/ 제외와 시험 모듈 파일
+            # 판정이 실제로 컴파일되는 파일과 맞는지 말할 수 없다.
+            lines = path_attr_lines(strip_cfg_test(tokenize(read(f))))
+            if lines:
+                raise ScanError(f"{f}:{lines[0]}: #[path] 모듈 선언은 판정하지 않는다")
             try:
                 hits, uses = judge_source(read(f))
             except ScanError as e:
@@ -452,6 +478,28 @@ def self_test():
     pub_guarded["crates/tasty-net-ssh/src/lib.rs"] = ("#[cfg(feature = \"system-ssh\")]\n#[doc(hidden)]\n"
                                                       "pub(crate) mod system;\n#[cfg(test)]\nmod tests;\n")
     crate_case("속성 둘과 pub(crate) mod system;", pub_guarded, "통과")
+    pathed = dict(tree)
+    pathed["crates/tasty-net-ssh/src/lib.rs"] = ("#[cfg(feature = \"system-ssh\")]\n#[path = \"empty.rs\"]\n"
+                                                 "mod system;\n#[cfg(test)]\nmod tests;\n")
+    pathed["crates/tasty-net-ssh/src/empty.rs"] = "\n"
+    crate_case("feature가 붙은 mod system;을 #[path]로 다른 파일에 잇는 입력", pathed, "읽기 오류")
+    second = dict(tree)
+    second["crates/tasty-net-ssh/src/lib.rs"] = (guarded + "#[path = \"system/spawn.rs\"]\nmod spawn;\n")
+    crate_case("feature 없는 다른 선언이 #[path]로 src/system/ 파일을 들이는 입력", second, "읽기 오류")
+    inline = dict(tree)
+    inline["crates/tasty-net-ssh/src/lib.rs"] = ("#[cfg(feature = \"system-ssh\")]\nmod system { pub mod spawn; }\n"
+                                                 "#[cfg(test)]\nmod tests;\n")
+    crate_case("인라인 mod system { … }(안의 선언이 src/system/을 가리킨다)", inline, "읽기 오류")
+    twice = dict(tree)
+    twice["crates/tasty-net-ssh/src/lib.rs"] = guarded + "#[cfg(not(feature = \"system-ssh\"))]\nmod system;\n"
+    crate_case("mod system;이 둘(하나는 feature 없음)", twice, "읽기 오류")
+    other_path = dict(tree)
+    other_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[path = \"../../tasty-net-ssh/src/system/spawn.rs\"]\nmod s;\n"
+    crate_case("다른 금지 크레이트의 #[path] 모듈 선언", other_path, "읽기 오류")
+    test_path = dict(tree)
+    test_path["crates/tasty-net-rendezvous/src/lib.rs"] = "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\n"
+    test_path["crates/tasty-net-rendezvous/src/t.rs"] = "use std::process::Command;\n"
+    crate_case("시험 cfg가 붙은 #[path] 시험 모듈은 검사 밖", test_path, "통과")
     leak = dict(tree)
     leak["crates/tasty-net-ssh/src/listener.rs"] = "use std::process::Stdio;\n"
     crate_case("src/system/ 밖의 금지 경로", leak, "실패")
