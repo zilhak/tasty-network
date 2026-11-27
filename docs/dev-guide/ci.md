@@ -63,7 +63,7 @@ bash check-mobile-deps.sh --manifest-path <앱 작업 공간>/Cargo.toml --app \
 
 - 인자: `--manifest-path`(앱 작업 공간의 `Cargo.toml`), `--app`(앱 그래프 기준), `--target`(여러 번, `aarch64-linux-android`·`x86_64-linux-android`·`aarch64-apple-ios`·`aarch64-apple-ios-sim`만), `-p`(앱 cdylib 크레이트), `--` 뒤의 feature 인자(배포 빌드와 같게). `--` 뒤에는 `--no-default-features`, `--all-features`, `--features <목록>`(`--features=<목록>`), `-F <목록>`만 받는다. `--prune`·`-e`·`--depth`·`-i`처럼 `cargo tree`의 출력 범위를 바꾸는 인자는 금지 의존을 그래프에서 지울 수 있어 받지 않는다. `--app`이 없으면 이 레포 기준이다. 모든 cargo 명령이 `--locked`라 앱의 `Cargo.lock`이 있어야 한다.
 - cargo는 `--manifest-path`로 준 `Cargo.toml`의 폴더에서 돈다. cargo는 지금 폴더와 그 위 폴더에서 `.cargo/config.toml`(소스 대체·patch 등)을 찾고 rustup도 같은 기준으로 `rust-toolchain.toml`(고정 툴체인)을 고르므로, 스크립트를 앱 작업 공간 밖에서 불러도 배포 빌드와 같은 설정이 적용된다.
-- 종료 코드: 통과 0, 위반 1, 판정 불가 2(인자 오류, 모바일이 아닌 target, `--` 뒤의 feature 인자가 아닌 것, `cargo tree` 실패, 출력에 뿌리 패키지 줄이 없음, 판정하는 awk의 실패나 빈 출력). target마다 `[mobile-deps] 통과|위반 — <target> <크레이트> <feature 인자> (…, 패키지 <수>개)` 줄을 남기고, 위반이면 그 앞에 `위반: …` 줄을 남긴다. 앱 기준에서 tokio의 `process`가 tasty-net 크레이트를 거쳐 켜지면 그 경로(`tokio feature "process" <- … <- <앱>`)를 찍는다.
+- 종료 코드: 통과 0, 위반 1, 판정 불가 2(인자 오류, 모바일이 아닌 target, `--` 뒤의 feature 인자가 아닌 것, `cargo tree` 실패, 출력에 뿌리 패키지 줄이 없음, 두 나무(feature 나무와 거꾸로 본 나무)에 모양을 모르는 줄이 있음(앞 공백, `|` 없는 줄 등. 빈 줄만 건너뛴다), 판정하는 awk·sed·grep의 실패나 빈 출력). target마다 `[mobile-deps] 통과|위반 — <target> <크레이트> <feature 인자> (…, 패키지 <수>개)` 줄을 남기고, 위반이면 그 앞에 `위반: …` 줄을 남긴다. 앱 기준에서 tokio의 `process`가 tasty-net 크레이트를 거쳐 켜지면 그 경로(`tokio feature "process" <- … <- <앱>`)를 찍는다.
 - 그래프에 tokio가 여러 판이면 `process`가 켜진 판마다 `-i tokio@<판>`으로 거꾸로 본다. tokio가 없거나 `process`가 꺼져 있으면 거꾸로 보지 않는다.
 - 앱 레포 CI에서는 Android 빌드 잡(또는 따로 둔 잡)의 한 단계로 부른다. target의 std나 NDK는 필요 없다(`cargo tree`는 빌드하지 않는다).
 

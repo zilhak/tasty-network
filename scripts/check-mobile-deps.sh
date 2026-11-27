@@ -21,7 +21,8 @@
 #
 # 실패(1): russh-config 패키지 줄이 있다, tasty-net-ssh의 feature에 system-ssh가 있다, tokio의 feature에
 # process가 있다(--app이면 위 조건). 판정 불가(2): 인자 오류(모바일이 아닌 target, -- 뒤의 feature
-# 인자가 아닌 것 포함), cargo tree 실패(종료 코드가 0이 아님), 출력에 뿌리 패키지 줄이 없음, 판정 실패. 통과는 0이다. cargo 명령은 --locked로 돌므로 Cargo.lock이 있어야 한다.
+# 인자가 아닌 것 포함), cargo tree 실패(종료 코드가 0이 아님), 출력에 뿌리 패키지 줄이 없음, 출력에 모양을
+# 모르는 줄이 있음, 판정 실패. 통과는 0이다. cargo 명령은 --locked로 돌므로 Cargo.lock이 있어야 한다.
 set -euo pipefail
 
 TAG="[mobile-deps]"
@@ -89,15 +90,19 @@ inverted_tokio() {
 }
 
 # feature 나무 판정. 위반을 "위반: …" 줄로, 앱 기준에서 process가 켜진 tokio 판을 "tokio-process <판>"
-# 줄로, 끝에 "packages <수>"를 찍는다.
+# 줄로, 모양을 모르는 줄을 "unknown <줄 번호>: <줄>"로, 끝에 "packages <수>"를 찍는다. 빈 줄만 건너뛴다.
 judge_features() {
     awk -v app="$APP" '
         {
             line = $0
             sub(/ \(\*\)$/, "", line)
-            bar = 0
-            for (i = length(line); i > 0; i--) if (substr(line, i, 1) == "|") { bar = i; break }
-            if (bar == 0) next
+            if (line == "") next
+            # "<이름> v<판>[ (<출처>)…]|<feature,…>"가 아니면 모르는 줄이다(앞 공백, | 없음 등).
+            if (line !~ /^[A-Za-z0-9_-]+ v[0-9][^ |]*( \([^()|]*\))*\|[A-Za-z0-9_,+.-]*$/) {
+                print "unknown " NR ": " $0
+                next
+            }
+            bar = index(line, "|")
             pkg = substr(line, 1, bar - 1)
             feats = "," substr(line, bar + 1) ","
             split(pkg, w, " ")
@@ -124,14 +129,23 @@ judge_features() {
 }
 
 # 거꾸로 본 나무에서 tokio feature "process"(깊이 1) 아래에 tasty-net-* 패키지나 그 feature 노드가 있으면 그 경로를
-# "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍고, 끝에 "end"를 찍는다.
+# "위반: …" 줄로 찍는다. 그 노드가 없으면 "no-process-node"를 찍고, 모양을 모르는 줄(깊이 숫자로 시작하지
+# 않음, 노드가 "<이름> v<판>…"이나 "<이름> feature \"<f>\"[ (<표시>)]"가 아님, 깊이가 한 번에 둘 이상 늘어남)은
+# "unknown <줄 번호>: <줄>"로 찍고, 끝에 "end"를 찍는다. 빈 줄만 건너뛴다.
 judge_inverted() {
     awk '
+        BEGIN { prev = -1 }
         {
-            if (!match($0, /^[0-9]+/)) next
+            if ($0 == "") next
+            if (!match($0, /^[0-9]+/)) { print "unknown " NR ": " $0; next }
             d = substr($0, 1, RLENGTH) + 0
             text = substr($0, RLENGTH + 1)
             sub(/ \(\*\)$/, "", text)
+            if (text !~ /^[A-Za-z0-9_-]+ (v[0-9][^ ]*( \([^()]*\))*|feature "[^"]*"( \([^()]*\))?)$/ || d > prev + 1) {
+                print "unknown " NR ": " $0
+                next
+            }
+            prev = d
             path[d] = text
             if (d == 1) { inside = (text == "tokio feature \"process\""); if (inside) found = 1; next }
             if (inside && d > 1) {
@@ -149,16 +163,24 @@ judge_inverted() {
     '
 }
 
+# 글자 $2에서 $1에 맞는 줄. 맞는 줄이 없으면 빈 출력과 0, grep이 실패하면(2 이상) 2.
+pick_lines() {
+    local out rc=0
+    out=$(grep -e "$1" <<<"$2") || rc=$?
+    [[ $rc -le 1 ]] || return 2
+    printf '%s' "$out"
+}
+
 # target 하나의 판정. 통과 0, 위반 1, 판정 불가 2. 이 함수는 ||의 왼쪽에서 불리므로 errexit가
 # 꺼져 있다. 그래서 명령마다 종료 코드와 필요한 출력 줄을 직접 본다.
 check_target() {
-    local t=$1 tree rc=0 verdict viol count vers v inv inv_rc
+    local t=$1 tree rc=0 verdict viol count vers v inv inv_rc unknown more
     tree=$(feature_tree "$t") || rc=$?
     if [[ $rc -ne 0 ]]; then
         echo "$TAG 판정 불가: cargo tree가 실패했다(target $t, 종료 코드 $rc)" >&2
         return 2
     fi
-    if ! grep -q "^$PKG v" <<<"$tree"; then
+    if ! grep -q "^$PKG v[^|]*|" <<<"$tree"; then
         echo "$TAG 판정 불가: cargo tree 출력에 $PKG 줄이 없다(target $t)" >&2
         return 2
     fi
@@ -166,13 +188,23 @@ check_target() {
         echo "$TAG 판정 불가: feature 나무 판정이 실패했다(target $t)" >&2
         return 2
     fi
-    count=$(sed -n 's/^packages \([1-9][0-9]*\)$/\1/p' <<<"$verdict")
-    if [[ -z "$count" ]]; then
+    if ! unknown=$(pick_lines '^unknown ' "$verdict"); then
+        echo "$TAG 판정 불가: feature 나무 판정의 출력을 읽지 못했다(target $t)" >&2
+        return 2
+    fi
+    if [[ -n "$unknown" ]]; then
+        printf '  %s\n' "$unknown" >&2
+        echo "$TAG 판정 불가: feature 나무에 모양을 모르는 줄이 있다(target $t)" >&2
+        return 2
+    fi
+    if ! count=$(sed -n 's/^packages \([1-9][0-9]*\)$/\1/p' <<<"$verdict") || [[ -z "$count" ]]; then
         echo "$TAG 판정 불가: feature 나무 판정이 패키지 줄을 하나도 읽지 못했다(target $t)" >&2
         return 2
     fi
-    viol=$(grep '^위반: ' <<<"$verdict" || true)
-    vers=$(sed -n 's/^tokio-process //p' <<<"$verdict")
+    if ! viol=$(pick_lines '^위반: ' "$verdict") || ! vers=$(sed -n 's/^tokio-process //p' <<<"$verdict"); then
+        echo "$TAG 판정 불가: feature 나무 판정의 출력을 읽지 못했다(target $t)" >&2
+        return 2
+    fi
     for v in $vers; do
         inv_rc=0
         inv=$(inverted_tokio "$t" "$v") || inv_rc=$?
@@ -184,13 +216,18 @@ check_target() {
             echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무의 판정이 실패했다(target $t)" >&2
             return 2
         fi
-        if grep -qx 'no-process-node' <<<"$inv"; then
-            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무에 tokio feature \"process\"가 없다(target $t)" >&2
+        if ! unknown=$(pick_lines '^unknown \|^no-process-node$' "$inv") || [[ -n "$unknown" ]]; then
+            printf '  %s\n' "$unknown" >&2
+            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무에 tokio feature \"process\"가 없거나 모양을 모르는 줄이 있다(target $t)" >&2
             return 2
         fi
-        viol+=$'\n'$(grep '^위반: ' <<<"$inv" || true)
+        if ! more=$(pick_lines '^위반: ' "$inv"); then
+            echo "$TAG 판정 불가: tokio@$v를 거꾸로 본 나무 판정의 출력을 읽지 못했다(target $t)" >&2
+            return 2
+        fi
+        viol+=$'\n'$more
     done
-    viol=$(grep . <<<"$viol" || true)
+    viol=$(pick_lines . "$viol") || return 2
     local what="$t $PKG ${FEATS[*]:-(기본 feature)}" mode="이 레포 기준"
     [[ $APP -eq 1 ]] && mode="앱 기준, process를 켠 tokio ${vers:-없음}"
     if [[ -n "$viol" ]]; then
@@ -212,12 +249,15 @@ self_test() {
     local rc_line='russh-config v0.50.0|'
     local inv_app='0tokio v1.54.1;1tokio feature "process";2app v0.1.0 (/w/app);1tokio feature "rt";2tasty-net-p2p v0.1.0 (/w/p2p);3app v0.1.0 (/w/app)'
     local inv_net='0tokio v1.54.1;1tokio feature "process";2tokio feature "full";3tasty-net-transport v0.1.0 (/w/t);4app v0.1.0 (/w/app);1tokio feature "rt"'
-    local inv_feat='0tokio v1.54.1;1tokio feature "process";2tasty-net-ssh feature "embedded-ssh";3app v0.1.0 (/w/app)'
+    local inv_feat='0tokio v1.54.1;1tokio feature "process";2tasty-net-ssh feature "embedded-ssh";3app v0.1.0 (/w/app);4app feature "default" (command-line)'
     local inv_none='0tokio v1.54.1;1tokio feature "rt";2app v0.1.0 (/w/app)'
+    local inv_space='0tokio v1.54.1;1tokio feature "process";2tokio feature "full"; 3tasty-net-transport v0.1.0 (/w/t);4app v0.1.0 (/w/app)'
+    local root_nobar='app v0.1.0 (/w/app)'
     local failed=0 name app want st_tree st_trc st_inv st_irc st_awk got
-    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드#awk 고장(없음·fail·empty)
-    # (나무의 줄은 ;로 나눈다. fail은 awk가 아무것도 찍지 않고 3으로 끝나고, empty는 0으로 끝나며 아무것도
-    # 찍지 않는다)
+    # 이름#--app(0·1)#기대 종료 코드#feature 나무#그 종료 코드#거꾸로 본 나무#그 종료 코드#도구 고장
+    # (나무의 줄은 ;로 나눈다. 도구 고장: fail은 awk가 아무것도 찍지 않고 3으로 끝나고, empty는 0으로 끝나며
+    # 아무것도 찍지 않는다. fail-inverted는 거꾸로 본 나무 판정이 3으로 끝난다. fail-sed는 tokio 판을 뽑는
+    # sed가, fail-grep은 위반 줄을 찾는 grep이 3·2로 끝난다)
     local cases=(
         "정상: process 없는 tokio와 embedded-ssh#0#0#$root;$tk;$ssh_e#0##0"
         "tokio의 process(이 레포 기준)#0#1#$root;$tkp#0##0"
@@ -236,6 +276,11 @@ self_test() {
         "feature 판정의 awk가 실패한다#0#2#$root;$tkp#0##0#fail"
         "feature 판정의 awk가 아무것도 찍지 않는다#0#2#$root;$tkp#0##0#empty"
         "거꾸로 본 나무 판정의 awk가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-inverted"
+        "거꾸로 본 나무의 줄 앞에 공백이 있다(앱 기준)#1#2#$root;$tkp#0#$inv_space#0"
+        "feature 나무의 뿌리 줄에 |가 없다#0#2#$root_nobar;$tk#0##0"
+        "feature 나무에 모르는 모양의 줄이 있다#0#2#$root;$tk;  $ssh_s#0##0"
+        "tokio 판을 뽑는 sed가 실패한다(앱 기준)#1#2#$root;$tkp#0#$inv_net#0#fail-sed"
+        "위반 줄을 찾는 grep이 실패한다#0#2#$root;$tkp#0##0#fail-grep"
     )
     for c in "${cases[@]}"; do
         st_awk=""
@@ -258,6 +303,14 @@ self_test() {
                 fail-inverted)
                     # shellcheck disable=SC2329  # check_target이 부른다
                     judge_inverted() { return 3; }
+                    ;;
+                fail-sed)
+                    # shellcheck disable=SC2329  # check_target이 부른다
+                    sed() { [[ "$*" == *tokio-process* ]] && return 3; command sed "$@"; }
+                    ;;
+                fail-grep)
+                    # shellcheck disable=SC2329  # check_target이 부른다
+                    grep() { [[ "$*" == *'^위반: '* ]] && return 2; command grep "$@"; }
                     ;;
             esac
             PKG=app
