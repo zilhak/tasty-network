@@ -1,0 +1,50 @@
+# Values of many supported and read-not-supported keywords.
+Host *
+    Ciphers +aes128-cbc
+    KexAlgorithms -diffie-hellman-group14-sha256
+    HostKeyAlgorithms ^ssh-ed25519
+    MACs hmac-sha2-256,hmac-sha2-512
+    PubkeyAcceptedAlgorithms -ssh-rsa
+    CASignatureAlgorithms ssh-ed25519
+    RekeyLimit 1G 1h
+    IPQoS af21 cs1
+    EscapeChar ~
+    LocalForward 8080 127.0.0.1:80
+    RemoteForward 9090 localhost:9091
+    DynamicForward 1080
+    ChannelTimeout session=5m global=1h
+    ObscureKeystrokeTiming interval:30
+    CanonicalDomains example.com example.net
+    CanonicalizeMaxDots 2
+    UserKnownHostsFile ~/.ssh/known_hosts_%h ~/.ssh/known_hosts2
+    GlobalKnownHostsFile none
+    VersionAddendum test-%h
+    PermitRemoteOpen any
+    RequiredRSASize 2048
+    SyslogFacility LOCAL1
+    LogVerbose kex.c:*
+    AddressFamily inet
+    BindAddress 192.0.2.30
+    PreferredAuthentications publickey,password
+    NumberOfPasswordPrompts 2
+    BatchMode yes
+    IdentitiesOnly yes
+    CheckHostIP yes
+    HashKnownHosts yes
+    TCPKeepAlive no
+    RequestTTY no
+    ControlMaster auto
+    ControlPersist 10m
+    ForwardX11 yes
+    ForwardX11Timeout 2h
+    AddKeysToAgent confirm 1h
+    UpdateHostKeys ask
+    VisualHostKey yes
+    FingerprintHash md5
+    StreamLocalBindMask 0077
+    Tunnel point-to-point
+    TunnelDevice 3:any
+    SessionType default
+    EnableEscapeCommandline yes
+    WarnWeakCrypto no
+    Protocol 2

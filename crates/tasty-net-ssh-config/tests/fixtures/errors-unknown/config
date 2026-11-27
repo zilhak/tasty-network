@@ -1,0 +1,5 @@
+# An unknown keyword in a block that does not apply still fails the file.
+Host never
+    NoSuchOption yes
+Host *
+    Port 2222

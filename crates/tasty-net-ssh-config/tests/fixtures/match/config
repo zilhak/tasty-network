@@ -1,0 +1,19 @@
+# Match criteria this crate evaluates.
+Host tagme
+    Tag prod
+Match tagged prod
+    LogLevel ERROR
+Match originalhost alias host real.example.com
+    User aliased
+Host alias
+    HostName real.example.com
+Match host *.example.com !host skip.example.com
+    Port 2200
+Match user root
+    ConnectTimeout 7
+Match localuser *
+    ServerAliveInterval 11
+Match canonical all
+    Port 2999
+Match all
+    StrictHostKeyChecking accept-new

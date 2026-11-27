@@ -1,0 +1,20 @@
+# ProxyJump, ProxyCommand none and their order, hop aliases.
+Host hop
+    HostName hop.example.org
+    User jumper
+    Port 2201
+Host inner
+    HostName inner.example.org
+    ProxyJump hop
+    # No lookup: the connection goes through a jump host (ssh.c:1229-1240).
+    CanonicalizePermittedCNAMEs *.example.org:*.example.net
+Host pc-first
+    ProxyCommand none
+    ProxyJump hop
+Host jump-first
+    ProxyJump deploy@hop:2202,second.example.org
+    ProxyCommand none
+Host none-jump
+    ProxyJump none
+Host chain
+    ProxyJump ssh://u@a.example.org:2203,b.example.org

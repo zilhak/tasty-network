@@ -1,0 +1,11 @@
+web
+ops@db.example.com
+bad.example.com
+-p 2200 web
+-l root other.example.net
+-o User=fromcli web
+-o Port=2022 -p 2200 web
+192.0.2.10
+2001:db8::5
+deploy@WEB.Example.COM
+ssh://user@uri.example.com:2201

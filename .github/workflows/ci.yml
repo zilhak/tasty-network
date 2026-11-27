@@ -86,7 +86,36 @@ jobs:
           }
       - name: Check sshd for the SSH tests
         run: bash scripts/prepare-test-sshd.sh
+      # The ssh -G comparison of tasty-net-ssh-config (tests/matches_openssh.rs) uses
+      # a reference client built from the OpenSSH commit the port follows
+      # (docs/design/ssh-backends.md). The build is cached; the test step requires the
+      # client on Linux and macOS. Windows does not compare.
+      - name: Cache OpenSSH reference client
+        if: runner.os != 'Windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/tools/openssh-10.6p2
+          key: openssh-ref-d449e662-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-openssh-ref.sh') }}
+      - name: Build OpenSSH reference client (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+          if [ ! -x target/tools/openssh-10.6p2/bin/ssh ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q autoconf build-essential libssl-dev zlib1g-dev libkrb5-dev
+          fi
+          bash scripts/install-openssh-ref.sh
+      - name: Build OpenSSH reference client (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          if [ ! -x target/tools/openssh-10.6p2/bin/ssh ]; then
+            brew install autoconf automake openssl@3
+          fi
+          OPENSSH_CONFIGURE_EXTRA="--with-ssl-dir=$(brew --prefix openssl@3)" bash scripts/install-openssh-ref.sh
       - name: test
+        env:
+          TASTY_OPENSSH_REF_REQUIRED: ${{ runner.os != 'Windows' && '1' || '' }}
         run: scripts/check.sh test --no-fail-fast
       # The SSH feature contract (docs/design/ssh-backends.md): tasty-net-transport
       # builds, passes clippy and its tests without default features, and that build

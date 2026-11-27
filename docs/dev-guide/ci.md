@@ -7,7 +7,7 @@
 | 잡 | 러너 | 단계 |
 |---|---|---|
 | `fmt` | `ubuntu-latest` | `scripts/check.sh fmt` |
-| `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
+| `clippy-test` | `ubuntu-latest`·`macos-latest`·`windows-latest` (`fail-fast: false`) | `scripts/check.sh lint`, sshd 준비(아래 "SSH 통합 시험의 sshd"), `ssh -G` 기준 클라이언트 준비(아래 "`ssh -G` 대조의 기준 클라이언트", Linux·macOS), `scripts/check.sh test --no-fail-fast`, `scripts/check.sh transport-no-ssh`(SSH 없는 transport), `cargo test -p tasty-net-rendezvous --locked`·`cargo test -p tasty-net-p2p --locked`(단독 실행), `scripts/check.sh p2p-example-pair`(P2P 예제 두 프로세스) |
 | `repo-checks` | `ubuntu-latest` | `shellcheck`(`scripts/check.sh shell`), `no-tasty-deps`(`scripts/check.sh no-tasty-deps`), `p2p-isolation`(`scripts/check.sh p2p-isolation`), `no-hidden-constants`(`scripts/check.sh no-hidden-constants`) |
 | `deny` | `ubuntu-latest` | `scripts/check.sh deny` |
 | `rendezvous-check` (`rendezvous.yml`) | `ubuntu-latest` | `bash rendezvous/check-config.sh --self-test`, `bash rendezvous/check-config.sh`, `bash rendezvous/container-check.sh --self-test`(D5 (b) 검사의 판정 함수만. docker 없이 돈다) |
@@ -37,6 +37,19 @@
 - 어느 서버로 돌았는지는 시험 단계 로그의 `[ssh_attach] sshd=openssh|russh|none` 줄(역할 반전 시험은 `[ssh_reverse_attach] sshd=...`)로 본다. 이 줄과 PID 줄은 시험이 통과해도 stderr에 남는다([예제](../examples.md) "통합 시험").
 - macOS는 기본 `/usr/sbin/sshd`를 쓰고 설치 단계가 없다.
 
+## `ssh -G` 대조의 기준 클라이언트
+
+`tasty-net-ssh-config`의 `tests/matches_openssh.rs`는 이식 기준 커밋(OpenSSH portable 10.6p2)에서 빌드한 `ssh`와 출력을 대조한다([SSH 백엔드](../design/ssh-backends.md#비교-시험의-기준-클라이언트)).
+
+| 단계 | OS | 하는 일 |
+|---|---|---|
+| `Cache OpenSSH reference client` | Linux·macOS | `target/tools/openssh-10.6p2`를 기준 커밋(`d449e662`)·OS·아키텍처·`scripts/install-openssh-ref.sh` 내용을 키로 캐시한다 |
+| `Build OpenSSH reference client (Linux)` | Linux | 캐시가 없으면 autoconf·OpenSSL·zlib·Kerberos 개발 패키지를 받고 `scripts/install-openssh-ref.sh`로 빌드한다 |
+| `Build OpenSSH reference client (macOS)` | macOS | 캐시가 없으면 brew로 autoconf·openssl@3을 받고 같은 스크립트로 빌드한다 |
+
+- 시험 단계는 Linux·macOS에서 `TASTY_OPENSSH_REF_REQUIRED=1`로 돈다. 그래서 기준 클라이언트가 없으면 대조 시험이 실패한다. 그 변수가 없는 로컬 실행은 대조를 건너뛰고 그 사실을 한 줄로 알린다. Windows는 대조하지 않는다.
+- 시험은 `PATH`의 ssh를 쓰지 않는다. `ssh -V`가 `OpenSSH_10.6p2`로 시작하지 않으면 실패한다.
+
 ## 툴체인
 
 잡마다 `scripts/install-toolchain.sh`가 `rust-toolchain.toml`의 채널을 rustfmt·clippy와 함께 설치한다. `RUSTUP_AUTO_INSTALL=0`이라 그 밖의 툴체인을 몰래 받지 않는다.
@@ -55,7 +68,7 @@
 
 ## cargo deny
 
-- `deny.toml`의 licenses·bans·sources를 본다. 라이선스 허용 목록은 tasty `deny.toml`과 같다. git 의존과 crates.io 밖의 레지스트리는 받지 않는다.
+- `deny.toml`의 licenses·bans·sources를 본다. 라이선스 허용 목록은 tasty `deny.toml`과 같고, `SSH-short`(OpenSSH 이식 크레이트 `tasty-net-ssh-config`) 하나만 더 있다. git 의존과 crates.io 밖의 레지스트리는 받지 않는다.
 - advisories는 보지 않는다. 새 보안 공지는 커밋과 무관하게 나와 바뀐 것이 없는 커밋의 실행도 실패시키기 때문이다. 외부 의존(quinn·rustls 등)이 늘어나는 작업에서 따로 잡을 둘지 정한다.
 - cargo-deny는 공식 릴리스 아카이브를 받아 워크플로에 고정한 SHA-256과 대조한 뒤 쓴다.
 

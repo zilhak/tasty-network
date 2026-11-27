@@ -1,0 +1,13 @@
+# Include with an absolute glob, Match final and Match version.
+Include ${TASTY_FIXTURE_DIR}/conf.d/*.conf
+Host short
+    HostName final.example.net
+Match final host final.example.net
+    Port 2022
+    User finaluser
+Match version OpenSSH_10.*
+    Compression yes
+Match version OpenSSH_9.*
+    Compression no
+Host *
+    User fallback

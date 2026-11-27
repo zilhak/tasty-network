@@ -54,3 +54,11 @@ Nothing that opens a socket, runs a program or does a name service lookup is por
 `Match exec`, `Match localnetwork` and `CanonicalizeHostname` with a name that is not an
 address make the resolution refused instead.
 
+
+## Tests
+
+`tests/matches_openssh.rs` compares `dump_client_config` with `ssh -F <fixture>/config -G
+<target>` of a reference client built from the base commit by
+`scripts/install-openssh-ref.sh` (`target/tools/openssh-10.6p2/bin/ssh`, or
+`$TASTY_OPENSSH_REF_DIR/bin/ssh`). It runs on Linux and macOS and fails without the client when
+`TASTY_OPENSSH_REF_REQUIRED` is set, as in CI; on Windows it does not compare.

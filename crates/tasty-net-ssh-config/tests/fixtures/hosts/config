@@ -1,0 +1,23 @@
+# Host blocks, first value wins, negation and tokens.
+Host web
+    HostName web.example.com
+    User deploy
+    Port 2222
+    IdentityFile ~/.ssh/id_web_%r
+    IdentityFile ~/.ssh/id_%h
+Host *.example.com !bad.example.com
+    User ops
+    ForwardAgent yes
+    ServerAliveInterval 15
+Host 192.0.2.* 2001:db8::*
+    User addr
+    HostKeyAlias Alias-%h
+Host *
+    Port 22
+    ServerAliveInterval 30
+    ServerAliveCountMax 5
+    ControlPath ~/.ssh/cm-%C
+    SendEnv LANG LC_*
+    SetEnv TOKEN=%h-%p GREETING="hello world"
+    ConnectTimeout 10
+    ConnectionAttempts 2
