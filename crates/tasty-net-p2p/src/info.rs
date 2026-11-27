@@ -55,8 +55,18 @@ pub struct NatInfo {
     pub mode: PunchMode,
 }
 
-/// Where the attempt is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The two addresses of a QUIC handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddressPair {
+    /// This side: the address the socket is bound to (may be a wildcard).
+    pub local: Option<SocketAddr>,
+    /// The peer: for A the address whose probe succeeded, for B the address the Initial came
+    /// from.
+    pub remote: SocketAddr,
+}
+
+/// Where the attempt is, with the values of its state (docs/design/p2p.md "연결 시도 상태").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttemptInfo {
     /// The punch attempt number, from 1 (0 before the first `punch_go` on B).
     pub number: u32,
@@ -64,6 +74,14 @@ pub struct AttemptInfo {
     pub retry_in: Option<Duration>,
     /// The time left of the attempt's whole bound (A).
     pub bound_in: Option<Duration>,
+    /// In `Punching`: the peer's candidates now, peer reflexive ones included.
+    pub candidates: Vec<RemoteCandidate>,
+    /// In `Punching`: the time to the end of the probe window.
+    pub window_end_in: Option<Duration>,
+    /// In `Handshaking`: the addresses of the handshake.
+    pub handshake_pair: Option<AddressPair>,
+    /// In `Handshaking`: the time to the handshake deadline.
+    pub handshake_deadline_in: Option<Duration>,
 }
 
 /// A value applied to one connection, with its source.
@@ -172,6 +190,12 @@ pub(crate) struct Rec {
     pub(crate) info: P2pConnectionInfo,
     pub(crate) retry_at: Option<Instant>,
     pub(crate) bound_at: Option<Instant>,
+    /// The punch's probe session, for the candidates while `Punching`.
+    pub(crate) probe: Option<Arc<crate::socket::ProbeSession>>,
+    /// The end of the probe window.
+    pub(crate) window_end_at: Option<Instant>,
+    /// The handshake's addresses and deadline.
+    pub(crate) handshake: Option<(AddressPair, Instant)>,
     pub(crate) conn: Option<quinn::Connection>,
     history: VecDeque<HistoryEntry>,
 }
@@ -241,6 +265,9 @@ impl Tracker {
             info,
             retry_at: None,
             bound_at: None,
+            probe: None,
+            window_end_at: None,
+            handshake: None,
             conn: None,
             history: VecDeque::new(),
         }));
@@ -266,6 +293,22 @@ impl Tracker {
                 info.history = r.history.iter().cloned().collect();
                 info.attempt.retry_in = r.retry_at.map(|t| t.saturating_duration_since(now));
                 info.attempt.bound_in = r.bound_at.map(|t| t.saturating_duration_since(now));
+                match info.state {
+                    AttemptPhase::Punching => {
+                        info.attempt.candidates =
+                            r.probe.as_ref().map(|p| p.candidates()).unwrap_or_default();
+                        info.attempt.window_end_in =
+                            r.window_end_at.map(|t| t.saturating_duration_since(now));
+                    }
+                    AttemptPhase::Handshaking => {
+                        if let Some((pair, at)) = r.handshake {
+                            info.attempt.handshake_pair = Some(pair);
+                            info.attempt.handshake_deadline_in =
+                                Some(at.saturating_duration_since(now));
+                        }
+                    }
+                    _ => {}
+                }
                 if let Some(c) = &r.conn {
                     info.rtt = Some(c.rtt());
                     info.remote_addr = Some(crate::socket::canonical(c.remote_address()));

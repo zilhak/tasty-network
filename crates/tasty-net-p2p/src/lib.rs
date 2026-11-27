@@ -35,7 +35,7 @@ pub use endpoint::{P2pConfig, P2pEndpoint};
 pub use error::{P2pConnectError, P2pError, StopCause};
 pub use events::{AttemptPhase, Cause, CauseDetail, EndpointPhase, P2pEvent, Phase, Subject};
 pub use info::{
-    AppliedSetting, AttemptInfo, HistoryEntry, NatInfo, P2pConnectionInfo, P2pStatus,
+    AddressPair, AppliedSetting, AttemptInfo, HistoryEntry, NatInfo, P2pConnectionInfo, P2pStatus,
     RendezvousServer, Side,
 };
 pub use nat::{NatJudgement, StunAnswer, judge};

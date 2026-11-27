@@ -445,7 +445,7 @@ quinn-proto와 rustls가 노출하지 않는 값이다. 바꿀 수 없으므로 
 | `remote_candidate` | 성공한 후보 주소와 종류(`server_reflexive` · `reported_reflexive` · `host` · `peer_reflexive`). 위 주소 바뀜이 있으면 `remote_addr`와 달라질 수 있다 |
 | `rendezvous` | 소개해 준 서버 주소와 서버 공개키 |
 | `nat` | 양쪽 `NatMapping`(이쪽은 판별 결과, 상대는 `punch_go.peer_nat`)과 `mode`(`all`·`host_only`) |
-| `attempt` | 지금 몇 번째 펀칭 시도인지, `RetryWait`면 다음 시도까지 남은 시간, 시도 전체 상한까지 남은 시간 |
+| `attempt` | 지금 몇 번째 펀칭 시도인지, `RetryWait`면 다음 시도까지 남은 시간, 시도 전체 상한까지 남은 시간, `Punching`이면 지금의 후보 목록과 창 끝까지 남은 시간, `Handshaking`이면 주소 쌍(바인딩 주소와 상대 주소)과 handshake 기한까지 남은 시간 |
 | `rtt` | quinn RTT 추정 |
 | `last_cause` | 마지막 전이의 원인 |
 | `history` | 전이와 관측된 원격 주소 변화의 이력(최대 `history.limit`개, 버린 수 함께) |

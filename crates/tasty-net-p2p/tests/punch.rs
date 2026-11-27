@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tasty_net_identity::DeviceId;
-use tasty_net_p2p::settings::Value;
+use tasty_net_p2p::settings::{Source, Value};
 use tasty_net_p2p::{
     AttemptPhase, CauseDetail, P2pCancel, P2pCloseReason, P2pConfig, P2pConnectError,
     P2pConnection, P2pEndpoint, P2pError, P2pEvent, PairingStore, Phase, RemoteKind, Side,
@@ -1264,6 +1264,81 @@ fn a_superseded_acceptor_session_ends_while_handshaking() {
         );
         assert!(closed_by_cancel(&lb.0, CancelReason::Superseded));
         assert_eq!(phase_before_close(&lb.0), Some(AttemptPhase::Handshaking));
+        cancel.cancel();
+        let _ended = h.join();
+    });
+    drop(r.w);
+}
+
+/// The info of an attempt carries the values of its state: the candidates and the window end
+/// while `Punching`, the address pair and the deadline while `Handshaking`; and the applied
+/// values include the socket buffers with their OS source (docs/design/p2p.md "연결 시도 상태",
+/// "연결 정보").
+#[test]
+fn attempt_info_shows_the_values_of_its_state() {
+    let info_in = |d: &Device, phase: AttemptPhase| {
+        d.ep.connections()
+            .into_iter()
+            .find(|i| i.state == phase)
+            .unwrap_or_else(|| panic!("no attempt in {phase:?}"))
+    };
+    // B answers no probe: both sides stay Punching.
+    let r = scripted(Script::default());
+    r.n2.set_rule(Arc::new(|dest: SocketAddr, _: &[u8]| {
+        if dest.ip() == IpAddr::from([198, 51, 100, 9]) {
+            Verdict::Pass
+        } else {
+            Verdict::Drop
+        }
+    }));
+    std::thread::scope(|sc| {
+        let (cancel, h) = hanging_dial(sc, &r.a, r.b.id());
+        for d in [&r.a, &r.b] {
+            let mut l = Log::default();
+            assert!(
+                l.wait(&d.ep, LONG, attempt_to(AttemptPhase::Punching))
+                    .is_some()
+            );
+            let info = info_in(d, AttemptPhase::Punching);
+            assert!(!info.attempt.candidates.is_empty(), "{info:?}");
+            let left = info.attempt.window_end_in.expect("window end");
+            assert!(left <= Duration::from_millis(5000), "{left:?}");
+            assert_eq!(info.attempt.handshake_pair, None);
+            let socket = info
+                .applied
+                .iter()
+                .find(|s| s.key == "socket.recv_buffer")
+                .expect("socket.recv_buffer applied");
+            assert_eq!(socket.source, Source::OsDefault);
+        }
+        cancel.cancel();
+        let _ended = h.join();
+    });
+    drop(r.w);
+
+    // A's QUIC is held back: A stays Handshaking.
+    let r = scripted(Script::default());
+    r.n1.set_rule(Arc::new(|dest: SocketAddr, p: &[u8]| {
+        if is_quic(p) && dest.ip() != IpAddr::from([198, 51, 100, 9]) {
+            Verdict::Delay(Duration::from_secs(2))
+        } else {
+            Verdict::Pass
+        }
+    }));
+    std::thread::scope(|sc| {
+        let (cancel, h) = hanging_dial(sc, &r.a, r.b.id());
+        let mut la = Log::default();
+        assert!(
+            la.wait(&r.a.ep, LONG, attempt_to(AttemptPhase::Handshaking))
+                .is_some()
+        );
+        let info = info_in(&r.a, AttemptPhase::Handshaking);
+        let pair = info.attempt.handshake_pair.expect("address pair");
+        assert_eq!(Some(pair.remote), info.remote_candidate.map(|c| c.addr));
+        assert_eq!(pair.local, info.local_bind);
+        let left = info.attempt.handshake_deadline_in.expect("deadline");
+        assert!(left <= Duration::from_millis(5000), "{left:?}");
+        assert!(info.attempt.candidates.is_empty(), "{info:?}");
         cancel.cancel();
         let _ended = h.join();
     });

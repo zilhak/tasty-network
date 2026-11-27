@@ -1,6 +1,7 @@
 //! Connection attempts: the dialer (A) and the acceptor (B) of docs/design/p2p.md "펀칭 절차"
 //! 1–11, "재시도와 포기" and the "연결 시도와 연결" state table.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use crate::conn::{ConnInner, P2pCancel};
 use crate::endpoint::{AcceptSession, Core, Incoming, PunchKey, PunchSignal, RequestOutcome, lock};
 use crate::error::P2pConnectError;
 use crate::events::{AttemptPhase, Cause, CauseDetail, EndpointPhase};
-use crate::info::{AppliedSetting, NatInfo, Side, Tracked};
+use crate::info::{AddressPair, AppliedSetting, NatInfo, Side, Tracked};
 use crate::probe;
 use crate::server::{TlsStage, tls_stage};
 use crate::settings::{P2pParams, Source, Value};
@@ -84,6 +85,7 @@ fn applied(core: &Core, go: &PunchGo, l: &Limits) -> Vec<AppliedSetting> {
         .into_iter()
         .filter(|e| {
             e.key.starts_with("punch.")
+                || e.key.starts_with("socket.")
                 || e.key.starts_with("quic.")
                 || e.key.starts_with("nat.")
                 || e.key.starts_with("path.")
@@ -223,6 +225,17 @@ fn refused(reason: RefuseReason) -> Fail {
 
 fn cancelled(reason: CancelReason) -> Cause {
     Cause::with("punch_cancelled", CauseDetail::Cancel(reason))
+}
+
+/// B takes a handshake from `remote`: `Handshaking` with its addresses and deadline.
+fn handshaking(core: &Core, t: &Tracked, remote: SocketAddr, limit: Duration) {
+    let pair = AddressPair {
+        local: core.io.local_addr().ok(),
+        remote,
+    };
+    let deadline = Instant::now() + limit;
+    t.update(|r| r.handshake = Some((pair, deadline.into_std())));
+    t.to(AttemptPhase::Handshaking, Cause::named("quic_incoming"));
 }
 
 /// The end of a connection attempt at its bound: the cause of the phase it was in, the error
@@ -505,8 +518,12 @@ async fn punch_once(
         () = tokio::time::sleep_until(start) => {}
         r = next_cancel(&mut signals) => return Err(on_cancel(r)),
     }
-    t.to(AttemptPhase::Punching, Cause::named("start_elapsed"));
     let window_end = start + Duration::from_millis(go.window_ms);
+    t.update(|r| {
+        r.probe = Some(session.clone());
+        r.window_end_at = Some(window_end.into_std());
+    });
+    t.to(AttemptPhase::Punching, Cause::named("start_elapsed"));
     let found = tokio::select! {
         f = probe::run(&core.router, &core.io, &session, p.probe_interval, window_end, true) => f,
         r = next_cancel(&mut signals) => return Err(on_cancel(r)),
@@ -515,7 +532,15 @@ async fn punch_once(
         result(core, (generation, go.punch_id), Some(ResultReason::Timeout));
         return Err((mode, Retry::Again(Cause::named("punch_window_elapsed"))));
     };
-    t.update(|r| r.info.remote_candidate = Some(found));
+    let pair = AddressPair {
+        local: core.io.local_addr().ok(),
+        remote: found.addr,
+    };
+    let deadline = Instant::now() + Duration::from_millis(go.handshake_ms);
+    t.update(|r| {
+        r.info.remote_candidate = Some(found);
+        r.handshake = Some((pair, deadline.into_std()));
+    });
     t.to(
         AttemptPhase::Handshaking,
         Cause::with("probe_succeeded", CauseDetail::Peer(found.addr)),
@@ -698,6 +723,10 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
             return;
         }
     }
+    t.update(|r| {
+        r.probe = Some(session.clone());
+        r.window_end_at = Some(window_end.into_std());
+    });
     t.to(AttemptPhase::Punching, Cause::named("start_elapsed"));
     let probes = {
         let (router, io, session) = (core.router.clone(), core.io.clone(), session.clone());
@@ -710,10 +739,10 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
     loop {
         tokio::select! {
             inc = incoming.recv() => match inc {
-                Some(Incoming::Started) => {
+                Some(Incoming::Started(addr)) => {
                     pending += 1;
                     if t.phase() == AttemptPhase::Punching {
-                        t.to(AttemptPhase::Handshaking, Cause::named("quic_incoming"));
+                        handshaking(&core, &t, addr, session.handshake);
                     }
                 }
                 Some(Incoming::Ended) => pending = pending.saturating_sub(1),
@@ -734,7 +763,8 @@ pub(crate) async fn accept(core: Arc<Core>, generation: u64, punch_id: u64, from
                 Some(Incoming::Established(conn)) => {
                     probes.abort();
                     if t.phase() == AttemptPhase::Punching {
-                        t.to(AttemptPhase::Handshaking, Cause::named("quic_incoming"));
+                        let addr = crate::socket::canonical(conn.remote_address());
+                        handshaking(&core, &t, addr, session.handshake);
                     }
                     if !core.pairing.is_paired(&from) {
                         conn.close(

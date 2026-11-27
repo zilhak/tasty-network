@@ -112,8 +112,8 @@ pub(crate) enum PunchSignal {
 /// What the accept loop tells an acceptor's session.
 #[derive(Debug)]
 pub(crate) enum Incoming {
-    /// A QUIC handshake from a session address began.
-    Started,
+    /// A QUIC handshake from this session address began.
+    Started(SocketAddr),
     /// One of those handshakes ended without a connection for this session.
     Ended,
     /// One of those handshakes failed, and this session was the only one its address fitted:
@@ -869,7 +869,7 @@ async fn accept_loop(core: Arc<Core>) {
         let core = core.clone();
         tokio::spawn(async move {
             for s in &matching {
-                let _sent = s.to.send(Incoming::Started).is_ok();
+                let _sent = s.to.send(Incoming::Started(addr)).is_ok();
             }
             let limit = matching
                 .iter()
