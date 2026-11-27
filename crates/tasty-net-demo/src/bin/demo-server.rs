@@ -340,14 +340,17 @@ fn hold(
     held: &Held,
 ) -> (String, ChannelWriter) {
     match reader.read_frame() {
-        Ok(frame) if frame.tag == StreamTag::Control => emit(&format!(
-            "server control client={client} {}",
-            String::from_utf8_lossy(&frame.payload)
-        )),
+        Ok(frame) if frame.tag == StreamTag::Control => {
+            // Held before the line goes out: a `send` that follows the line finds the link.
+            lock(held).push((client, writer));
+            emit(&format!(
+                "server control client={client} {}",
+                String::from_utf8_lossy(&frame.payload)
+            ));
+        }
         Ok(_) => return ("protocol".into(), writer),
         Err(error) => return (failure_name(error.failure()).into(), writer),
     }
-    lock(held).push((client, writer));
     let end = loop {
         match reader.read_frame() {
             Ok(frame) => match frame.tag {
