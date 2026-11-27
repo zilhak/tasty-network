@@ -14,7 +14,8 @@
 //!
 //! With no matching answer before the timeout it prints `stun-probe server=<addr> result=timeout`
 //! and exits 1. A datagram longer than the largest answer of this subset is not read as an
-//! answer: it prints `stun-probe server=<addr> result=oversize len=<bytes>` and exits 1. A wrong
+//! answer: it prints `stun-probe server=<addr> result=oversize` and exits 1, on every OS (Linux
+//! and macOS cut such a datagram to the buffer, Windows reports `WSAEMSGSIZE`). A wrong
 //! argument exits 2. Packets that are not the answer to this request (another transaction ID,
 //! not STUN, a request) are skipped and counted in the timeout line.
 
@@ -30,9 +31,20 @@ const USAGE: &str = "usage: stun_probe <host:port> <timeout ms>";
 /// IPv6 XOR-MAPPED-ADDRESS (docs/design/rendezvous.md "포트와 전송", 크기와 증폭).
 const MAX_ANSWER: usize = 44;
 
-/// The receive buffer, larger than [`MAX_ANSWER`] so that a longer datagram is seen as longer
-/// (a datagram cut to the buffer still reads as at least this many bytes).
+/// The receive buffer, larger than [`MAX_ANSWER`] so that a longer datagram is seen as longer.
+/// A datagram larger than the buffer is cut to it on Linux and macOS (the length read is the
+/// buffer's) and is a `WSAEMSGSIZE` receive error on Windows; both are [`Outcome::Oversize`].
 const RECV_BUFFER: usize = 1500;
+
+/// Whether a receive error means the datagram was larger than the buffer: Windows gives
+/// `WSAEMSGSIZE` for it instead of a cut datagram. Unix has no such error for `recv`.
+fn receive_error_is_oversize(e: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    let too_large = Some(windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE);
+    #[cfg(not(windows))]
+    let too_large: Option<i32> = None;
+    too_large.is_some() && e.raw_os_error() == too_large
+}
 
 /// How a probe ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,7 +57,7 @@ enum Outcome {
     /// No answer before the deadline; `skipped` packets were not the answer.
     Timeout { skipped: u32 },
     /// A datagram longer than [`MAX_ANSWER`] came; it is not read as an answer.
-    Oversize { len: usize },
+    Oversize,
 }
 
 /// The deadline `timeout` from now, or `None` when it does not fit the clock.
@@ -92,10 +104,11 @@ fn probe(server: SocketAddr, deadline: Instant) -> Result<Outcome, String> {
             {
                 continue;
             }
+            Err(e) if receive_error_is_oversize(&e) => return Ok(Outcome::Oversize),
             Err(e) => return Err(format!("receive from {server}: {e}")),
         };
         if n > MAX_ANSWER {
-            return Ok(Outcome::Oversize { len: n });
+            return Ok(Outcome::Oversize);
         }
         let answer = buf
             .get(..n)
@@ -142,8 +155,8 @@ fn main() -> ExitCode {
             println!("stun-probe server={server} result=timeout skipped={skipped}");
             ExitCode::FAILURE
         }
-        Ok(Outcome::Oversize { len }) => {
-            println!("stun-probe server={server} result=oversize len={len}");
+        Ok(Outcome::Oversize) => {
+            println!("stun-probe server={server} result=oversize");
             ExitCode::FAILURE
         }
         Err(e) => {
@@ -202,18 +215,16 @@ mod tests {
 
     #[test]
     fn a_datagram_longer_than_the_largest_answer_is_not_an_answer() {
-        // A valid answer followed by more bytes: cut to its first bytes it would parse, so the
-        // probe must refuse it by its length, not by the codec.
+        // A valid answer followed by more bytes than the buffer holds. Linux and macOS cut it to
+        // the buffer, whose first bytes would parse, so the probe must refuse it by its length,
+        // not by the codec; Windows reports WSAEMSGSIZE. The outcome is the same on every OS.
         let server = fake_server(|txid| {
             let mut answer = stun::binding_success(txid, "127.0.0.1:4000".parse().unwrap(), None);
             answer.resize(RECV_BUFFER + 100, 0);
             answer
         });
         let outcome = probe(server, soon()).unwrap();
-        assert!(
-            matches!(outcome, Outcome::Oversize { len } if len > MAX_ANSWER),
-            "{outcome:?}"
-        );
+        assert_eq!(outcome, Outcome::Oversize);
     }
 
     #[test]
@@ -224,12 +235,7 @@ mod tests {
             answer
         });
         let outcome = probe(server, soon()).unwrap();
-        assert_eq!(
-            outcome,
-            Outcome::Oversize {
-                len: MAX_ANSWER + 1
-            }
-        );
+        assert_eq!(outcome, Outcome::Oversize);
     }
 
     #[test]
