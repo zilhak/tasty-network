@@ -64,6 +64,13 @@ impl EndState {
 
 type CloseHook = Box<dyn Fn() + Send + Sync>;
 
+/// A channel's record that the end of its parent link also ends: the channel's own end
+/// closes it, the parent holds it weakly and drops it when it is gone.
+pub(crate) trait ChildEnd: Send + Sync {
+    /// The parent link ended (its closer is `parent`).
+    fn parent_ended(&self, parent: &CloserWatch);
+}
+
 /// The consumer's registration guard of a bulk channel, shared by the channel and its parent:
 /// whichever ends first drops it.
 pub(crate) type GuardSlot = Mutex<Option<Box<dyn Any + Send>>>;
@@ -80,6 +87,9 @@ struct CloserInner {
     /// Run once when the link ends: the first forced close or the normal end (the bulk
     /// credential revocation of an attach link).
     hooks: Mutex<Vec<CloseHook>>,
+    /// The end records of the channels under the link, held weakly: a channel whose own end
+    /// ran drops out here, instead of living as long as the parent link.
+    child_ends: Mutex<Vec<Weak<dyn ChildEnd>>>,
     /// The link ended (forced or normal); no channel is adopted any more.
     ended: AtomicBool,
     /// A read of the link failed before anything ended it here: the peer or the path went
@@ -116,6 +126,7 @@ impl LinkCloser {
                 channels: Mutex::new(Vec::new()),
                 guards: Mutex::new(Vec::new()),
                 hooks: Mutex::new(Vec::new()),
+                child_ends: Mutex::new(Vec::new()),
                 ended: AtomicBool::new(false),
                 lost_seen: AtomicBool::new(false),
             }),
@@ -166,6 +177,39 @@ impl LinkCloser {
         hooks.push(hook);
     }
 
+    /// Tells `child` when this link ends, unless it is gone by then. A link that already
+    /// ended tells it at once. Records of channels that are gone are dropped here.
+    pub(crate) fn on_end_of_child(&self, child: &Arc<dyn ChildEnd>) {
+        let mut children = lock(&self.inner.child_ends);
+        if self.has_ended() {
+            drop(children);
+            child.parent_ended(&self.watch());
+            return;
+        }
+        children.retain(|c| c.strong_count() > 0);
+        children.push(Arc::downgrade(child));
+    }
+
+    /// How many child end records the closer holds, gone ones included.
+    #[cfg(test)]
+    pub(crate) fn child_end_count(&self) -> usize {
+        lock(&self.inner.child_ends).len()
+    }
+
+    /// How many end hooks the closer holds.
+    #[cfg(test)]
+    pub(crate) fn hook_count(&self) -> usize {
+        lock(&self.inner.hooks).len()
+    }
+
+    /// Tells the live child end records that the link ended.
+    fn end_children(&self, children: Vec<Weak<dyn ChildEnd>>) {
+        let watch = self.watch();
+        for child in children.iter().filter_map(Weak::upgrade) {
+            child.parent_ended(&watch);
+        }
+    }
+
     /// A handle that reads the end reason without keeping the closer alive.
     pub(crate) fn watch(&self) -> CloserWatch {
         CloserWatch(Arc::downgrade(&self.inner))
@@ -193,7 +237,7 @@ impl LinkCloser {
     /// arrive), force closes the bulk channels still open under the link, and runs the end
     /// hooks, without raising a reason (docs/design/transport.md "P2P의 닫기 범위").
     pub(crate) fn end_normally(&self) {
-        let hooks = self.mark_ended(None);
+        let (hooks, children) = self.mark_ended(None);
         if let Some(first) = self.inner.first.upgrade()
             && let Err(error) = first.shutdown_write()
         {
@@ -206,22 +250,25 @@ impl LinkCloser {
         for hook in hooks {
             hook();
         }
+        self.end_children(children);
     }
 
-    /// Marks the link ended (raising `reason` if any) under the locks `adopt` and `on_end`
-    /// read the state under, and takes the hooks. A channel or hook added alongside is either
-    /// in the lists or handled by its caller.
-    fn mark_ended(&self, reason: Option<EndReason>) -> Vec<CloseHook> {
+    /// Marks the link ended (raising `reason` if any) under the locks `adopt`, `on_end` and
+    /// `on_end_of_child` read the state under, and takes the hooks and the child end records.
+    /// A channel, hook or record added alongside is either in the lists or handled by its
+    /// caller.
+    fn mark_ended(&self, reason: Option<EndReason>) -> (Vec<CloseHook>, Vec<Weak<dyn ChildEnd>>) {
         let channels = lock(&self.inner.channels);
         let guards = lock(&self.inner.guards);
         let mut hooks = lock(&self.inner.hooks);
+        let mut children = lock(&self.inner.child_ends);
         if let Some(reason) = reason {
             self.inner.end.raise(reason);
         }
         self.inner.ended.store(true, Ordering::Release);
         drop(guards);
         drop(channels);
-        std::mem::take(&mut *hooks)
+        (std::mem::take(&mut *hooks), std::mem::take(&mut *children))
     }
 
     /// Raises the reason. A lower reason never replaces a higher one, and a settled reason
@@ -249,12 +296,13 @@ impl LinkCloser {
     /// are blocked on them (on Windows this cancels the pending socket I/O too). Calling it
     /// again only raises the reason and wakes again.
     pub fn force_close(&self, reason: EndReason) {
-        let hooks = self.mark_ended(Some(reason));
+        let (hooks, children) = self.mark_ended(Some(reason));
         self.wake();
         self.drop_guards();
         for hook in hooks {
             hook();
         }
+        self.end_children(children);
     }
 
     /// Closes every channel both ways and wakes blocked reads, without raising a reason.

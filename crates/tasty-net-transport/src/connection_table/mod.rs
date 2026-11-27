@@ -17,7 +17,7 @@ pub use info::{
     Via,
 };
 
-use crate::end::{EndReason, LinkCloser};
+use crate::end::{ChildEnd, EndReason, LinkCloser};
 use crate::link::{LinkTimeouts, PeerInfo};
 use crate::link_id::LinkId;
 use crate::lock::lock;
@@ -632,7 +632,8 @@ fn on_end(closer: &LinkCloser, f: impl FnOnce(Cause) + Send + 'static) {
 
 /// [`on_end`] for a channel under the link of `parent`: the parent's end closes the channel
 /// without ending its own closer (a consumer may still hold it), so it also runs `f`, with
-/// the parent's cause. The parent holds the mark weakly and so does not keep it.
+/// the parent's cause. The parent holds the mark weakly and drops its record once the
+/// channel's own end ran.
 fn on_end_under(
     closer: &LinkCloser,
     parent: Option<&LinkCloser>,
@@ -643,13 +644,7 @@ fn on_end_under(
         watch: closer.watch(),
     });
     if let Some(parent) = parent {
-        let weak = Arc::downgrade(&mark);
-        let watch = parent.watch();
-        parent.on_end(Box::new(move || {
-            if let Some(mark) = weak.upgrade() {
-                mark.fire_by(&watch);
-            }
-        }));
+        parent.on_end_of_child(&(Arc::clone(&mark) as Arc<dyn ChildEnd>));
     }
     closer.on_end(Box::new(move || mark.fire()));
 }
@@ -683,8 +678,67 @@ impl EndMark {
     }
 }
 
+impl ChildEnd for EndMark {
+    fn parent_ended(&self, parent: &crate::end::CloserWatch) {
+        self.fire_by(parent);
+    }
+}
+
 impl Drop for EndMark {
     fn drop(&mut self) {
         self.fire();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::memory_channel_pair;
+
+    fn closer() -> LinkCloser {
+        let (a, _b) = memory_channel_pair();
+        LinkCloser::new(a.control())
+    }
+
+    /// Bulk channels opened and closed one after another under one parent link leave no
+    /// growing list of end records or hooks on the parent.
+    #[test]
+    fn closed_channels_leave_no_end_records_on_their_parent() {
+        let parent = closer();
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..8 {
+            let child = closer();
+            // As the accepting side registers a bulk channel: its count and its entry.
+            for _ in 0..2 {
+                let ended = Arc::clone(&ended);
+                on_end_under(&child, Some(&parent), move |cause| {
+                    lock(&ended).push(cause);
+                });
+            }
+            child.force_close(EndReason::Forced);
+            drop(child);
+            assert!(
+                parent.child_end_count() <= 2,
+                "{} records",
+                parent.child_end_count()
+            );
+            assert_eq!(parent.hook_count(), 0);
+        }
+        assert_eq!(
+            lock(&ended).len(),
+            16,
+            "each channel's own end ran its records"
+        );
+
+        // A channel still open when the parent ends hears it, with the parent's cause.
+        let child = closer();
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&ended);
+        on_end_under(&child, Some(&parent), move |cause| lock(&seen).push(cause));
+        parent.force_close(EndReason::Forced);
+        assert_eq!(*lock(&ended), [Cause::ClosedHere]);
+        assert_eq!(parent.child_end_count(), 0);
+        drop(child);
+        assert_eq!(lock(&ended).len(), 1, "the record ran once");
     }
 }
