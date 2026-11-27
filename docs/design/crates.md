@@ -126,5 +126,5 @@ frame, ssh-config, identity ─> (없음)
 | P2P 어댑터 위 채널 시험(한 스트림 안 순서, 닫기 범위, 첫 스트림 거절 ACK 전달, 양방향 마지막 프레임 전달) | `tasty-net-transport`의 `tests/`(p2p가 정식 의존이다) |
 | 실제 `ssh`·`sshd`와 별도 OS 프로세스 두 개를 쓰는 시험 | `crates/tasty-net-demo/tests/ssh_attach.rs`, `ssh_reverse_attach.rs` |
 | 별도 OS 프로세스 두 개의 P2P 시험 | `crates/tasty-net-demo/tests/p2p_attach.rs` |
-| rendezvous 서버 설정 검사와 STUN 응답 확인 | `rendezvous/check-config.sh`(CI workflow `rendezvous.yml`) |
+| rendezvous 서버 설정 검사와 STUN 응답 확인 | `rendezvous/check-config.sh`(CI workflow `rendezvous.yml`). STUN 질의는 `tasty-net-rendezvous`의 `examples/stun_probe.rs`가 이 크레이트의 STUN 코덱으로 보낸다 |
 | 같은 망 안에서 실제 서버 프로세스를 거치는 연결 확인 | `rendezvous/container-check.sh`(원격 빌드 환경, D5 (b)) |

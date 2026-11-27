@@ -221,7 +221,7 @@ quinn·rustls의 값(QUIC 손실 복구 등)은 기기 쪽과 같은 항목을 �
 
 ## 배포 형태
 
-- 이 레포에 둘 것: `rendezvous/`. `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시, `advertise.*` 포함), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인), `container-check.sh`(이미지로 띄운 서버에 같은 망의 기기 두 대를 붙이는 확인, D5 (b)), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 광고 주소, 두 번째 IP).
+- 이 레포에 둘 것: `rendezvous/`. `Dockerfile`(이 레포 소스를 태그 기준으로 빌드하는 다단계 이미지, 비root 사용자), `rendezvous.toml`(설정 예시, `advertise.*` 포함), `compose.yaml`(UDP 3478·3479 게시), `check-config.sh`(설정 검사와 STUN 응답 확인. STUN 질의는 이 크레이트의 예제 `stun_probe`로 보내 외부 STUN 클라이언트를 쓰지 않는다), `container-check.sh`(이미지로 띄운 서버에 같은 망의 기기 두 대를 붙이는 확인, D5 (b)), `README.md`(자체 운영 안내: 서버 키 만들기, 공개키 배포, 방화벽, 광고 주소, 두 번째 IP).
 - 외부 이미지를 쓰지 않는다. 바이너리는 이 workspace의 `tasty-rendezvous`이고, 판은 workspace 버전을 따른다([버전·호환](versioning.md)).
 - 서버 키 파일은 설정한 경로에 둔다. 파일 권한은 기기 키와 같은 규칙을 쓴다([기기 키·토큰](identity.md)). `keygen --dir`의 없는 디렉터리는 CLI가 미리 만들지 않고 identity의 키 파일 함수가 만든다(Unix에서 새로 만드는 중간 디렉터리까지 0700).
 - 컨테이너에서는 듣는 주소가 컨테이너 안 주소이므로 `advertise.*`를 반드시 준다(위 "광고 주소와 바인딩 주소").
