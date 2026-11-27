@@ -291,3 +291,65 @@ fn applied_options_show_which_value_wins() {
         "ssh.connect_timeout (ConnectTimeout) = 60 (target)"
     );
 }
+
+/// The target's ConnectTimeout is read in the OpenSSH time format. `none` leaves it to the
+/// launcher (with the launcher's source), and a value that cannot be read is shown as written
+/// while discovery classifies with the launcher value.
+#[test]
+fn the_target_connect_timeout_is_read_like_openssh() {
+    use crate::{connect_timeout_for, parse_openssh_time};
+    let mut configured = SshSettings::new();
+    configured.set("ssh.connect_timeout", secs(20)).unwrap();
+    let applied = |settings: &SshSettings, options: &[&str]| {
+        let mut target = SshTarget::parse("host");
+        target.extra_options = options.iter().map(|o| (*o).to_owned()).collect();
+        let launcher = SshLauncher::new("ssh").with_settings(settings.clone());
+        let connect = launcher
+            .applied_options(&target)
+            .into_iter()
+            .find(|o| o.option == "ConnectTimeout")
+            .expect("ConnectTimeout is applied");
+        (
+            connect.value,
+            connect.source.to_string(),
+            connect_timeout_for(settings, &target),
+        )
+    };
+    let d = Duration::from_secs;
+    let defaults = SshSettings::default();
+    for (options, value, source, bound) in [
+        (&["ConnectTimeout=1m"][..], "1m", "target", d(60)),
+        (&["ConnectTimeout 1m30s"][..], "1m30s", "target", d(90)),
+        (&["connecttimeout=90"][..], "90", "target", d(90)),
+        (&["ConnectTimeout=1H"][..], "1H", "target", d(3600)),
+        (&["ConnectTimeout=none"][..], "10", "default", d(10)),
+        (
+            &["ConnectTimeout=none", "ConnectTimeout=5"][..],
+            "5",
+            "target",
+            d(5),
+        ),
+        (&["ConnectTimeout=ten"][..], "ten", "target", d(10)),
+        (&["ConnectTimeout=0"][..], "0", "target", Duration::MAX),
+    ] {
+        assert_eq!(
+            applied(&defaults, options),
+            (value.to_owned(), source.to_owned(), bound),
+            "{options:?}"
+        );
+    }
+    assert_eq!(
+        applied(&configured, &["ConnectTimeout=none"]),
+        ("20".to_owned(), "configured".to_owned(), d(20))
+    );
+    assert_eq!(
+        applied(&configured, &["ConnectTimeout=1x"]),
+        ("1x".to_owned(), "target".to_owned(), d(20))
+    );
+    // The format itself.
+    assert_eq!(parse_openssh_time("1w2d3h4m5s"), Some(d(788_645)));
+    assert_eq!(parse_openssh_time("1m30"), Some(d(90)));
+    for refused in ["", "m", "1.5", "-1", "1 m", "99999999999"] {
+        assert_eq!(parse_openssh_time(refused), None, "{refused:?}");
+    }
+}

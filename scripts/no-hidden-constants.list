@@ -233,6 +233,15 @@ allow	crates/tasty-net-ssh/src/discovery.rs	-> [String; 2]	명시 경로 명령�
 allow	crates/tasty-net-ssh/src/discovery.rs	const AUTO_FALLBACK_CHAIN: [PortMode; 3] = [PortMode::Subcommand, PortMode::FileUnix, PortMode::FileWindows,]	Auto 사슬의 세 단계
 allow	crates/tasty-net-ssh/src/discovery.rs	const PRIORITY: [PortDiscoveryFailureKind; 6] = [PortDiscoveryFailureKind::Cancelled, PortDiscoveryFailureKind::RemoteInstanceExited, PortDiscoveryFailureKind::TimedOut, PortDiscoveryFailureKind::SshConnectionFailed, PortDiscoveryFailureKind::RemoteInstanceNotRunning, PortDiscoveryFailureKind::PortParseFailed,]	실패 분류 여섯의 대표 순서
 allow	crates/tasty-net-ssh/src/lib.rs	&path[1..]	앞의 ~ 한 글자를 뗀다
+allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_MINUTE: u64 = 60	OpenSSH 시간 형식의 단위 m
+allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE	OpenSSH 시간 형식의 단위 h
+allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR	OpenSSH 시간 형식의 단위 d
+allow	crates/tasty-net-ssh/src/lib.rs	const SECS_PER_WEEK: u64 = 7 * SECS_PER_DAY	OpenSSH 시간 형식의 단위 w
+allow	crates/tasty-net-ssh/src/lib.rs	total: u64 = 0	OpenSSH 시간 형식: 합은 0에서 시작
+allow	crates/tasty-net-ssh/src/lib.rs	's' => 1	OpenSSH 시간 형식의 단위 s
+allow	crates/tasty-net-ssh/src/lib.rs	add(&mut digits, 1)	OpenSSH 시간 형식: 단위 없는 끝 숫자는 초
+allow	crates/tasty-net-ssh/src/lib.rs	i32::MAX	OpenSSH 시간 형식: convtime이 받는 최대 초(INT_MAX)
+allow	crates/tasty-net-ssh/src/lib.rs	=> Duration::MAX	OpenSSH: ConnectTimeout 0은 기한 없음이라 시간으로 분류하지 않는다
 allow	crates/tasty-net-ssh/src/listener.rs	[0u8; 4096]	파이프를 한 번에 읽는 버퍼(읽는 단위이지 상한이 아니다)
 allow	crates/tasty-net-ssh/src/listener.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
 allow	crates/tasty-net-ssh/src/listener.rs	baseline = 0	시험용 판정 핸들: 판정 전에 본 거절 줄은 없다

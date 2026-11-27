@@ -175,10 +175,10 @@ const CONNECT_TIMEOUT_OPTION: &str = "ConnectTimeout";
 const SERVER_ALIVE_INTERVAL_OPTION: &str = "ServerAliveInterval";
 const SERVER_ALIVE_COUNT_MAX_OPTION: &str = "ServerAliveCountMax";
 
-/// The value of the first option `name` in the target's extra options (`Key=Value` or
-/// `Key Value`; ssh compares option names without case), as ssh would read it.
-fn target_option<'a>(target: &'a SshTarget, name: &str) -> Option<&'a str> {
-    target.extra_options.iter().find_map(|opt| {
+/// The values of the options `name` in the target's extra options, in order (`Key=Value` or
+/// `Key Value`; ssh compares option names without case).
+fn target_options<'a>(target: &'a SshTarget, name: &'a str) -> impl Iterator<Item = &'a str> {
+    target.extra_options.iter().filter_map(move |opt| {
         let opt = opt.trim();
         let split = opt.find(|c: char| c == '=' || c.is_whitespace())?;
         let (key, rest) = opt.split_at(split);
@@ -187,13 +187,79 @@ fn target_option<'a>(target: &'a SshTarget, name: &str) -> Option<&'a str> {
     })
 }
 
-/// The connect timeout ssh runs with for `target`: the target's own whole-second
-/// `ConnectTimeout` if it has one, otherwise `ssh.connect_timeout`. Port discovery classifies a
-/// slow connection failure with it.
+/// The `none` of an OpenSSH time option: it leaves the option unset, so a later value sets it.
+const OPENSSH_UNSET: &str = "none";
+const SECS_PER_MINUTE: u64 = 60;
+const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
+const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
+const SECS_PER_WEEK: u64 = 7 * SECS_PER_DAY;
+
+/// A time in the OpenSSH time format (`convtime`): numbers, each followed by a unit `s`, `m`,
+/// `h`, `d` or `w` (either case) or by nothing (seconds), written one after another (`1m30s`,
+/// `90`). OpenSSH refuses a total above `i32::MAX` seconds; so does this.
+pub(crate) fn parse_openssh_time(text: &str) -> Option<Duration> {
+    let mut total: u64 = 0;
+    let mut digits = String::new();
+    let mut add = |digits: &mut String, unit: u64| -> Option<()> {
+        let n: u64 = digits.parse().ok()?;
+        digits.clear();
+        total = total.checked_add(n.checked_mul(unit)?)?;
+        Some(())
+    };
+    if text.is_empty() {
+        return None;
+    }
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c.to_ascii_lowercase() {
+            's' => 1,
+            'm' => SECS_PER_MINUTE,
+            'h' => SECS_PER_HOUR,
+            'd' => SECS_PER_DAY,
+            'w' => SECS_PER_WEEK,
+            _ => return None,
+        };
+        add(&mut digits, unit)?;
+    }
+    if !digits.is_empty() {
+        add(&mut digits, 1)?;
+    }
+    (total <= u64::from(i32::MAX.unsigned_abs())).then(|| Duration::from_secs(total))
+}
+
+/// The target's own `ConnectTimeout` as ssh takes it: the first value that is not `none`.
+enum TargetTimeout<'a> {
+    /// The target leaves it to this crate's setting.
+    Unset,
+    /// A value in the OpenSSH time format.
+    Read(&'a str, Duration),
+    /// A value ssh would refuse; it is shown as written and does not classify.
+    Unreadable(&'a str),
+}
+
+fn target_connect_timeout(target: &SshTarget) -> TargetTimeout<'_> {
+    match target_options(target, CONNECT_TIMEOUT_OPTION).find(|v| *v != OPENSSH_UNSET) {
+        None => TargetTimeout::Unset,
+        Some(v) => match parse_openssh_time(v) {
+            Some(d) => TargetTimeout::Read(v, d),
+            None => TargetTimeout::Unreadable(v),
+        },
+    }
+}
+
+/// The connect timeout ssh runs with for `target`: the target's own `ConnectTimeout` if it sets
+/// one that can be read, otherwise `ssh.connect_timeout`. Port discovery classifies a slow
+/// connection failure with it. A `ConnectTimeout` of 0 is no timeout for OpenSSH, so it gives
+/// `Duration::MAX` (no failure is slow enough to be a timeout).
 pub(crate) fn connect_timeout_for(settings: &SshSettings, target: &SshTarget) -> Duration {
-    target_option(target, CONNECT_TIMEOUT_OPTION)
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or_else(|| settings.connect_timeout(), Duration::from_secs)
+    match target_connect_timeout(target) {
+        TargetTimeout::Read(_, d) if d.is_zero() => Duration::MAX,
+        TargetTimeout::Read(_, d) => d,
+        TargetTimeout::Unset | TargetTimeout::Unreadable(_) => settings.connect_timeout(),
+    }
 }
 
 /// Where the value of an ssh option this crate passes comes from, for one target.
@@ -255,14 +321,14 @@ pub(crate) fn applied_options(settings: &SshSettings, target: &SshTarget) -> Vec
         value,
         source: OptionSource::Setting(settings.source(key)),
     };
-    let connect = match target_option(target, CONNECT_TIMEOUT_OPTION) {
-        Some(value) => AppliedOption {
+    let connect = match target_connect_timeout(target) {
+        TargetTimeout::Read(value, _) | TargetTimeout::Unreadable(value) => AppliedOption {
             key: settings::CONNECT_TIMEOUT,
             option: CONNECT_TIMEOUT_OPTION,
             value: value.to_owned(),
             source: OptionSource::Target,
         },
-        None => from_setting(
+        TargetTimeout::Unset => from_setting(
             settings::CONNECT_TIMEOUT,
             CONNECT_TIMEOUT_OPTION,
             settings.connect_timeout().as_secs().to_string(),
