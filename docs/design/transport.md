@@ -143,6 +143,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 - 조회: `SshLauncher::settings().entries()`(항목마다 `{key, value, source}`, 출처 `default`·`configured`)와 `get(키)`.
 - 대상마다의 적용값: 앞의 세 키는 ssh 옵션이 된다. 대상의 `extra_options`에 같은 옵션이 있으면 ssh는 먼저 나온 값을 쓴다. 그래서 `ServerAliveInterval`·`ServerAliveCountMax`는 대상 옵션보다 앞에 넘겨 설정값이 이기고, `ConnectTimeout`은 맨 뒤에 넘겨 대상의 값이 이긴다. `SshLauncher::applied_options(&target)`가 옵션마다 `{key, option, value, source}`를 돌려준다. `source`는 `default`·`configured`(설정값이 쓰인다)나 `target`(대상의 `ConnectTimeout`이 쓰인다)이다. 포트 발견이 느린 연결 실패를 시간 초과로 분류할 때도 이 적용값을 쓴다. 연결 목록의 `applied`에 싣는 일은 transport 쪽이 한다.
 - 나머지 키는 런처 하나에 하나다. 대상마다 다른 값이 필요하면 소비자가 대상마다 런처를 만든다.
+- 간격 키가 기한·상한 키보다 커도 기한과 상한이 이긴다. 모든 대기는 남은 기한으로 자르고, 터널 준비 확인은 기한이 지난 뒤 새로 접속을 시도하지 않는다. `discovery.poll_min`이 `discovery.poll_max`보다 크면 `poll_max`에서 시작한다. `backoff.initial`이 `backoff.max_delay`보다 크면 처음 대기와 `reset` 뒤 대기도 `max_delay`다. 리스너 판정은 거절 줄이 온 시각을 기록해 `tunnel.verdict_grace`가 지난 뒤 온 줄은 세지 않는다. 키 사이의 관계로 설정을 거절하지는 않는다.
 
 | 키 | 기본 | 범위 | 근거 |
 |---|---|---|---|

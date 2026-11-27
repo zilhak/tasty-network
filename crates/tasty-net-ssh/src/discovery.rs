@@ -535,14 +535,15 @@ enum WaitEnd {
 ///
 /// The crate has no async runtime, so it polls `try_wait`. The interval starts at
 /// `discovery.poll_min` (5 ms) and doubles up to `discovery.poll_max` (50 ms): little delay on
-/// the normal path (hundreds of ms), few wakeups on long waits.
+/// the normal path (hundreds of ms), few wakeups on long waits. A `poll_min` above `poll_max`
+/// starts at `poll_max`, and every interval is cut to the time left.
 fn wait_with_timeout(
     owner: &mut ChildOwner,
     deadline: Instant,
     stop: &mut dyn FnMut() -> bool,
     limits: Limits,
 ) -> WaitEnd {
-    let mut nap = limits.poll_min;
+    let mut nap = limits.poll_min.min(limits.poll_max);
     loop {
         if owner.is_cancelled() {
             return WaitEnd::Ended;
@@ -732,7 +733,8 @@ fn exit_after_overflow(
         match child.try_wait() {
             Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) if Instant::now() < until && !cancel_requested() => {
-                std::thread::sleep(limits.poll_min);
+                let left = until.saturating_duration_since(Instant::now());
+                std::thread::sleep(limits.poll_min.min(limits.poll_max).min(left));
             }
             _ => break,
         }
@@ -1335,6 +1337,60 @@ mod tests {
         assert_eq!(judge(&SshSettings::default(), &target), failed);
         target.extra_options = vec!["ConnectTimeout=5".into()];
         assert_eq!(judge(&longer, &target), PortDiscoveryFailureKind::TimedOut);
+    }
+
+    /// A `poll_min` of 1 s with a `poll_max` of 1 ms polls at 1 ms: a child that exits at once
+    /// is seen long before a second.
+    #[test]
+    fn the_first_poll_is_cut_to_the_longest_poll() {
+        let mut l = limits();
+        l.poll_min = Duration::from_secs(1);
+        l.poll_max = Duration::from_millis(1);
+        let child = helper_command("echo:x")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let mut owner = ChildOwner::Local(child);
+        let started = Instant::now();
+        let end = super::wait_with_timeout(
+            &mut owner,
+            started + Duration::from_secs(5),
+            &mut || false,
+            l,
+        );
+        let took = started.elapsed();
+        assert_eq!(end, WaitEnd::Ended);
+        assert!(took < Duration::from_millis(900), "{took:?}");
+        let _reaped = owner.finish("poll").map(|mut c| c.wait());
+    }
+
+    /// After an overflow, a grace of 1 ms with polls of 1 s cuts a running child off after about
+    /// the grace, not the poll.
+    #[test]
+    fn the_overflow_grace_is_not_stretched_by_the_poll() {
+        let mut l = limits();
+        l.overflow_exit_grace = Duration::from_millis(1);
+        l.poll_min = Duration::from_secs(1);
+        l.poll_max = Duration::from_secs(1);
+        let child = helper_command("sleep")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let started = Instant::now();
+        let status = exit_after_overflow(
+            ChildOwner::Local(child),
+            started + Duration::from_secs(30),
+            "overflow",
+            l,
+        )
+        .expect("no cancel");
+        let took = started.elapsed();
+        assert!(status.is_none(), "the kill ended it: {status:?}");
+        assert!(took < Duration::from_millis(500), "{took:?}");
     }
 
     #[test]

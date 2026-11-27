@@ -244,9 +244,10 @@ impl SshTunnel {
         )
     }
 
-    /// Polls the local end every `tunnel.ready_poll` until `tunnel.ready_timeout`, checking the
-    /// deadline and the child's exit between attempts. A single `TcpStream::connect` has no
-    /// timeout of its own.
+    /// Polls the local end every `tunnel.ready_poll` (cut to the time left) until
+    /// `tunnel.ready_timeout`, checking the child's exit and the deadline before each attempt, so
+    /// no attempt starts after the deadline. A single `TcpStream::connect` has no timeout of its
+    /// own.
     fn wait_ready(
         &self,
         stderr_relay: &mut Option<JoinHandle<()>>,
@@ -264,16 +265,18 @@ impl SshTunnel {
                 );
                 return Err(TunnelError::ExitedBeforeReady { status });
             }
-            if TcpStream::connect(("127.0.0.1", self.local_port)).is_ok() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return Err(TunnelError::ReadyTimeout {
                     local_port: self.local_port,
                     waited: ready_timeout,
                 });
             }
-            std::thread::sleep(settings.ready_poll());
+            if TcpStream::connect(("127.0.0.1", self.local_port)).is_ok() {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(settings.ready_poll().min(left));
         }
     }
 
@@ -314,7 +317,8 @@ impl SshTunnel {
     }
 }
 
-/// Waits up to `limit` (`tunnel.stderr_drain_limit`), looking every `poll`, for the relay of an
+/// Waits up to `limit` (`tunnel.stderr_drain_limit`), looking every `poll` (cut to the time
+/// left), for the relay of an
 /// ssh that exited before ready, so its last stderr (an authentication refusal and so on)
 /// reaches the user before the error. The pipe closes when ssh exits, so the relay thread ends
 /// soon. Another process that inherited the pipe (a ProxyCommand and so on) keeps it open, hence
@@ -324,8 +328,12 @@ fn drain_stderr_relay(relay: Option<JoinHandle<()>>, limit: Duration, poll: Dura
         return;
     };
     let deadline = Instant::now() + limit;
-    while !relay.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(poll);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if relay.is_finished() || left.is_zero() {
+            break;
+        }
+        std::thread::sleep(poll.min(left));
     }
     if !relay.is_finished() {
         tracing::debug!("ssh tunnel stderr relay still open after the tunnel exited");
@@ -384,13 +392,15 @@ impl Backoff {
     }
 
     /// Starts at `backoff.initial`, multiplies by `backoff.multiplier`, at most
-    /// `backoff.max_delay`.
+    /// `backoff.max_delay`. The cap holds for every wait: a first wait above it starts (and
+    /// resets) at the cap.
     pub fn from_settings(settings: &SshSettings) -> Self {
-        let min = settings.backoff_initial();
+        let max = settings.backoff_max_delay();
+        let min = settings.backoff_initial().min(max);
         Self {
             cur: min,
             min,
-            max: settings.backoff_max_delay(),
+            max,
             factor: settings.backoff_multiplier(),
         }
     }
@@ -434,6 +444,43 @@ mod tests {
     use super::*;
     use crate::SpawnHook;
     use std::sync::atomic::AtomicUsize;
+
+    /// A first wait above the cap starts, and resets, at the cap.
+    #[test]
+    fn backoff_caps_its_first_and_reset_wait() {
+        use crate::settings::Value;
+        let mut settings = SshSettings::new();
+        settings
+            .set("backoff.initial", Value::Duration(Duration::from_secs(60)))
+            .unwrap()
+            .set(
+                "backoff.max_delay",
+                Value::Duration(Duration::from_millis(1)),
+            )
+            .unwrap();
+        let mut b = Backoff::from_settings(&settings);
+        assert_eq!(b.current(), Duration::from_millis(1));
+        b.advance();
+        assert_eq!(b.current(), Duration::from_millis(1));
+        b.reset();
+        assert_eq!(b.current(), Duration::from_millis(1));
+    }
+
+    /// A drain limit of 100 ms with a poll of 1 s waits about 100 ms for a relay that stays open.
+    #[test]
+    fn the_stderr_drain_waits_the_limit_even_with_a_longer_poll() {
+        let (keep_open, closed) = std::sync::mpsc::channel::<()>();
+        let relay = std::thread::spawn(move || {
+            let _ended = closed.recv_timeout(Duration::from_secs(10));
+        });
+        let limit = Duration::from_millis(100);
+        let started = Instant::now();
+        drain_stderr_relay(Some(relay), limit, Duration::from_secs(1));
+        let took = started.elapsed();
+        drop(keep_open);
+        assert!(took >= limit, "{took:?}");
+        assert!(took < Duration::from_millis(600), "{took:?}");
+    }
 
     /// `backoff.*` give the first wait, the factor and the cap.
     #[test]
@@ -956,6 +1003,37 @@ mod tests {
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
+        }
+
+        /// A ready timeout of 100 ms with a poll of 1 s gives up after about 100 ms, and the
+        /// error says the time it waited.
+        #[test]
+        fn the_ready_wait_is_not_stretched_by_the_poll() {
+            use crate::settings::Value;
+            let ssh = Script::new("never-ready-poll", "#!/bin/sh\nexec sleep 10\n");
+            let mut settings = crate::SshSettings::new();
+            settings
+                .set(
+                    "tunnel.ready_timeout",
+                    Value::Duration(Duration::from_millis(100)),
+                )
+                .unwrap()
+                .set("tunnel.ready_poll", Value::Duration(Duration::from_secs(1)))
+                .unwrap();
+            let launcher = SshLauncher::new(ssh.path()).with_settings(settings);
+            let started = Instant::now();
+            let error = SshTunnel::establish(&launcher, &SshTarget::parse("fake-host"), 45123)
+                .err()
+                .expect("the fake never forwards");
+            let took = started.elapsed();
+            match error {
+                TunnelError::ReadyTimeout { waited, .. } => {
+                    assert_eq!(waited, Duration::from_millis(100));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            assert!(took >= Duration::from_millis(100), "{took:?}");
+            assert!(took < Duration::from_millis(700), "{took:?}");
         }
 
         /// `tunnel.ready_timeout` of the launcher bounds the wait for the local end.

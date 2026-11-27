@@ -233,10 +233,8 @@ allow	crates/tasty-net-ssh/src/discovery.rs	-> [String; 2]	명시 경로 명령�
 allow	crates/tasty-net-ssh/src/discovery.rs	const AUTO_FALLBACK_CHAIN: [PortMode; 3] = [PortMode::Subcommand, PortMode::FileUnix, PortMode::FileWindows,]	Auto 사슬의 세 단계
 allow	crates/tasty-net-ssh/src/discovery.rs	const PRIORITY: [PortDiscoveryFailureKind; 6] = [PortDiscoveryFailureKind::Cancelled, PortDiscoveryFailureKind::RemoteInstanceExited, PortDiscoveryFailureKind::TimedOut, PortDiscoveryFailureKind::SshConnectionFailed, PortDiscoveryFailureKind::RemoteInstanceNotRunning, PortDiscoveryFailureKind::PortParseFailed,]	실패 분류 여섯의 대표 순서
 allow	crates/tasty-net-ssh/src/lib.rs	&path[1..]	앞의 ~ 한 글자를 뗀다
-allow	crates/tasty-net-ssh/src/listener.rs	channel_connect_failures.fetch_add(1,	거절 줄 하나를 센다
 allow	crates/tasty-net-ssh/src/listener.rs	[0u8; 4096]	파이프를 한 번에 읽는 버퍼(읽는 단위이지 상한이 아니다)
 allow	crates/tasty-net-ssh/src/listener.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
-allow	crates/tasty-net-ssh/src/listener.rs	channel_connect_failures.store(1,	시험용 판정 핸들: 거절 줄 하나를 본 것으로 둔다
 allow	crates/tasty-net-ssh/src/listener.rs	baseline = 0	시험용 판정 핸들: 판정 전에 본 거절 줄은 없다
 allow	crates/tasty-net-ssh/src/spawn.rs	const CREATE_NO_WINDOW: u32 = 0x0800_0000	OS: winbase.h의 CREATE_NO_WINDOW
 allow	crates/tasty-net-ssh/src/tunnel.rs	const TUNNEL_FORCED_OPTIONS: [&str; 4] = ["ExitOnForwardFailure=yes", "ControlMaster=no", "ControlPath=none", "ClearAllForwardings=no",]	터널이 강제하는 ssh 옵션 넷
