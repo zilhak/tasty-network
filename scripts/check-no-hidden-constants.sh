@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 숨은 동작값 검사(docs/design/testing.md "설정값 시험", 동작 수준 기준 D10).
-# 대상 소스에서 설정 모듈 밖의 숫자 리터럴과 Duration 상수(Duration::ZERO 등)를 모두 찾는다.
+# 대상 소스에서 설정 모듈 밖의 숫자 리터럴, Duration 상수(Duration::ZERO 등), 정수 타입의
+# 연관 상수(usize::MIN, u16::MAX 등)를 모두 찾는다.
 # 0과 1도 전역 예외가 아니다. 허용은 목록 파일 하나(scripts/no-hidden-constants.list)로만 한다.
 # 같은 검사가 설계 문서 설정 표의 키 집합과 설정 모듈의 항목 목록을 비교한다(값 대조는
 # 크레이트의 defaults_match_design_tables 시험이 한다).
@@ -17,7 +18,8 @@
 #                                         그 설정 파일의 entry("키"·fixed("키" 항목과 비교한다.
 #                                         같은 설정 파일의 table 줄들은 키를 합쳐서 비교한다
 #   allow    <파일> <대상> <이유>          <대상>은 다음 중 하나다
-#              리터럴(예: 20, 0x2112A442)  그 파일의 그 값 리터럴 전부
+#              리터럴(예: 20, 0x2112A442,  그 파일의 그 값 리터럴 전부
+#              u16::MAX)
 #              const NAME = 식             그 이름의 const·static 선언 안의 리터럴(타입 안 길이 포함).
 #              static NAME = 식            식은 선언의 = 오른쪽 식 전체다(연산자·부호·괄호 포함,
 #                                          공백은 토큰 사이 하나로 보고 비교한다). 다르면 위반이다
@@ -75,6 +77,8 @@ PUNCT3 = ("<<=", ">>=", "...", "..=")
 PUNCT2 = ("::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=",
           "%=", "^=", "&=", "|=", "<<", ">>", "..")
 DURATION_CONSTS = {"ZERO", "MAX", "SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"}
+INT_TYPES = {"u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"}
+INT_CONSTS = {"MIN", "MAX"}
 
 
 def tokenize(text):
@@ -270,8 +274,8 @@ def duration_names(toks):
 
 
 def literals(toks):
-    """(위치, 글자, 줄) 목록: 숫자 리터럴과 Duration 상수(별칭 포함). 튜플 첨자(.0)는 빼되
-    ..0은 본다."""
+    """(위치, 글자, 줄) 목록: 숫자 리터럴, Duration 상수(별칭 포함), 정수 타입의 MIN·MAX.
+    튜플 첨자(.0)는 빼되 ..0은 본다."""
     out = []
     names = duration_names(toks)
     for i, (k, t, line) in enumerate(toks):
@@ -282,11 +286,14 @@ def literals(toks):
         elif (k == "ident" and t in DURATION_CONSTS and i >= 2
               and toks[i - 1][1] == "::" and toks[i - 2][1] in names):
             out.append((i, "Duration::" + t, line))
+        elif (k == "ident" and t in INT_CONSTS and i >= 2
+              and toks[i - 1][1] == "::" and toks[i - 2][1] in INT_TYPES):
+            out.append((i, toks[i - 2][1] + "::" + t, line))
     return out
 
 
 def lit_value(text):
-    return text if text.startswith("Duration::") else num_value(text)
+    return text if "::" in text else num_value(text)
 
 
 def decl_spans(toks, keyword, name):
@@ -380,7 +387,7 @@ def decl_expr(toks, keyword, a, b):
     return " , ".join(expr_text(e) for e in exprs) if exprs else None
 
 
-LITERAL = re.compile(r"Duration::[A-Z_]+|0[xob][0-9A-Fa-f_]+[a-z0-9]*|[0-9][0-9_.eE]*[a-z0-9]*")
+LITERAL = re.compile(r"Duration::[A-Z_]+|(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)::(?:MIN|MAX)|0[xob][0-9A-Fa-f_]+[a-z0-9]*|[0-9][0-9_.eE]*[a-z0-9]*")
 
 
 def judge_file(path, text, allows):
@@ -601,6 +608,9 @@ def self_test():
     files["src/alias.rs"] = ("use std::time::Duration as D;\ntype Dur = std::time::Duration;\n"
                              "fn f() -> (D, Dur) { (D::ZERO, Dur::MAX) }\n")
     case("Duration 별칭의 상수", "target\tsrc\n", {"src/alias.rs"}, 2)
+    files["src/intconst.rs"] = "fn f() -> (usize, u16, u8) { (usize::MIN, u16::MAX, u8::MAX) }\n"
+    case("정수 타입의 MIN·MAX는 리터럴이고 허용 줄을 따른다(u16::MAX만 허용)",
+         "target\tsrc\nallow\tsrc/intconst.rs\tu16::MAX\t길이 상한\n", {"src/intconst.rs"}, 2)
     files["src/chain.rs"] = ("use std::time::Duration as D;\ntype Delay = D;\ntype Late = Delay;\n"
                              "fn f() -> (Delay, Late) { (Delay::ZERO, Late::MAX) }\n")
     case("별칭의 별칭(Duration as D → type Delay = D → type Late = Delay)의 상수", "target\tsrc\n",

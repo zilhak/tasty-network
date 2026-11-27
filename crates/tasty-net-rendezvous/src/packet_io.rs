@@ -98,10 +98,11 @@ impl UdpPacketIo {
             state,
             held: Mutex::new(Held {
                 buf: vec![0; COALESCED_MAX],
-                from: SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, u16::MIN)),
-                len: usize::MIN,
-                stride: usize::MIN,
-                pos: usize::MIN,
+                // Nothing held yet.
+                from: SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+                len: 0,
+                stride: 0,
+                pos: 0,
             }),
         })
     }
@@ -151,11 +152,11 @@ impl PacketIo for UdpPacketIo {
                     held.len = meta.len;
                     // Without coalescing the stride is the length.
                     held.stride = match meta.stride {
-                        usize::MIN => meta.len,
+                        0 => meta.len,
                         stride => stride,
                     };
-                    held.pos = usize::MIN;
-                    let got = held.next(buf).unwrap_or((usize::MIN, meta.addr));
+                    held.pos = 0;
+                    let got = held.next(buf).unwrap_or((0, meta.addr));
                     return Poll::Ready(Ok(got));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}

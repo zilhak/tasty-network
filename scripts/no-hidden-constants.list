@@ -18,6 +18,7 @@ allow	crates/tasty-net-rendezvous/src/wire/frame.rs	const FRAME_HEADER_LEN = 4	�
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	declared == 0	와이어 형식: 길이 0 프레임은 형식 오류 (rendezvous.md 프레임)
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	first == 0	읽은 바이트 0은 스트림 끝
 allow	crates/tasty-net-rendezvous/src/wire/frame.rs	[0;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-rendezvous/src/wire/frame.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화(오류 보고의 길이)
 allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const STUN_HEADER_LEN = 20	와이어 형식: STUN 헤더 20 B
 allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const MAGIC_COOKIE = 0x2112_A442	와이어 형식: STUN magic cookie 0x2112A442
 allow	crates/tasty-net-rendezvous/src/wire/stun.rs	const MAGIC_COOKIE_HIGH = 0x2112	와이어 형식: magic cookie 위 16비트(XOR 포트, RFC 8489 §14.2)
@@ -45,6 +46,7 @@ allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	port() == 0	후보 규�
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut taken = 0	세기: 고른 후보 수의 시작
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	let mut dropped = 0	세기: 버린 후보 수의 시작
 allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	+= 1	세기: 하나씩 센다
+allow	crates/tasty-net-rendezvous/src/wire/candidate.rs	usize::MAX	서버 반사 주소 하나는 몫 상한이 없다(목록 길이 1)
 allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_SPKI_PREFIX = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,]	와이어 형식: ed25519 SPKI 앞머리 12 B (RFC 8410)
 allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_PKCS8_V1_PREFIX = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,]	와이어 형식: ed25519 PKCS#8 v1 앞머리 16 B (RFC 8410 §7)
 allow	crates/tasty-net-rendezvous/src/tls.rs	const ED25519_KEY_LEN = 32	와이어 형식: ed25519 키 32 B (RFC 8032)
@@ -57,11 +59,21 @@ allow	crates/tasty-net-rendezvous/src/packet_io.rs	Ok(1)	quinn AsyncUdpSocket::p
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	const COALESCED_MAX = 1 << 16	OS가 받기 한 번에 합치는 최대 64 KiB(Linux GRO·Windows URO 상한, 설정 아님)
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	vec![0;	버퍼를 0으로 채워 만든다
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	meta[0]	받기 한 번의 결과 하나(첨자)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	UNSPECIFIED, 0)	받은 것이 없을 때의 출발 주소 자리(포트 0)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	len: 0	받은 것이 없을 때: 받은 바이트 0
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	stride: 0	받은 것이 없을 때: 조각 크기 0
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	pos: 0	받은 것이 없을 때: 넘긴 바이트 0
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	pos = 0	새로 받았을 때: 넘긴 바이트 0
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	0 =>	quinn RecvMeta::stride 0은 합치지 않은 받기(조각 크기는 길이)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	unwrap_or((0,	길이 0 데이터그램은 빈 조각 하나
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	+= 1	세기: 출처별 STUN 수
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_sub(1,	세기: 등록 전 연결 하나가 빠짐
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	n + 1	세기: 등록 전 연결 하나를 더함
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	[0u8;	버퍼를 0으로 채워 만든다(길이는 u16::MAX)
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	unwrap_or(u32::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-rendezvous/src/server/mod.rs	usize::from(u16::MAX)	UDP 데이터그램 최대 길이 65535 B의 받기 버퍼
 allow	crates/tasty-net-rendezvous/src/server/state.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/state.rs	next_punch_id: 1	punch_id는 1부터 매긴다
 allow	crates/tasty-net-rendezvous/src/server/state.rs	next_conn_id: 1	연결 번호는 1부터 매긴다
@@ -69,5 +81,7 @@ allow	crates/tasty-net-rendezvous/src/server/state.rs	+= 1	세기·번호 매기
 allow	crates/tasty-net-rendezvous/src/server/state.rs	let mut rejected = 0	세기: 버린 호스트 후보 수의 시작
 allow	crates/tasty-net-rendezvous/src/server/state.rs	saturating_add(1)	후보 규칙의 서버 반사 주소 하나(rendezvous.md 후보 주소 규칙)
 allow	crates/tasty-net-rendezvous/src/server/state.rs	/ 2	start_after 식의 절반 RTT (rendezvous.md 서버 상태)
+allow	crates/tasty-net-rendezvous/src/server/state.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화
 allow	crates/tasty-net-rendezvous/src/access.rs	index + 1	오류의 행 번호는 1부터
 allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	skip(1)	argv 첫 칸은 실행 파일 이름
+allow	crates/tasty-net-rendezvous/src/bin/tasty-rendezvous.rs	Id::from_u64(u64::MAX)	span을 만들지 않는 로그 구독자의 자리 ID(0은 쓸 수 없다)
