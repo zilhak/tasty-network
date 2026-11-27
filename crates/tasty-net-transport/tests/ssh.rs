@@ -822,6 +822,10 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
         shared.links
     );
 
+    // The listener of the last case is bound while the first one still is, so the two ports
+    // differ: the old tunnel never reaches it.
+    let other = echo_server(token('a'));
+
     // The far end goes while the tunnel stays shared: each attempt joins it, and its real
     // handshake fails with a retryable error, which the entry keeps until the attempts run out.
     drop(server);
@@ -860,7 +864,6 @@ fn a_redial_that_joins_a_shared_tunnel_settles_after_its_handshake() {
     // The first attempt joins and its handshake fails; the record then names another
     // instance, and the second attempt starts a new tunnel whose link comes up on the same
     // entry.
-    let other = echo_server(token('a'));
     let lost = lose();
     let mut attempts = 0;
     let link = redialer(3)
