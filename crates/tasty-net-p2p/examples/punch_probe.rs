@@ -11,6 +11,8 @@
 //!   --pause <ms>            the wait between two attempts, default 1000
 //!   --probe-interval <ms>   the device setting punch.probe_interval (default: the setting's)
 //!   --timeout <s>           the bound of the whole run, default 600
+//!   --host-ip <ip>          a host address to report besides the ones the endpoint finds
+//!                           (P2pConfig::host_ips), may be given more than once
 //! ```
 //!
 //! Each line has the attempt number, the result, the time from the request to the punch
@@ -19,7 +21,7 @@
 //! carries addresses: when writing it up in a public document, keep only the network kinds
 //! (docs/design/p2p.md "펀칭 실험").
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use tasty_net_p2p::{
 const USAGE: &str = "usage: punch_probe id --key-dir <dir>
        punch_probe --listen --key-dir <dir> --server <addr> --server-key <id> --peer <id> [options]
        punch_probe --dial <id> --key-dir <dir> --server <addr> --server-key <id> [options]
-options: --count <n> --pause <ms> --probe-interval <ms> --timeout <s>";
+options: --count <n> --pause <ms> --probe-interval <ms> --timeout <s> --host-ip <ip>";
 
 /// The default number of attempts.
 const DEFAULT_COUNT: u64 = 10;
@@ -58,6 +60,7 @@ struct Args {
     server: Option<SocketAddr>,
     server_key: Option<DeviceId>,
     peer: Option<DeviceId>,
+    host_ips: Vec<IpAddr>,
     count: Option<u64>,
     pause: Option<Duration>,
     probe_interval: Option<Duration>,
@@ -83,6 +86,11 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--server-key" => a.server_key = Some(id(&value("--server-key")?)?),
             "--peer" => a.peer = Some(id(&value("--peer")?)?),
+            "--host-ip" => {
+                let v = value("--host-ip")?;
+                a.host_ips
+                    .push(v.parse().map_err(|e| format!("--host-ip {v}: {e}"))?);
+            }
             "--count" => a.count = Some(number("--count", &value("--count")?)?),
             "--pause" => {
                 let ms = number("--pause", &value("--pause")?)?;
@@ -122,6 +130,7 @@ fn endpoint(a: &Args, peer: DeviceId) -> Result<P2pEndpoint, String> {
         addr: need(a.server, "--server")?,
         public_key: need(a.server_key, "--server-key")?,
     });
+    config.host_ips = a.host_ips.clone();
     if let Some(p) = a.probe_interval {
         config
             .settings

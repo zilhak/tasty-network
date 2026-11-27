@@ -4,19 +4,20 @@
 //! ```text
 //! p2p_peer id --key-dir <dir>
 //!     make the device key if missing and print the device ID
-//! p2p_peer --listen --key-dir <dir> --server <addr> --server-key <id> --peer <id> [--timeout <s>]
+//! p2p_peer --listen --key-dir <dir> --server <addr> --server-key <id> --peer <id> [--timeout <s>] [--host-ip <ip>]...
 //!     take one connection from the paired peer, echo one stream, wait for the peer to close
-//! p2p_peer --dial <id> --key-dir <dir> --server <addr> --server-key <id> [--message <text>] [--timeout <s>]
+//! p2p_peer --dial <id> --key-dir <dir> --server <addr> --server-key <id> [--message <text>] [--timeout <s>] [--host-ip <ip>]...
 //!     connect to the peer, send the message, check the echo, close
 //! ```
 //!
 //! `--timeout` bounds the whole run (default 60 s); until then the dialer asks again while the
 //! server does not know the peer yet. Each side prints one result line on stdout and exits
 //! with 0 on success. The line names the path (the candidate kind that worked), the local and
-//! remote addresses and the server.
+//! remote addresses and the server. `--host-ip` adds a host address to report besides the ones
+//! the endpoint finds itself (`P2pConfig::host_ips`); it may be given more than once.
 
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -29,8 +30,8 @@ use tasty_net_p2p::{
 };
 
 const USAGE: &str = "usage: p2p_peer id --key-dir <dir>
-       p2p_peer --listen --key-dir <dir> --server <addr> --server-key <id> --peer <id> [--timeout <s>]
-       p2p_peer --dial <id> --key-dir <dir> --server <addr> --server-key <id> [--message <text>] [--timeout <s>]";
+       p2p_peer --listen --key-dir <dir> --server <addr> --server-key <id> --peer <id> [--timeout <s>] [--host-ip <ip>]...
+       p2p_peer --dial <id> --key-dir <dir> --server <addr> --server-key <id> [--message <text>] [--timeout <s>] [--host-ip <ip>]...";
 
 /// The default bound of a run.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -48,6 +49,7 @@ struct Args {
     server: Option<SocketAddr>,
     server_key: Option<DeviceId>,
     peer: Option<DeviceId>,
+    host_ips: Vec<IpAddr>,
     message: Option<String>,
     timeout: Option<Duration>,
 }
@@ -67,6 +69,11 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--server-key" => a.server_key = Some(id(&value("--server-key")?)?),
             "--peer" => a.peer = Some(id(&value("--peer")?)?),
+            "--host-ip" => {
+                let v = value("--host-ip")?;
+                a.host_ips
+                    .push(v.parse().map_err(|e| format!("--host-ip {v}: {e}"))?);
+            }
             "--message" => a.message = Some(value("--message")?),
             "--timeout" => {
                 let v = value("--timeout")?;
@@ -99,6 +106,7 @@ fn endpoint(a: &Args, peer: DeviceId) -> Result<P2pEndpoint, String> {
         addr: need(a.server, "--server")?,
         public_key: need(a.server_key, "--server-key")?,
     });
+    config.host_ips = a.host_ips.clone();
     P2pEndpoint::bind(config).map_err(|e| format!("bind: {e}"))
 }
 

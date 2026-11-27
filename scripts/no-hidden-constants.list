@@ -269,6 +269,8 @@ allow	crates/tasty-net-p2p/src/close.rs	const CODE_CLOSED: u64 = 0	와이어 형
 allow	crates/tasty-net-p2p/src/close.rs	const CODE_NOT_PAIRED: u64 = 1	와이어 형식: 기기 사이 QUIC 종료 코드 1 not_paired (p2p.md 와이어 형식 상수)
 allow	crates/tasty-net-p2p/src/close.rs	const CODE_SESSION_MISMATCH: u64 = 4	와이어 형식: 기기 사이 QUIC 종료 코드 4 session_mismatch (p2p.md 와이어 형식 상수)
 allow	crates/tasty-net-p2p/src/endpoint.rs	wrapping_add(1)	등록 변화 알림 번호를 하나 올림
+allow	crates/tasty-net-p2p/src/endpoint.rs	const ROUTE_PROBE_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)	경로 질의 목적지: IPv6 문서용 주소 2001:db8::1(RFC 3849), 보내지 않는다 (p2p.md 호스트 후보의 IP)
+allow	crates/tasty-net-p2p/src/endpoint.rs	const ROUTE_PROBE_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1)	경로 질의 목적지: IPv4 문서용 주소 192.0.2.1(RFC 5737), 보내지 않는다 (p2p.md 호스트 후보의 IP)
 allow	crates/tasty-net-p2p/src/endpoint.rs	u16::MIN	포트 0: 보내지 않고 경로만 묻는 소켓은 OS가 포트를 고른다
 allow	crates/tasty-net-p2p/src/endpoint.rs	u64::MIN	세기·번호의 시작 0
 allow	crates/tasty-net-p2p/src/endpoint.rs	fetch_add(1,	세기: 사건 하나

@@ -393,15 +393,43 @@ impl fmt::Debug for P2pEndpoint {
     }
 }
 
-/// The local IP the OS uses towards `server`, without sending anything.
-fn route_ip(server: SocketAddr) -> Option<IpAddr> {
-    let any: SocketAddr = match server {
+/// Where the route of the address family the server is not in is asked: a documentation
+/// address of that family (RFC 3849, RFC 5737), never sent to (docs/design/p2p.md "소켓 하나와
+/// 패킷 나누기").
+const ROUTE_PROBE_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+const ROUTE_PROBE_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1);
+
+/// The local IP the OS uses towards `to`, without sending anything.
+fn route_ip(to: SocketAddr) -> Option<IpAddr> {
+    let any: SocketAddr = match to {
         SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, u16::MIN).into(),
         SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, u16::MIN).into(),
     };
     let s = UdpSocket::bind(any).ok()?;
-    s.connect(server).ok()?;
+    s.connect(to).ok()?;
     s.local_addr().ok().map(|a| a.ip())
+}
+
+/// The local IPs of a wildcard socket, one per address family the socket serves: the route
+/// towards the server for its family, and for the other family the route towards a
+/// documentation address of it. A global IPv6 host candidate is found so also with an IPv4
+/// server. The candidate rule drops what may not be sent.
+fn route_ips(server: SocketAddr, local: SocketAddr, dual_stack: bool) -> Vec<IpAddr> {
+    let other: SocketAddr = match server {
+        SocketAddr::V4(_) => (ROUTE_PROBE_V6, server.port()).into(),
+        SocketAddr::V6(_) => (ROUTE_PROBE_V4, server.port()).into(),
+    };
+    // An IPv4 socket serves IPv4 only; an IPv6 one IPv4 too when dual stack.
+    let serves = |a: &SocketAddr| match (local, a) {
+        (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_)) => true,
+        (SocketAddr::V6(_), SocketAddr::V4(_)) => dual_stack,
+        (SocketAddr::V4(_), SocketAddr::V6(_)) => false,
+    };
+    [server, other]
+        .iter()
+        .filter(|a| serves(a))
+        .filter_map(|a| route_ip(*a))
+        .collect()
 }
 
 /// The device IDs of this process's endpoints that are on.
@@ -479,8 +507,8 @@ impl P2pEndpoint {
         let local = io.local_addr().map_err(P2pError::Io)?;
         if !local.ip().is_unspecified() {
             host_ips.push(local.ip());
-        } else if let Some(ip) = route_ip(server.addr) {
-            host_ips.push(ip);
+        } else {
+            host_ips.extend(route_ips(server.addr, local, io.dual_stack()));
         }
         host_ips.dedup();
         let router = Arc::new(StunRouter::default());
@@ -1029,5 +1057,36 @@ mod tests {
         assert!(!moved);
         assert!(chain(&events).is_empty());
         assert_eq!(lock(&reg).phase, Some(EndpointPhase::Off));
+    }
+
+    #[test]
+    fn route_ips_ask_each_family_the_socket_serves() {
+        let local_v6: SocketAddr = "[::]:5000".parse().unwrap();
+        let local_v4: SocketAddr = "0.0.0.0:5000".parse().unwrap();
+        let server: SocketAddr = "127.0.0.1:3478".parse().unwrap();
+        // An IPv4 server: the route towards it, and an IPv6 route asked besides when the
+        // socket is dual stack. Hosts without IPv6 routes give no IPv6 address.
+        let dual = route_ips(server, local_v6, true);
+        assert!(
+            dual.contains(&IpAddr::from(std::net::Ipv4Addr::LOCALHOST)),
+            "{dual:?}"
+        );
+        let other = route_ip(SocketAddr::from((ROUTE_PROBE_V6, 3478)));
+        assert_eq!(
+            dual.iter().any(IpAddr::is_ipv6),
+            other.is_some(),
+            "{dual:?}"
+        );
+        // An IPv4 socket asks IPv4 only, an IPv6-only socket IPv6 only.
+        assert!(
+            route_ips(server, local_v4, false)
+                .iter()
+                .all(IpAddr::is_ipv4)
+        );
+        assert!(
+            route_ips(server, local_v6, false)
+                .iter()
+                .all(IpAddr::is_ipv6)
+        );
     }
 }
