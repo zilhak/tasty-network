@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -245,9 +245,8 @@ impl SshTunnel {
     }
 
     /// Polls the local end every `tunnel.ready_poll` (cut to the time left) until
-    /// `tunnel.ready_timeout`, checking the child's exit and the deadline before each attempt, so
-    /// no attempt starts after the deadline. A single `TcpStream::connect` has no timeout of its
-    /// own.
+    /// `tunnel.ready_timeout` ([`poll_until_ready`]). Each attempt connects with the time left
+    /// as its timeout.
     fn wait_ready(
         &self,
         stderr_relay: &mut Option<JoinHandle<()>>,
@@ -255,28 +254,27 @@ impl SshTunnel {
     ) -> Result<(), TunnelError> {
         let ready_timeout = settings.ready_timeout();
         let deadline = Instant::now() + ready_timeout;
-        loop {
-            let exited = self.lock_child().try_wait().map_err(TunnelError::Wait)?;
-            if let Some(status) = exited {
+        let local = SocketAddr::from((Ipv4Addr::LOCALHOST, self.local_port));
+        let readiness = poll_until_ready(
+            deadline,
+            settings.ready_poll(),
+            || self.lock_child().try_wait().map_err(TunnelError::Wait),
+            |left| TcpStream::connect_timeout(&local, left).is_ok(),
+        )?;
+        match readiness {
+            Readiness::Ready => Ok(()),
+            Readiness::Exited(status) => {
                 drain_stderr_relay(
                     stderr_relay.take(),
                     settings.stderr_drain_limit(),
                     settings.stderr_drain_poll(),
                 );
-                return Err(TunnelError::ExitedBeforeReady { status });
+                Err(TunnelError::ExitedBeforeReady { status })
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(TunnelError::ReadyTimeout {
-                    local_port: self.local_port,
-                    waited: ready_timeout,
-                });
-            }
-            if TcpStream::connect(("127.0.0.1", self.local_port)).is_ok() {
-                return Ok(());
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(settings.ready_poll().min(left));
+            Readiness::TimedOut => Err(TunnelError::ReadyTimeout {
+                local_port: self.local_port,
+                waited: ready_timeout,
+            }),
         }
     }
 
@@ -436,6 +434,39 @@ impl Backoff {
 impl Default for Backoff {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// How the wait for the local end ended ([`poll_until_ready`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    Exited(ExitStatus),
+    TimedOut,
+}
+
+/// Until `deadline`: checks the child's exit, then attempts `connect` with the time left as its
+/// timeout, then sleeps `poll` (cut to the time left). No attempt starts after the deadline, and
+/// a connection counts only when it is made by the deadline, so a late success is a timeout.
+fn poll_until_ready(
+    deadline: Instant,
+    poll: Duration,
+    mut exited: impl FnMut() -> Result<Option<ExitStatus>, TunnelError>,
+    mut connect: impl FnMut(Duration) -> bool,
+) -> Result<Readiness, TunnelError> {
+    loop {
+        if let Some(status) = exited()? {
+            return Ok(Readiness::Exited(status));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(Readiness::TimedOut);
+        }
+        if connect(left) && Instant::now() <= deadline {
+            return Ok(Readiness::Ready);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(poll.min(left));
     }
 }
 
@@ -642,6 +673,34 @@ mod tests {
     /// test binary run as `fake_ssh_forwarder_entry`: it listens on the `-L` local port of real
     /// TCP and forwards to the remote port, or writes ssh's channel failure line if nothing
     /// listens there.
+    /// A connection that is made only after the deadline (one that runs over the time it was
+    /// given) is a timeout, and every attempt gets no more than the time left.
+    #[test]
+    fn a_ready_connection_made_after_the_deadline_is_a_timeout() {
+        let ready = Duration::from_millis(100);
+        let deadline = Instant::now() + ready;
+        let mut given = Vec::new();
+        let readiness = poll_until_ready(
+            deadline,
+            Duration::from_millis(10),
+            || Ok(None),
+            |left| {
+                given.push((Instant::now(), left));
+                std::thread::sleep(left + Duration::from_millis(20));
+                true
+            },
+        )
+        .expect("no wait error");
+        assert_eq!(readiness, Readiness::TimedOut);
+        assert!(!given.is_empty());
+        for (at, left) in &given {
+            assert!(
+                !left.is_zero() && *left <= ready && *at <= deadline,
+                "{left:?}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     mod fake {
         use super::*;
