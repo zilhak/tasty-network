@@ -6,9 +6,10 @@ resolver = "3"
 # One version for every crate in this repository (docs/design/versioning.md).
 version = "0.1.0"
 edition = "2024"
-# Not lower than the minimum of the whole dependency graph: iroh 1.5.0 declares 1.91
-# (docs/design/versioning.md). The pinned toolchain is in rust-toolchain.toml.
-rust-version = "1.91"
+# Not lower than the minimum of the whole dependency graph: russh 0.65.4 (a dev dependency of
+# tasty-net-demo) declares 1.89 (docs/design/versioning.md). The pinned toolchain is in
+# rust-toolchain.toml.
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/zilhak/tasty-network"
 
