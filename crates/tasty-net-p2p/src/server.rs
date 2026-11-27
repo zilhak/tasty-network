@@ -101,6 +101,11 @@ pub(crate) async fn run(core: Arc<Core>) {
         let started = Instant::now();
         let end = session(&core).await;
         clear_registration(&core);
+        // The shutdown sets its flag and reports `Off` before it closes the QUIC endpoint, so a
+        // session that ended with the closing socket's error ends here without a transition.
+        if core.is_shutting_down() {
+            return;
+        }
         let cause = match end {
             End::Shutdown => return,
             End::Stop(c) => {

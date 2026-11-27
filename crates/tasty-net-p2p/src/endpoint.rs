@@ -197,6 +197,11 @@ impl Core {
     pub(crate) fn endpoint_to(&self, to: EndpointPhase, cause: Cause) {
         let from = {
             let mut r = lock(&self.reg);
+            // After the shutdown reported `Off`, `Off` stays the last state: a server loop that
+            // was between two steps when the shutdown began does not move the endpoint again.
+            if r.phase == Some(EndpointPhase::Off) && self.is_shutting_down() {
+                return;
+            }
             let from = r.phase.replace(to);
             r.last_cause = Some(cause.clone());
             from
