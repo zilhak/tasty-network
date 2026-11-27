@@ -905,17 +905,25 @@ mod tests {
         /// waits the whole grace, so `an_empty_remote_port_is_judged_absent_for_that_channel_only`
         /// takes about 5 s longer.
         fn busy_host_settings() -> crate::SshSettings {
-            use crate::settings::Value;
+            let mut settings = busy_host_drain_settings();
+            settings
+                .set(
+                    "tunnel.verdict_grace",
+                    crate::settings::Value::Duration(Duration::from_secs(5)),
+                )
+                .unwrap();
+            settings
+        }
+
+        /// Settings that give only `tunnel.stderr_drain_limit` 5 s, for the early exit tests
+        /// that read the stderr lines of ssh after it exits (see
+        /// [`busy_host_settings`]). The wait ends when the stderr of ssh closes.
+        fn busy_host_drain_settings() -> crate::SshSettings {
             let mut settings = crate::SshSettings::new();
             settings
                 .set(
                     "tunnel.stderr_drain_limit",
-                    Value::Duration(Duration::from_secs(5)),
-                )
-                .unwrap()
-                .set(
-                    "tunnel.verdict_grace",
-                    Value::Duration(Duration::from_secs(5)),
+                    crate::settings::Value::Duration(Duration::from_secs(5)),
                 )
                 .unwrap();
             settings
@@ -1197,6 +1205,7 @@ mod tests {
         /// `tunnel.stderr_max_line` of the launcher reaches the stderr relay of its tunnels: a
         /// ForkAfterAuthentication refusal of about 370 bytes is judged with the default 1 KiB
         /// (the tunnel starts again without the option) and not with 256 B (no second start).
+        /// The 1 KiB side waits up to 5 s for the refusal line ([`busy_host_drain_settings`]).
         #[test]
         fn the_line_limit_comes_from_the_settings() {
             use crate::settings::Value;
@@ -1226,7 +1235,7 @@ mod tests {
                 assert!(matches!(result, Err(TunnelError::ExitedBeforeReady { .. })));
                 calls.load(Ordering::SeqCst)
             };
-            assert_eq!(starts(crate::SshSettings::default()), 2);
+            assert_eq!(starts(busy_host_drain_settings()), 2);
             let mut short = crate::SshSettings::new();
             short
                 .set("tunnel.stderr_max_line", Value::Bytes(256))
@@ -1302,7 +1311,9 @@ mod tests {
                 "#!/bin/sh\necho 'first line' >&2\nsleep 0.05\necho 'Permission denied (publickey).' >&2\nexit 255\n",
             );
             let (hook, calls, pids) = counting_hook();
-            let launcher = SshLauncher::new(ssh.path()).with_spawn_hook(hook);
+            let launcher = SshLauncher::new(ssh.path())
+                .with_spawn_hook(hook)
+                .with_settings(busy_host_drain_settings());
             let relayed = Arc::new(Mutex::new(Vec::new()));
             let into = Arc::clone(&relayed);
             let result = SshTunnel::establish_relaying_to(
