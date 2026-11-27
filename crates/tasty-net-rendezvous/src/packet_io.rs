@@ -13,7 +13,7 @@
 
 use std::fmt;
 use std::io::{self, IoSliceMut};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,19 @@ pub trait PacketIo: Send + Sync + fmt::Debug + 'static {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>>;
+
+    /// Receive one datagram like [`PacketIo::poll_recv_from`], with the local IP it was sent
+    /// to when the packet I/O knows it (the destination of the datagram, which differs from
+    /// the bound address on a wildcard binding). quinn takes it as the local IP of a connection
+    /// it accepts. The default calls `poll_recv_from` and gives `None`.
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr, Option<IpAddr>)>> {
+        self.poll_recv_from(cx, buf)
+            .map_ok(|(len, from)| (len, from, None))
+    }
 
     /// Ready when a send may succeed.
     fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
@@ -72,6 +85,8 @@ pub struct UdpPacketIo {
 struct Held {
     buf: Vec<u8>,
     from: SocketAddr,
+    /// The local IP the datagrams were sent to, when the OS tells it.
+    dst: Option<IpAddr>,
     /// Bytes received.
     len: usize,
     /// The size of each datagram but the last.
@@ -130,6 +145,7 @@ impl UdpPacketIo {
                 buf: vec![0; COALESCED_MAX],
                 // Nothing held yet.
                 from: SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+                dst: None,
                 len: 0,
                 stride: 0,
                 pos: 0,
@@ -140,7 +156,7 @@ impl UdpPacketIo {
 
 impl Held {
     /// The next held datagram into `buf`, if any.
-    fn next(&mut self, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
+    fn next(&mut self, buf: &mut [u8]) -> Option<(usize, SocketAddr, Option<IpAddr>)> {
         if self.pos >= self.len {
             return None;
         }
@@ -148,7 +164,7 @@ impl Held {
         let n = size.min(buf.len());
         buf[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
         self.pos += size;
-        Some((n, self.from))
+        Some((n, self.from, self.dst))
     }
 }
 
@@ -158,6 +174,15 @@ impl PacketIo for UdpPacketIo {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        self.poll_recv_with_dst(cx, buf)
+            .map_ok(|(len, from, _)| (len, from))
+    }
+
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr, Option<IpAddr>)>> {
         let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(got) = held.next(buf) {
             return Poll::Ready(Ok(got));
@@ -179,6 +204,7 @@ impl PacketIo for UdpPacketIo {
             match got {
                 Ok(meta) => {
                     held.from = meta.addr;
+                    held.dst = meta.dst_ip;
                     held.len = meta.len;
                     // Without coalescing the stride is the length.
                     held.stride = match meta.stride {
@@ -186,7 +212,7 @@ impl PacketIo for UdpPacketIo {
                         stride => stride,
                     };
                     held.pos = 0;
-                    let got = held.next(buf).unwrap_or((0, meta.addr));
+                    let got = held.next(buf).unwrap_or((0, meta.addr, meta.dst_ip));
                     return Poll::Ready(Ok(got));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -346,7 +372,7 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
             return Poll::Ready(Ok(0));
         };
         loop {
-            let (len, from) = match self.io.poll_recv_from(cx, buf) {
+            let (len, from, dst_ip) = match self.io.poll_recv_with_dst(cx, buf) {
                 Poll::Ready(Ok(got)) => got,
                 Poll::Ready(Err(e)) if receive_error_is_fatal(&e) => return Poll::Ready(Err(e)),
                 Poll::Ready(Err(e)) => {
@@ -368,7 +394,7 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
                         len,
                         stride: len,
                         ecn: None,
-                        dst_ip: None,
+                        dst_ip,
                     };
                     return Poll::Ready(Ok(1));
                 }
@@ -399,21 +425,157 @@ mod tests {
     #[test]
     fn a_coalesced_receive_splits_into_stride_sized_datagrams() {
         let from: SocketAddr = "192.0.2.1:4000".parse().unwrap();
+        let dst: IpAddr = "192.0.2.9".parse().unwrap();
         // Two full segments of 4 bytes and a short last one of 2.
         let mut held = Held {
             buf: (0..10).collect(),
             from,
+            dst: Some(dst),
             len: 10,
             stride: 4,
             pos: 0,
         };
         let mut out = [0u8; 8];
         let mut got = Vec::new();
-        while let Some((n, addr)) = held.next(&mut out) {
+        while let Some((n, addr, to)) = held.next(&mut out) {
             assert_eq!(addr, from);
+            assert_eq!(to, Some(dst));
             got.push(out[..n].to_vec());
         }
         assert_eq!(got, [vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9]]);
         assert!(held.next(&mut out).is_none());
+    }
+
+    /// Packet I/O that hands out one QUIC-looking datagram, with a destination or without.
+    #[derive(Debug)]
+    struct One {
+        dst: Option<IpAddr>,
+        taken: Mutex<bool>,
+    }
+
+    fn sender() -> SocketAddr {
+        "192.0.2.1:4000".parse().unwrap()
+    }
+
+    impl PacketIo for One {
+        fn poll_recv_from(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
+            self.poll_recv_with_dst(cx, buf)
+                .map_ok(|(len, from, _)| (len, from))
+        }
+        fn poll_recv_with_dst(
+            &self,
+            _: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr, Option<IpAddr>)>> {
+            let mut taken = self.taken.lock().unwrap();
+            if *taken {
+                return Poll::Pending;
+            }
+            *taken = true;
+            // A first byte of 64 is a QUIC short header.
+            buf[..4].copy_from_slice(&[64, 0, 0, 0]);
+            Poll::Ready(Ok((4, sender(), self.dst)))
+        }
+        fn poll_send_ready(&self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn try_send_to(&self, _: &[u8], _: SocketAddr) -> io::Result<()> {
+            Ok(())
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("0.0.0.0:5000".parse().unwrap())
+        }
+    }
+
+    /// Packet I/O written before the destination receive: only `poll_recv_from`.
+    #[derive(Debug)]
+    struct Plain;
+
+    impl PacketIo for Plain {
+        fn poll_recv_from(
+            &self,
+            _: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
+            buf[..4].copy_from_slice(&[64, 0, 0, 0]);
+            Poll::Ready(Ok((4, sender())))
+        }
+        fn poll_send_ready(&self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn try_send_to(&self, _: &[u8], _: SocketAddr) -> io::Result<()> {
+            Ok(())
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("0.0.0.0:5000".parse().unwrap())
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoStun;
+
+    impl StunSink for NoStun {
+        fn on_stun(&self, _: &[u8], _: SocketAddr, _: &dyn PacketIo) {}
+    }
+
+    /// The receive metadata the demux socket gives quinn for the next datagram of `io`.
+    fn demux_meta(io: Arc<dyn PacketIo>) -> RecvMeta {
+        use quinn::AsyncUdpSocket;
+        let socket = DemuxSocket::new(io, Arc::new(NoStun));
+        let mut buf = [0u8; 64];
+        let mut bufs = [IoSliceMut::new(&mut buf)];
+        let mut meta = [RecvMeta::default()];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        match socket.poll_recv(&mut cx, &mut bufs, &mut meta) {
+            Poll::Ready(Ok(1)) => meta[0],
+            other => panic!("no datagram: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_demux_socket_hands_quinn_the_destination_ip() {
+        let dst: IpAddr = "198.51.100.4".parse().unwrap();
+        let io = Arc::new(One {
+            dst: Some(dst),
+            taken: Mutex::new(false),
+        });
+        let meta = demux_meta(io);
+        assert_eq!(meta.addr, sender());
+        assert_eq!(meta.dst_ip, Some(dst));
+    }
+
+    #[test]
+    fn packet_io_without_the_destination_receive_gives_none() {
+        let meta = demux_meta(Arc::new(Plain));
+        assert_eq!(meta.addr, sender());
+        assert_eq!(meta.dst_ip, None);
+    }
+
+    /// A wildcard-bound OS socket tells the destination of a datagram where the OS gives it
+    /// (Linux packet info). Elsewhere it may be unknown.
+    #[tokio::test]
+    async fn an_os_socket_tells_the_destination_ip() {
+        let io = UdpPacketIo::bind("0.0.0.0:0".parse().unwrap())
+            .await
+            .unwrap();
+        let port = io.local_addr().unwrap().port();
+        let to = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let out = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        out.send_to(b"\x40abc", to).await.unwrap();
+        let mut buf = [0u8; 64];
+        let (len, from, dst) = std::future::poll_fn(|cx| io.poll_recv_with_dst(cx, &mut buf))
+            .await
+            .unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(from, out.local_addr().unwrap());
+        if cfg!(target_os = "linux") {
+            assert_eq!(dst, Some(IpAddr::from(std::net::Ipv4Addr::LOCALHOST)));
+        } else {
+            assert!(dst.is_none_or(|ip| ip.is_loopback()), "{dst:?}");
+        }
     }
 }

@@ -269,7 +269,9 @@ impl Tracker {
                 if let Some(c) = &r.conn {
                     info.rtt = Some(c.rtt());
                     info.remote_addr = Some(crate::socket::canonical(c.remote_address()));
-                    info.local_ip = info.local_ip.or_else(|| c.local_ip());
+                    info.local_ip = info
+                        .local_ip
+                        .or_else(|| c.local_ip().map(|ip| ip.to_canonical()));
                 }
                 info
             })
