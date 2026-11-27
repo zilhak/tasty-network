@@ -1084,9 +1084,15 @@ mod tests {
         // The address family.
         assert_eq!(n("2001:db8::1", Family::Inet), None);
         assert_eq!(n("127.1", Family::Inet6), None);
-        // An IPv4-mapped address asked for IPv4, and the `inet_ntop` text.
+        // An IPv4-mapped address asked for IPv4 (the glibc rule; the reference client on a
+        // BSD libc keeps the name, so these are not comparison cases), and the `inet_ntop`
+        // text.
         assert_eq!(
             n("::ffff:192.0.2.1", Family::Inet).as_deref(),
+            Some("192.0.2.1")
+        );
+        assert_eq!(
+            n("::FFFF:C000:201", Family::Inet).as_deref(),
             Some("192.0.2.1")
         );
         assert_eq!(

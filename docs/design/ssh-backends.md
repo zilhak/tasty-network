@@ -354,7 +354,7 @@ struct SshInspection {
 
 - 옮기는 것은 해석과 판정이다. 소켓·암호·서명 검증·프로세스 실행은 옮기지 않는다(그 자리는 russh와 거부 규칙이다).
 - 서비스 데이터베이스는 읽지 않는다. `a2port`(`misc.c:592`–`:604`)는 숫자 포트만 받는다. 원본은 `getservbyname`으로 서비스 이름(`Port ssh`)도 받지만, 이 크레이트는 그 줄을 설정 오류(`ConfigError`, 키워드 `port`)로 거부한다.
-- 숫자 주소는 Linux glibc의 `getaddrinfo`·`getnameinfo`가 내는 결과를 따른다(`inet_aton` 형식, `AddressFamily inet`에서 IPv4 매핑 IPv6를 IPv4로, IPv4 호환 IPv6 `::a.b.c.d`의 표기). scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다.
+- 숫자 주소는 Linux glibc의 `getaddrinfo`·`getnameinfo`가 내는 결과를 따른다(`inet_aton` 형식, `AddressFamily inet`에서 IPv4 매핑 IPv6를 IPv4로, IPv4 호환 IPv6 `::a.b.c.d`의 표기). scope가 붙은 IPv6(`fe80::1%eth0`, `%0001`)는 숫자 주소로 보지 않고 적힌 그대로 둔다(소문자로 바꾸지 않는다). 기준판은 OS 인터페이스 표로 scope를 이름으로 바꾼다(`%0001`→`%lo`). 다룰지는 [후속 작업과 미정](#후속-작업과-미정)의 "IPv6 scope의 정규화"다. 대조 fixture는 OS와 무관한 사례만 둔다. BSD 계열 libc(macOS Libinfo, Android bionic)의 기준판은 `AddressFamily inet`에서 IPv4 매핑 IPv6를 바꾸지 않으므로(`getaddrinfo`가 `EAI_NONAME`을 내고 `hostname`은 적힌 그대로다), 그 규칙은 glibc 기준의 단위 시험이 고정한다. 실행 OS의 규칙을 따를지는 [후속 작업과 미정](#후속-작업과-미정)의 "숫자 주소의 OS별 규칙"이다.
 - 키 비교는 공개키 blob 바이트로 한다. known_hosts 줄의 base64를 풀어 서버가 보낸 blob과 비교하므로 키 형식 크레이트에 의존하지 않는다. 의존은 `hmac`·`sha1`(해시 호스트 `|1|`), `base64`다.
 - 다른 프로그램을 실행하지 않는다. `Match exec`·`ProxyCommand`·`KnownHostsCommand`는 해석만 하고, 적용되면 거부 결과를 돌려준다. `LocalCommand`는 해석만 하고 표시한다.
 
@@ -682,6 +682,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | `@cert-authority`와 호스트 인증서 | 2단계 밖. 넣을 때 인증서 형식·주체 이름·중요 옵션·CA 서명 알고리즘·`@revoked` 적용을 따로 정한다 |
 | Windows의 설정 경로 규칙 | 175500 질문. 이식 크레이트는 기준판(portable)대로 `/`만 경로 구분자로 본다([내장 백엔드가 읽는 파일](#내장-백엔드가-읽는-파일)). Win32-OpenSSH 규칙(드라이브 문자와 `\`를 절대 경로로 보기, 시스템 설정의 상대 `Include`를 `%PROGRAMDATA%\ssh` 아래로 풀기)을 따를지. 따르면 `path_absolute`·glob·`SSHDIR`을 바꾸고 Include 시험을 Windows에서도 돌린다 |
 | IPv6 scope의 정규화 | 175500 질문. 기준판은 `getaddrinfo`·`getnameinfo`가 scope를 OS 인터페이스 표로 풀어 `hostname`을 바꾼다(`fe80::1%0001`→`fe80::1%lo`, 16진 소문자화). 이식 크레이트는 인터페이스 표를 읽지 않아 scope가 붙은 주소를 적힌 그대로 둔다. 인터페이스 표를 읽을지, 그 값이 `%h`·호스트 키 조회 이름에 쓰이는 차이를 둘지 |
+| 숫자 주소의 OS별 규칙 | 175500 질문. 이식 크레이트는 모든 OS에서 Linux glibc의 숫자 주소 규칙을 따른다. 기준판은 실행 OS의 libc를 쓰므로 macOS·Android에서는 `AddressFamily inet`의 IPv4 매핑 IPv6(`::ffff:192.0.2.1`)를 IPv4로 바꾸지 않는다. 실행 OS의 규칙을 따를지(따르면 `numeric_host`를 OS별로 가르고 대조 사례를 OS별로 둔다) |
 | 비교 시험의 기준 클라이언트 빌드 | 원격 빌드 머신에서 확인했다. `scripts/install-openssh-ref.sh`가 기준 커밋을 빌드하고 `ssh -G` 대조가 돈다([비교 시험의 기준 클라이언트](#비교-시험의-기준-클라이언트)의 빌드 도구) |
 | 채널 열기 거절의 설명 문구 | 후속 작업(내장 SSH 백엔드). 실패한 호출자가 채널 ID를 받지 못하는 russh 0.65.4에서 `Handler::channel_open_failure`의 설명을 그 오류에 맞출 수 있는지(같은 세션의 열기 요청 순서로 맞추기 등), 없으면 `ChannelOpenRefused{code}`만 둔다 |
 | exec 출력 상한의 경계와 관측 순서 | 후속 작업(내장 SSH 백엔드). 정확히 `exec.output_buffer`만큼의 출력이 성공인지, 이미 담긴 바이트와 `OutputLimitExceeded`를 `Read`(`io::Error`)와 `wait`에서 어떤 순서로 보는지, stdout·stderr별 시험 |
