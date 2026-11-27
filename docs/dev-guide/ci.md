@@ -44,8 +44,8 @@
 | 단계 | OS | 하는 일 |
 |---|---|---|
 | `Cache OpenSSH reference client` | Linux·macOS | `target/tools/openssh-10.6p2`를 기준 커밋(`d449e662`)·OS·아키텍처·`scripts/install-openssh-ref.sh` 내용을 키로 캐시한다 |
-| `Build OpenSSH reference client (Linux)` | Linux | 캐시가 없으면 autoconf·OpenSSL·zlib·Kerberos 개발 패키지를 받고 `scripts/install-openssh-ref.sh`로 빌드한다 |
-| `Build OpenSSH reference client (macOS)` | macOS | 캐시가 없으면 brew로 autoconf·openssl@3을 받고 같은 스크립트로 빌드한다 |
+| `Build OpenSSH reference client (Linux)` | Linux | 캐시한 `ssh`가 없거나, 실행되지 않거나, `ssh -V`가 `OpenSSH_10.6p2`로 시작하지 않으면 autoconf·OpenSSL·zlib·Kerberos 개발 패키지를 받는다. 이어서 `scripts/install-openssh-ref.sh`가 같은 판이 아니면 빌드한다 |
+| `Build OpenSSH reference client (macOS)` | macOS | 같은 조건에서 brew로 autoconf·openssl@3을 받고 같은 스크립트로 빌드한다 |
 
 - 시험 단계는 Linux·macOS에서 `TASTY_OPENSSH_REF_REQUIRED=1`로 돈다. 그래서 기준 클라이언트가 없으면 대조 시험이 실패한다. 그 변수가 없는 로컬 실행은 대조를 건너뛰고 그 사실을 한 줄로 알린다. Windows는 대조하지 않는다.
 - 시험은 `PATH`의 ssh를 쓰지 않는다. `ssh -V`가 `OpenSSH_10.6p2`로 시작하지 않으면 실패한다.

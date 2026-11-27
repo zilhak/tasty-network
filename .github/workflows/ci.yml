@@ -100,7 +100,8 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 15
         run: |
-          if [ ! -x target/tools/openssh-10.6p2/bin/ssh ]; then
+          # A cached client that no longer runs (a newer runner image) is rebuilt.
+          if ! target/tools/openssh-10.6p2/bin/ssh -V 2>&1 | grep -q '^OpenSSH_10\.6p2'; then
             sudo apt-get update -q
             sudo apt-get install -y -q autoconf build-essential libssl-dev zlib1g-dev libkrb5-dev
           fi
@@ -109,7 +110,7 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 15
         run: |
-          if [ ! -x target/tools/openssh-10.6p2/bin/ssh ]; then
+          if ! target/tools/openssh-10.6p2/bin/ssh -V 2>&1 | grep -q '^OpenSSH_10\.6p2'; then
             brew install autoconf automake openssl@3
           fi
           OPENSSH_CONFIGURE_EXTRA="--with-ssl-dir=$(brew --prefix openssl@3)" bash scripts/install-openssh-ref.sh
