@@ -10,9 +10,13 @@
 //! - [`tls`]: RFC 7250 raw public key TLS 1.3 with device keys.
 //! - [`settings`]: every server time, count and limit, with defaults and sources.
 //! - [`packet_io`]: the packet I/O trait and the first-byte split socket under quinn.
+//! - [`server`]: the server ([`server::Server`]) with its [`access`] policy.
 #![deny(unsafe_code)]
 
+pub mod access;
 pub mod packet_io;
+pub mod quic;
+pub mod server;
 pub mod settings;
 pub mod tls;
 pub mod wire;

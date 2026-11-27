@@ -17,6 +17,9 @@ path = "src/bin/tasty-rendezvous.rs"
 tasty-net-identity = { path = "../tasty-net-identity" }
 # Exact pins and features: docs/design/p2p.md "외부 의존과 고정".
 quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+# quinn-proto is pinned too (docs/design/p2p.md "의존성이 노출하는 값"); the connection ID
+# generator with a lifetime is only exported here.
+quinn-proto = { version = "=0.11.19", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 serde = { version = "1", features = ["derive"] }
