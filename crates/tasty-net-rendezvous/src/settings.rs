@@ -1186,10 +1186,12 @@ impl Resolver<'_> {
             stun_rate_window: ONE_SECOND,
             quic,
         };
+        let ttl = params.punch_session_ttl();
         self.relation(
-            now.checked_add(params.punch_session_ttl()).is_some(),
-            "the current time + start_delay_max + punch_window + 2 × quic_handshake_timeout + \
-             punch_session_grace is in range of the clock",
+            ttl <= MAX_DURATION && now.checked_add(ttl).is_some(),
+            "start_delay_max + punch_window + 2 × quic_handshake_timeout + punch_session_grace is \
+             at most 2^32 - 1 s, like every time, and the current time + it is in range of the \
+             clock",
             &[
                 "start_delay_max",
                 "punch_window",
@@ -1944,6 +1946,30 @@ mod tests {
                 Err(e) => {
                     assert!(!ok, "{key} = {n} refused: {e}");
                     assert!(e.to_string().contains(key), "{e}");
+                }
+            }
+        }
+        // The computed session TTL has the same upper bound as every time: with the other
+        // three at their defaults, punch_session_grace may take what is left of 2^32 - 1 s.
+        let defaults = local().resolve().unwrap();
+        let others = defaults.punch_session_ttl() - defaults.punch_session_grace;
+        let room = Duration::from_secs(longest) - others;
+        for (grace, ok) in [
+            (room, true),
+            (room + Duration::from_millis(1), false),
+            (Duration::from_secs(longest), false),
+        ] {
+            let mut s = local();
+            s.set("punch_session_grace", Value::Duration(grace))
+                .unwrap();
+            match s.resolve() {
+                Ok(p) => {
+                    assert!(ok, "grace {grace:?} accepted");
+                    assert_eq!(p.punch_session_ttl(), Duration::from_secs(longest));
+                }
+                Err(e) => {
+                    assert!(!ok, "grace {grace:?} refused: {e}");
+                    assert!(e.to_string().contains("punch_session_grace"), "{e}");
                 }
             }
         }
