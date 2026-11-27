@@ -1,0 +1,35 @@
+[package]
+name = "tasty-net-rendezvous"
+description = "Rendezvous protocol, STUN subset, punch probe format, raw public key TLS and server of the Tasty network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "tasty-rendezvous"
+path = "src/bin/tasty-rendezvous.rs"
+
+[dependencies]
+# The only workspace crate this crate may use (docs/design/crates.md "P2P 크레이트 격리").
+tasty-net-identity = { path = "../tasty-net-identity" }
+# Exact pins and features: docs/design/p2p.md "외부 의존과 고정".
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The server settings file of the tasty-rendezvous executable.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+# Punch tokens.
+getrandom = "0.4"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[lints]
+workspace = true
