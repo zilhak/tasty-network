@@ -31,7 +31,8 @@
 #      본 반사 주소와 다른지 본다. 서버 로그의 매핑 판별과 펀칭 mode도 적는다.
 #   7. no-forward: 데이터 실행의 서버 쪽 수신 바이트가 대조 실행의 두 배를 넘지 않는지 본다. 두 실행은 메시지
 #      크기만 다르고 서버로 가는 제어 트래픽은 메시지를 싣지 않는다. 메시지가 서버를 지났다면 데이터 실행은
-#      대조 실행 + 메시지 바이트 이상이다. 메시지가 대조 실행의 두 배 이하면 판정 불가다(근거: no_forward_ok 주석).
+#      대조 실행 + 메시지 바이트 이상이다. 메시지가 대조 실행의 두 배 이하이거나 어느 실행의 수신 바이트·패킷
+#      증가가 0이면 판정 불가다(근거: no_forward_ok 주석).
 #   8. stop: docker stop(SIGINT)으로 멈추고 종료 코드 0과 종료 로그를 본다.
 #   9. cleanup: 예제가 남았으면 SIGTERM 뒤 기한 안에 끝나는지 보고 남으면 SIGKILL로 끝내 거둔다. 이 실행의
 #      컨테이너·볼륨·이미지를 지우고 남지 않았는지 본다. 하나라도 실패하면 result=fail step=cleanup이고
@@ -130,20 +131,32 @@ advertise_config() {
 }
 
 # no_forward_ok <데이터 실행의 서버 수신 바이트> <대조 실행의 서버 수신 바이트> <메시지 바이트>
+#               <데이터 실행의 서버 수신 패킷> <대조 실행의 서버 수신 패킷>
 # 두 실행은 같은 단계(등록, NAT 판별, 펀칭 요청, 연결, echo, 닫기)를 밟고 메시지 크기만 다르다. 서버로 가는
 # 제어 트래픽(조정 연결과 STUN)은 메시지를 싣지 않으므로 메시지 크기와 무관하다. 그 실행마다의 차이(연결 재요청,
 # STUN 재전송, 펀칭 재시도 punch.attempts 2회)는 제어 교환 한 번을 더 하는 것을 넘지 않는다고 보고, 데이터
 # 실행의 상한을 대조 실행의 두 배로 둔다. 메시지(한 방향만 해도 메시지 바이트)가 서버를 지났다면 데이터 실행은
 # 대조 실행 + 메시지 바이트 이상이므로, 메시지가 대조 실행의 두 배보다 크면 상한을 넘는다.
-# 0: 상한 안. 1: 상한을 넘음(까닭 한 줄). 2: 판정 불가(값이 숫자가 아니거나 메시지가 대조 실행의 두 배 이하).
+# 두 실행 모두 기기가 서버에 등록·STUN·펀칭 요청을 하므로 서버 수신 바이트와 패킷이 함께 늘어야 한다. 어느
+# 실행이든 바이트나 패킷 증가가 0이면(음수는 숫자 검사에서 걸린다) 그 구간의 카운터를 근거로 쓸 수 없다.
+# 패킷 수는 이 유효성 검사에만 쓰고 상한에는 쓰지 않는다. 데이터그램 하나의 크기에 하한이 없어 패킷 수로는
+# 메시지 바이트가 지났는지를 가를 수 없기 때문이다.
+# 0: 상한 안. 1: 상한을 넘음(까닭 한 줄). 2: 판정 불가(값이 숫자가 아니거나, 어느 실행의 바이트·패킷 증가가
+# 0이거나, 메시지가 대조 실행의 두 배 이하).
 no_forward_ok() {
-    local data=$1 control=$2 msg=$3
-    if ! [[ "$data" =~ ^[0-9]{1,18}$ && "$control" =~ ^[0-9]{1,18}$ && "$msg" =~ ^[0-9]{1,18}$ ]]; then
-        echo "서버 수신 바이트가 숫자가 아니다: data='$data' control='$control' message='$msg'"
+    local data=$1 control=$2 msg=$3 data_packets=${4-} control_packets=${5-} v
+    for v in "$data" "$control" "$msg" "$data_packets" "$control_packets"; do
+        if ! [[ "$v" =~ ^[0-9]{1,18}$ ]]; then
+            echo "서버 수신 값이 십진수가 아니다: data='$data' control='$control' message='$msg' data_packets='$data_packets' control_packets='$control_packets'"
+            return 2
+        fi
+    done
+    if ((control == 0 || control_packets == 0)); then
+        echo "대조 실행에서 서버 수신이 늘지 않았다(바이트 $control, 패킷 $control_packets). 카운터를 근거로 쓸 수 없다"
         return 2
     fi
-    if ((control == 0)); then
-        echo "대조 실행에서 서버 수신 바이트가 늘지 않았다(카운터가 서버 컨테이너의 것인지 볼 수 없다)"
+    if ((data == 0 || data_packets == 0)); then
+        echo "데이터 실행에서 서버 수신이 늘지 않았다(바이트 $data, 패킷 $data_packets). 카운터를 근거로 쓸 수 없다"
         return 2
     fi
     if ((msg <= 2 * control)); then
@@ -245,19 +258,29 @@ self_test() {
     sed 's/^# alternate_port = 3479$/alternate_port = 3479/' "$EXAMPLE" >"$dir/open.toml"
     check not advertise_config "$dir/open.toml" 127.0.0.1 40001 >/dev/null
     rm -rf "${dir:?}"
-    no_forward_ok 20100 19800 98304 >/dev/null
+    no_forward_ok 20100 19800 98304 40 43 >/dev/null
     check test "$?" -eq 0
-    no_forward_ok 39600 19800 98304 >/dev/null
+    no_forward_ok 39600 19800 98304 40 43 >/dev/null
     check test "$?" -eq 0
-    no_forward_ok 39601 19800 98304 >/dev/null
+    no_forward_ok 39601 19800 98304 40 43 >/dev/null
     check test "$?" -eq 1
-    no_forward_ok 118104 19800 98304 >/dev/null
+    no_forward_ok 118104 19800 98304 40 43 >/dev/null
     check test "$?" -eq 1
-    no_forward_ok 20100 60000 98304 >/dev/null
+    no_forward_ok 20100 60000 98304 40 43 >/dev/null
     check test "$?" -eq 2
-    no_forward_ok 20100 0 98304 >/dev/null
+    no_forward_ok 20100 0 98304 40 43 >/dev/null
     check test "$?" -eq 2
-    no_forward_ok '' 19800 98304 >/dev/null
+    no_forward_ok '' 19800 98304 40 43 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 0 19856 98304 40 43 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 19589 19856 98304 0 43 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 19589 19856 98304 39 0 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 19589 19856 98304 -3 43 >/dev/null
+    check test "$?" -eq 2
+    no_forward_ok 19589 19856 98304 >/dev/null
     check test "$?" -eq 2
     check test "$(decimal_in 08 1 120000)" = 8
     check test "$(decimal_in 98304 1 120000)" = 98304
@@ -632,7 +655,7 @@ main_check() {
 
     STEP=no-forward
     local judged=0
-    why=$(no_forward_ok "$data_bytes" "$control_bytes" "$MESSAGE_BYTES") || judged=$?
+    why=$(no_forward_ok "$data_bytes" "$control_bytes" "$MESSAGE_BYTES" "$data_packets" "$control_packets") || judged=$?
     case "$judged" in
         0) ;;
         2) unsure "$why" ;;
