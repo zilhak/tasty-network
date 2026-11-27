@@ -185,3 +185,32 @@ allow	crates/tasty-net-topology/src/model.rs	pair[1]	hex 두 자의 둘째
 allow	crates/tasty-net-topology/src/model.rs	+ 10	hex: a는 10
 allow	crates/tasty-net-topology/src/local.rs	unwrap_or(u64::MAX)	RTT 밀리초 변환이 넘치면 타입 최대로 포화
 allow	crates/tasty-net-topology/src/ids.rs	[0u8; 16]	형식: request_id·branch는 128비트 난수
+# transport: 연결 목록(ConnectionTable)·Redialer·링크 ID
+target	crates/tasty-net-transport/src/connection_table/
+target	crates/tasty-net-transport/src/redial.rs
+target	crates/tasty-net-transport/src/link_id.rs
+settings	crates/tasty-net-transport/src/settings.rs
+table	crates/tasty-net-transport/src/settings.rs	transport.md	보관 상한과 재연결 도우미
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	lagged > 0	버린 이벤트가 있는지(있으면 다음 읽기 첫머리에 Lagged)
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	+= 1	세기·번호 매기기: 항목 번호(단조 증가 ID), 버린 이벤트 수, 열린 채널 수를 하나씩
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	history_dropped: 0	새 항목: 버린 이력 수 0에서 시작
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	bulk_channels: 0	새 항목: 열린 bulk 채널 수 0에서 시작
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	request_channels: 0	새 항목: 열린 요청 채널 수 0에서 시작
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	limit == 0	connections.event_queue_limit 0은 큐 없음(transport.md 보관 상한과 재연결 도우미)
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	unwrap_or(u64::MAX)	변환이 넘치면 타입 최대로 포화(버린 이력 수)
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	saturating_sub(1)	세기: 닫힌 채널 하나를 뺌
+allow	crates/tasty-net-transport/src/connection_table/mod.rs	splice(0..0,	적용값을 목록 앞에 끼운다(빈 범위 0..0)
+allow	crates/tasty-net-transport/src/redial.rs	saturating_sub(1)	대기 공식의 지수 n−1 (transport.md 보관 상한과 재연결 도우미)
+allow	crates/tasty-net-transport/src/redial.rs	initial == 0.0	redial.initial 0이면 대기도 0 (0 × 무한대를 계산하지 않음)
+allow	crates/tasty-net-transport/src/redial.rs	{ 0.0 } else if	redial.initial 0일 때의 대기 0
+allow	crates/tasty-net-transport/src/redial.rs	clamp(-1.0, 1.0)	대기 공식: 난수 u를 [−1, 1]로 자름
+allow	crates/tasty-net-transport/src/redial.rs	(1.0 + u *	대기 공식의 1 + u × jitter
+allow	crates/tasty-net-transport/src/redial.rs	clamp(0.0, max)	대기 공식: [0, max_delay]로 자르는 하한
+allow	crates/tasty-net-transport/src/redial.rs	let mut number: u64 = 1	시도 번호는 1부터 매긴다
+allow	crates/tasty-net-transport/src/redial.rs	number += 1	세기: 시도 번호를 하나씩
+allow	crates/tasty-net-transport/src/redial.rs	bounded != 0	redial.max_attempts 0은 횟수 상한 없음(transport.md 표)
+allow	crates/tasty-net-transport/src/redial.rs	unit * 2.0 - 1.0	[0, 1) 난수를 [−1, 1)로 옮김
+allow	crates/tasty-net-transport/src/redial.rs	const NO_JITTER: f64 = 0.0	대기를 공식 그대로 두는 난수 값(NaN이거나 OS 난수가 없을 때)
+allow	crates/tasty-net-transport/src/link_id.rs	const LINK_ID_LEN: usize = 16	형식: 링크 ID는 SHA-256 앞 16 B (handshake.md bulk 자격, topology 링크 ID 길이)
+allow	crates/tasty-net-transport/src/link_id.rs	const CREDENTIAL_LEN: usize = 32	형식: bulk 자격 32 B (handshake.md bulk 자격)
+allow	crates/tasty-net-transport/src/link_id.rs	[0u8;	버퍼를 0으로 채워 만든다
