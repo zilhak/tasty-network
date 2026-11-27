@@ -8,7 +8,7 @@
 //! compares it with the table of the design document.
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `connections.history_limit`: the transitions kept per entry.
 pub const HISTORY_LIMIT: &str = "connections.history_limit";
@@ -269,8 +269,21 @@ pub(crate) const MIN_MULTIPLIER: f64 = 1.0;
 /// The jitter is a fraction of the wait.
 pub(crate) const MAX_JITTER: f64 = 1.0;
 
-/// Checks the redial values: a finite multiplier of at least 1 and a jitter in [0, 1].
-pub(crate) fn check_redial(multiplier: f64, jitter: f64) -> Result<(), InvalidSetting> {
+/// Checks the redial values: a finite multiplier of at least 1, a jitter in [0, 1], and
+/// times (`redial.initial`, `redial.max_delay`, `redial.give_up_after`) that can be added to
+/// the present instant.
+pub(crate) fn check_redial(
+    multiplier: f64,
+    jitter: f64,
+    times: [(&'static str, Duration); 3],
+) -> Result<(), InvalidSetting> {
+    let now = Instant::now();
+    if let Some((key, _)) = times.iter().find(|(_, d)| now.checked_add(*d).is_none()) {
+        return Err(InvalidSetting {
+            key,
+            reason: "is too long to count from now",
+        });
+    }
     if !(multiplier.is_finite() && multiplier >= MIN_MULTIPLIER) {
         return Err(InvalidSetting {
             key: REDIAL_MULTIPLIER,

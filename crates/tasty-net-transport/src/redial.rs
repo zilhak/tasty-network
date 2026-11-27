@@ -130,13 +130,24 @@ impl RedialerConfig {
 
     /// The wait before attempt `attempt` (1 for the first) with the random value `u` in
     /// [−1, 1]: min(max_delay, initial × multiplier^(attempt − 1)) × (1 + u × jitter), cut to
-    /// [0, max_delay].
+    /// [0, max_delay]. A zero `initial` gives zero; a product past `max_delay` stops there
+    /// without being computed, and a `u` that is not a number counts as 0.
     pub fn wait_before(&self, attempt: u64, u: f64) -> Duration {
         let max = self.max_delay().as_secs_f64();
+        let initial = self.initial().as_secs_f64();
         let steps = attempt.saturating_sub(1) as f64;
-        let base = (self.initial().as_secs_f64() * self.multiplier().powf(steps)).min(max);
-        let wait = (base * (1.0 + u.clamp(-1.0, 1.0) * self.jitter())).clamp(0.0, max);
-        Duration::try_from_secs_f64(wait).unwrap_or_else(|_| self.max_delay())
+        // multiplier ≥ 1 and finite, so its logarithm is finite and not negative.
+        let base = if initial == 0.0 {
+            0.0
+        } else if initial.ln() + steps * self.multiplier().ln() >= max.ln() {
+            max
+        } else {
+            (initial * self.multiplier().powf(steps)).min(max)
+        };
+        let u = if u.is_nan() { 0.0 } else { u.clamp(-1.0, 1.0) };
+        let wait = (base * (1.0 + u * self.jitter())).clamp(0.0, max);
+        Duration::try_from_secs_f64(wait)
+            .map_or_else(|_| self.max_delay(), |w| w.min(self.max_delay()))
     }
 }
 
@@ -219,8 +230,8 @@ impl Clock for SystemClock {
 }
 
 impl Redialer {
-    /// A redialer over `table` with `config`. A multiplier below 1 or not finite, or a
-    /// jitter outside [0, 1], is refused.
+    /// A redialer over `table` with `config`. A multiplier below 1 or not finite, a jitter
+    /// outside [0, 1], or a time too long to add to the present instant is refused.
     pub fn new(table: &ConnectionTable, config: RedialerConfig) -> Result<Self, InvalidSetting> {
         Self::with_clock(table, config, Arc::new(SystemClock))
     }
@@ -230,7 +241,15 @@ impl Redialer {
         config: RedialerConfig,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, InvalidSetting> {
-        check_redial(config.multiplier(), config.jitter())?;
+        check_redial(
+            config.multiplier(),
+            config.jitter(),
+            [
+                (REDIAL_INITIAL, config.initial()),
+                (REDIAL_MAX_DELAY, config.max_delay()),
+                (REDIAL_GIVE_UP_AFTER, config.give_up_after()),
+            ],
+        )?;
         Ok(Self {
             table: table.clone(),
             config,
@@ -309,6 +328,10 @@ impl Redialer {
                 return Err(RedialError::Cancelled);
             }
             progress(&pending, clock, number, None);
+            // A sleep that woke late may already be past the limit.
+            if clock.since(started) > config.give_up_after() {
+                return Err(exhausted(&pending, last));
+            }
             match attempt(&options) {
                 Ok(connected) => {
                     pending.hold(false, None);
@@ -541,5 +564,81 @@ mod tests {
         // 100 = 420, past 350, so two attempts.
         let (_, attempts, _, _) = fake_redial(config, Duration::ZERO, ms(60));
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn a_late_wake_past_give_up_after_makes_no_attempt() {
+        let ms = Duration::from_millis;
+        // The first wait fits (100 ≤ 350) but the sleep wakes at 400.
+        let config = RedialerConfig::new()
+            .with_initial(ms(100))
+            .with_jitter(0.0)
+            .with_give_up_after(ms(350));
+        let (result, attempts, waits, table) = fake_redial(config, ms(300), Duration::ZERO);
+        assert!(
+            matches!(result, Err(RedialError::Exhausted(None))),
+            "{result:?}"
+        );
+        assert_eq!((attempts, waits.len()), (0, 1));
+        assert_eq!(last_cause(&table), Some(Cause::RedialExhausted));
+    }
+
+    #[test]
+    fn waits_stay_finite_at_the_bounds() {
+        let ms = Duration::from_millis;
+        let defaults = RedialerConfig::new();
+        // 2^1024 does not fit in a float: the wait stops at max_delay.
+        assert_eq!(defaults.wait_before(1025, 0.0), defaults.max_delay());
+        assert_eq!(defaults.wait_before(u64::MAX, 1.0), defaults.max_delay());
+        assert_eq!(
+            defaults.wait_before(0, 0.0),
+            defaults.initial(),
+            "as attempt 1"
+        );
+        // A zero first wait stays zero however many attempts, not 0 × ∞.
+        let zero = RedialerConfig::new().with_initial(Duration::ZERO);
+        assert_eq!(zero.wait_before(1025, 0.0), Duration::ZERO);
+        assert_eq!(zero.wait_before(u64::MAX, 1.0), Duration::ZERO);
+        // A zero max_delay caps every wait at zero.
+        let capped = RedialerConfig::new().with_max_delay(Duration::ZERO);
+        assert_eq!(capped.wait_before(1, 1.0), Duration::ZERO);
+        assert_eq!(capped.wait_before(1025, 0.0), Duration::ZERO);
+        // A random value that is not a number counts as 0.
+        let exact = RedialerConfig::new().with_initial(ms(40)).with_jitter(0.5);
+        assert_eq!(exact.wait_before(1, f64::NAN), ms(40));
+        // The largest multiplier the settings allow.
+        let steep = RedialerConfig::new()
+            .with_multiplier(f64::MAX)
+            .with_jitter(0.5);
+        assert_eq!(steep.wait_before(2, 0.0), steep.max_delay());
+        assert_eq!(steep.wait_before(u64::MAX, -1.0), steep.max_delay() / 2);
+    }
+
+    #[test]
+    fn times_that_cannot_be_counted_from_now_are_refused() {
+        let table = ConnectionTable::default();
+        let cases = [
+            (
+                RedialerConfig::new().with_initial(Duration::MAX),
+                REDIAL_INITIAL,
+            ),
+            (
+                RedialerConfig::new().with_max_delay(Duration::MAX),
+                REDIAL_MAX_DELAY,
+            ),
+            (
+                RedialerConfig::new().with_give_up_after(Duration::MAX),
+                REDIAL_GIVE_UP_AFTER,
+            ),
+        ];
+        for (config, key) in cases {
+            match Redialer::new(&table, config) {
+                Err(error) => assert_eq!(error.key, key),
+                Ok(_) => panic!("{key}: Duration::MAX was accepted"),
+            }
+        }
+        // A long but countable limit is kept.
+        let year = Duration::from_secs(365 * 24 * 60 * 60);
+        assert!(Redialer::new(&table, RedialerConfig::new().with_give_up_after(year)).is_ok());
     }
 }
