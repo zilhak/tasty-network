@@ -1064,10 +1064,22 @@ fn a_localnetwork_refusal_names_the_c_library_readings() {
         || cfg!(target_os = "android")
         || cfg!(target_vendor = "apple"));
     assert_eq!(readings, no_rule, "{}", f.message);
-    // The same list read alike says only that the interfaces are not known.
-    let r = resolve("Match localnetwork 10.0.0.0/8\n    Port 2222\n", "example");
-    let f = r.refusal.expect("a refusal");
-    assert!(!f.message.contains("C libraries"), "{}", f.message);
+    // A list read alike says only that the interfaces are not known. Darwin gives
+    // ff02:1:: like the others, though writing it would need an interface.
+    for list in ["10.0.0.0/8", "ff02:1::/32"] {
+        let r = resolve(
+            &format!("Match localnetwork {list}\n    Port 2222\n"),
+            "example",
+        );
+        let f = r.refusal.expect("a refusal");
+        assert_eq!(f.kind, RefusalKind::Undeterminable);
+        assert!(!f.message.contains("C libraries"), "{list}: {}", f.message);
+        assert!(
+            !f.message.contains("cannot tell the address"),
+            "{list}: {}",
+            f.message
+        );
+    }
 }
 
 #[test]

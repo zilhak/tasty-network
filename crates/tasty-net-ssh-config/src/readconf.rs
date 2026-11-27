@@ -500,9 +500,20 @@ fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
     for cp in list.split(',') {
         match cidr_entry(cp) {
             Some((addr, mask)) => {
+                // A Darwin entry scoped by its second word is judged with the address
+                // `getaddrinfo` gives; the interface is only needed to write it. The reason
+                // below is made from the same addresses.
                 let readings: Vec<(misc::Libc, misc::Reading)> = libcs
                     .iter()
-                    .map(|l| (*l, misc::numeric_host_of(*l, addr, misc::Family::Any)))
+                    .map(|l| {
+                        let r = match misc::numeric_host_of(*l, addr, misc::Family::Any) {
+                            misc::Reading::Scoped(given) => {
+                                misc::Reading::Address(std::net::IpAddr::V6(given))
+                            }
+                            r => r,
+                        };
+                        (*l, r)
+                    })
                     .collect();
                 entries.push((addr, mask, readings));
             }
@@ -510,13 +521,11 @@ fn valid_cidr_list_by(list: &str, libcs: &[misc::Libc]) -> CidrList {
             None => return CidrList::Invalid,
         }
     }
-    // Whether one library takes every entry. A Darwin entry scoped by its second word is
-    // judged with the address `getaddrinfo` gives; the interface is only needed to write it.
+    // Whether one library takes every entry.
     let verdict = |libc: misc::Libc| -> bool {
         entries.iter().all(|(_, mask, readings)| {
             match readings.iter().find(|(l, _)| *l == libc).map(|(_, r)| *r) {
                 Some(misc::Reading::Address(ip)) => cidr_fits(ip, *mask),
-                Some(misc::Reading::Scoped(given)) => cidr_fits(std::net::IpAddr::V6(given), *mask),
                 _ => false,
             }
         })
@@ -2445,6 +2454,34 @@ mod tests {
                 want[3],
                 "no rule: {list}"
             );
+        }
+    }
+
+    #[test]
+    fn cidr_list_notes_of_each_c_library() {
+        use misc::Libc;
+        // Darwin gives ff02:1:: like the others; only writing it needs the interface.
+        for libcs in [&[Libc::Darwin][..], Libc::ALL] {
+            assert!(
+                matches!(
+                    valid_cidr_list_by("ff02:1::/32", libcs),
+                    CidrList::Valid(None)
+                ),
+                "{libcs:?}"
+            );
+        }
+        // Darwin gives fe80:: with the second word cleared: alone it settles, with the
+        // others the addresses differ.
+        assert!(matches!(
+            valid_cidr_list_by("fe80:1::/32", &[Libc::Darwin]),
+            CidrList::Valid(None)
+        ));
+        match valid_cidr_list_by("fe80:1::/32", Libc::ALL) {
+            CidrList::Valid(Some(m)) => assert!(
+                m.contains("glibc fe80:1::, bionic fe80:1::, Darwin fe80::"),
+                "{m}"
+            ),
+            _ => panic!("fe80:1::/32 is valid with a note"),
         }
     }
 
