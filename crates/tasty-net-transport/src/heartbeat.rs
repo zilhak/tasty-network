@@ -122,6 +122,8 @@ mod tests {
     use crate::channel::{ChannelConfig, RawChannel};
     use crate::heartbeat::HeartbeatPolicy;
     use crate::memory::memory_channel_pair;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tasty_net_frame::{ReadFailure, StreamTag, read_frame};
 
@@ -168,30 +170,74 @@ mod tests {
         drop(a);
     }
 
+    /// Writes Data every 20 ms on a channel with a 100 ms heartbeat interval while the peer
+    /// reads for 450 ms. Returns the tags it read and an upper bound of the longest time the
+    /// channel's last write stayed unchanged while the peer read: from before `framed` (which
+    /// sets it) to the end of the first write, from the start of each write to the end of the
+    /// next, and from the start of the last write to when the reading had ended.
+    fn busy_run(policy: HeartbeatPolicy) -> (Vec<StreamTag>, Duration) {
+        let (a, mut b) = memory_channel_pair();
+        let before_framed = Instant::now();
+        // 600 ms read timeout -> 100 ms interval.
+        let a = a
+            .framed(&config(policy, Duration::from_millis(600)))
+            .expect("framed");
+        let read_done = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&read_done);
+        let writer = a.writer;
+        let busy = std::thread::spawn(move || {
+            let mut started = before_framed;
+            let mut quiet = Duration::ZERO;
+            while !done.load(Ordering::SeqCst) {
+                let start = Instant::now();
+                writer.write_frame(StreamTag::Data, b"x").expect("write");
+                quiet = quiet.max(started.elapsed());
+                started = start;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            quiet = quiet.max(started.elapsed());
+            (writer, quiet)
+        });
+        let tags = raw_tags_until(&mut b, Instant::now() + Duration::from_millis(450));
+        read_done.store(true, Ordering::SeqCst);
+        let (writer, quiet) = busy.join().expect("writer");
+        drop(writer);
+        (tags, quiet)
+    }
+
+    /// "While frames flow" is judged by the writes' real times: a run where the scheduler kept
+    /// the writer quiet for half the interval or more is not one, and runs again. A WhenIdle
+    /// Ping after a quiet interval is correct (CI once saw only four writes in 450 ms and a
+    /// Ping among them), so such a run proves nothing either way.
     #[test]
     fn when_idle_sends_no_ping_while_frames_flow_but_periodic_does() {
-        for (policy, expect_pings) in [
-            (HeartbeatPolicy::WhenIdle, false),
-            (HeartbeatPolicy::Periodic, true),
-        ] {
-            let (a, mut b) = memory_channel_pair();
-            let a = a
-                .framed(&config(policy, Duration::from_millis(600)))
-                .expect("framed");
-            let writer = a.writer;
-            let busy = std::thread::spawn(move || {
-                let until = Instant::now() + Duration::from_millis(500);
-                while Instant::now() < until {
-                    writer.write_frame(StreamTag::Data, b"x").expect("write");
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                writer
-            });
-            let tags = raw_tags_until(&mut b, Instant::now() + Duration::from_millis(450));
-            let pings = tags.iter().filter(|t| **t == StreamTag::Ping).count();
-            assert_eq!(pings > 0, expect_pings, "{policy:?}: {tags:?}");
-            drop(busy.join().expect("writer"));
-        }
+        const FLOWING: Duration = Duration::from_millis(50);
+        const RUNS: usize = 10;
+        let mut quiet_runs = Vec::new();
+        let flowing = (0..RUNS).find_map(|_| {
+            let (tags, quiet) = busy_run(HeartbeatPolicy::WhenIdle);
+            if quiet < FLOWING {
+                Some(tags)
+            } else {
+                quiet_runs.push(quiet);
+                None
+            }
+        });
+        let Some(tags) = flowing else {
+            panic!(
+                "the writer never wrote without a {FLOWING:?} gap in {RUNS} runs: {quiet_runs:?}"
+            );
+        };
+        let pings = tags.iter().filter(|t| **t == StreamTag::Ping).count();
+        assert_eq!(
+            pings, 0,
+            "WhenIdle sent a Ping while frames flowed: {tags:?}"
+        );
+
+        // Periodic pings whatever the writes do.
+        let (tags, _) = busy_run(HeartbeatPolicy::Periodic);
+        let pings = tags.iter().filter(|t| **t == StreamTag::Ping).count();
+        assert!(pings > 0, "Periodic: {tags:?}");
     }
 
     #[test]
