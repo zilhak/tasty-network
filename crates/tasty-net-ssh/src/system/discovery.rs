@@ -15,6 +15,10 @@ use crate::settings::SshSettings;
 use crate::system::cancel::{SshCancel, cancel_requested, current_cancel, kill_and_reap};
 use crate::{SpawnHook, SshLauncher, SshTarget, connect_timeout_for};
 
+/// The tracing target of this module's events: its module path before it moved into
+/// `system`, so log filters on the old path keep selecting them.
+const LOG_TARGET: &str = "tasty_net_ssh::discovery";
+
 /// Exit code of the remote subcommand when the instance that wrote the record has exited.
 /// It differs from the general failure 1 and the usage error 2, so discovery can settle on
 /// "the remote instance is not running" instead of guessing.
@@ -272,7 +276,7 @@ pub struct PortDiscoveryError {
 impl PortDiscoveryError {
     fn new(kind: PortDiscoveryFailureKind, detail: impl Into<String>) -> Self {
         let detail = detail.into();
-        tracing::debug!(?kind, %detail, "remote port discovery failed");
+        tracing::debug!(target: LOG_TARGET, ?kind, %detail, "remote port discovery failed");
         Self {
             kind,
             detail,
@@ -473,7 +477,7 @@ impl ChildOwner {
                 // Waiting longer cannot tell more. Treat it as exited and let the output
                 // collection meet and classify the same error.
                 Err(e) => {
-                    tracing::debug!("ssh try_wait failed; polling stops: {e}");
+                    tracing::debug!(target: LOG_TARGET, "ssh try_wait failed; polling stops: {e}");
                     ChildPoll::Exited
                 }
             }
@@ -612,7 +616,7 @@ fn spawn_reader(
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(e) => {
-                        tracing::debug!(%e, "ssh output read ended");
+                        tracing::debug!(target: LOG_TARGET, %e, "ssh output read ended");
                         break;
                     }
                 }
@@ -740,7 +744,10 @@ fn exit_after_overflow(
         }
     }
     if let Err(e) = child.kill() {
-        tracing::debug!("ssh child kill failed (the child may already have exited): {e}");
+        tracing::debug!(
+            target: LOG_TARGET,
+            "ssh child kill failed (the child may already have exited): {e}",
+        );
     }
     let reaped = child.wait();
     if cancel_requested() {
@@ -750,7 +757,7 @@ fn exit_after_overflow(
         Ok(status) if exited_on_its_own(status.code(), KILLED_EXIT_CODE) => Ok(Some(status)),
         Ok(_) => Ok(None),
         Err(e) => {
-            tracing::debug!("ssh child reaping failed: {e}");
+            tracing::debug!(target: LOG_TARGET, "ssh child reaping failed: {e}");
             Ok(None)
         }
     }
@@ -1080,7 +1087,13 @@ impl Probe<'_> {
         match self.run(&[&cmds[0]], decode) {
             Ok(found) => return Ok(found),
             Err(e) if e.kind == PortDiscoveryFailureKind::Cancelled => return Err(e),
-            Err(e) => tracing::debug!("port file `{}` failed ({e}); trying the next", cmds[0]),
+            Err(e) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "port file `{}` failed ({e}); trying the next",
+                    cmds[0],
+                )
+            }
         }
         self.run(&[&cmds[1]], decode)
     }
@@ -1120,7 +1133,10 @@ where
             // would read the record it left behind and report success.
             Err(e) if stops_auto_chain(e.kind) => return Err(e),
             Err(e) => {
-                tracing::debug!("{m:?} port discovery failed ({e}); falling back");
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "{m:?} port discovery failed ({e}); falling back",
+                );
                 errors.push(e);
             }
         }
@@ -1229,7 +1245,10 @@ where
             Err(e) if e.kind == PortDiscoveryFailureKind::RemoteInstanceExited => return Ok(m),
             Err(e) if e.kind == PortDiscoveryFailureKind::Cancelled => return Err(e),
             Err(e) => {
-                tracing::debug!("{m:?} detection probe failed ({e}); trying the next mode");
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "{m:?} detection probe failed ({e}); trying the next mode",
+                );
                 errors.push(e);
             }
         }
@@ -1263,6 +1282,39 @@ mod tests {
     /// ([`the_test_limits_are_the_defaults`]).
     const STDERR_DETAIL_LIMIT: usize = 512;
     const STDERR_LIMIT: usize = 16 * 1024;
+
+    /// Records the targets of the events a thread sends.
+    struct Targets(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for Targets {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let target = event.metadata().target().to_string();
+            self.0.lock().expect("targets").push(target);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A discovery failure logs under the target the module had before it moved into
+    /// `system`, so a filter on `tasty_net_ssh::discovery` still selects it.
+    #[test]
+    fn a_discovery_failure_logs_under_the_old_module_target() {
+        let targets = std::sync::Arc::default();
+        let recorder = Targets(std::sync::Arc::clone(&targets));
+        let _error = tracing::subscriber::with_default(recorder, || {
+            PortDiscoveryError::new(PortDiscoveryFailureKind::TimedOut, "test")
+        });
+        let targets = targets.lock().expect("targets");
+        assert_eq!(*targets, ["tasty_net_ssh::discovery"]);
+    }
 
     /// The values of the default settings.
     fn limits() -> Limits {
@@ -2663,7 +2715,10 @@ mod tests {
                     if let Err(e) = std::fs::remove_file(p)
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
-                        tracing::warn!("fake ssh cleanup failed: {e}");
+                        tracing::warn!(
+                            target: "tasty_net_ssh::discovery::tests::fake_ssh",
+                            "fake ssh cleanup failed: {e}",
+                        );
                     }
                 }
             }
@@ -2946,7 +3001,10 @@ mod tests {
             let found =
                 discover_remote_port(&fake.launcher(), &target(), PortMode::Auto, &c, decode_port);
             if let Err(e) = std::fs::remove_dir_all(&dir) {
-                tracing::warn!("quoted test cleanup failed: {e}");
+                tracing::warn!(
+                    target: "tasty_net_ssh::discovery::tests::fake_ssh",
+                    "quoted test cleanup failed: {e}",
+                );
             }
             assert_eq!(found.expect("cat reads the quoted path"), 45127);
             assert_eq!(fake.calls(), [format!("cat '{}'", file.display())]);

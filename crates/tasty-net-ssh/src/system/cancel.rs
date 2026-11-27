@@ -6,6 +6,10 @@ use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 
+/// The tracing target of this module's events: its module path before it moved into
+/// `system`, so log filters on the old path keep selecting them.
+const LOG_TARGET: &str = "tasty_net_ssh::cancel";
+
 /// Cancels the port discovery children of another thread.
 ///
 /// The discovery children of worker threads that installed this handle (or a clone) with
@@ -156,8 +160,9 @@ pub(crate) fn recover_mutex<'a, T: ?Sized>(
     acquired.unwrap_or_else(|poisoned| {
         if !reported.swap(true, Ordering::Relaxed) {
             tracing::error!(
+                target: LOG_TARGET,
                 "{what} lock poisoned — a thread panicked while holding it. Recovering (the \
-                 guarded data keeps its invariants); later occurrences are not logged."
+                 guarded data keeps its invariants); later occurrences are not logged.",
             );
         }
         poisoned.into_inner()
@@ -177,10 +182,13 @@ fn lock_slot<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// already exited; the wait still reaps it.
 pub(crate) fn kill_and_reap(child: &mut Child) {
     if let Err(e) = child.kill() {
-        tracing::debug!("ssh child kill failed (the child may already have exited): {e}");
+        tracing::debug!(
+            target: LOG_TARGET,
+            "ssh child kill failed (the child may already have exited): {e}",
+        );
     }
     if let Err(e) = child.wait() {
-        tracing::debug!("ssh child reaping failed: {e}");
+        tracing::debug!(target: LOG_TARGET, "ssh child reaping failed: {e}");
     }
 }
 

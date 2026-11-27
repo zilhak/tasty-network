@@ -15,6 +15,10 @@ use crate::settings::SshSettings;
 use crate::system::cancel::{kill_and_reap, recover_mutex};
 use crate::{SshLauncher, SshTarget};
 
+/// The tracing target of this module's events: its module path before it moved into
+/// `system`, so log filters on the old path keep selecting them.
+const LOG_TARGET: &str = "tasty_net_ssh::tunnel";
+
 /// Returns a free local port and the listener holding it. Between dropping the listener and
 /// ssh binding the port, another process can take it.
 fn reserve_local_port() -> io::Result<(TcpListener, u16)> {
@@ -212,7 +216,13 @@ impl SshTunnel {
             std::thread::Builder::new()
                 .name("ssh-tunnel-stderr".into())
                 .spawn(move || relay_stderr(stderr, sink(), &seen, max_line))
-                .map_err(|e| tracing::warn!(%e, "ssh tunnel stderr relay thread could not start"))
+                .map_err(|e| {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %e,
+                        "ssh tunnel stderr relay thread could not start",
+                    )
+                })
                 .ok()
         });
 
@@ -229,7 +239,10 @@ impl SshTunnel {
             Err(e @ TunnelError::ExitedBeforeReady { .. })
                 if no_fork_option && tunnel.marks.fork_option_refused.load(Ordering::Acquire) =>
             {
-                tracing::debug!("ssh does not know ForkAfterAuthentication; starting without it");
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "ssh does not know ForkAfterAuthentication; starting without it",
+                );
                 Err(AttemptError::ForkOptionRefused(e))
             }
             Err(e) => Err(AttemptError::Failed(e)),
@@ -293,7 +306,7 @@ impl SshTunnel {
     pub fn terminate_and_reap(&self) -> io::Result<ExitStatus> {
         let mut child = self.lock_child();
         if let Err(error) = child.kill() {
-            tracing::debug!(%error, "SSH tunnel kill returned before wait");
+            tracing::debug!(target: LOG_TARGET, %error, "SSH tunnel kill returned before wait");
         }
         child.wait()
     }
@@ -334,11 +347,14 @@ fn drain_stderr_relay(relay: Option<JoinHandle<()>>, limit: Duration, poll: Dura
         std::thread::sleep(poll.min(left));
     }
     if !relay.is_finished() {
-        tracing::debug!("ssh tunnel stderr relay still open after the tunnel exited");
+        tracing::debug!(
+            target: LOG_TARGET,
+            "ssh tunnel stderr relay still open after the tunnel exited",
+        );
         return;
     }
     if relay.join().is_err() {
-        tracing::warn!("ssh tunnel stderr relay thread panicked");
+        tracing::warn!(target: LOG_TARGET, "ssh tunnel stderr relay thread panicked");
     }
 }
 
@@ -792,7 +808,10 @@ mod tests {
         impl Drop for Script {
             fn drop(&mut self) {
                 if let Err(e) = std::fs::remove_file(&self.0) {
-                    tracing::warn!("fake ssh cleanup failed: {e}");
+                    tracing::warn!(
+                        target: "tasty_net_ssh::tunnel::tests::fake",
+                        "fake ssh cleanup failed: {e}",
+                    );
                 }
             }
         }
