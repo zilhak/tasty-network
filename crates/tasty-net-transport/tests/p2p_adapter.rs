@@ -96,7 +96,8 @@ fn endpoint(server: &Rendezvous, seed: u8, peer: DeviceId) -> P2pEndpoint {
     endpoint_with(server, seed, peer, None, None)
 }
 
-/// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers; with
+/// [`endpoint`] on `gate` instead of an OS socket of its own, with short QUIC timers and a
+/// short `path.poll_interval` (how often the adapter copies an attempt to its entry); with
 /// `streams`, the peer may open at most that many streams at a time on its connections.
 fn endpoint_with(
     server: &Rendezvous,
@@ -118,7 +119,11 @@ fn endpoint_with(
                 "quic.keepalive_interval",
                 P2pValue::Duration(Duration::from_millis(300)),
             )
-            .set("quic.idle_timeout", P2pValue::Duration(IDLE_TIMEOUT));
+            .set("quic.idle_timeout", P2pValue::Duration(IDLE_TIMEOUT))
+            .set(
+                "path.poll_interval",
+                P2pValue::Duration(Duration::from_millis(100)),
+            );
     }
     if let Some(streams) = streams {
         config
@@ -680,6 +685,76 @@ fn a_cancel_ends_the_wait_for_a_stream() {
     }
     // The shared connection and its link stay.
     assert_eq!(pair.transport.live_connections(), 1);
+}
+
+/// Two attempts of one transport to the same peer at once: each entry follows its own attempt,
+/// never the other's. The peer is silent, so both punches run for a while (the server's offer
+/// timeout) and the entries are copied at every poll meanwhile.
+#[test]
+fn concurrent_attempts_to_one_peer_keep_their_own_entries() {
+    let (pair, gate) = Pair::start_with(54, Mode::Echo, true);
+    let gate = gate.expect("gate");
+    // `b` is registered once a link stood; the link's end closes its connection.
+    drop(pair.link(None).expect("link"));
+    wait_until("the first connection's close", || {
+        pair.transport.live_connections() == 0
+    });
+    gate.shut.store(true, Ordering::SeqCst);
+    let attempts: Vec<_> = ["one", "two"]
+        .into_iter()
+        .map(|name| {
+            let cancel = AttemptCancel::new();
+            let transport = Arc::clone(&pair.transport);
+            let peer = pair.b.id();
+            let options = ConnectOptions::new().with_name(name);
+            let (cancel_in, done) = (cancel.clone(), mpsc::channel());
+            std::thread::spawn(move || {
+                let result = transport.connect_with(&peer, &cancel_in, &options);
+                let _sent = done.0.send(result.map(|_| ()));
+            });
+            (name, cancel, done.1)
+        })
+        .collect();
+    let named = |name: &str| {
+        pair.table_a
+            .connections()
+            .into_iter()
+            .find(|e| e.peer.name.as_deref() == Some(name))
+    };
+    wait_until("both entries", || {
+        named("one").is_some() && named("two").is_some()
+    });
+    // Several polls while both punch: the entries never show the same attempt.
+    let watch_until = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < watch_until {
+        let (one, two) = (named("one").expect("one"), named("two").expect("two"));
+        assert!(
+            one.p2p_id.is_none() || one.p2p_id != two.p2p_id,
+            "both entries follow attempt {:?}",
+            one.p2p_id
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // One attempt ends; the other's entry then follows its own attempt alone.
+    let (_, cancel_one, done_one) = &attempts[0];
+    cancel_one.cancel();
+    let ended = done_one
+        .recv_timeout(PATIENCE)
+        .expect("the first attempt's end");
+    assert!(matches!(ended, Err(ConnectError::Cancelled)), "{ended:?}");
+    let one = named("one").expect("one");
+    let two = named("two").expect("two");
+    assert!(
+        one.p2p_id.is_none() || one.p2p_id != two.p2p_id,
+        "{:?} {:?}",
+        one.p2p_id,
+        two.p2p_id
+    );
+    let (_, cancel_two, done_two) = &attempts[1];
+    cancel_two.cancel();
+    let _ended = done_two
+        .recv_timeout(PATIENCE)
+        .expect("the second attempt's end");
 }
 
 /// Both sides send a last frame and end their side; each application reads the other's last

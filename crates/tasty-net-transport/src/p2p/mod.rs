@@ -88,6 +88,8 @@ type Shared = Arc<Mutex<HashMap<DeviceId, Weak<ConnState>>>>;
 pub struct P2pTransport {
     endpoint: P2pEndpoint,
     shared: Shared,
+    /// The punches of this transport in progress, by peer device.
+    punching: Mutex<HashMap<DeviceId, usize>>,
     poll: Duration,
     connections: Option<ConnectionTable>,
 }
@@ -108,6 +110,7 @@ impl P2pTransport {
         Self {
             endpoint,
             shared: Arc::default(),
+            punching: Mutex::default(),
             poll,
             connections: None,
         }
@@ -202,6 +205,9 @@ impl P2pTransport {
         followed: &Mutex<Followed>,
     ) -> Result<P2pConnection, P2pError> {
         let done = (Mutex::new(false), Condvar::new());
+        // The attempts to `peer` before this one: this attempt is none of them.
+        let before: Vec<u64> = self.attempts_to(peer).map(|info| info.id).collect();
+        let _punching = Punching::start(&self.punching, peer);
         std::thread::scope(|scope| {
             let follower = std::thread::Builder::new()
                 .name("p2p-punch".into())
@@ -217,7 +223,7 @@ impl P2pTransport {
                             break;
                         }
                         let mut followed = lock(followed);
-                        if let Some(info) = self.attempt_of(peer, followed.id()) {
+                        if let Some(info) = self.attempt_of(peer, followed.id(), &before) {
                             follow(entry, &info, &mut followed);
                         }
                     }
@@ -233,21 +239,66 @@ impl P2pTransport {
         })
     }
 
-    /// The attempt to `peer` an entry follows: the one it followed already, or the newest
-    /// attempt this device dials to `peer`.
-    fn attempt_of(&self, peer: DeviceId, id: Option<u64>) -> Option<P2pConnectionInfo> {
-        self.endpoint
-            .connections()
-            .into_iter()
-            .filter(|info| match id {
-                Some(id) => info.id == id,
-                None => {
-                    info.peer == peer
-                        && info.side == tasty_net_p2p::Side::Dialer
-                        && !matches!(info.state, AttemptPhase::Connected | AttemptPhase::Closed)
-                }
-            })
-            .max_by_key(|info| info.id)
+    /// The attempt an entry follows: the one it followed already, or else this attempt once it
+    /// is the only one it can be. `tasty-net-p2p` does not say which attempt a dial is, so
+    /// while this transport punches to `peer` more than once, or more than one new attempt to
+    /// `peer` is in progress, the entry waits; the connection's history is copied whole once
+    /// it stands.
+    fn attempt_of(
+        &self,
+        peer: DeviceId,
+        id: Option<u64>,
+        before: &[u64],
+    ) -> Option<P2pConnectionInfo> {
+        if let Some(id) = id {
+            return self
+                .endpoint
+                .connections()
+                .into_iter()
+                .find(|info| info.id == id);
+        }
+        if lock(&self.punching).get(&peer).copied() != Some(1) {
+            return None;
+        }
+        let mut new = self
+            .attempts_to(peer)
+            .filter(|info| !before.contains(&info.id));
+        let attempt = new.next()?;
+        new.next().is_none().then_some(attempt)
+    }
+
+    /// The attempts this device dials to `peer` that are in progress.
+    fn attempts_to(&self, peer: DeviceId) -> impl Iterator<Item = P2pConnectionInfo> {
+        self.endpoint.connections().into_iter().filter(move |info| {
+            info.peer == peer
+                && info.side == tasty_net_p2p::Side::Dialer
+                && !matches!(info.state, AttemptPhase::Connected | AttemptPhase::Closed)
+        })
+    }
+}
+
+/// One punch of a transport to a peer, counted while it runs.
+struct Punching<'a> {
+    punching: &'a Mutex<HashMap<DeviceId, usize>>,
+    peer: DeviceId,
+}
+
+impl<'a> Punching<'a> {
+    fn start(punching: &'a Mutex<HashMap<DeviceId, usize>>, peer: DeviceId) -> Self {
+        *lock(punching).entry(peer).or_default() += 1;
+        Self { punching, peer }
+    }
+}
+
+impl Drop for Punching<'_> {
+    fn drop(&mut self) {
+        let mut punching = lock(self.punching);
+        if let Some(count) = punching.get_mut(&self.peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                punching.remove(&self.peer);
+            }
+        }
     }
 }
 
