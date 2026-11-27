@@ -1,10 +1,13 @@
 //! Test support of the two-process SSH tests: child processes, the test SSH server
-//! (docs/design/testing.md "SSH 통합 시험의 sshd") and temporary directories.
+//! (docs/design/testing.md "SSH 통합 시험의 sshd"), one test's scene and temporary
+//! directories.
+//!
+//! Each test file compiles this module on its own and uses only part of it; what one file
+//! leaves unused, another uses.
+#![allow(dead_code)]
 
 pub mod process;
 mod russh_server;
-// Each test file uses its own part of the scene; the rest would be dead code there.
-#[allow(dead_code)]
 pub mod scene;
 pub mod sshd;
 
