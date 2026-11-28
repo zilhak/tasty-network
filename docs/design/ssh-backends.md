@@ -495,7 +495,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `StrictHostKeyChecking` | `yes`, `ask`(`SshPrompt`가 없거나 `BatchMode yes`면 `yes`), `accept-new`. 설정 파일·대상 옵션의 `no`·`off`는 적용하지 않고 표시한다(아래 표). `ssh.overrides`로는 받지 않는다([옵션 적용 순서](#옵션-적용-순서)) |
 | `UserKnownHostsFile`, `GlobalKnownHostsFile`, `CheckHostIP`, `HashKnownHosts` | `accept-new`가 첫 `UserKnownHostsFile`의 폴더를 만들 때 Unix에서는 `0700`으로 만든다(OpenSSH `hostfile_create_user_ssh_dir`, 결정됨, conductor M4 Gate 4) |
 | `RevokedHostKeys` | 공개키 목록 파일. 파일이 KRL 바이너리면 거부. 파일이 없거나 읽지 못하면 OpenSSH처럼 호스트 인증을 실패시킨다(`sshconnect.c:1544`–`:1563`) |
-| `RequiredRSASize` | 기본 1024(`readconf.c:3032`–`:3033`, `SSH_RSA_MINIMUM_MODULUS_SIZE`). 그보다 작은 RSA 호스트 키는 연결을 끊고, 작은 RSA 사용자 키는 건너뛴다(`sshconnect2.c:96`·`:1593`·`:1847`). 사용자 키는 키 파일, agent 키, 인증서에 서명할 키 파일 모두 본다 |
+| `RequiredRSASize` | 기본 1024(`readconf.c:3032`–`:3033`, `SSH_RSA_MINIMUM_MODULUS_SIZE`). 그보다 작은 RSA 호스트 키는 연결을 끊고, 작은 RSA 사용자 키는 건너뛴다(`sshconnect2.c:96`·`:1593`·`:1847`). 사용자 키는 키 파일, agent 키, 인증서에 서명할 키 파일 모두 본다. 인증서는 출처(`CertificateFile`, 키 파일 옆 `-cert`, agent가 든 인증서)와 서명자(agent, 키 파일)와 관계없이 그 공개 키로 보고, 작으면 목록에서 뺀다(`pubkey_prepare`의 `sshkey_check_rsa_length`) |
 | `HostKeyAlgorithms`, `KexAlgorithms`, `Ciphers`, `MACs`, `PubkeyAcceptedAlgorithms`(`PubkeyAcceptedKeyTypes`), `CASignatureAlgorithms` | [알고리즘](#알고리즘) |
 | `RekeyLimit` | russh `Limits`의 범위로 자른다([설정값](#설정값)) |
 | `ConnectTimeout`, `ConnectionAttempts`, `ServerAliveInterval`, `ServerAliveCountMax`, `TCPKeepAlive`(`KeepAlive`), `AddressFamily`, `BindAddress` | |
@@ -582,7 +582,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | MAC | `umac-64-etm`, `umac-128-etm`, `hmac-sha2-256-etm`, `hmac-sha2-512-etm`, `hmac-sha1-etm`, `umac-64`, `umac-128`, `hmac-sha2-256`, `hmac-sha2-512`, `hmac-sha1`(etm은 `@openssh.com`) | `umac-*` 넷 |
 | 호스트 키·사용자 키 | 인증서 형식들, `ssh-mldsa44-ed25519`(인증서 포함), `ssh-ed25519`, `ecdsa-sha2-nistp256`·`384`·`521`, `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`, webauthn 형식, `rsa-sha2-512`, `rsa-sha2-256` | `ssh-mldsa44-ed25519`, webauthn 형식. 인증서 형식은 1단계에서 빼고 제안한다 |
 
-- `CASignatureAlgorithms`는 OpenSSH 클라이언트에서 호스트 인증서의 CA 서명을 볼 때만 쓴다(`sshconnect.c:1123` `sshkey_cert_check_host`). 사용자 인증서를 고를 때는 쓰지 않는다(`sshconnect2.c` 사용 0건, 대조: 같은 파일의 `required_rsa_size` 3건. `auth2-pubkey.c`의 사용은 서버 쪽이다). 내장 백엔드는 이 단계에서 호스트 인증서를 믿지 않으므로(`@cert-authority` 줄은 모르는 호스트) 이 값을 쓸 곳이 없다. `PubkeyAcceptedAlgorithms`는 사용자 키 인증 서명 알고리즘이고, russh `Preferred`의 `key`는 호스트 키 협상용이라 사용자 키 쪽은 이 레포가 인증 시도 전에 거른다(`pubkey_prepare`처럼 키 파일·agent 키는 서명 알고리즘 이름, 인증서는 `CertificateFile`·`<파일>-cert`·agent 인증서 모두 인증서 형식 이름으로 본다).
+- `CASignatureAlgorithms`는 OpenSSH 클라이언트에서 호스트 인증서의 CA 서명을 볼 때만 쓴다(`sshconnect.c:1123` `sshkey_cert_check_host`). 사용자 인증서를 고를 때는 쓰지 않는다(`sshconnect2.c` 사용 0건, 대조: 같은 파일의 `required_rsa_size` 3건. `auth2-pubkey.c`의 사용은 서버 쪽이다). 내장 백엔드는 이 단계에서 호스트 인증서를 믿지 않으므로(`@cert-authority` 줄은 모르는 호스트) 이 값을 쓸 곳이 없다. `PubkeyAcceptedAlgorithms`는 사용자 키 인증 서명 알고리즘이고, russh `Preferred`의 `key`는 호스트 키 협상용이라 사용자 키 쪽은 이 레포가 인증 시도 전에 거른다(`pubkey_prepare`처럼 키 파일·agent 키는 서명 알고리즘 이름, 인증서는 `CertificateFile`·`<파일>-cert`·agent 인증서 모두 인증서 형식 이름으로 본다). RSA 인증서는 그 이름을 고른 SHA-2 해시(`rsa-sha2-512-cert-v01@openssh.com` 등)로 보고, 키 파일이 서명할 때도 같은 해시로 서명해 그 이름으로 보낸다. 고정판 russh의 `authenticate_openssh_cert`는 해시를 받지 않고 `ssh-rsa-cert-v01@openssh.com`을 보내므로(`client/encrypted.rs:1481`–`:1491`) 쓰지 않고, 해시를 받는 `authenticate_certificate_with`에 키 파일 서명자를 넘긴다.
 
 ## 설정값
 

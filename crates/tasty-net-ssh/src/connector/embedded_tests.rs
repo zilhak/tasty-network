@@ -569,10 +569,33 @@ fn on_auth_server(
     edit: impl Fn(String) -> String,
     prompt: Arc<CountingPrompt>,
 ) -> (crate::embedded::test_server::TestServer, SshConnector) {
+    on_auth_server_for(
+        dir,
+        crate::embedded::test_server::client_key(),
+        rule,
+        edit,
+        prompt,
+    )
+}
+
+/// [`on_auth_server`] with `client` as the key file `id_test` and the key the server lets in.
+fn on_auth_server_for(
+    dir: &Dir,
+    client: russh::keys::PrivateKey,
+    rule: crate::embedded::test_server::AuthRule,
+    edit: impl Fn(String) -> String,
+    prompt: Arc<CountingPrompt>,
+) -> (crate::embedded::test_server::TestServer, SshConnector) {
     use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
     let key = dir.0.join("id_test");
     let known = dir.0.join("known_hosts");
-    let server = TestServer::start_with(&key, ExecReply::Silent, DirectReply::Refuse(2), rule);
+    let server = TestServer::start_for(
+        &key,
+        client,
+        ExecReply::Silent,
+        DirectReply::Refuse(2),
+        rule,
+    );
     std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
     let (connector, _) = embedded_with(dir, &edit(server.config(&key, &known)));
     (server, connector.with_prompt(prompt))
@@ -633,6 +656,11 @@ fn the_agent_signs_for_a_key_file_it_holds_before_the_file_is_read() {
 
 /// A user certificate of the client key, signed by a test CA.
 fn user_certificate() -> russh::keys::Certificate {
+    certificate_of(&crate::embedded::test_server::client_key())
+}
+
+/// A user certificate of `key` for the user `u`, signed by a test CA.
+fn certificate_of(key: &russh::keys::PrivateKey) -> russh::keys::Certificate {
     use russh::keys::ssh_key::certificate::{Builder, CertType};
     use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
     let ca = russh::keys::PrivateKey::new(
@@ -640,7 +668,6 @@ fn user_certificate() -> russh::keys::Certificate {
         "test ca",
     )
     .expect("ca");
-    let key = crate::embedded::test_server::client_key();
     let mut builder = Builder::new(
         vec![5; 16],
         key.public_key().key_data().clone(),
@@ -978,4 +1005,150 @@ fn an_identity_file_that_names_a_public_key_signs_with_the_agent() {
     std::fs::remove_file(&private).expect("remove the private file");
     server.agent(&socket, &[client_key()]);
     open_session(&connector).expect("the agent signs for the named public key");
+}
+
+/// A deterministic random source for test keys (splitmix64): the keys are made in the test.
+struct TestRng(u64);
+
+impl russh::keys::ssh_key::rand_core::TryRng for TestRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok((self.try_next_u64()? >> 32) as u32)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Ok(z ^ (z >> 31))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        for chunk in dst.chunks_mut(8) {
+            let word = self.try_next_u64()?.to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+impl russh::keys::ssh_key::rand_core::TryCryptoRng for TestRng {}
+
+/// A 1024-bit RSA test key, made once per test process.
+fn rsa_key() -> russh::keys::PrivateKey {
+    use russh::keys::ssh_key::private::{KeypairData, RsaKeypair};
+    static KEY: std::sync::OnceLock<russh::keys::PrivateKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let pair = RsaKeypair::random(&mut TestRng(41), 1024).expect("rsa key");
+        russh::keys::PrivateKey::new(KeypairData::Rsa(pair), "tasty-net-ssh-rsa-test")
+            .expect("rsa test key")
+    })
+    .clone()
+}
+
+/// A key file signs an RSA certificate with the SHA-2 hash that the certificate name was
+/// judged with, so a `PubkeyAcceptedAlgorithms` with only the SHA-2 certificate names gets in.
+#[test]
+fn an_rsa_certificate_is_signed_with_the_sha2_hash_of_its_name() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("rsa-cert");
+    let key = rsa_key();
+    let cert = dir.0.join("id_cert.pub");
+    std::fs::write(
+        &cert,
+        certificate_of(&key).to_openssh().expect("encode cert"),
+    )
+    .expect("cert file");
+    let line = format!(
+        "CertificateFile \"{}\"\n  PubkeyAcceptedAlgorithms rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com",
+        cert.display()
+    );
+    let (server, connector) = on_auth_server_for(
+        &dir,
+        key,
+        AuthRule::Cert,
+        |c| format!("{c}  {line}\n"),
+        Arc::new(CountingPrompt::default()),
+    );
+    open_session(&connector).expect("the RSA certificate gets in");
+    let events = server.events();
+    assert!(events.contains(&Event::Cert), "{events:?}");
+    // The server refuses a request that names SHA-1, and saw only SHA-2 names.
+    let requested: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Requested(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!requested.is_empty(), "{events:?}");
+    assert!(
+        requested
+            .iter()
+            .all(|name| *name == "rsa-sha2-512" || *name == "rsa-sha2-256"),
+        "{events:?}"
+    );
+}
+
+/// The signature the key file signer appends names the RSA hash of the request.
+#[test]
+fn the_key_file_signer_uses_the_hash_it_is_given() {
+    use russh::Signer as _;
+    use russh::keys::HashAlg;
+    use russh::keys::ssh_encoding::Decode as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let key = Arc::new(rsa_key());
+    let identity = russh::keys::agent::AgentIdentity::PublicKey {
+        key: key.public_key().clone(),
+        comment: String::new(),
+    };
+    for (hash, name) in [
+        (Some(HashAlg::Sha512), "rsa-sha2-512"),
+        (Some(HashAlg::Sha256), "rsa-sha2-256"),
+        (None, "ssh-rsa"),
+    ] {
+        let mut signer = crate::embedded::session::KeySigner(Arc::clone(&key));
+        let out = runtime
+            .block_on(signer.auth_sign(&identity, hash, b"data".to_vec()))
+            .expect("signed");
+        assert_eq!(&out[..4], b"data");
+        let mut rest = &out[4..];
+        let blob = Vec::<u8>::decode(&mut rest).expect("signature blob");
+        let mut blob = &blob[..];
+        assert_eq!(String::decode(&mut blob).expect("name"), name);
+    }
+}
+
+/// A certificate smaller than `RequiredRSASize` is not offered: the key file signs it without
+/// the setting and nothing is sent with it.
+#[cfg(unix)]
+#[test]
+fn a_certificate_smaller_than_required_rsa_size_is_not_offered() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let offered = |required: &str| {
+        let dir = Dir::new("rsa-size");
+        let key = rsa_key();
+        let cert = dir.0.join("id_cert.pub");
+        std::fs::write(
+            &cert,
+            certificate_of(&key).to_openssh().expect("encode cert"),
+        )
+        .expect("cert file");
+        let lines = format!("CertificateFile \"{}\"\n{required}", cert.display());
+        let (server, connector) = on_auth_server_for(
+            &dir,
+            key,
+            AuthRule::Key,
+            |c| format!("{c}  {lines}\n"),
+            Arc::new(CountingPrompt::default()),
+        );
+        let _attempted = open_session(&connector).is_ok();
+        server.events().contains(&Event::Cert)
+    };
+    assert!(offered(""));
+    assert!(!offered("  RequiredRSASize 2048"));
 }

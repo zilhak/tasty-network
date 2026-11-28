@@ -55,6 +55,10 @@ pub(crate) enum AuthRule {
     /// This password first (a partial success that asks for `publickey` next), then the
     /// client key. A key offered before the password is refused.
     PasswordThenKey(&'static str),
+    /// A certificate of the client key only: the plain client key is refused. russh asks
+    /// [`Handler::auth_publickey_offered`] with the plain key of a certificate too, so the offer
+    /// of the client key passes and the plain key is refused once signed.
+    Cert,
 }
 
 /// What the server saw, in order.
@@ -66,6 +70,9 @@ pub(crate) enum Event {
     Key(String),
     /// A certificate offered.
     Cert,
+    /// The signature algorithm a request of [`AuthRule::Cert`] named (`rsa-sha2-512` for
+    /// `rsa-sha2-512-cert-v01@openssh.com`).
+    Requested(String),
     /// A password.
     Password,
 }
@@ -102,7 +109,17 @@ impl TestServer {
         direct: DirectReply,
         rule: AuthRule,
     ) -> Self {
-        let client = self::client_key();
+        Self::start_for(client_key, self::client_key(), exec, direct, rule)
+    }
+
+    /// [`Self::start_with`] with `client` as the client key the server lets in.
+    pub(crate) fn start_for(
+        client_key: &Path,
+        client: PrivateKey,
+        exec: ExecReply,
+        direct: DirectReply,
+        rule: AuthRule,
+    ) -> Self {
         let text = client.to_openssh(LineEnding::LF).expect("encode");
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -257,6 +274,7 @@ impl Handle {
         let in_order = match self.rule {
             AuthRule::Key => true,
             AuthRule::PasswordThenKey(_) => self.password_ok,
+            AuthRule::Cert => false,
         };
         if in_order && key.key_data() == self.allowed.key_data() {
             Auth::Accept
@@ -289,6 +307,21 @@ impl Handler for Handle {
         self.note(Event::Key(
             offer.public_key.algorithm().as_str().to_string(),
         ));
+        if matches!(self.rule, AuthRule::Cert) {
+            // The plain key of a certificate is offered here too (russh
+            // `server/encrypted.rs`); `auth_publickey` refuses the plain key itself. A request
+            // that names RSA with SHA-1 (`ssh-rsa`, `ssh-rsa-cert-v01@openssh.com`) is refused,
+            // so the SHA-2 name is part of getting in.
+            self.note(Event::Requested(offer.algorithm.as_str().to_string()));
+            let sha1 = matches!(offer.algorithm, russh::keys::Algorithm::Rsa { hash: None });
+            return Ok(
+                if !sha1 && offer.public_key.key_data() == self.allowed.key_data() {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            );
+        }
         Ok(self.judge(offer.public_key))
     }
 
@@ -304,10 +337,16 @@ impl Handler for Handle {
     async fn auth_openssh_certificate(
         &mut self,
         _user: &str,
-        _certificate: &russh::keys::Certificate,
+        certificate: &russh::keys::Certificate,
     ) -> Result<Auth, Self::Error> {
         self.note(Event::Cert);
-        Ok(Auth::reject())
+        if matches!(self.rule, AuthRule::Cert)
+            && certificate.public_key() == self.allowed.key_data()
+        {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
     }
 
     async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {

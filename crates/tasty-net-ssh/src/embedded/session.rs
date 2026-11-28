@@ -945,18 +945,25 @@ fn same_key(a: &russh::keys::PublicKey, b: &russh::keys::PublicKey) -> bool {
 
 /// Whether an RSA key is smaller than `RequiredRSASize` (`sshkey_check_rsa_length`).
 fn too_small(key: &russh::keys::PublicKey, required: u32) -> bool {
-    key.key_data()
-        .rsa()
-        .is_some_and(|rsa| rsa.key_size() < required)
+    data_too_small(key.key_data(), required)
+}
+
+/// [`too_small`] for the key data of a key or a certificate.
+fn data_too_small(data: &russh::keys::ssh_key::public::KeyData, required: u32) -> bool {
+    data.rsa().is_some_and(|rsa| rsa.key_size() < required)
 }
 
 /// The list of `ssh` (`pubkey_prepare`): the `CertificateFile` certificates, the agent's keys
 /// that are key files (in the agent's order), the agent's other keys unless `IdentitiesOnly`,
 /// then the key files the agent does not hold, each followed by its `<file>-cert` when no
-/// `CertificateFile` is given. Agent keys smaller than `RequiredRSASize` are left out.
+/// `CertificateFile` is given. Agent keys and certificates (of every source) smaller than
+/// `RequiredRSASize` are left out, as `pubkey_prepare` checks each with
+/// `sshkey_check_rsa_length`.
 fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
     use russh::keys::ssh_key::certificate::CertType;
-    let user_cert = |cert: &Certificate| cert.cert_type() == CertType::User;
+    let user_cert = |cert: &Certificate| {
+        cert.cert_type() == CertType::User && !data_too_small(cert.public_key(), plan.required_rsa)
+    };
     let mut files = Vec::new();
     for (path, origin) in &plan.identities {
         files.push(Candidate::File {
@@ -1002,10 +1009,15 @@ fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
                 }
                 Candidate::Agent(key.clone())
             }
-            AgentIdentity::Certificate { certificate, .. } => Candidate::Cert {
-                cert: Box::new(certificate.clone()),
-                file: None,
-            },
+            AgentIdentity::Certificate { certificate, .. } => {
+                if !user_cert(certificate) {
+                    continue;
+                }
+                Candidate::Cert {
+                    cert: Box::new(certificate.clone()),
+                    file: None,
+                }
+            }
         };
         if !plan.identities_only {
             others.push(candidate);
@@ -1082,6 +1094,7 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                     matches!(id, AgentIdentity::Certificate { certificate, .. }
                         if certificate == &**cert)
                 });
+                let mut signed = None;
                 if held && let Some((client, _)) = agent.as_mut() {
                     match handle
                         .authenticate_certificate_with(
@@ -1092,12 +1105,15 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                         )
                         .await
                     {
-                        Ok(res) => res,
+                        Ok(res) => signed = Some(res),
                         Err(e) => {
                             tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}");
                             continue;
                         }
                     }
+                }
+                if let Some(res) = signed {
+                    res
                 } else {
                     // The key file of the certificate: its own file, or a key file with the
                     // same public key (`sign_and_send_pubkey`).
@@ -1122,10 +1138,26 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                     if key.public_key().key_data() != cert.public_key() {
                         continue;
                     }
-                    handle
-                        .authenticate_openssh_cert(plan.user.clone(), key, Certificate::clone(cert))
+                    // Signed here with the SHA-2 hash the name was judged with, so the name
+                    // sent (`rsa-sha2-*-cert-v01@openssh.com`) is the one `cert_accepted` saw.
+                    match handle
+                        .authenticate_certificate_with(
+                            plan.user.clone(),
+                            Certificate::clone(cert),
+                            rsa_hash,
+                            &mut KeySigner(key),
+                        )
                         .await
-                        .map_err(session_failed)?
+                    {
+                        Ok(res) => res,
+                        Err(russh::AgentAuthError::Send(_)) => {
+                            return Err(session_failed(russh::Error::SendError));
+                        }
+                        Err(e) => {
+                            tracing::debug!(target: LOG_TARGET, "key file signing failed: {e}");
+                            continue;
+                        }
+                    }
                 }
             }
             Candidate::File {
@@ -1157,6 +1189,36 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
         }
     }
     Ok(last)
+}
+
+/// Signs an authentication request with a key file's private key, with the RSA hash of the
+/// request, and appends the signature as the agent client does.
+pub(crate) struct KeySigner(pub(crate) Arc<PrivateKey>);
+
+impl russh::Signer for KeySigner {
+    type Error = russh::AgentAuthError;
+
+    fn auth_sign(
+        &mut self,
+        _key: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        use russh::keys::signature::Signer as _;
+        use russh::keys::ssh_encoding::Encode as _;
+        use russh::keys::ssh_key::private::KeypairData;
+        let signed = match self.0.key_data() {
+            KeypairData::Rsa(pair) => (pair, hash_alg).try_sign(&to_sign),
+            other => other.try_sign(&to_sign),
+        }
+        .map_err(russh::keys::ssh_key::Error::from)
+        .and_then(|signature| Ok(signature.encode_vec()?))
+        .and_then(|blob| Ok(blob.encode(&mut to_sign)?));
+        async move {
+            signed.map_err(russh::keys::Error::from)?;
+            Ok(to_sign)
+        }
+    }
 }
 
 /// A key file read once per round ([`load_key`]); a key smaller than `RequiredRSASize` is not
