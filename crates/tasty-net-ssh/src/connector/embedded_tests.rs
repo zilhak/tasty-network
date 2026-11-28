@@ -335,3 +335,192 @@ fn port_discovery_stops_at_a_cancel_while_the_session_opens() {
         started.elapsed()
     );
 }
+
+#[test]
+fn an_open_the_server_never_answers_leaves_no_task_on_the_session() {
+    use crate::embedded::test_server::ExecReply;
+    let dir = Dir::new("never-open");
+    let (_server, connector) = on_test_server(&dir, ExecReply::NeverOpen);
+    let mut settings = connector.settings().clone();
+    settings
+        .set(
+            "embedded.channel_open_timeout",
+            crate::settings::Value::Duration(std::time::Duration::from_millis(300)),
+        )
+        .expect("channel_open_timeout");
+    let connector = SshConnector::new(settings);
+    // A tunnel holds the session the discovery shares.
+    let held = {
+        use crate::embedded::resolve::{Purpose, load, resolve_chain};
+        let ctx = connector.embedded_ctx();
+        let set = load(ctx.settings).expect("load");
+        let chain = resolve_chain(
+            &set,
+            ctx.settings,
+            &SshTarget::parse("h.example"),
+            Purpose::Tunnel,
+            ctx.verify,
+        )
+        .expect("chain");
+        crate::embedded::session::open(ctx, &chain).expect("session")
+    };
+    let before = Arc::strong_count(&held.conn.handle);
+    for _ in 0..3 {
+        let error =
+            discover_once(&connector, std::time::Duration::from_secs(2)).expect_err("no channel");
+        assert_ne!(
+            error.kind,
+            crate::discovery::PortDiscoveryFailureKind::Cancelled,
+            "{error}"
+        );
+    }
+    // Each open task held the session's handle; once the late wait gives up on it (one more
+    // open timeout) the task is gone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while Arc::strong_count(&held.conn.handle) > before && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(Arc::strong_count(&held.conn.handle), before);
+}
+
+/// A connector for `h.example` on the test server, with its key and known_hosts in `dir`.
+fn on_test_server(
+    dir: &Dir,
+    exec: crate::embedded::test_server::ExecReply,
+) -> (crate::embedded::test_server::TestServer, SshConnector) {
+    use crate::embedded::test_server::{DirectReply, TestServer};
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, exec, DirectReply::Refuse(2));
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let (connector, _) = embedded_with(dir, &server.config(&key, &known));
+    (server, connector)
+}
+
+/// Whether the server saw a close of every `exec` channel it saw.
+fn every_exec_closed(events: &[crate::embedded::test_server::Event]) -> bool {
+    use crate::embedded::test_server::Event;
+    let execs: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Exec(c) => Some(*c),
+            Event::Close(_) => None,
+        })
+        .collect();
+    !execs.is_empty() && execs.iter().all(|c| events.contains(&Event::Close(*c)))
+}
+
+#[test]
+fn port_discovery_closes_its_channel_at_the_budget() {
+    use crate::embedded::test_server::ExecReply;
+    let dir = Dir::new("close-budget");
+    let (server, connector) = on_test_server(&dir, ExecReply::Silent);
+    let error =
+        discover_once(&connector, std::time::Duration::from_secs(2)).expect_err("no answer");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::TimedOut,
+        "{error}"
+    );
+    assert!(
+        server.wait_for(std::time::Duration::from_secs(5), every_exec_closed),
+        "{:?}",
+        server.events()
+    );
+}
+
+#[test]
+fn port_discovery_closes_a_channel_that_opens_after_its_budget() {
+    use crate::embedded::test_server::{Event, ExecReply};
+    let dir = Dir::new("close-late");
+    let (server, connector) = on_test_server(
+        &dir,
+        ExecReply::LateOpen(std::time::Duration::from_millis(2500)),
+    );
+    // A session of the tunnel purpose stays open, as a tunnel holds it, and the discovery
+    // shares it (the purposes differ only in the values of each channel).
+    let held = {
+        use crate::embedded::resolve::{Purpose, load, resolve_chain};
+        let ctx = connector.embedded_ctx();
+        let set = load(ctx.settings).expect("load");
+        let chain = resolve_chain(
+            &set,
+            ctx.settings,
+            &SshTarget::parse("h.example"),
+            Purpose::Tunnel,
+            ctx.verify,
+        )
+        .expect("chain");
+        crate::embedded::session::open(ctx, &chain).expect("session")
+    };
+    let error =
+        discover_once(&connector, std::time::Duration::from_secs(2)).expect_err("no channel");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::TimedOut,
+        "{error}"
+    );
+    // The confirmation comes after the discovery gave up, and its channel is closed.
+    let late_closed = |events: &[Event]| {
+        server
+            .opened()
+            .iter()
+            .any(|c| events.contains(&Event::Close(*c)))
+    };
+    assert!(
+        server.wait_for(std::time::Duration::from_secs(10), late_closed),
+        "{:?} {:?}",
+        server.opened(),
+        server.events()
+    );
+    drop(held);
+}
+
+#[test]
+fn port_discovery_closes_its_channel_at_a_cancel() {
+    use crate::embedded::test_server::ExecReply;
+    let dir = Dir::new("close-cancel");
+    let (server, connector) = on_test_server(&dir, ExecReply::Silent);
+    let cancel = crate::SshCancel::new();
+    let later = cancel.clone();
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        later.cancel();
+    });
+    let error = {
+        let _scope = cancel.scope();
+        discover_once(&connector, std::time::Duration::from_secs(60)).expect_err("cancelled")
+    };
+    stopper.join().expect("stopper");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::Cancelled,
+        "{error}"
+    );
+    assert!(
+        server.wait_for(std::time::Duration::from_secs(5), every_exec_closed),
+        "{:?}",
+        server.events()
+    );
+}
+
+#[test]
+fn port_discovery_closes_its_channel_at_the_output_limit() {
+    use crate::embedded::test_server::ExecReply;
+    let dir = Dir::new("close-limit");
+    let limit = crate::discovery::Limits::new(&SshSettings::new(), &SshTarget::parse("h.example"))
+        .output_limit;
+    let (server, connector) = on_test_server(&dir, ExecReply::Flood(limit + 1));
+    let error =
+        discover_once(&connector, std::time::Duration::from_secs(20)).expect_err("too long");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::PortParseFailed,
+        "{error}"
+    );
+    assert!(
+        server.wait_for(std::time::Duration::from_secs(5), every_exec_closed),
+        "{:?}",
+        server.events()
+    );
+}

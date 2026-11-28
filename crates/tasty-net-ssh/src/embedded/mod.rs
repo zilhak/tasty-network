@@ -15,6 +15,8 @@ pub(crate) mod discovery;
 pub(crate) mod hostkey;
 pub(crate) mod resolve;
 pub(crate) mod session;
+#[cfg(test)]
+pub(crate) mod test_server;
 pub(crate) mod tunnel;
 
 use std::collections::HashMap;
