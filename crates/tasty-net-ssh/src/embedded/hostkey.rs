@@ -48,6 +48,8 @@ pub(crate) struct HostCheck {
     required_rsa: u32,
     hash: bool,
     record_file: Option<PathBuf>,
+    /// The known_hosts files, read again under the record lock before a new key is written.
+    known_files: Vec<PathBuf>,
     prompt: Option<Arc<dyn SshPrompt>>,
     prompt_timeout: Duration,
     paused: Arc<Paused>,
@@ -112,6 +114,7 @@ impl HostCheck {
                 .unwrap_or_default(),
             hash: o.hash_known_hosts.is_some_and(Flag::is_yes),
             record_file,
+            known_files: res.known_hosts_files.clone(),
             prompt: if o.batch_mode.is_some_and(Flag::is_yes) {
                 None
             } else {
@@ -200,111 +203,233 @@ impl HostCheck {
                 }
             }
         }
-        let address = address.filter(|_| self.check_ip);
-        let verdict = self.known.check_with_address(&self.query, address, &blob);
-        let plain_blob = plain.to_bytes().unwrap_or_default();
-        let address_unknown = match address {
-            Some(a) => {
-                let query = HostKeyQuery::for_address(a, self.port);
-                match self.known.check(&query, &plain_blob) {
-                    HostKeyVerdict::Mismatch { file, line } => {
-                        return Err(refuse(HostKeyReason::Changed { file, line }));
-                    }
-                    HostKeyVerdict::Revoked { file, line } => {
-                        return Err(refuse(HostKeyReason::Revoked {
-                            file,
-                            line: Some(line),
-                        }));
-                    }
-                    HostKeyVerdict::Match { .. } => None,
-                    _ => Some(query.name),
-                }
-            }
-            None => None,
+        let names = Names {
+            query: self.query.clone(),
+            port: self.port,
+            address: address.filter(|_| self.check_ip).map(str::to_string),
+            plain_blob: plain.to_bytes().unwrap_or_default(),
+            blob,
         };
-        match verdict {
-            HostKeyVerdict::Match { .. } => {
-                if let Some(ip) = address_unknown {
-                    self.record(&[ip], &plain).await;
+        // The first judgement, from the files read before connecting. A judgement that writes
+        // is made again by the same function under the record lock on the files as they are
+        // then, and that judgement is followed: a refusal refuses, a new host goes to the
+        // checking mode (once), and what is written is what it chose.
+        let mut decision = names.decide(&self.known);
+        let mut accepted = false;
+        let stands = loop {
+            match &decision {
+                Decision::Refuse(_) | Decision::Pass => break decision,
+                Decision::NewHost { .. } if !accepted => {
+                    if !self.accept_unknown(&plain).await {
+                        break decision;
+                    }
+                    accepted = true;
                 }
-                Ok(())
+                Decision::NewHost { .. } | Decision::Record(_) => {}
             }
-            HostKeyVerdict::Mismatch { file, line } => {
-                Err(refuse(HostKeyReason::Changed { file, line }))
+            match self.record(&names, accepted, &plain, decision).await {
+                Recorded::Done(latest) => break latest,
+                Recorded::Again(latest) => decision = latest,
             }
-            HostKeyVerdict::Revoked { file, line } => Err(refuse(HostKeyReason::Revoked {
-                file,
-                line: Some(line),
-            })),
-            other => {
-                if let HostKeyVerdict::DistrustedCaLine { file, line } = &other {
-                    self.note(backend_note(
-                        "@cert-authority",
-                        &tasty_net_ssh_config::Origin::File {
-                            path: file.clone(),
-                            line: *line,
-                        },
-                        NoteClass::CertAuthorityDistrusted,
-                    ));
-                }
-                let accept = match self.mode {
-                    StrictHostKey::New => true,
-                    StrictHostKey::Ask => match &self.prompt {
-                        Some(prompt) => {
-                            let question = HostKeyQuestion {
-                                host: self.query.name.clone(),
-                                key_type: key_type.clone(),
-                                fingerprint: plain.fingerprint(HashAlg::Sha256).to_string(),
-                            };
-                            ask(
-                                Arc::clone(prompt),
-                                self.prompt_timeout,
-                                &self.paused,
-                                move |p| p.confirm_host_key(&question),
-                            )
-                            .await
-                            .unwrap_or(false)
-                        }
-                        None => false,
-                    },
-                    // `Off` is never the checking mode of a resolution; refuse like `yes`.
-                    StrictHostKey::Yes | StrictHostKey::Off => false,
-                };
-                if !accept {
-                    return Err(refuse(HostKeyReason::Unknown));
-                }
-                let mut names = vec![self.query.name.clone()];
-                names.extend(address_unknown);
-                self.record(&names, &plain).await;
-                Ok(())
-            }
+        };
+        // The notes and the result are those of the judgement that stands (the one under the
+        // lock when there was one), as a new connection to those files gives them.
+        if let Decision::NewHost { verdict, .. } = &stands {
+            self.note_distrusted(verdict);
+        }
+        match stands {
+            Decision::Refuse(reason) => Err(refuse(reason)),
+            Decision::NewHost { .. } if !accepted => Err(refuse(HostKeyReason::Unknown)),
+            Decision::Pass | Decision::Record(_) | Decision::NewHost { .. } => Ok(()),
         }
     }
 
-    /// Adds `key` for `names` to the first `UserKnownHostsFile` (`add_host_to_hostfile`). As
-    /// in `ssh`, a failure is logged and the connection goes on.
-    async fn record(&self, names: &[String], key: &PublicKey) {
+    /// Notes a `@cert-authority` line that would have vouched for the host, which is not
+    /// trusted in this stage.
+    fn note_distrusted(&self, verdict: &HostKeyVerdict) {
+        if let HostKeyVerdict::DistrustedCaLine { file, line } = verdict {
+            self.note(backend_note(
+                "@cert-authority",
+                &tasty_net_ssh_config::Origin::File {
+                    path: file.clone(),
+                    line: *line,
+                },
+                NoteClass::CertAuthorityDistrusted,
+            ));
+        }
+    }
+
+    /// Whether an unknown host key `plain` is accepted by the `StrictHostKeyChecking` mode:
+    /// `accept-new` accepts it, `ask` asks the prompt (no prompt or no answer refuses), `yes`
+    /// refuses.
+    async fn accept_unknown(&self, plain: &PublicKey) -> bool {
+        match self.mode {
+            StrictHostKey::New => true,
+            StrictHostKey::Ask => match &self.prompt {
+                Some(prompt) => {
+                    let question = HostKeyQuestion {
+                        host: self.query.name.clone(),
+                        key_type: plain.key_data().algorithm().as_str().to_string(),
+                        fingerprint: plain.fingerprint(HashAlg::Sha256).to_string(),
+                    };
+                    ask(
+                        Arc::clone(prompt),
+                        self.prompt_timeout,
+                        &self.paused,
+                        move |p| p.confirm_host_key(&question),
+                    )
+                    .await
+                    .unwrap_or(false)
+                }
+                None => false,
+            },
+            // `Off` is never the checking mode of a resolution; refuse like `yes`.
+            StrictHostKey::Yes | StrictHostKey::Off => false,
+        }
+    }
+
+    /// Judges `names` again under the record lock with [`Names::decide`] on the known_hosts
+    /// files read again, and writes `key` for the names that judgement chose to the first
+    /// `UserKnownHostsFile` (`add_host_to_hostfile`): the new `CheckHostIP` address of a
+    /// known host, or with `accepted` (the checking mode took the key as a new host) the host
+    /// and its new address. A key another connection recorded meanwhile is the name's key now,
+    /// so the same key is not written twice; another judgement (a refusal, or a new host the
+    /// mode has not decided) is returned to [`Self::judge`] to follow. As in `ssh`, a failure
+    /// to write is logged and the connection goes on. With no file to write to, nothing is
+    /// written and `decision` (the judgement before it) stands. [`Recorded::Done`] carries the
+    /// judgement that stands, whose notes [`Self::judge`] keeps.
+    async fn record(
+        &self,
+        names: &Names,
+        accepted: bool,
+        key: &PublicKey,
+        decision: Decision,
+    ) -> Recorded {
         let Some(file) = self.record_file.clone() else {
-            return;
+            return Recorded::Done(decision);
         };
-        let lines = match host_lines(names, key, self.hash) {
-            Ok(lines) => lines,
-            Err(e) => {
-                tracing::warn!(target: LOG_TARGET, "could not record the host key: {e}");
-                return;
-            }
-        };
-        let written = tokio::task::spawn_blocking(move || append(&file, &lines)).await;
+        let files = self.known_files.clone();
+        let (names, key, hash) = (names.clone(), key.clone(), self.hash);
+        // What stands when the record task itself fails: the judgement before it.
+        let stand_in = decision;
+        let written = tokio::task::spawn_blocking(move || {
+            let _guard = RECORD_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let latest = names.decide(&KnownHosts::load(&files));
+            let to_write = match &latest {
+                Decision::Pass => return (Recorded::Done(latest), None),
+                Decision::Record(to_write) => to_write,
+                Decision::NewHost {
+                    names: to_write, ..
+                } if accepted => to_write,
+                Decision::NewHost { .. } | Decision::Refuse(_) => {
+                    return (Recorded::Again(latest), None);
+                }
+            };
+            let failed = match host_lines(to_write, &key, hash) {
+                Ok(lines) => append_locked(&file, &lines).err(),
+                Err(e) => Some(std::io::Error::other(e)),
+            };
+            (Recorded::Done(latest), failed)
+        })
+        .await;
         match written {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(target: LOG_TARGET, "could not record the host key: {e}");
+            Ok((recorded, failed)) => {
+                if let Some(e) = failed {
+                    tracing::warn!(target: LOG_TARGET, "could not record the host key: {e}");
+                }
+                recorded
             }
             Err(e) => {
                 tracing::warn!(target: LOG_TARGET, "could not record the host key: {e}");
+                Recorded::Done(stand_in)
             }
         }
     }
+}
+
+/// The names one connection's host key is judged under, and the key: the host's query (with
+/// the `CheckHostIP` address for the re-lookup of a name with a port) with the offered blob,
+/// and the address's own query (with the port) with the plain key.
+#[derive(Clone)]
+struct Names {
+    query: HostKeyQuery,
+    port: u16,
+    address: Option<String>,
+    blob: Vec<u8>,
+    plain_blob: Vec<u8>,
+}
+
+impl Names {
+    /// The judgement of these names in `known` (`check_host_key`), the same before connecting
+    /// and under the record lock. The address is judged first: its changed or revoked key
+    /// refuses before anything is asked. Then the host: a match passes and writes only a new
+    /// address (`ssh` adds it without asking, `sshconnect.c:1153`–`:1167`), a changed or
+    /// revoked key refuses, and anything else is a new host for the checking mode, with the
+    /// host and its new address to write.
+    fn decide(&self, known: &KnownHosts) -> Decision {
+        let mut new_address = None;
+        if let Some(address) = &self.address {
+            let query = HostKeyQuery::for_address(address, self.port);
+            match known.check(&query, &self.plain_blob) {
+                HostKeyVerdict::Mismatch { file, line } => {
+                    return Decision::Refuse(HostKeyReason::Changed { file, line });
+                }
+                HostKeyVerdict::Revoked { file, line } => {
+                    return Decision::Refuse(HostKeyReason::Revoked {
+                        file,
+                        line: Some(line),
+                    });
+                }
+                HostKeyVerdict::Match { .. } => {}
+                _ => new_address = Some(query.name),
+            }
+        }
+        match known.check_with_address(&self.query, self.address.as_deref(), &self.blob) {
+            HostKeyVerdict::Match { .. } => match new_address {
+                Some(address) => Decision::Record(vec![address]),
+                None => Decision::Pass,
+            },
+            HostKeyVerdict::Mismatch { file, line } => {
+                Decision::Refuse(HostKeyReason::Changed { file, line })
+            }
+            HostKeyVerdict::Revoked { file, line } => Decision::Refuse(HostKeyReason::Revoked {
+                file,
+                line: Some(line),
+            }),
+            verdict => Decision::NewHost {
+                names: std::iter::once(self.query.name.clone())
+                    .chain(new_address)
+                    .collect(),
+                verdict,
+            },
+        }
+    }
+}
+
+/// What [`Names::decide`] judged.
+enum Decision {
+    /// Refused as changed or revoked.
+    Refuse(HostKeyReason),
+    /// Known, nothing to write.
+    Pass,
+    /// The host is known and these names (its new address) are written without asking.
+    Record(Vec<String>),
+    /// The host is new (`NotFound` or `DistrustedCaLine`): the checking mode decides, and
+    /// `names` are written when it accepts.
+    NewHost {
+        names: Vec<String>,
+        verdict: HostKeyVerdict,
+    },
+}
+
+/// What the record under its lock did.
+enum Recorded {
+    /// Written as judged, or nothing to write: the judgement that stands.
+    Done(Decision),
+    /// The judgement under the lock is another one, to follow.
+    Again(Decision),
 }
 
 /// The key blobs of a `RevokedHostKeys` file of public keys (`type base64 [comment]` lines).
@@ -352,18 +477,25 @@ fn host_lines(names: &[String], key: &PublicKey, hash: bool) -> Result<Vec<Strin
 /// no other record of the process writes.
 static RECORD_LOCK: Mutex<()> = Mutex::new(());
 
+/// Appends `lines` to `file` under the record lock ([`append_locked`]).
+#[cfg(test)]
+fn append(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
+    let _guard = RECORD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    append_locked(file, lines)
+}
+
 /// Appends `lines` to `file`, making its folder when it is missing (`ssh` makes `~/.ssh`).
 /// The lines go out in one buffer and one `write_all`, so two records of this process (and a
-/// record of another program that writes whole lines) do not mix inside a line.
-fn append(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
+/// record of another program that writes whole lines) do not mix inside a line. The caller
+/// holds [`RECORD_LOCK`].
+fn append_locked(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
     let mut buffer = String::new();
     for line in lines {
         buffer.push_str(line);
         buffer.push('\n');
     }
-    let _guard = RECORD_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(dir) = file.parent()
         && !dir.as_os_str().is_empty()
         && !dir.exists()
