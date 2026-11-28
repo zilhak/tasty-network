@@ -794,12 +794,18 @@ async fn stun_only_loop(inner: Arc<Inner>, io: Arc<dyn PacketIo>) {
         let got = poll_fn(|cx| io.poll_recv_from(cx, &mut buf)).await;
         match got {
             Ok((len, from)) => {
+                if inner.closing.load(Ordering::SeqCst) {
+                    return;
+                }
                 let packet = &buf[..len];
                 if classify(packet) == PacketClass::Stun {
                     inner.on_stun(packet, from, io.as_ref());
                 } else {
                     inner.counters.stun_dropped.fetch_add(1, Ordering::Relaxed);
                 }
+                // A socket whose queue never empties would hold the thread: each datagram costs
+                // a unit of tokio's budget, so other tasks run and an abort gets in.
+                tokio::task::coop::consume_budget().await;
             }
             Err(e) if receive_error_is_fatal(&e) => {
                 warn!(error = %e, "STUN port socket is broken, the port stops");

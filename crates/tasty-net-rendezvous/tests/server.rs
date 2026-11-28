@@ -1535,6 +1535,127 @@ async fn every_socket_is_free_when_the_shutdown_returns() {
     }
 }
 
+/// Packet I/O on a real port whose receive queue never empties while the flood is on: every
+/// receive gets, at once, a datagram that is neither STUN nor QUIC.
+#[derive(Debug)]
+struct Flood {
+    socket: std::net::UdpSocket,
+    on: Arc<std::sync::atomic::AtomicBool>,
+    received: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PacketIo for Flood {
+    fn poll_recv_from(
+        &self,
+        _: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        if !self.on.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::task::Poll::Pending;
+        }
+        self.received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        buf[0] = 0x10;
+        std::task::Poll::Ready(Ok((1, SocketAddr::from((Ipv4Addr::LOCALHOST, 9)))))
+    }
+    fn poll_send_ready(
+        &self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn try_send_to(&self, _: &[u8], _: SocketAddr) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+}
+
+/// Turns the flood off when dropped, so a failing test still lets its runtime end.
+struct FloodOff(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for FloodOff {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Sockets whose queues never empty, on the primary port (read by quinn's driver through the
+/// demux) and on the STUN-only port, hold neither the shutdown nor their ports: each receive
+/// loop gives its thread back, so the abort reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sockets_that_never_run_dry_do_not_hold_the_shutdown() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let _off = FloodOff(on.clone());
+    let flood = || {
+        let received = Arc::<std::sync::atomic::AtomicU64>::default();
+        let io = Arc::new(Flood {
+            socket: std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(),
+            on: on.clone(),
+            received: received.clone(),
+        });
+        (io, received)
+    };
+    let (primary, primary_received) = flood();
+    let (alternate_port, alternate_received) = flood();
+    let addrs = [
+        primary.local_addr().unwrap(),
+        alternate_port.local_addr().unwrap(),
+    ];
+    let bound = Duration::from_millis(500);
+    let margin = Duration::from_millis(1500);
+    let mut config = ServerConfig::new(key(100));
+    config.settings = settings_with_shutdown_timeout(bound);
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary,
+            alternate_port,
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    eventually("both receive loops take datagrams", || {
+        let taken =
+            |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed) > 1000;
+        taken(&primary_received) && taken(&alternate_received)
+    })
+    .await;
+    // A std thread watches the bound, not tokio's clock: a receive loop that never gives its
+    // thread back can block the shutdown inside one poll, where no tokio timeout gets in. Past
+    // the bound the watcher turns the flood off, so the shutdown ends and the test fails with
+    // a message instead of hanging.
+    let (done, watch) = std::sync::mpsc::channel::<()>();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (on, stopped) = (on.clone(), stopped.clone());
+        std::thread::spawn(move || {
+            if watch.recv_timeout(bound + margin) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            {
+                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                on.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+    };
+    let started = Instant::now();
+    tokio::time::timeout(DEADLINE, server.shutdown())
+        .await
+        .expect("shutdown ends once the flood is off");
+    let took = started.elapsed();
+    drop(done);
+    watcher.join().unwrap();
+    assert!(
+        !stopped.load(std::sync::atomic::Ordering::SeqCst),
+        "the shutdown ended only after the flood was turned off at its bound ({took:?})"
+    );
+    assert!(took < bound + margin, "{took:?}");
+    for addr in addrs {
+        std::net::UdpSocket::bind(addr).unwrap_or_else(|e| panic!("{addr} is free again: {e}"));
+    }
+}
+
 #[tokio::test]
 async fn mtu_discovery_follows_the_socket() {
     let mtu = |server: &Server| {

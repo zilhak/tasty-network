@@ -161,12 +161,12 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 
 ### 서버 종료
 
-- `Server::shutdown()`은 모든 연결을 `closed`로 닫고, 연결이 닫기를 마칠 때까지(quinn `Endpoint::wait_idle`) 기다린다. 기다림의 상한은 `shutdown_timeout`이고, 0이면 기다리지 않는다. 그다음 남은 연결과 그 작업(서버의 연결 작업과 quinn이 띄운 endpoint·연결 driver)을 끝내고 등록과 펀칭 상태를 비운다. 소켓을 쥔 accept 루프와 STUN 전용 루프도 끝나기를 기다리므로, 돌아올 때 서버의 소켓을 모두 놓는다. 실행 파일의 종료 신호 처리도 이 함수를 부른다.
+- `Server::shutdown()`은 모든 연결을 `closed`로 닫고, 연결이 닫기를 마칠 때까지(quinn `Endpoint::wait_idle`) 기다린다. 기다림의 상한은 `shutdown_timeout`이고, 0이면 기다리지 않는다. 그다음 남은 연결과 그 작업(서버의 연결 작업과 quinn이 띄운 endpoint·연결 driver)을 끝내고 등록과 펀칭 상태를 비운다. 소켓을 쥔 accept 루프와 STUN 전용 루프도 끝나기를 기다리므로, 돌아올 때 서버의 소켓을 모두 놓는다. 수신 큐가 비지 않는 소켓(주입한 `PacketIo`)에서도 주 소켓의 demux와 STUN 전용 루프는 데이터그램마다 tokio의 실행 예산을 써서 실행권을 넘기고, STUN 전용 루프는 종료가 시작되면 다음 데이터그램에서 끝나므로 abort와 기다림이 끝에 닿는다. 실행 파일의 종료 신호 처리도 이 함수를 부른다.
 - 상한이 0이거나 연결 driver가 CONNECTION_CLOSE를 보낼 시간보다 짧으면 그 close가 나가기 전에 driver가 끝난다. 그 기기는 `closed`를 받지 못하고 자기 idle timeout으로 끊김을 안다.
 - 종료가 시작되면(상태 잠금 아래에서) 새 등록과 새 펀칭 타이머를 만들지 않는다. 종료 직전에 프레임을 읽은 reader도 타이머를 붙이지 못하고, 이미 붙은 타이머는 종료가 멈춘다.
 - `shutdown()` future가 끝나기 전에 드롭돼도 연결 작업을 abort하고 상태를 비운다. 등록이 쥔 연결이 소켓을, 소켓이 서버 상태를 쥐는 순환이 남지 않는다. `shutdown()` 없이 `Server`를 드롭하면 연결을 닫고 상태를 비우되 연결 작업은 끝내지 않는다. 연결은 제 속도로 닫기를 마치고, 위의 남는 연결이 있으면 그 driver가 `idle_timeout`까지 주 소켓을 쥔다.
 - 상한이 필요한 까닭: 기기가 첫 패킷을 보내기 전에 닫으면 그 기기의 첫 Initial에는 CONNECTION_CLOSE만 든다. 고정한 quinn-proto(0.11.19)는 이 첫 패킷을 받아 연결을 바로 draining으로 두는데, 이 경로는 닫기 타이머(3 PTO)를 걸지 않고 첫 패킷이 건 idle 타이머만 남긴다. 이미 닫힌 상태라 endpoint의 close도 그 연결에 아무 일을 하지 않고, 서버 코드는 그 연결의 핸들을 받지 못한다(handshake 실패로 끝난다). 그래서 그 연결은 `idle_timeout`(기본 45 s)까지 남고, 상한 없이 기다리면 종료도 그만큼 걸린다. 서버 쪽에서 그 연결만 바로 끝낼 방법이 없으므로 기다림에 상한을 두고, 상한 뒤에는 작업을 끝내 소켓과 작업이 `idle_timeout`까지 남지 않게 한다.
-- 시험: `tests/server.rs`의 `shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet`, `shutdown_with_a_zero_bound_does_not_wait`, `a_dropped_shutdown_gives_the_primary_port_up`, `every_socket_is_free_when_the_shutdown_returns`.
+- 시험: `tests/server.rs`의 `shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet`, `shutdown_with_a_zero_bound_does_not_wait`, `a_dropped_shutdown_gives_the_primary_port_up`, `every_socket_is_free_when_the_shutdown_returns`, `sockets_that_never_run_dry_do_not_hold_the_shutdown`.
 
 ### 알려진 한계
 

@@ -428,8 +428,14 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
             return Poll::Ready(Ok(0));
         };
         loop {
+            // Each datagram taken costs the task a unit of tokio's budget: a socket whose queue
+            // never empties gives the thread back now and then, so an abort reaches the task.
+            let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
             let (len, from, dst_ip) = match self.io.poll_recv_with_dst(cx, buf) {
-                Poll::Ready(Ok(got)) => got,
+                Poll::Ready(Ok(got)) => {
+                    coop.made_progress();
+                    got
+                }
                 Poll::Ready(Err(e)) if receive_error_is_fatal(&e) => return Poll::Ready(Err(e)),
                 Poll::Ready(Err(e)) => {
                     // quinn ends its driver on any error but `ConnectionReset`: drop this one
