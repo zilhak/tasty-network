@@ -34,7 +34,10 @@ tasty-net-transport = { path = "../tasty-net-transport" }
 # The test-only SSH server, the fallback when OpenSSH sshd cannot serve
 # (docs/design/testing.md "SSH 통합 시험의 sshd"). ring instead of the default aws-lc-rs.
 russh = { version = "0.65", default-features = false, features = ["ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util"] }
+# The rendezvous server the P2P tests start in their own process on a loopback port
+# (docs/design/testing.md "P2P 시험").
+tasty-net-rendezvous = { path = "../tasty-net-rendezvous" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"] }
 
 [lints]
 workspace = true

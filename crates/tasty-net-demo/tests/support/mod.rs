@@ -1,12 +1,14 @@
-//! Test support of the two-process SSH tests: child processes, the test SSH server
-//! (docs/design/testing.md "SSH 통합 시험의 sshd"), one test's scene and temporary
-//! directories.
+//! Test support of the two-process tests: child processes, the test SSH server
+//! (docs/design/testing.md "SSH 통합 시험의 sshd"), the rendezvous server of the P2P tests
+//! (docs/design/testing.md "P2P 시험"), one test's scene and temporary directories.
 //!
 //! Each test file compiles this module on its own and uses only part of it; what one file
 //! leaves unused, another uses.
 #![allow(dead_code)]
 
+pub mod p2p;
 pub mod process;
+pub mod rendezvous;
 mod russh_server;
 pub mod scene;
 pub mod sshd;

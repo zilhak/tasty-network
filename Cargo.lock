@@ -1664,6 +1664,7 @@ dependencies = [
  "tasty-net-frame",
  "tasty-net-identity",
  "tasty-net-p2p",
+ "tasty-net-rendezvous",
  "tasty-net-ssh",
  "tasty-net-transport",
  "tokio",
