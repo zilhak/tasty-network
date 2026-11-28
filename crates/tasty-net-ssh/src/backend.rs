@@ -193,6 +193,10 @@ pub enum SshBackendError {
         /// The methods tried, in order (`none`, `publickey`, `keyboard-interactive`,
         /// `password`).
         tried: Vec<String>,
+        /// The notes of the session up to the failure: the resolution's, and the ones the
+        /// authentication left, such as a key file not used for its permissions
+        /// (`bad_key_permissions`), so the caller sees why a key was not offered.
+        notes: Vec<ConfigNote>,
     },
     /// The SSH session failed after it was set up, or the embedded runtime could not run it.
     Session {
@@ -335,11 +339,28 @@ impl fmt::Display for SshBackendError {
                 )
             }
             SshBackendError::HostKey(refusal) => write!(f, "{refusal}"),
-            SshBackendError::AuthFailed { user, host, tried } => write!(
-                f,
-                "SSH authentication of {user} on {host} failed (tried: {}).",
-                tried.join(", ")
-            ),
+            SshBackendError::AuthFailed {
+                user,
+                host,
+                tried,
+                notes,
+            } => {
+                write!(
+                    f,
+                    "SSH authentication of {user} on {host} failed (tried: {}).",
+                    tried.join(", ")
+                )?;
+                for note in notes {
+                    write!(
+                        f,
+                        " {} at {}: {}.",
+                        note.keyword,
+                        note.origin,
+                        note.class.name()
+                    )?;
+                }
+                Ok(())
+            }
             SshBackendError::Session { detail } => write!(f, "The SSH session failed: {detail}"),
         }
     }

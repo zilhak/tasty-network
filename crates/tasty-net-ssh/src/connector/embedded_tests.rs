@@ -907,3 +907,32 @@ fn an_encrypted_pkcs8_key_file_asks_for_its_passphrase() {
         "the passphrase is asked once"
     );
 }
+
+/// The note of a key file skipped for its permissions reaches the caller with the failure.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+#[test]
+fn a_failed_authentication_carries_the_note_of_a_key_file_not_used() {
+    use crate::embedded::test_server::AuthRule;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir::new("perm-failure");
+    let (_server, connector) = on_auth_server(
+        &dir,
+        AuthRule::Key,
+        |c| c,
+        Arc::new(CountingPrompt::default()),
+    );
+    std::fs::set_permissions(
+        dir.0.join("id_test"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("chmod");
+    match open_session(&connector) {
+        Err(SshBackendError::AuthFailed { notes, .. }) => assert!(
+            notes
+                .iter()
+                .any(|n| n.class == NoteClass::KeyPermissions && n.keyword == "identityfile"),
+            "{notes:?}"
+        ),
+        other => panic!("not an authentication failure: {other:?}"),
+    }
+}

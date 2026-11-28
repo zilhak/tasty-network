@@ -669,6 +669,11 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
         user: plan.user.clone(),
         host: plan.host.clone(),
         tried,
+        notes: plan
+            .notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
     })
 }
 
