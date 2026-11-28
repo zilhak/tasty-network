@@ -1,4 +1,7 @@
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the Android module that reads the local network block reason through
+// the NDK is the one place allowed to (docs/design/crates.md "unsafe 규칙", director 2937). A
+// test checks that no other file allows it.
+#![deny(unsafe_code)]
 
 //! System `ssh` delegation of the Tasty network library.
 //!
