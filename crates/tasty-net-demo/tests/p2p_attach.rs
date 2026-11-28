@@ -331,11 +331,6 @@ fn connected_entry(view: &TableView) -> &EntryView {
     up[0]
 }
 
-/// Whether the platform gives the destination IP of a received packet to quinn, so the
-/// accepting side (the QUIC server) knows its `local_ip`. Linux and macOS do (seen in this
-/// test); on other systems (Windows) the test accepts either and logs which it was.
-const DESTINATION_IP_KNOWN: bool = cfg!(any(target_os = "linux", target_os = "macos"));
-
 /// Both ends report the link's QUIC connection as one `p2p_udp` entry: the peer device, the
 /// `udp` segment (the dialer's bound port and reflexive address, its `local_ip` unknown; each
 /// end's remote address is the other's reflexive one), the introducing server's address and
@@ -413,14 +408,15 @@ fn connection_table_reports_p2p() {
     let b_reflexive = b_udp.reflexive.expect("the listener's reflexive address");
     assert_eq!(a.value("seg.udp.remote"), b_reflexive.to_string(), "{a:#?}");
     assert_eq!(b.value("seg.udp.remote"), a_reflexive.to_string(), "{b:#?}");
+    // The accepting side (the QUIC server) knows its `local_ip` from the destination IP of
+    // the packets it receives: quinn-udp asks for it (IP_PKTINFO and the like) on Linux, macOS
+    // and Windows alike, and the P2P socket passes it on to quinn.
     log(&format!(
-        "listener local_ip={} on {} (destination IP expected: {DESTINATION_IP_KNOWN})",
+        "listener local_ip={} on {}",
         b_udp.ip,
         std::env::consts::OS
     ));
-    if DESTINATION_IP_KNOWN || b_udp.ip != "unknown" {
-        assert_eq!(b_udp.ip, b_reflexive.ip().to_string(), "{b:#?}");
-    }
+    assert_eq!(b_udp.ip, b_reflexive.ip().to_string(), "{b:#?}");
 
     // The link's end ends both entries, each with its cause.
     let (a_id, b_id) = (a.id(), b.id());
