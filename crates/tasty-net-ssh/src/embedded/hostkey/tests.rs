@@ -21,7 +21,9 @@ impl Dir {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "tasty-net-ssh-hostkey-{}-{}-{name}",
+            // A space in the folder name, as a user's temporary folder can have: the
+            // configuration lines quote their paths.
+            "tasty-net-ssh hostkey-{}-{}-{name}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -90,7 +92,7 @@ fn check_host(
     let cfg = dir.write(
         "config",
         &format!(
-            "UserKnownHostsFile {}\nGlobalKnownHostsFile none\n{config}\n",
+            "UserKnownHostsFile \"{}\"\nGlobalKnownHostsFile none\n{config}\n",
             kh.display()
         ),
     );
@@ -264,7 +266,7 @@ fn revoked_host_keys_files_are_read_before_the_check() {
     let c = check(
         &dir,
         &known,
-        &format!("RevokedHostKeys {}", missing.display()),
+        &format!("RevokedHostKeys \"{}\"", missing.display()),
         None,
     )
     .expect("check");
@@ -277,7 +279,7 @@ fn revoked_host_keys_files_are_read_before_the_check() {
     let c = check(
         &dir,
         &known,
-        &format!("RevokedHostKeys {}", list.display()),
+        &format!("RevokedHostKeys \"{}\"", list.display()),
         None,
     )
     .expect("check");
@@ -289,7 +291,7 @@ fn revoked_host_keys_files_are_read_before_the_check() {
     let c = check(
         &dir,
         &known,
-        &format!("RevokedHostKeys {}", other.display()),
+        &format!("RevokedHostKeys \"{}\"", other.display()),
         None,
     )
     .expect("check");
@@ -300,7 +302,7 @@ fn revoked_host_keys_files_are_read_before_the_check() {
     let refusal = check(
         &dir,
         &known,
-        &format!("RevokedHostKeys {}", krl.display()),
+        &format!("RevokedHostKeys \"{}\"", krl.display()),
         None,
     )
     .err()
@@ -334,7 +336,7 @@ fn the_record_goes_to_the_first_user_file() {
     let cfg = dir.write(
         "config",
         &format!(
-            "UserKnownHostsFile {} {}\nGlobalKnownHostsFile none\nStrictHostKeyChecking accept-new\n",
+            "UserKnownHostsFile \"{}\" \"{}\"\nGlobalKnownHostsFile none\nStrictHostKeyChecking accept-new\n",
             first.display(),
             second.display()
         ),
