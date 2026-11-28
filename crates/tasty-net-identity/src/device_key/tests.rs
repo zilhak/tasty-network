@@ -657,6 +657,7 @@ mod dir_sync {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::secret_file::DirCheck;
 
     #[test]
     fn a_new_key_in_new_directories_syncs_each_new_parent_then_its_directory() {
@@ -673,7 +674,24 @@ mod dir_sync {
             base.clone(),
             dir.clone(),
         ];
-        assert_eq!(fault::take_synced(), expected);
+        let notes = fault::take_sync_notes();
+        let dirs: Vec<PathBuf> = notes.iter().map(|note| note.dir.clone()).collect();
+        assert_eq!(dirs, expected);
+        // The new parents refuse a link at their last element, the existing root may be one,
+        // and the key directory must be the one that was checked.
+        let checks: Vec<DirCheck> = notes.iter().map(|note| note.check).collect();
+        assert!(
+            matches!(
+                checks[..],
+                [
+                    DirCheck::Created,
+                    DirCheck::Created,
+                    DirCheck::Ancestor,
+                    DirCheck::Same(_)
+                ]
+            ),
+            "{checks:?}"
+        );
     }
 
     #[test]

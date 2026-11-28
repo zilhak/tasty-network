@@ -48,7 +48,8 @@ impl DeviceKey {
         settings: &IdentitySettings,
     ) -> Result<Self, IdentityError> {
         let max_len = settings.max_secret_bytes();
-        let dir = &secret_file::prepare_dir(dir, settings)?;
+        let (dir, dir_id) = secret_file::prepare_dir_with_id(dir, settings)?;
+        let dir = &dir;
         let path = dir.join(DEVICE_KEY_FILE);
         if let Some(key) = read(&path, max_len)? {
             return Ok(key);
@@ -76,7 +77,7 @@ impl DeviceKey {
         // `dir`: one sync makes them durable, so a power loss cannot take the key away and
         // change the device ID. A lost race syncs too, because the winner may not have synced
         // yet, and so does a temporary name that could not be removed.
-        secret_file::sync_dir(dir);
+        secret_file::sync_dir(dir, secret_file::DirCheck::Same(dir_id));
         discarded?;
         read(&path, max_len)?.ok_or_else(|| {
             IdentityError::io(

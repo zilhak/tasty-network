@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use super::{CreateFailure, DirFailure, OpenFailure};
+use super::{CreateFailure, DirCheck, DirFailure, OpenFailure};
 use crate::error::UnsafeReason;
 use crate::settings::IdentitySettings;
 
@@ -38,21 +38,58 @@ pub(super) fn create_dir(dir: &Path, settings: &IdentitySettings) -> Result<(), 
         create_one_dir(element, settings)?;
     }
     // An element another creator made meanwhile is synced too: its entry may not be durable yet
-    // when this call returns.
+    // when this call returns. The parent of the topmost missing element is the existing
+    // ancestor; every other parent is a missing element.
+    let topmost = missing.last().copied();
     for element in missing {
         let parent = element
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        super::sync_dir(parent);
+        let check = if Some(element) == topmost {
+            DirCheck::Ancestor
+        } else {
+            DirCheck::Created
+        };
+        super::sync_dir(parent, check);
     }
     Ok(())
 }
 
-/// Sync the directory `dir` through a handle opened on it. `File::sync_all` is `fsync`, and on
-/// macOS and iOS `fcntl(F_FULLFSYNC)`, the same as for the key file.
-pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
+/// The ID of a directory from its metadata (not following a link), for [`DirCheck::Same`].
+pub(crate) type DirId = FileId;
+
+pub(super) fn dir_id(meta: &fs::Metadata) -> DirId {
+    FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    }
+}
+
+/// Sync the directory `dir` through a handle opened on it. `O_DIRECTORY` refuses anything else
+/// that took its place, and `O_NONBLOCK` keeps such an open from waiting (a FIFO); `O_NOFOLLOW`
+/// refuses a link at the last element unless `check` is the existing ancestor. A checked
+/// directory must also have its ID. `File::sync_all` is `fsync`, and on macOS and iOS
+/// `fcntl(F_FULLFSYNC)`, the same as for the key file.
+pub(super) fn sync_dir(dir: &Path, check: DirCheck) -> io::Result<()> {
+    let flags = match check {
+        DirCheck::Ancestor => libc::O_DIRECTORY | libc::O_NONBLOCK,
+        DirCheck::Same(_) | DirCheck::Created => {
+            libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOFOLLOW
+        }
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(dir)?;
+    if let DirCheck::Same(id) = check
+        && file_id(&file)? != id
+    {
+        return Err(io::Error::other(
+            "the directory was replaced after it was checked",
+        ));
+    }
+    file.sync_all()
 }
 
 /// Create one directory element. An element that appeared meanwhile must be a directory, not a

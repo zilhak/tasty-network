@@ -34,7 +34,7 @@ pub(crate) mod windows;
 #[cfg(windows)]
 use windows as os;
 
-pub(crate) use os::FileId;
+pub(crate) use os::{DirId, FileId};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -99,6 +99,14 @@ pub(crate) fn prepare_dir(
     dir: &Path,
     settings: &IdentitySettings,
 ) -> Result<PathBuf, IdentityError> {
+    prepare_dir_with_id(dir, settings).map(|(dir, _)| dir)
+}
+
+/// [`prepare_dir`], and the ID of the directory it checked, for [`DirCheck::Same`].
+pub(crate) fn prepare_dir_with_id(
+    dir: &Path,
+    settings: &IdentitySettings,
+) -> Result<(PathBuf, DirId), IdentityError> {
     // `a/link/` would let lstat follow the link; the components drop the trailing separator.
     let dir: PathBuf = match dir.components().collect::<PathBuf>() {
         p if p.as_os_str().is_empty() => PathBuf::from("."),
@@ -130,7 +138,8 @@ pub(crate) fn prepare_dir(
         os::narrow_dir(&dir, &meta)
     };
     fixed.map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
-    Ok(dir)
+    let id = os::dir_id(&meta);
+    Ok((dir, id))
 }
 
 /// A written private temporary file and the file ID read from its handle before it was closed.
@@ -270,13 +279,29 @@ fn hard_link(temp: &Path, target: &Path) -> io::Result<()> {
     std::fs::hard_link(temp, target)
 }
 
+/// What a directory sync expects to find at its path (docs/design/identity.md "폴더 동기화").
+/// Every kind is opened as a directory only and without blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirCheck {
+    /// The directory [`prepare_dir_with_id`] checked: not a link at the last element, and the
+    /// opened directory has this ID.
+    Same(DirId),
+    /// A directory this call created: not a link at the last element.
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows uses create_dir_all"))]
+    Created,
+    /// The existing ancestor below which this call created directories. It may be a link the
+    /// consumer's path goes through, so the link is followed.
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows uses create_dir_all"))]
+    Ancestor,
+}
+
 /// Make the entries of the directory `dir` durable: a name this crate just published or removed
 /// in it, or a directory it just created in it (docs/design/identity.md "폴더 동기화"). Unix
-/// opens the directory and syncs it like the key file (`fsync`, on macOS and iOS
-/// `F_FULLFSYNC`); Windows has no directory sync. The name is in place already, so a failure is
-/// logged and not returned.
-pub(crate) fn sync_dir(dir: &Path) {
-    if let Err(error) = try_sync_dir(dir) {
+/// opens the directory as `check` says and syncs it like the key file (`fsync`, on macOS and
+/// iOS `F_FULLFSYNC`); Windows has no directory sync. The name is in place already, so a
+/// failure, also a directory that is not the expected one, is logged and not returned.
+pub(crate) fn sync_dir(dir: &Path, check: DirCheck) {
+    if let Err(error) = try_sync_dir(dir, check) {
         tracing::warn!(
             dir = %dir.display(),
             %error,
@@ -285,10 +310,10 @@ pub(crate) fn sync_dir(dir: &Path) {
     }
 }
 
-fn try_sync_dir(dir: &Path) -> io::Result<()> {
+fn try_sync_dir(dir: &Path, check: DirCheck) -> io::Result<()> {
     #[cfg(test)]
-    fault::record_sync(dir)?;
-    os::sync_dir(dir)
+    fault::record_sync(dir, check)?;
+    os::sync_dir(dir, check)
 }
 
 /// Remove a file this crate wrote. A file that is already gone counts as removed.
@@ -412,8 +437,48 @@ mod tests {
     #[test]
     fn a_directory_can_be_synced() {
         let dir = tempfile::tempdir().unwrap();
-        os::sync_dir(dir.path()).unwrap();
-        assert!(os::sync_dir(&dir.path().join("missing")).is_err());
+        let id = os::dir_id(&std::fs::symlink_metadata(dir.path()).unwrap());
+        for check in [DirCheck::Same(id), DirCheck::Created, DirCheck::Ancestor] {
+            os::sync_dir(dir.path(), check).unwrap();
+            assert!(os::sync_dir(&dir.path().join("missing"), check).is_err());
+        }
+    }
+
+    /// What took the place of the checked directory is not synced as if it were that directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_sync_refuses_what_replaced_the_directory() {
+        use std::fs;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("keys");
+        let old = root.path().join("old");
+        fs::create_dir(&dir).unwrap();
+        let id = os::dir_id(&fs::symlink_metadata(&dir).unwrap());
+
+        // Another directory renamed into its place: another ID.
+        fs::rename(&dir, &old).unwrap();
+        fs::create_dir(&dir).unwrap();
+        assert!(os::sync_dir(&dir, DirCheck::Same(id)).is_err());
+        os::sync_dir(&dir, DirCheck::Created).unwrap();
+
+        // A link to the checked directory: refused at the last element, even with its ID,
+        // except for the existing ancestor, which may be a link.
+        fs::remove_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&old, &dir).unwrap();
+        assert!(os::sync_dir(&dir, DirCheck::Same(id)).is_err());
+        assert!(os::sync_dir(&dir, DirCheck::Created).is_err());
+        os::sync_dir(&dir, DirCheck::Ancestor).unwrap();
+
+        // A FIFO: refused, and the open does not wait for a writer.
+        fs::remove_file(&dir).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for check in [DirCheck::Same(id), DirCheck::Created, DirCheck::Ancestor] {
+            assert!(os::sync_dir(&dir, check).is_err(), "{check:?}");
+        }
     }
 }
 
@@ -544,6 +609,7 @@ pub(crate) mod fault {
     )]
     pub(crate) struct SyncNote {
         pub(crate) dir: std::path::PathBuf,
+        pub(crate) check: super::DirCheck,
         /// The temporary file names in `dir` when the sync was called.
         pub(crate) temps: Vec<std::ffi::OsString>,
     }
@@ -555,7 +621,10 @@ pub(crate) mod fault {
     }
 
     /// Note a directory sync on this thread; the injected failure comes after the note.
-    pub(super) fn record_sync(dir: &std::path::Path) -> std::io::Result<()> {
+    pub(super) fn record_sync(
+        dir: &std::path::Path,
+        check: super::DirCheck,
+    ) -> std::io::Result<()> {
         let temps = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -565,6 +634,7 @@ pub(crate) mod fault {
             .collect();
         let note = SyncNote {
             dir: dir.to_path_buf(),
+            check,
             temps,
         };
         SYNCED.with(|synced| synced.borrow_mut().push(note));

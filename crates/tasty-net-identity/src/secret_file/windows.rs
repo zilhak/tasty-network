@@ -288,8 +288,16 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
 
 /// Windows has no directory sync through the general file API, and `CreateHardLinkW` takes no
 /// write-through flag (docs/design/identity.md "폴더 동기화"): nothing to do.
-pub(super) fn sync_dir(_dir: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(_dir: &Path, _check: super::DirCheck) -> io::Result<()> {
     Ok(())
+}
+
+/// Windows syncs no directory, so it compares no directory ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirId;
+
+pub(super) fn dir_id(_meta: &std::fs::Metadata) -> DirId {
+    DirId
 }
 
 /// Windows keeps the hard link (`CreateHardLinkW`, which never replaces): the caller links
