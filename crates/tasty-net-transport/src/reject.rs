@@ -175,8 +175,8 @@ pub enum HandshakeError {
     RemoteListenerAbsent(RemoteListenerAbsent),
     /// The channel through the SSH tunnel dropped because the SSH server refused to open it
     /// with a reason other than a failed connect (the embedded backend sees the code). The
-    /// session stays up, and connecting again can give another result, as a closed channel
-    /// can.
+    /// session stays up. Whether connecting again can give another result depends on the code
+    /// ([`ChannelOpenRefused::is_retryable`]).
     #[cfg(feature = "ssh")]
     ChannelOpenRefused(ChannelOpenRefused),
     /// A timeout of the [`LinkTimeouts`](crate::LinkTimeouts) is too large to add to the
@@ -203,14 +203,17 @@ pub enum HandshakeError {
 
 impl HandshakeError {
     /// Whether connecting again can give another result: a timeout, a closed channel, a busy
-    /// peer, a plain QUIC close or an I/O failure. Refusals for authentication, version and
-    /// role, cancellation and a TOFU mismatch are not retried.
+    /// peer, a plain QUIC close, an I/O failure or a tunnel channel refused for a passing
+    /// reason. Refusals for authentication, version and role, cancellation, a TOFU mismatch
+    /// and a tunnel channel the server's configuration refuses are not retried.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Rejected { reason, .. } => reason.is_retryable(),
             Self::TimedOut | Self::PeerClosed | Self::Io(_) => true,
             #[cfg(feature = "ssh")]
-            Self::RemoteListenerAbsent(_) | Self::ChannelOpenRefused(_) => true,
+            Self::RemoteListenerAbsent(_) => true,
+            #[cfg(feature = "ssh")]
+            Self::ChannelOpenRefused(refused) => refused.is_retryable(),
             Self::Closed(reason) => reason.is_retryable(),
             Self::Connect(e) => e.is_retryable(),
             _ => false,
@@ -347,6 +350,22 @@ mod tests {
         assert_eq!(reason.reason(), b"session_mismatch");
         assert!(!reason.is_retryable());
         assert!(!HandshakeError::Closed(reason).is_retryable());
+    }
+
+    /// Reason codes 1 and 3 come from the server's configuration and are not retried; 4 and a
+    /// code outside RFC 4254 are. The cause keeps one name for every code.
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn a_refused_tunnel_channel_is_retried_only_for_a_passing_reason() {
+        use crate::connection_table::Cause;
+        for (code, retried) in [(1, false), (3, false), (4, true), (7, true)] {
+            let error = HandshakeError::ChannelOpenRefused(ChannelOpenRefused { code });
+            assert_eq!(error.is_retryable(), retried, "code {code}");
+            let cause = Cause::of_handshake(&error);
+            assert_eq!(cause, Cause::ChannelOpenRefused(code));
+            assert_eq!(cause.as_str(), "channel_open_refused");
+            assert_eq!(cause.is_retryable(), retried, "code {code}");
+        }
     }
 
     #[test]

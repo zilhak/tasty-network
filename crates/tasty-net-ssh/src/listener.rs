@@ -537,6 +537,25 @@ pub struct ChannelOpenRefused {
     pub code: u32,
 }
 
+/// Reason code 1 of RFC 4254 5.1, `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`.
+const ADMINISTRATIVELY_PROHIBITED: u32 = 1;
+/// Reason code 3 of RFC 4254 5.1, `SSH_OPEN_UNKNOWN_CHANNEL_TYPE`.
+const UNKNOWN_CHANNEL_TYPE: u32 = 3;
+
+impl ChannelOpenRefused {
+    /// Whether opening the channel again can give another result. 1
+    /// `ADMINISTRATIVELY_PROHIBITED` and 3 `UNKNOWN_CHANNEL_TYPE` come from the server's
+    /// configuration (sshd `AllowTcpForwarding`, `PermitOpen`), so the same request gets the
+    /// same answer: false. 4 `RESOURCE_SHORTAGE` passes (such as sshd `MaxSessions`), and a
+    /// code outside RFC 4254 is retried as any refusal was before: true.
+    pub fn is_retryable(&self) -> bool {
+        !matches!(
+            self.code,
+            ADMINISTRATIVELY_PROHIBITED | UNKNOWN_CHANNEL_TYPE
+        )
+    }
+}
+
 impl fmt::Display for ChannelOpenRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -918,6 +937,17 @@ mod refusal_tests {
         assert!(!mine.remote_listener_absent(&dropped));
         // A verdict that names no connection gives no code.
         assert_eq!(verdict(&marks).channel_open_refused(&dropped), None);
+    }
+
+    #[test]
+    fn only_a_refusal_of_the_server_configuration_is_not_retried() {
+        for (code, retried) in [(1, false), (3, false), (4, true), (7, true)] {
+            assert_eq!(
+                ChannelOpenRefused { code }.is_retryable(),
+                retried,
+                "code {code}"
+            );
+        }
     }
 
     /// Two connections from the same address, one after the other: each verdict keeps its

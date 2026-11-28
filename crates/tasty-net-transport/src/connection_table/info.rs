@@ -277,11 +277,17 @@ impl Cause {
             | Self::ClosedHere => false,
             #[cfg(feature = "ssh")]
             Self::Discovery(_) => true,
+            #[cfg(feature = "ssh")]
+            Self::ChannelOpenRefused(code) => {
+                tasty_net_ssh::ChannelOpenRefused { code: *code }.is_retryable()
+            }
+            // Only the SSH transport refuses a channel with a code.
+            #[cfg(not(feature = "ssh"))]
+            Self::ChannelOpenRefused(_) => true,
             Self::TunnelFailed(_)
             | Self::SshBackendUnavailable
             | Self::TunnelExited
             | Self::RemoteListenerAbsent
-            | Self::ChannelOpenRefused(_)
             | Self::ConnectFailed(_)
             | Self::HandshakeTimedOut
             | Self::PeerClosed

@@ -255,6 +255,8 @@ allow	crates/tasty-net-ssh/src/listener.rs	[0u8; 4096]	파이프를 한 번에 �
 allow	crates/tasty-net-ssh/src/listener.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
 allow	crates/tasty-net-ssh/src/listener.rs	baseline = 0	시험용 판정 핸들: 판정 전에 본 거절 줄은 없다
 allow	crates/tasty-net-ssh/src/listener.rs	accepted += 1	받은 로컬 연결 하나를 센다(연결의 세대 번호)
+allow	crates/tasty-net-ssh/src/listener.rs	const ADMINISTRATIVELY_PROHIBITED: u32 = 1	와이어 형식: 채널 열기 거절 사유 코드 1 (RFC 4254 5.1)
+allow	crates/tasty-net-ssh/src/listener.rs	const UNKNOWN_CHANNEL_TYPE: u32 = 3	와이어 형식: 채널 열기 거절 사유 코드 3 (RFC 4254 5.1)
 allow	crates/tasty-net-ssh/src/system/spawn.rs	const CREATE_NO_WINDOW: u32 = 0x0800_0000	OS: winbase.h의 CREATE_NO_WINDOW
 allow	crates/tasty-net-ssh/src/system/tunnel.rs	const TUNNEL_FORCED_OPTIONS: [&str; 4] = ["ExitOnForwardFailure=yes", "ControlMaster=no", "ControlPath=none", "ClearAllForwardings=no",]	터널이 강제하는 ssh 옵션 넷
 allow	crates/tasty-net-ssh/src/system/tunnel.rs	static TUNNEL_DROP_NANOS: AtomicU64 = AtomicU64::new(0)	터널 해제 시간 합계는 0에서 시작

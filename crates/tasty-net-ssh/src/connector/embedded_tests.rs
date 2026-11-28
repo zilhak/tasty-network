@@ -2065,3 +2065,38 @@ fn a_key_file_that_does_not_answer_holds_no_runtime_worker() {
     );
     drop(end);
 }
+
+// Retrying a refused tunnel channel by its reason code (docs/design/ssh-backends.md "리스너
+// 판정", conductor M4 2단계 D6).
+
+/// A channel the server refuses with code 1 or 3 is not retried, with code 4 it is: the code
+/// the verdict gives for the connection decides.
+#[test]
+fn a_refused_tunnel_channel_is_retried_only_for_a_passing_reason() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    use std::io::Read;
+    for (code, retried) in [(1, false), (3, false), (4, true)] {
+        let dir = Dir::new("refused-retry");
+        let key = dir.0.join("id_test");
+        let known = dir.0.join("known_hosts");
+        let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(code));
+        std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+        let (connector, selected) = embedded_with(&dir, &server.config(&key, &known));
+        let tunnel = connector
+            .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
+            .expect("tunnel");
+        let verdict = tunnel.listener_verdict();
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
+        let verdict = verdict.for_local(stream.local_addr().expect("local address"));
+        let mut buf = [0u8; 1];
+        let read = stream.read(&mut buf);
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+        let dropped = crate::connection_closed_error("the channel closed");
+        let refused = verdict
+            .channel_open_refused(&dropped)
+            .unwrap_or_else(|| panic!("code {code} gives no refusal"));
+        assert_eq!(refused, crate::ChannelOpenRefused { code });
+        assert_eq!(refused.is_retryable(), retried, "code {code}");
+    }
+}
