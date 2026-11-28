@@ -45,8 +45,8 @@ pub(crate) enum OpenFailure {
     Unsafe(UnsafeReason, Option<io::Error>),
 }
 
-/// Why a secret directory could not be created: an I/O failure at `path`, or an element that
-/// appeared meanwhile and is not a directory.
+/// Why a secret directory could not be created or changed: an I/O failure at `path`, or an
+/// element that appeared meanwhile and is not a directory.
 pub(crate) enum DirFailure {
     Io(PathBuf, io::Error),
     #[cfg_attr(windows, allow(dead_code, reason = "Windows uses create_dir_all"))]
@@ -94,7 +94,8 @@ pub(crate) struct PrivateFile {
 /// Make sure `dir` is a private directory (Unix 0700) and return it without trailing
 /// separators. The last path element is checked before anything is created: a link (also a
 /// dangling one) or a non-directory there is [`IdentityError::UnsafeFile`]. A missing directory
-/// is created (with the retries of `settings`); a wider existing one is narrowed.
+/// is created (with the retries of `settings`); a wider existing one is narrowed, and on Unix an
+/// existing one of the current user that lacks owner bits only gets them added.
 pub(crate) fn prepare_dir(
     dir: &Path,
     settings: &IdentitySettings,
@@ -116,10 +117,7 @@ pub(crate) fn prepare_dir_with_id(
     let (meta, created) = match lstat() {
         Ok(meta) => (meta, false),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            os::create_dir(&dir, settings).map_err(|failure| match failure {
-                DirFailure::Io(path, e) => IdentityError::io(FileOp::CreateDir, &path, e),
-                DirFailure::Unsafe(path, reason) => IdentityError::unsafe_file(&path, reason),
-            })?;
+            os::create_dir(&dir, settings).map_err(dir_error)?;
             let meta = lstat().map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
             (meta, true)
         }
@@ -132,14 +130,20 @@ pub(crate) fn prepare_dir_with_id(
         return Err(IdentityError::unsafe_file(&dir, UnsafeReason::NotRegular));
     }
     // A new directory is set to exactly 0700: the umask can also take owner bits away.
-    let fixed = if created {
-        os::set_new_dir_private(&dir)
+    if created {
+        os::set_new_dir_private(&dir).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
     } else {
-        os::narrow_dir(&dir, &meta)
-    };
-    fixed.map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+        os::narrow_dir(&dir, &meta).map_err(dir_error)?;
+    }
     let id = os::dir_id(&meta);
     Ok((dir, id))
+}
+
+fn dir_error(failure: DirFailure) -> IdentityError {
+    match failure {
+        DirFailure::Io(path, e) => IdentityError::io(FileOp::CreateDir, &path, e),
+        DirFailure::Unsafe(path, reason) => IdentityError::unsafe_file(&path, reason),
+    }
 }
 
 /// A written private temporary file and the file ID read from its handle before it was closed.
@@ -693,6 +697,61 @@ pub(crate) mod fault {
     #[cfg(unix)]
     pub(crate) fn fail_sync() -> Guard {
         set(&SYNC_FAILS)
+    }
+
+    thread_local! {
+        #[cfg(unix)]
+        static AFTER_MKDIR: std::cell::RefCell<Option<AfterMkdir>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(unix)]
+    type AfterMkdir = (std::path::PathBuf, Box<dyn FnOnce()>);
+
+    /// Run `then` once on this thread right after this crate's `mkdir` of `dir`, before it sets
+    /// the new directory to 0700, as if another creator of the same path came in there (Unix
+    /// tests).
+    #[cfg(unix)]
+    pub(crate) fn after_mkdir(dir: &std::path::Path, then: impl FnOnce() + 'static) {
+        AFTER_MKDIR.with(|hook| *hook.borrow_mut() = Some((dir.to_path_buf(), Box::new(then))));
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_after_mkdir(dir: &std::path::Path) {
+        let then = AFTER_MKDIR.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            match hook.take() {
+                Some((path, then)) if path == dir => Some(then),
+                other => {
+                    *hook = other;
+                    None
+                }
+            }
+        });
+        if let Some(then) = then {
+            then();
+        }
+    }
+
+    thread_local! {
+        #[cfg(unix)]
+        static BEFORE_NARROW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `then` once on this thread when an existing secret directory is about to be
+    /// changed, after it was checked and before it is opened for the change, as if its path
+    /// were swapped in between (Unix tests).
+    #[cfg(unix)]
+    pub(crate) fn before_narrow(then: impl FnOnce() + 'static) {
+        BEFORE_NARROW.with(|hook| *hook.borrow_mut() = Some(Box::new(then)));
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_before_narrow() {
+        if let Some(then) = BEFORE_NARROW.with(|hook| hook.borrow_mut().take()) {
+            then();
+        }
     }
 
     /// Make the access restriction of new secret files fail on this thread while the guard lives.

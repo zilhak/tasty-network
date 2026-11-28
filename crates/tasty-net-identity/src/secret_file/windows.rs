@@ -69,7 +69,7 @@ pub(super) fn set_new_dir_private(_dir: &Path) -> io::Result<()> {
 }
 
 /// Windows has no directory mode bits; the contract is on the files.
-pub(super) fn narrow_dir(_dir: &Path, _meta: &std::fs::Metadata) -> io::Result<()> {
+pub(super) fn narrow_dir(_dir: &Path, _meta: &std::fs::Metadata) -> Result<(), DirFailure> {
     Ok(())
 }
 

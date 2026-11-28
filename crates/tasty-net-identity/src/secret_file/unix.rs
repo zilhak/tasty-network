@@ -100,6 +100,8 @@ fn create_one_dir(element: &Path, settings: &IdentitySettings) -> Result<(), Dir
     loop {
         let error = match DirBuilder::new().mode(0o700).create(element) {
             Ok(()) => {
+                #[cfg(test)]
+                super::fault::run_after_mkdir(element);
                 return fs::set_permissions(element, fs::Permissions::from_mode(0o700))
                     .map_err(io_failure);
             }
@@ -159,12 +161,105 @@ pub(super) fn set_new_dir_private(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn narrow_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    let mode = meta.mode() & 0o7777;
-    if mode & 0o077 == 0 {
+/// Narrow an existing directory with group or other bits to its owner bits. A directory of the
+/// current user without group and other bits but without all owner bits is what `mkdir` gives
+/// under a umask that removes owner bits (0500 under 0277): another creator of the same path may
+/// have made it and not set it to 0700 yet, so the missing owner bits are added here instead of
+/// failing on the directory. That is best effort: when it fails (a read-only file system, or a
+/// directory the owner cannot read and so cannot open), the directory is used as it is.
+///
+/// `meta` (from the check before, not following a link) only tells whether anything is to be
+/// changed. The change is judged and made on a handle: the directory is opened again without
+/// following a link at the last element (`O_NOFOLLOW`, and `O_DIRECTORY` refuses anything else),
+/// its type, owner and mode are read from that handle, and the mode is set through it
+/// (`fchmod`), so an element swapped in after the check is never changed. A link or a
+/// non-directory found at that open is [`DirFailure::Unsafe`], a missing one [`DirFailure::Io`].
+pub(super) fn narrow_dir(dir: &Path, meta: &fs::Metadata) -> Result<(), DirFailure> {
+    if !needs_change(meta) {
         return Ok(());
     }
-    fs::set_permissions(dir, fs::Permissions::from_mode(mode & 0o700))
+    #[cfg(test)]
+    super::fault::run_before_narrow();
+    let io_failure = |e| DirFailure::Io(dir.to_owned(), e);
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir);
+    let handle = match handle {
+        Ok(handle) => handle,
+        Err(e) => match e.raw_os_error() {
+            // A link at the last element is ELOOP or, because of O_DIRECTORY, ENOTDIR
+            // (Linux); the element itself tells a link from another non-directory.
+            Some(libc::ELOOP | libc::ENOTDIR) => {
+                let link = e.raw_os_error() == Some(libc::ELOOP)
+                    || fs::symlink_metadata(dir).is_ok_and(|meta| is_link(&meta));
+                let reason = if link {
+                    UnsafeReason::Symlink
+                } else {
+                    UnsafeReason::NotRegular
+                };
+                return Err(DirFailure::Unsafe(dir.to_owned(), reason));
+            }
+            _ if e.kind() == io::ErrorKind::NotFound => return Err(io_failure(e)),
+            // Not opened (a directory the owner cannot read): the directory is used as it is
+            // only when it is still one that needed owner bits only. Judged on the element as
+            // it is now, not on the check before, because its mode may have changed since.
+            _ => {
+                let now = match fs::symlink_metadata(dir) {
+                    Ok(now) => now,
+                    Err(_) => return Err(io_failure(e)),
+                };
+                if is_link(&now) {
+                    return Err(DirFailure::Unsafe(dir.to_owned(), UnsafeReason::Symlink));
+                }
+                if !now.is_dir() {
+                    return Err(DirFailure::Unsafe(dir.to_owned(), UnsafeReason::NotRegular));
+                }
+                let private = now.mode() & 0o077 == 0;
+                if !private || now.uid() != effective_uid() {
+                    return Err(io_failure(e));
+                }
+                tracing::debug!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "could not open the secret directory to add the missing owner bits"
+                );
+                return Ok(());
+            }
+        },
+    };
+    let meta = handle.metadata().map_err(io_failure)?;
+    if !meta.is_dir() {
+        return Err(DirFailure::Unsafe(dir.to_owned(), UnsafeReason::NotRegular));
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o077 == 0 {
+        if mode & 0o700 != 0o700
+            && meta.uid() == effective_uid()
+            && let Err(error) = handle.set_permissions(fs::Permissions::from_mode(mode | 0o700))
+        {
+            tracing::debug!(
+                dir = %dir.display(),
+                %error,
+                "could not add the missing owner bits to the secret directory"
+            );
+        }
+        return Ok(());
+    }
+    handle
+        .set_permissions(fs::Permissions::from_mode(mode & 0o700))
+        .map_err(io_failure)
+}
+
+/// Whether [`narrow_dir`] has anything to change in a directory with `meta`: group or other bits
+/// to take away, or owner bits to add to a directory of the current user.
+fn needs_change(meta: &fs::Metadata) -> bool {
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o077 == 0 {
+        mode & 0o700 != 0o700 && meta.uid() == effective_uid()
+    } else {
+        true
+    }
 }
 
 pub(super) fn create_temp(path: &Path) -> Result<File, CreateFailure> {

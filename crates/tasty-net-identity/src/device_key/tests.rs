@@ -780,6 +780,131 @@ mod unix {
         assert_eq!(mode(dir.path()), 0o700);
     }
 
+    /// Another creator of the same key directory made its last element and has not set it to
+    /// 0700 yet (0500 is what mkdir gives under umask 0277): a call that finds the directory
+    /// then still creates the key, and both calls read the same key.
+    #[test]
+    fn a_key_directory_another_creator_has_not_set_to_0700_yet_is_used() {
+        use std::{cell::Cell, rc::Rc};
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("a").join("keys");
+        let inner = Rc::new(Cell::new(None));
+        {
+            let (dir, inner) = (dir.clone(), Rc::clone(&inner));
+            fault::after_mkdir(&dir.clone(), move || {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+                inner.set(Some(DeviceKey::load_or_create(&dir).map(|key| key.id())));
+                // The second call itself added the owner bits (the first one has not set 0700
+                // yet). Checked here too because root could write into the 0500 directory.
+                assert_eq!(mode(&dir), 0o700);
+            });
+        }
+        let key = DeviceKey::load_or_create(&dir).unwrap();
+        let inner = inner.take().expect("the hook ran at the last element");
+        assert_eq!(inner.unwrap(), key.id());
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(DEVICE_KEY_FILE)), 0o600);
+    }
+
+    /// An existing directory of the current user with fewer owner bits gets the missing ones;
+    /// one with group or other bits is narrowed to its owner bits as before.
+    #[test]
+    fn an_existing_directory_gets_the_missing_owner_bits_only_when_it_is_otherwise_private() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        DeviceKey::load_or_create(dir.path()).unwrap();
+        assert_eq!(mode(dir.path()), 0o700);
+
+        let wide = tempfile::tempdir().unwrap();
+        fs::set_permissions(wide.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let narrowed = secret_file::prepare_dir(wide.path(), &IdentitySettings::default());
+        // Restore the owner bits so the temporary directory can be removed.
+        let mode_after = mode(wide.path());
+        fs::set_permissions(wide.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        narrowed.unwrap();
+        assert_eq!(mode_after, 0o500);
+    }
+
+    /// The key directory is replaced by a link to another directory after it was checked and
+    /// before its mode is changed: the change is refused as a link, and the mode of the link
+    /// target stays as it was, both for owner bits to add and for group and other bits to take
+    /// away.
+    #[test]
+    fn a_link_swapped_in_after_the_check_is_not_changed() {
+        for (before, target_mode) in [(0o500, 0o500), (0o755, 0o755)] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("keys");
+            let target = root.path().join("target");
+            fs::create_dir(&dir).unwrap();
+            fs::create_dir(&target).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(before)).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(target_mode)).unwrap();
+            {
+                let (dir, target, moved) = (dir.clone(), target.clone(), root.path().join("old"));
+                fault::before_narrow(move || {
+                    fs::rename(&dir, moved).unwrap();
+                    symlink(target, &dir).unwrap();
+                });
+            }
+            let error = DeviceKey::load_or_create(&dir).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    IdentityError::UnsafeFile {
+                        reason: UnsafeReason::Symlink,
+                        ..
+                    }
+                ),
+                "{before:o}: {error:?}"
+            );
+            assert_eq!(mode(&target), target_mode, "{before:o}");
+            assert_eq!(mode(&root.path().join("old")), before, "{before:o}");
+        }
+    }
+
+    /// The key directory, checked as 0500, is changed to 0333 before it is opened for the
+    /// change: the owner cannot read it, so it cannot be opened, and it now has group and other
+    /// bits. That is a failure to narrow it, not a directory to use as it is, and no key is
+    /// published in it.
+    #[test]
+    fn a_directory_that_gained_group_bits_and_cannot_be_opened_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        // Root opens a directory it cannot read, so this order cannot be made as root.
+        if fs::metadata(root.path()).unwrap().uid() == 0 {
+            return;
+        }
+        let dir = root.path().join("keys");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        {
+            let dir = dir.clone();
+            fault::before_narrow(move || {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o333)).unwrap();
+            });
+        }
+        let error = DeviceKey::load_or_create(&dir).unwrap_err();
+        let mode_after = mode(&dir);
+        let published = dir.join(DEVICE_KEY_FILE).exists();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(
+                &error,
+                IdentityError::Io {
+                    op: FileOp::CreateDir,
+                    source,
+                    ..
+                } if source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "{error:?}"
+        );
+        assert_eq!(mode_after, 0o333);
+        assert!(!published);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
     #[test]
     fn a_wide_key_file_is_refused_and_kept() {
         let dir = tempfile::tempdir().unwrap();
