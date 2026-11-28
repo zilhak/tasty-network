@@ -118,6 +118,19 @@ jobs:
         env:
           TASTY_OPENSSH_REF_REQUIRED: ${{ runner.os != 'Windows' && '1' || '' }}
         run: scripts/check.sh test --no-fail-fast
+      # Criterion E1 of docs/design/done-criteria.md: both SSH backends built. The
+      # demo's _embedded attach tests start the dialer with no OpenSSH client on its
+      # PATH, so auto falls back to the embedded backend (docs/design/ssh-backends.md
+      # "시험 목록").
+      - name: clippy, both SSH backends
+        run: cargo clippy --workspace --all-targets --locked --features tasty-net-ssh/embedded-ssh,tasty-net-transport/embedded-ssh,tasty-net-demo/embedded-ssh -- -D warnings
+      - name: test, both SSH backends (E1)
+        run: cargo test --locked -p tasty-net-ssh -p tasty-net-transport -p tasty-net-demo --features tasty-net-ssh/embedded-ssh,tasty-net-transport/embedded-ssh,tasty-net-demo/embedded-ssh --no-fail-fast
+      # The mobile combination: the embedded backend without the system one.
+      - name: embedded SSH backend alone
+        run: |
+          cargo clippy --locked -p tasty-net-ssh -p tasty-net-transport --all-targets --no-default-features --features tasty-net-ssh/embedded-ssh,tasty-net-transport/embedded-ssh -- -D warnings
+          cargo test --locked -p tasty-net-ssh -p tasty-net-transport --no-default-features --features tasty-net-ssh/embedded-ssh,tasty-net-transport/embedded-ssh --no-fail-fast
       # The SSH feature contract (docs/design/ssh-backends.md): tasty-net-transport
       # builds, passes clippy and its tests without default features, and that build
       # has no tasty-net-ssh in its dependency graph.
@@ -191,6 +204,24 @@ jobs:
           echo "$dir/$name" >> "$GITHUB_PATH"
       - name: cargo deny
         run: scripts/check.sh deny
+
+  # The security advisories of the locked dependencies (docs/design/ssh-backends.md
+  # "의존 사실": russh, ssh-key and the rest follow security fixes). A new advisory can
+  # fail it without a new commit; the fix is a version bump.
+  audit:
+    name: cargo audit (advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_AUDIT_VERSION: 0.23.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: bash scripts/install-toolchain.sh
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
+      - name: cargo audit
+        run: cargo audit
 
   # Mobile cross check (docs/design/mobile.md "모바일 cross check"): cargo check of the
   # crate and feature combinations in scripts/mobile-crates.list for each mobile target,

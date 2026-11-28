@@ -8,7 +8,9 @@ tasty-net-frame
 tasty-net-identity
 tasty-net-topology
 tasty-net-transport --no-default-features
+tasty-net-transport --no-default-features --features embedded-ssh
 tasty-net-rendezvous
 tasty-net-p2p
 tasty-net-ssh-config
+tasty-net-ssh --no-default-features --features embedded-ssh
 tasty-net-ffi
