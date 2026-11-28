@@ -75,9 +75,8 @@ pub(crate) struct StderrMarks {
     /// How many channel connect failure lines came ([`is_channel_connect_failure`]). A count,
     /// so the marks of a tunnel keep the same size however long it lives.
     connect_failures: AtomicU64,
-    /// The local connections of an embedded tunnel and the verdicts that name them
-    /// ([`Connections`]).
-    connections: Mutex<Connections>,
+    /// The verdicts of an embedded tunnel waiting for their local connection ([`Claims`]).
+    claims: Mutex<Claims>,
     /// ssh refused `ForkAfterAuthentication` ([`is_fork_option_refusal`]).
     #[cfg(feature = "system-ssh")]
     pub(crate) fork_option_refused: AtomicBool,
@@ -94,8 +93,8 @@ impl StderrMarks {
         self.connect_failures.load(Ordering::Acquire)
     }
 
-    fn connections(&self) -> std::sync::MutexGuard<'_, Connections> {
-        self.connections
+    fn claims(&self) -> std::sync::MutexGuard<'_, Claims> {
+        self.claims
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -105,105 +104,77 @@ impl StderrMarks {
     #[cfg(any(test, feature = "embedded-ssh"))]
     pub(crate) fn per_connection() -> Self {
         let marks = Self::default();
-        marks.connections().per_connection = true;
+        marks.claims().per_connection = true;
         marks
     }
 
-    /// The local connection from `peer` the tunnel accepted: its slot, which the verdict that
-    /// names this connection shares ([`ListenerVerdict::for_local`]). The tunnel gives it back
-    /// with [`Self::release`] when the connection has ended.
+    /// The local connection from `peer` the tunnel accepted: its slot. A verdict that named
+    /// `peer` before the connection was made ([`ListenerVerdict::for_local`]) shares it; a
+    /// connection no verdict named gets a slot no verdict sees. The tunnel calls
+    /// [`Self::release`] when the connection has ended.
     #[cfg(any(test, feature = "embedded-ssh"))]
     pub(crate) fn accept(&self, peer: SocketAddr) -> Arc<ChannelSlot> {
-        let mut c = self.connections();
-        c.accepted += 1;
-        let generation = c.accepted;
-        c.forget_dropped_claims();
-        if let Some((after, slot)) = c.claims.remove(&peer)
-            && after < generation
-            && let Some(slot) = slot.upgrade()
-        {
-            return slot;
-        }
-        let slot = Arc::new(ChannelSlot::default());
-        c.unclaimed.insert(peer, (generation, Arc::clone(&slot)));
-        slot
+        let mut c = self.claims();
+        c.forget_dropped();
+        c.waiting
+            .remove(&peer)
+            .and_then(|slot| slot.upgrade())
+            .unwrap_or_default()
     }
 
-    /// The local connection from `peer` with `slot` has ended (both sides closed): a slot no
-    /// verdict has taken is dropped, so a verdict that names that connection later knows
-    /// nothing of it (no code, no absent listener).
+    /// The local connection from `peer` has ended (both sides closed). A verdict still waiting
+    /// for `peer` named it while that connection was open, which is not before its own
+    /// connection: it is dropped, so that verdict knows nothing (no code, no absent listener)
+    /// and does not meet the next connection from the address.
     #[cfg(any(test, feature = "embedded-ssh"))]
-    pub(crate) fn release(&self, peer: SocketAddr, slot: &Arc<ChannelSlot>) {
-        let mut c = self.connections();
-        if c.unclaimed
-            .get(&peer)
-            .is_some_and(|(_, kept)| Arc::ptr_eq(kept, slot))
-        {
-            c.unclaimed.remove(&peer);
-        }
+    pub(crate) fn release(&self, peer: SocketAddr) {
+        self.claims().waiting.remove(&peer);
     }
 
-    /// The entries the marks keep: accepted connections no verdict has taken, and verdicts
-    /// waiting for their connection.
+    /// The live verdicts waiting for their connection.
     #[cfg(test)]
     pub(crate) fn kept(&self) -> usize {
-        let c = self.connections();
-        c.unclaimed.len() + c.claims.len()
+        let mut c = self.claims();
+        c.forget_dropped();
+        c.waiting.len()
     }
 
-    /// The local connections accepted so far.
-    fn accepted(&self) -> u64 {
-        self.connections().accepted
-    }
-
-    /// The slot of the first connection from `local` accepted after `after` connections: the
-    /// one already accepted, or the one the tunnel accepts next from that address.
-    fn claim(&self, local: SocketAddr, after: u64) -> Option<Arc<ChannelSlot>> {
-        let mut c = self.connections();
+    /// The slot of the next connection from `local` the tunnel accepts.
+    fn claim(&self, local: SocketAddr) -> Option<Arc<ChannelSlot>> {
+        let mut c = self.claims();
         if !c.per_connection {
             return None;
         }
-        c.forget_dropped_claims();
-        if let Some((generation, slot)) = c.unclaimed.remove(&local)
-            && generation > after
-        {
-            return Some(slot);
-        }
+        c.forget_dropped();
         let slot = Arc::new(ChannelSlot::default());
-        c.claims.insert(local, (after, Arc::downgrade(&slot)));
+        c.waiting.insert(local, Arc::downgrade(&slot));
         Some(slot)
     }
 }
 
-impl Connections {
+impl Claims {
     /// Drops the claims whose verdicts are gone.
-    fn forget_dropped_claims(&mut self) {
-        self.claims.retain(|_, (_, slot)| slot.upgrade().is_some());
+    fn forget_dropped(&mut self) {
+        self.waiting.retain(|_, slot| slot.upgrade().is_some());
     }
 }
 
-/// The local connections of an embedded tunnel, each with a generation (the count of
-/// connections accepted up to it), so a verdict finds its own connection and not a later one
-/// from the same address. A verdict takes the count when it is taken, before its connection
-/// exists, and names the address once connected, while its connection is open; the tunnel may
-/// accept the connection before or after that.
+/// The verdicts of an embedded tunnel that named the local address of their connection
+/// before connecting, so a verdict meets only the connection made after it named the address
+/// (docs/design/ssh-backends.md "리스너 판정"). An earlier connection from the same address,
+/// still open in the tunnel or not, is another one.
 ///
-/// What is kept is bounded by the open connections and the live verdicts, not by the
-/// connections a tunnel has forwarded: an accepted connection's slot waits for its verdict
-/// only while the connection is open (the tunnel releases it when both sides have closed, so
-/// a connection no verdict names, such as one cancelled before it was named, leaves nothing),
-/// a claim is dropped when its verdict is, and each map keeps one entry per address. A verdict
-/// that names a connection which has already ended gets an empty slot: no code.
+/// What is kept is bounded by the live verdicts, not by the connections a tunnel has
+/// forwarded: the accept of its connection takes a claim, the end of a connection from the
+/// same address drops it, a claim is dropped when its verdict is, and one is kept per address.
+/// A connection no verdict named leaves nothing.
 #[derive(Debug, Default)]
-struct Connections {
+struct Claims {
     /// The marks know each connection's channel (an embedded tunnel).
     per_connection: bool,
-    accepted: u64,
-    /// Accepted connections no verdict has named yet: generation and slot.
-    unclaimed: HashMap<SocketAddr, (u64, Arc<ChannelSlot>)>,
-    /// Verdicts whose connection the tunnel has not accepted yet: the count when the verdict
-    /// was taken, and the slot the verdict holds.
-    claims: HashMap<SocketAddr, (u64, std::sync::Weak<ChannelSlot>)>,
+    /// Verdicts whose connection the tunnel has not accepted yet, by its local address: the
+    /// slot the verdict holds.
+    waiting: HashMap<SocketAddr, std::sync::Weak<ChannelSlot>>,
 }
 
 /// How the server answered the channel open of one local connection, if it refused it.
@@ -426,8 +397,6 @@ pub struct ListenerVerdict {
     marks: Arc<StderrMarks>,
     /// Failure lines seen before this verdict was taken.
     baseline: u64,
-    /// Local connections the tunnel had accepted before this verdict was taken.
-    accepted: u64,
     /// The channel of the local connection the verdict judges ([`Self::for_local`], embedded
     /// tunnels only).
     slot: Option<Arc<ChannelSlot>>,
@@ -437,12 +406,10 @@ pub struct ListenerVerdict {
 impl ListenerVerdict {
     pub(crate) fn new(remote_port: u16, marks: Arc<StderrMarks>, timing: VerdictTiming) -> Self {
         let baseline = marks.connect_failures();
-        let accepted = marks.accepted();
         Self {
             remote_port,
             marks,
             baseline,
-            accepted,
             slot: None,
             timing,
         }
@@ -454,15 +421,17 @@ impl ListenerVerdict {
         self.marks.kept()
     }
 
-    /// The verdict for the local connection from `local` (the local address of the socket
-    /// connected to the tunnel's forwarding end), made right after the connection: the first
-    /// connection from that address the tunnel accepts after the verdict was taken. On an
-    /// embedded tunnel only that connection's channel gives a code
-    /// ([`Self::channel_open_refused`]) or an absent listener; a later connection from the same
-    /// address is another one. Name one connection per verdict.
+    /// The verdict for the local connection from `local`, named before the connection is made:
+    /// bind the socket to a loopback address first, name that address here, then connect it to
+    /// the tunnel's forwarding end. The verdict judges the next connection from `local` the
+    /// tunnel accepts. On an embedded tunnel only that connection's channel gives a code
+    /// ([`Self::channel_open_refused`]) or an absent listener; an earlier or later connection
+    /// from the same address is another one. A verdict named while another connection from
+    /// `local` is still open in the tunnel knows nothing once that connection ends (no code,
+    /// no absent listener). Name one connection per verdict.
     #[must_use]
     pub fn for_local(mut self, local: SocketAddr) -> Self {
-        self.slot = self.marks.claim(local, self.accepted);
+        self.slot = self.marks.claim(local);
         self
     }
 
@@ -914,12 +883,11 @@ mod refusal_tests {
         let marks = Arc::new(StderrMarks::per_connection());
         let local = SocketAddr::from(([127, 0, 0, 1], 50_001));
         let other_local = SocketAddr::from(([127, 0, 0, 1], 50_002));
-        let mine = verdict(&marks);
-        let other = verdict(&marks);
+        // Each verdict names its address before its connection is made.
+        let mine = verdict(&marks).for_local(local);
+        let _other = verdict(&marks).for_local(other_local);
         let other_slot = marks.accept(other_local);
         let my_slot = marks.accept(local);
-        let mine = mine.for_local(local);
-        let _other = other.for_local(other_local);
         let dropped = connection_closed_error("closed");
         assert_eq!(mine.channel_open_refused(&dropped), None);
         other_slot.refuse(ChannelRefusal::Other(1));
@@ -951,18 +919,17 @@ mod refusal_tests {
     }
 
     /// Two connections from the same address, one after the other: each verdict keeps its
-    /// own connection's result, whichever comes first, the accept or the naming.
+    /// own connection's result.
     #[test]
     fn two_connections_from_one_address_keep_their_own_results() {
         let marks = Arc::new(StderrMarks::per_connection());
         let local = SocketAddr::from(([127, 0, 0, 1], 50_003));
         let dropped = connection_closed_error("closed");
-        // The first is accepted before its verdict names it.
-        let first = verdict(&marks);
+        let first = verdict(&marks).for_local(local);
         let first_slot = marks.accept(local);
-        let first = first.for_local(local);
         first_slot.refuse(ChannelRefusal::Other(1));
-        // The second, from the same address once the first closed, is named first.
+        marks.release(local);
+        // The second, from the same address once the first closed.
         let second = verdict(&marks).for_local(local);
         let second_slot = marks.accept(local);
         second_slot.refuse(ChannelRefusal::Other(4));
@@ -981,6 +948,63 @@ mod refusal_tests {
         assert!(!third.remote_listener_absent(&dropped));
     }
 
+    /// H3 (AM): a connection from the address that the tunnel accepted before the verdict
+    /// named it is not the verdict's, even while it is still open in the tunnel (its client
+    /// closed and the address went to the verdict's socket). The verdict gets the connection
+    /// accepted after the naming.
+    #[test]
+    fn a_connection_accepted_before_the_naming_is_not_the_verdicts() {
+        let marks = Arc::new(StderrMarks::per_connection());
+        let local = SocketAddr::from(([127, 0, 0, 1], 50_010));
+        let dropped = connection_closed_error("closed");
+        let taken = verdict(&marks);
+        // Another connection from the address: accepted and refused, not yet released.
+        let earlier = marks.accept(local);
+        earlier.refuse(ChannelRefusal::Other(1));
+        // The verdict's socket got the address; it names it, then connects.
+        let mine = taken.for_local(local);
+        assert_eq!(mine.channel_open_refused(&dropped), None);
+        let my_slot = marks.accept(local);
+        assert_eq!(mine.channel_open_refused(&dropped), None);
+        my_slot.refuse(ChannelRefusal::Other(4));
+        assert_eq!(
+            mine.channel_open_refused(&dropped),
+            Some(ChannelOpenRefused { code: 4 })
+        );
+        // The earlier connection's end leaves the verdict's result.
+        marks.release(local);
+        assert_eq!(
+            mine.channel_open_refused(&dropped),
+            Some(ChannelOpenRefused { code: 4 })
+        );
+        assert_eq!(marks.kept(), 0);
+    }
+
+    /// H4 (AT): a verdict named while a connection from its address is open in the tunnel,
+    /// which is not before its own connection, knows nothing once that connection ends, and
+    /// does not meet the next connection from the address.
+    #[test]
+    fn a_verdict_named_while_another_connection_is_open_knows_nothing_after_it_ends() {
+        let marks = Arc::new(StderrMarks::per_connection());
+        let local = SocketAddr::from(([127, 0, 0, 1], 50_011));
+        let dropped = connection_closed_error("closed");
+        let open = marks.accept(local);
+        let late = verdict(&marks).for_local(local);
+        open.refuse(ChannelRefusal::Other(1));
+        marks.release(local);
+        assert_eq!(marks.kept(), 0);
+        // The next connection from the address is refused, both with a code and as an absent
+        // listener: neither is the late verdict's.
+        let next = marks.accept(local);
+        next.refuse(ChannelRefusal::Other(3));
+        assert_eq!(late.channel_open_refused(&dropped), None);
+        let refused = marks.accept(local);
+        refused.refuse(ChannelRefusal::ConnectFailed);
+        marks.record_connect_failure();
+        assert!(!late.remote_listener_absent(&dropped));
+        assert_eq!(late.channel_open_refused(&dropped), None);
+    }
+
     /// Reason 2 of another connection on the same embedded tunnel is no absent listener for a
     /// connection whose channel opened.
     #[test]
@@ -989,11 +1013,10 @@ mod refusal_tests {
         let opened = SocketAddr::from(([127, 0, 0, 1], 50_004));
         let refused = SocketAddr::from(([127, 0, 0, 1], 50_005));
         let dropped = connection_closed_error("closed");
-        let a = verdict(&marks);
-        let b = verdict(&marks);
+        let a = verdict(&marks).for_local(opened);
+        let b = verdict(&marks).for_local(refused);
         let _a_slot = marks.accept(opened);
         let b_slot = marks.accept(refused);
-        let (a, b) = (a.for_local(opened), b.for_local(refused));
         b_slot.refuse(ChannelRefusal::ConnectFailed);
         marks.record_connect_failure();
         assert!(!a.remote_listener_absent(&dropped));
@@ -1005,9 +1028,9 @@ mod refusal_tests {
         assert!(!unnamed.remote_listener_absent(&dropped));
     }
 
-    /// A connection that ended leaves nothing: its slot goes when no verdict took it, a verdict
-    /// that names it afterwards knows nothing of it, and a claim whose verdict is gone is
-    /// dropped.
+    /// Nothing is kept for a connection: one no verdict named leaves nothing, the accept takes
+    /// the claim of the verdict that named it, which keeps its result after the connection
+    /// ended, and a claim whose verdict is gone is dropped.
     #[test]
     fn an_ended_connection_leaves_no_slot() {
         let marks = Arc::new(StderrMarks::per_connection());
@@ -1016,34 +1039,28 @@ mod refusal_tests {
             let local = SocketAddr::from(([127, 0, 0, 1], port));
             let slot = marks.accept(local);
             slot.refuse(ChannelRefusal::Other(1));
-            marks.release(local, &slot);
+            marks.release(local);
         }
         assert_eq!(marks.kept(), 0);
-        // Named after its connection ended: no code.
-        let local = SocketAddr::from(([127, 0, 0, 1], 50_200));
-        let late = verdict(&marks);
-        let slot = marks.accept(local);
-        slot.refuse(ChannelRefusal::Other(4));
-        marks.release(local, &slot);
-        let late = late.for_local(local);
-        assert_eq!(late.channel_open_refused(&dropped), None);
         // A slot a verdict took is not dropped by the release.
         let local = SocketAddr::from(([127, 0, 0, 1], 50_201));
-        let mine = verdict(&marks);
+        let mine = verdict(&marks).for_local(local);
+        assert_eq!(marks.kept(), 1);
         let slot = marks.accept(local);
-        let mine = mine.for_local(local);
+        assert_eq!(marks.kept(), 0);
         slot.refuse(ChannelRefusal::Other(3));
-        marks.release(local, &slot);
+        marks.release(local);
         assert_eq!(
             mine.channel_open_refused(&dropped),
             Some(ChannelOpenRefused { code: 3 })
         );
-        // The claim of the late verdict above waits for an accept; once the verdict is gone it
-        // is dropped.
-        drop(late);
-        let other = SocketAddr::from(([127, 0, 0, 1], 50_202));
-        let slot = marks.accept(other);
-        marks.release(other, &slot);
+        // A verdict dropped before its connection came: its claim goes.
+        let gone = verdict(&marks).for_local(SocketAddr::from(([127, 0, 0, 1], 50_202)));
+        assert_eq!(marks.kept(), 1);
+        drop(gone);
+        let other = SocketAddr::from(([127, 0, 0, 1], 50_203));
+        let _slot = marks.accept(other);
+        marks.release(other);
         assert_eq!(marks.kept(), 0);
     }
 }

@@ -254,7 +254,6 @@ allow	crates/tasty-net-ssh/src/listener.rs	connect_failures.fetch_add(1,	거절 
 allow	crates/tasty-net-ssh/src/listener.rs	[0u8; 4096]	파이프를 한 번에 읽는 버퍼(읽는 단위이지 상한이 아니다)
 allow	crates/tasty-net-ssh/src/listener.rs	Ok(0) => break	read가 0을 주면 파이프가 닫혔다
 allow	crates/tasty-net-ssh/src/listener.rs	baseline = 0	시험용 판정 핸들: 판정 전에 본 거절 줄은 없다
-allow	crates/tasty-net-ssh/src/listener.rs	accepted += 1	받은 로컬 연결 하나를 센다(연결의 세대 번호)
 allow	crates/tasty-net-ssh/src/listener.rs	const ADMINISTRATIVELY_PROHIBITED: u32 = 1	와이어 형식: 채널 열기 거절 사유 코드 1 (RFC 4254 5.1)
 allow	crates/tasty-net-ssh/src/listener.rs	const UNKNOWN_CHANNEL_TYPE: u32 = 3	와이어 형식: 채널 열기 거절 사유 코드 3 (RFC 4254 5.1)
 allow	crates/tasty-net-ssh/src/system/spawn.rs	const CREATE_NO_WINDOW: u32 = 0x0800_0000	OS: winbase.h의 CREATE_NO_WINDOW

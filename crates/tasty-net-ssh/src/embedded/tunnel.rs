@@ -150,9 +150,10 @@ async fn accept_loop(
 /// One forwarded connection. A refused channel closes the local connection after it is marked:
 /// reason 2 (`SSH_OPEN_CONNECT_FAILED`) as an absent remote listener, any other reason as a
 /// refused channel with its code ([`crate::ChannelOpenRefused`]). The connection's slot is
-/// released once the local side has closed too, so a verdict named while the connection is
-/// open always finds it, and an ended connection leaves nothing in the marks. A forward that
-/// is aborted (the tunnel terminated or dropped) releases its slot as it is dropped.
+/// the one of the verdict that named its address before connecting, if any. The connection
+/// is released once the local side has closed too: a verdict still waiting for the address
+/// named it while this connection was open and is dropped then. A forward that is aborted
+/// (the tunnel terminated or dropped) releases its connection as it is dropped.
 async fn forward(
     mut stream: tokio::net::TcpStream,
     peer: SocketAddr,
@@ -179,7 +180,7 @@ async fn forward(
     )
     .await;
     // The end of this side, then the wait for the local side to close: until then the
-    // connection is open and its verdict may still be named.
+    // connection is open.
     let _shut = stream.shutdown().await.is_ok();
     let _drained = tokio::io::copy(&mut stream, &mut tokio::io::sink())
         .await
@@ -187,7 +188,8 @@ async fn forward(
     drop(held);
 }
 
-/// The slot of one forwarded connection, released when the forward ends or is aborted.
+/// The slot of one forwarded connection, whose end is told to the marks when the forward ends
+/// or is aborted.
 struct Held<'a> {
     slot: Arc<ChannelSlot>,
     marks: &'a StderrMarks,
@@ -196,7 +198,7 @@ struct Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        self.marks.release(self.peer, &self.slot);
+        self.marks.release(self.peer);
     }
 }
 

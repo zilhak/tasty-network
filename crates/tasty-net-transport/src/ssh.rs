@@ -519,9 +519,11 @@ impl Cancellable for OwnedTunnel {
 }
 
 /// Opens one loopback TCP channel through `tunnel`. The listener verdict is taken right
-/// before connecting, so it judges only this channel. A cancel that arrived by the time the
-/// connect returns wins over its result: the socket is closed and `Cancelled` returned. A
-/// cancel after that reaches the channel when the handshake registers it.
+/// before connecting, so it judges only this channel, and names the connection before it is
+/// made: the socket is bound to a loopback port first and the verdict names that address
+/// (docs/design/ssh-backends.md "리스너 판정"). A cancel that arrived by the time the connect
+/// returns wins over its result: the socket is closed and `Cancelled` returned. A cancel after
+/// that reaches the channel when the handshake registers it.
 fn open_through(
     hold: &Arc<TunnelHold>,
     cancel: &AttemptCancel,
@@ -529,16 +531,26 @@ fn open_through(
     let tunnel = &hold.tunnel;
     let verdict = tunnel.listener_verdict();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tunnel.local_port()));
-    let connected = TcpStream::connect_timeout(&addr, LOCAL_CONNECT_TIMEOUT);
+    let (socket, bound) = bind_loopback().map_err(ConnectError::Io)?;
+    // The verdict names this connection before the tunnel can accept it, so a refusal code is
+    // only of this channel.
+    let named = bound.map(|bound| (bound, verdict.clone().for_local(bound)));
+    let connected = socket.connect_timeout(&addr.into(), LOCAL_CONNECT_TIMEOUT);
     if cancel.is_cancelled() {
         return Err(ConnectError::Cancelled);
     }
-    let stream = connected.map_err(ConnectError::Io)?;
+    connected.map_err(ConnectError::Io)?;
+    let stream = TcpStream::from(socket);
     let local = stream.local_addr();
-    // The verdict names this connection, so a refusal code is only of this channel.
-    let verdict = match &local {
-        Ok(local) => verdict.for_local(*local),
-        Err(_) => verdict,
+    // Connected from another address than the one bound (not expected on any OS): the named
+    // verdict would wait for a connection that never comes, so the channel keeps the verdict
+    // that names none.
+    let verdict = match (named, &local) {
+        (Some((bound, named)), Ok(local)) if bound == *local => named,
+        _ => {
+            tracing::debug!(?bound, ?local, "the channel's verdict names no connection");
+            verdict
+        }
     };
     let channel = RawChannel::from_tcp_as(stream, TransportKind::Ssh).map_err(ConnectError::Io)?;
     let channel = channel.with_verdict(verdict);
@@ -564,6 +576,19 @@ fn open_through(
         control: Arc::downgrade(&channel.control()),
     };
     Ok(channel.keep_alive(Arc::new(held) as Arc<dyn std::any::Any + Send + Sync>))
+}
+
+/// A TCP socket bound to a loopback port the OS picks, and the address it got (`None` if the OS
+/// does not tell it).
+fn bind_loopback() -> io::Result<(socket2::Socket, Option<SocketAddr>)> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, u16::MIN)).into())?;
+    let bound = socket.local_addr()?.as_socket();
+    Ok((socket, bound))
 }
 
 /// One channel's hold on its tunnel, dropped with the channel's last half: the tunnel's entry
@@ -1038,6 +1063,28 @@ mod tunnel_key_tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
         }
         path
+    }
+
+    /// The address a channel's socket is bound to before it connects is the one the tunnel
+    /// accepts the connection from, so the verdict named with it meets that connection
+    /// (docs/design/ssh-backends.md "리스너 판정"). This runs on every OS of the CI.
+    #[test]
+    fn a_channel_socket_connects_from_the_address_it_was_bound_to() {
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, u16::MIN)).expect("listener");
+        let addr = listener.local_addr().expect("listener address");
+        for _ in 0..20 {
+            let (socket, bound) = bind_loopback().expect("bind");
+            let bound = bound.expect("the bound address");
+            assert_eq!(bound.ip(), Ipv4Addr::LOCALHOST);
+            assert_ne!(bound.port(), u16::MIN, "a port is picked at the bind");
+            socket
+                .connect_timeout(&addr.into(), LOCAL_CONNECT_TIMEOUT)
+                .expect("connect");
+            let (_accepted, peer) = listener.accept().expect("accept");
+            assert_eq!(peer, bound);
+            assert_eq!(TcpStream::from(socket).local_addr().expect("local"), bound);
+        }
     }
 
     #[test]

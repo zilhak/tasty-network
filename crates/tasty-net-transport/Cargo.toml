@@ -13,7 +13,7 @@ publish = false
 # it brings tasty-net-ssh without a backend, so consumers turn on a backend feature instead.
 # Without default features the crate has no SSH transport.
 default = ["system-ssh"]
-ssh = ["dep:tasty-net-ssh"]
+ssh = ["dep:tasty-net-ssh", "dep:socket2"]
 system-ssh = ["ssh", "tasty-net-ssh/system-ssh"]
 # The embedded russh backend: not a default feature until the E1 criterion (docs/design/
 # done-criteria.md "내장 폴백 활성 기준"). With system-ssh too, auto falls back to it.
@@ -26,6 +26,10 @@ tasty-net-identity = { path = "../tasty-net-identity" }
 # "의존 방향": transport ─> p2p).
 tasty-net-p2p = { path = "../tasty-net-p2p" }
 tasty-net-ssh = { path = "../tasty-net-ssh", default-features = false, optional = true }
+# Binds a channel's loopback socket before it connects to the SSH tunnel, so the listener
+# verdict names the connection first (docs/design/ssh-backends.md "리스너 판정"). The same
+# version as the P2P sockets.
+socket2 = { version = "0.6", optional = true }
 # Nonces and bulk credentials (docs/design/crates.md "외부 의존 원칙").
 getrandom = "0.4"
 serde_json = "1"

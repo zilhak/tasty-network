@@ -215,8 +215,8 @@ impl SshTunnel {
 
     /// The absent-listener verdict for the next channel through this tunnel. Take it right
     /// before opening that channel; it counts only refusals after this call, and gives a
-    /// refusal code once [`ListenerVerdict::for_local`] names the local connection
-    /// ([`ListenerVerdict`]). It stays usable after the tunnel moved elsewhere or dropped.
+    /// refusal code once [`ListenerVerdict::for_local`] names the local connection before it is
+    /// made ([`ListenerVerdict`]). It stays usable after the tunnel moved elsewhere or dropped.
     pub fn listener_verdict(&self) -> ListenerVerdict {
         match &self.inner {
             #[cfg(feature = "system-ssh")]

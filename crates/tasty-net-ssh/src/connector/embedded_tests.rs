@@ -808,10 +808,7 @@ fn a_refused_tunnel_channel_keeps_its_reason_code() {
         let tunnel = connector
             .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
             .expect("tunnel");
-        let verdict = tunnel.listener_verdict();
-        let mut stream =
-            std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
-        let verdict = verdict.for_local(stream.local_addr().expect("local address"));
+        let (verdict, mut stream) = connect_named(&tunnel);
         let mut buf = [0u8; 1];
         let read = stream.read(&mut buf);
         assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
@@ -844,11 +841,9 @@ fn concurrent_forwards_on_one_tunnel_get_only_their_own_refusal_code() {
     // at the same time on the one session.
     let streams: Vec<_> = (0..12)
         .map(|_| {
-            let verdict = tunnel.listener_verdict();
-            let stream =
-                std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
+            let (verdict, stream) = connect_named(&tunnel);
             let local = stream.local_addr().expect("local address");
-            (verdict.for_local(local), local, stream)
+            (verdict, local, stream)
         })
         .collect();
     let dropped = crate::connection_closed_error("the channel closed");
@@ -863,9 +858,10 @@ fn concurrent_forwards_on_one_tunnel_get_only_their_own_refusal_code() {
     }
 }
 
-/// The tunnel keeps a connection's slot only while the connection is open: many forwards
-/// that open and end, and connections closed before any verdict names them (as a cancelled
-/// attempt does), leave nothing behind; what is kept never exceeds the open connections.
+/// The tunnel keeps nothing for its connections: many forwards that open and end,
+/// connections closed before any verdict names them (as a cancelled attempt does), and named
+/// connections that stay open leave nothing behind once accepted; a verdict whose connection
+/// never comes is dropped with the verdict.
 #[test]
 fn ended_forwards_leave_no_slot_in_the_tunnel() {
     use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
@@ -889,41 +885,34 @@ fn ended_forwards_leave_no_slot_in_the_tunnel() {
         }
         probe.kept()
     };
-    let reached = |want: usize| {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while probe.kept() < want && std::time::Instant::now() < end {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        probe.kept()
-    };
     // Forwards whose channels opened and ended, read to their end without a verdict.
     for _ in 0..40 {
         let mut stream = connect();
         let mut rest = Vec::new();
         let _read = stream.read_to_end(&mut rest);
     }
+    assert_eq!(probe.kept(), 0);
+    // Named connections that stay open: the accepts take their verdicts' claims.
+    let open: Vec<_> = (0..3).map(|_| connect_named(&tunnel)).collect();
     assert_eq!(settled(0), 0);
-    // Connections that stay open keep their slots, no more.
-    let open: Vec<_> = (0..3).map(|_| connect()).collect();
-    assert_eq!(reached(open.len()), open.len());
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    assert_eq!(probe.kept(), open.len());
     drop(open);
-    assert_eq!(settled(0), 0);
-    // Connections closed after the tunnel accepted them, before a verdict names them (a
-    // cancelled attempt).
+    // Connections closed before a verdict names them (a cancelled attempt).
     for _ in 0..10 {
-        let stream = connect();
-        assert_eq!(reached(1), 1);
-        drop(stream);
-        assert_eq!(settled(0), 0);
+        drop(connect());
     }
-    // Connections still open when the tunnel is terminated: the aborted forwards release
-    // their slots, also while the verdict keeps the marks and the local sockets are open.
-    let open: Vec<_> = (0..3).map(|_| connect()).collect();
-    assert_eq!(reached(open.len()), open.len());
+    assert_eq!(probe.kept(), 0);
+    // A verdict named for a connection that never comes waits until it is dropped.
+    let waiting = tunnel
+        .listener_verdict()
+        .for_local(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            9,
+        )));
+    assert_eq!(probe.kept(), 1);
+    drop(waiting);
+    // Connections still open when the tunnel is terminated.
+    let open: Vec<_> = (0..3).map(|_| connect_named(&tunnel)).collect();
     tunnel.terminate_and_reap().expect("terminate");
-    assert_eq!(settled(0), 0);
     drop(open);
     drop(tunnel);
     assert_eq!(probe.kept(), 0);
@@ -2085,10 +2074,7 @@ fn a_refused_tunnel_channel_is_retried_only_for_a_passing_reason() {
         let tunnel = connector
             .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
             .expect("tunnel");
-        let verdict = tunnel.listener_verdict();
-        let mut stream =
-            std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
-        let verdict = verdict.for_local(stream.local_addr().expect("local address"));
+        let (verdict, mut stream) = connect_named(&tunnel);
         let mut buf = [0u8; 1];
         let read = stream.read(&mut buf);
         assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
@@ -2099,4 +2085,33 @@ fn a_refused_tunnel_channel_is_retried_only_for_a_passing_reason() {
         assert_eq!(refused, crate::ChannelOpenRefused { code });
         assert_eq!(refused.is_retryable(), retried, "code {code}");
     }
+}
+
+// Naming the local connection before it is made (docs/design/ssh-backends.md "리스너 판정",
+// conductor M4 2단계 D7).
+
+/// A local connection to `tunnel` and its verdict, made as the transport makes them: the
+/// verdict is taken, the socket is bound to a loopback port, the verdict names that address,
+/// and then the socket connects.
+fn connect_named(tunnel: &crate::SshTunnel) -> (crate::ListenerVerdict, std::net::TcpStream) {
+    use std::net::{Ipv4Addr, SocketAddr};
+    let verdict = tunnel.listener_verdict();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        let verdict = verdict.for_local(socket.local_addr().expect("local address"));
+        let stream = socket
+            .connect(SocketAddr::from((Ipv4Addr::LOCALHOST, tunnel.local_port())))
+            .await
+            .expect("connect");
+        let stream = stream.into_std().expect("std stream");
+        stream.set_nonblocking(false).expect("blocking");
+        (verdict, stream)
+    })
 }
