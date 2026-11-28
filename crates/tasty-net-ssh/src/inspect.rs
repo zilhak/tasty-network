@@ -119,6 +119,10 @@ pub enum NoteClass {
     Clamped,
     /// No agent socket: agent authentication is skipped.
     AgentUnavailable,
+    /// A private key file the user owns that the group or others can read or write (OpenSSH
+    /// `sshkey_perm_ok`, "UNPROTECTED PRIVATE KEY FILE"), or whose metadata cannot be read:
+    /// not used.
+    KeyPermissions,
 }
 
 impl NoteClass {
@@ -138,6 +142,7 @@ impl NoteClass {
             NoteClass::AlgorithmNotImplemented => "algorithm_not_implemented",
             NoteClass::Clamped => "clamped",
             NoteClass::AgentUnavailable => "agent_unavailable",
+            NoteClass::KeyPermissions => "bad_key_permissions",
         }
     }
 }

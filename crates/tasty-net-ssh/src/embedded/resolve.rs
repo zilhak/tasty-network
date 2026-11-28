@@ -201,7 +201,7 @@ fn local_context(settings: &SshSettings) -> ResolveContext {
 
 /// The uid of this process, from the owner of `/proc/self` (Linux, Android). `None` elsewhere:
 /// the port then checks only the mode of configuration files and `%i` is not known.
-fn local_uid() -> Option<u32> {
+pub(crate) fn local_uid() -> Option<u32> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::MetadataExt;

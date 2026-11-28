@@ -237,3 +237,23 @@ fn the_resolved_target_carries_only_the_values_that_choose_the_target() {
     assert!(!keywords.contains(&"sendenv"), "{keywords:?}");
     assert!(!format!("{resolved:?}").contains("s3cret"), "{resolved:?}");
 }
+
+/// OpenSSH `sshkey_perm_ok` on desktop Unix: a key file the group or others can read is not
+/// used.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+#[test]
+fn a_key_file_others_can_read_is_not_used() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir::new("perm");
+    let key = dir.0.join("id_test");
+    std::fs::write(&key, "not a key").expect("key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let judged =
+        || crate::embedded::session::key_permissions_ok(&std::fs::File::open(&key).expect("open"));
+    assert!(judged());
+    for mode in [0o640, 0o604, 0o660, 0o644] {
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        assert!(!judged(), "{mode:o}");
+    }
+    assert_eq!(NoteClass::KeyPermissions.name(), "bad_key_permissions");
+}

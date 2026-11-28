@@ -626,9 +626,20 @@ enum LoadedKey {
 }
 
 async fn load_key(plan: &AuthPlan, path: &Path, origin: &Origin) -> LoadedKey {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // The permissions are judged on the file that is read, through one open handle, as
+    // `sshkey_load_private_type` (`authfile.c`) does with `fstat` on its descriptor: a file
+    // swapped in between cannot be read unjudged.
+    let Ok(mut file) = std::fs::File::open(path) else {
         return LoadedKey::Skipped;
     };
+    if !key_permissions_ok(&file) {
+        plan.note("identityfile", origin, NoteClass::KeyPermissions);
+        return LoadedKey::Skipped;
+    }
+    let mut text = String::new();
+    if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
+        return LoadedKey::Skipped;
+    }
     if text.trim_start().starts_with(PPK_HEADER) {
         plan.note("identityfile", origin, NoteClass::UnsupportedKeyFormat);
         return LoadedKey::Skipped;
@@ -674,6 +685,29 @@ async fn load_key(plan: &AuthPlan, path: &Path, origin: &Origin) -> LoadedKey {
             LoadedKey::Skipped
         }
     }
+}
+
+/// Whether an open private key file may be used, as OpenSSH `sshkey_perm_ok` (`authfile.c`)
+/// judges it on desktop Unix: a file the user owns that the group or others can read or write
+/// (`mode & 077`) is not used. A file of another owner is not judged, as in OpenSSH. Where the
+/// local user ID is not known (macOS here), every file is judged, which refuses more and never
+/// less. A file whose metadata cannot be read is not used either, as `fstat` failing stops
+/// OpenSSH. Android and iOS app storage has no such bits to judge.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) fn key_permissions_ok(file: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    const GROUP_OTHER_BITS: u32 = 0o077;
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    let owned = super::resolve::local_uid().is_none_or(|uid| uid == meta.uid());
+    !(owned && meta.mode() & GROUP_OTHER_BITS != 0)
+}
+
+/// Windows, Android and iOS: no Unix permission bits to judge.
+#[cfg(not(all(unix, not(any(target_os = "android", target_os = "ios")))))]
+pub(crate) fn key_permissions_ok(_file: &std::fs::File) -> bool {
+    true
 }
 
 /// The agent's identities, or `None` (noted) when there is no agent to ask.
