@@ -212,6 +212,35 @@ fn settings_list_matches_query() {
     }
 }
 
+/// `embedded.auth_timeout` refuses a value out of its range as every time setting does: 0
+/// (the type has no negative time) and more than 1 h are `OutOfRange`, the value in effect
+/// stays, and the ends of the range are taken.
+#[test]
+fn the_auth_timeout_refuses_a_value_out_of_its_range() {
+    let key = "embedded.auth_timeout";
+    let mut settings = SshSettings::new();
+    assert_eq!(settings.auth_timeout(), Duration::from_secs(120));
+    for value in [secs(0), ms(999), secs(3601)] {
+        assert!(
+            matches!(
+                settings.set(key, value),
+                Err(SettingsError::OutOfRange { .. })
+            ),
+            "{value}"
+        );
+        let entry = settings.get(key).expect("a setting");
+        assert_eq!(
+            (entry.value, entry.source),
+            (secs(120), Source::Default),
+            "{value}"
+        );
+    }
+    for value in [secs(1), secs(3600)] {
+        settings.set(key, value).expect("in range");
+        assert_eq!(settings.get(key).expect("a setting").value, value);
+    }
+}
+
 /// The group-exchange sizes keep `min <= preferred <= max`, as russh's `GexParams` checks; a
 /// change that breaks it is refused and changes nothing.
 #[test]

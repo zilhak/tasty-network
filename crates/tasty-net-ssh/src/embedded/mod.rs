@@ -164,6 +164,16 @@ impl Paused {
         Duration::from_nanos(self.total.load(Ordering::Acquire))
     }
 
+    /// The prompt time of ended questions so far, for [`Paused::since`].
+    pub(crate) fn mark(&self) -> Duration {
+        self.total()
+    }
+
+    /// The prompt time of the questions that ended since `mark` ([`Paused::mark`]).
+    pub(crate) fn since(&self, mark: Duration) -> Duration {
+        self.total().saturating_sub(mark)
+    }
+
     /// Marks a question open until the guard is dropped, which credits its time.
     fn open(&self) -> OpenQuestion<'_> {
         self.open.fetch_add(1, Ordering::AcqRel);

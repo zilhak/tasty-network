@@ -273,6 +273,8 @@ struct HostPlan {
     config: Arc<Config>,
     check: Arc<HostCheck>,
     connect_timeout: Duration,
+    /// `embedded.auth_timeout`: the key exchange and the authentication, from the banner.
+    auth_timeout: Duration,
     attempts: u32,
     family: Option<AddressFamily>,
     bind: Option<String>,
@@ -402,6 +404,7 @@ fn plan(
             .connection_timeout
             .and_then(|s| u64::try_from(s).ok())
             .map_or(settings.connect_timeout(), Duration::from_secs),
+        auth_timeout: settings.auth_timeout(),
         attempts: to_u32(o.connection_attempts, CONNECTION_ATTEMPTS).max(1),
         family: o.address_family,
         bind: o.bind_address.clone(),
@@ -444,7 +447,7 @@ async fn connect_chain(
 ) -> Result<Arc<Conn>, SshBackendError> {
     let mut parent: Option<Arc<Conn>> = None;
     for plan in plans {
-        let mut handle = match &parent {
+        let (mut handle, login) = match &parent {
             None => connect_direct(&plan).await?,
             Some(jump) => {
                 let started = Instant::now();
@@ -474,19 +477,25 @@ async fn connect_chain(
                         });
                     }
                 };
-                handshake(&plan, channel.into_stream(), None).await?
+                // A proxy's banner gets the whole `ConnectTimeout` (`ssh_proxy_connect`).
+                handshake(
+                    &plan,
+                    channel.into_stream(),
+                    None,
+                    Instant::now() + plan.connect_timeout,
+                )
+                .await?
             }
         };
-        // The whole authentication of the host is bounded by `ConnectTimeout` too (prompt
-        // time does not count), so a server that keeps changing its list of methods or keeps
-        // answering partial success cannot hold the session open forever.
-        let started = Instant::now();
+        // The authentication of the host shares `embedded.auth_timeout` with the key exchange
+        // (prompt time does not count), so a server that keeps changing its list of methods or
+        // keeps answering partial success cannot hold the session open forever.
         match bounded(
             authenticate(&mut handle, &plan.auth),
-            started + plan.connect_timeout,
+            login.deadline(&plan),
             &plan.paused,
             None,
-            plan.connect_timeout,
+            plan.auth_timeout,
         )
         .await
         {
@@ -494,7 +503,7 @@ async fn connect_chain(
             Bounded::Expired | Bounded::Cancelled => {
                 return Err(SshBackendError::TimedOut {
                     host: plan.host.clone(),
-                    waited: started.elapsed(),
+                    waited: login.banner.elapsed(),
                 });
             }
         }
@@ -510,7 +519,7 @@ async fn connect_chain(
 }
 
 /// The TCP connection to the first host: its addresses in order, `ConnectionAttempts` rounds.
-async fn connect_direct(plan: &HostPlan) -> Result<Handle<Client>, SshBackendError> {
+async fn connect_direct(plan: &HostPlan) -> Result<(Handle<Client>, Login), SshBackendError> {
     let fail = |detail: String| SshBackendError::Connect {
         host: plan.host.clone(),
         port: plan.port,
@@ -550,11 +559,15 @@ async fn connect_direct(plan: &HostPlan) -> Result<Handle<Client>, SshBackendErr
                     continue;
                 }
             };
+            // The banner exchange gets what the TCP connection left of `ConnectTimeout`
+            // (`ssh_connect_direct`, "timeout: %d ms remain after connect").
+            let tried = Instant::now();
             match tokio::time::timeout(plan.connect_timeout, socket.connect(*addr)).await {
                 Ok(Ok(stream)) => {
                     // russh sets `TCP_NODELAY` only for its own connect.
                     stream.set_nodelay(true).unwrap_or_default();
-                    return handshake(plan, stream, Some(addr.ip().to_string())).await;
+                    let banner = tried + plan.connect_timeout;
+                    return handshake(plan, stream, Some(addr.ip().to_string()), banner).await;
                 }
                 Ok(Err(e)) => last = format!("{addr}: {e}"),
                 Err(_) => last = format!("{addr}: timed out after {:?}", plan.connect_timeout),
@@ -587,13 +600,126 @@ fn socket_for(
     Ok(socket)
 }
 
-/// The SSH handshake over `stream`, with the host key check, within `ConnectTimeout` (prompt
-/// time does not count).
+/// The end of the banner exchange of one host: the key exchange and the authentication after
+/// it share `embedded.auth_timeout`.
+struct Login {
+    banner: Instant,
+    /// The prompt time of the session when the banner exchange ended.
+    paused: Duration,
+}
+
+impl Login {
+    /// The deadline of the rest of the login as a new wait sees it: the prompt time since the
+    /// banner is added, as a single [`bounded`] wait would have added it.
+    fn deadline(&self, plan: &HostPlan) -> Instant {
+        self.banner + plan.auth_timeout + plan.paused.since(self.paused)
+    }
+}
+
+/// `stream` that tells `seen` when the server's identification line (`SSH-…` up to its line
+/// end) has been read: the end of the banner exchange `ConnectTimeout` bounds in OpenSSH
+/// (`kex_exchange_identification`). Lines before it are skipped, as the server may send them.
+struct BannerWatch<S> {
+    inner: S,
+    /// The start of the line being read, up to the length of [`IDENT_PREFIX`].
+    line: Vec<u8>,
+    seen: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// The start of the SSH identification line (RFC 4253 §4.2).
+const IDENT_PREFIX: &[u8] = b"SSH-";
+
+impl<S> BannerWatch<S> {
+    fn new(inner: S, seen: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            inner,
+            line: Vec::with_capacity(IDENT_PREFIX.len()),
+            seen: Some(seen),
+        }
+    }
+
+    fn look(&mut self, read: &[u8]) {
+        for &b in read {
+            if self.seen.is_none() {
+                return;
+            }
+            if b == b'\n' {
+                if self.line == IDENT_PREFIX
+                    && let Some(seen) = self.seen.take()
+                {
+                    // The handshake that waits for it may have ended already.
+                    seen.send(()).unwrap_or_default();
+                }
+                self.line.clear();
+            } else if self.line.len() < IDENT_PREFIX.len() {
+                self.line.push(b);
+            }
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for BannerWatch<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if self.seen.is_some() {
+            let read = buf.filled()[before..].to_vec();
+            self.look(&read);
+        }
+        polled
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for BannerWatch<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
+/// The SSH handshake over `stream`, with the host key check. The banner exchange is bounded
+/// by `banner_deadline` (from `ConnectTimeout`), as in OpenSSH; the key exchange after it starts the
+/// `embedded.auth_timeout` the authentication then shares ([`Login`]). Prompt time does not
+/// count in either.
 async fn handshake<S>(
     plan: &HostPlan,
     stream: S,
     address: Option<String>,
-) -> Result<Handle<Client>, SshBackendError>
+    banner_deadline: Instant,
+) -> Result<(Handle<Client>, Login), SshBackendError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -603,22 +729,55 @@ where
         address,
         refusal: Arc::clone(&refusal),
     };
+    let (seen, banner) = tokio::sync::oneshot::channel();
+    let stream = BannerWatch::new(stream, seen);
     let started = Instant::now();
-    let done = bounded(
-        russh::client::connect_stream(Arc::clone(&plan.config), stream, client),
-        started + plan.connect_timeout,
+    let mut connect = std::pin::pin!(russh::client::connect_stream(
+        Arc::clone(&plan.config),
+        stream,
+        client
+    ));
+    let first = bounded(
+        async {
+            tokio::select! {
+                biased;
+                out = &mut connect => Some(out),
+                Ok(()) = banner => None,
+            }
+        },
+        banner_deadline,
         &plan.paused,
         None,
         plan.connect_timeout,
     )
     .await;
+    // The banner exchange ended (or the handshake did, together with it).
+    let login = Login {
+        banner: Instant::now(),
+        paused: plan.paused.mark(),
+    };
+    let done = match first {
+        Bounded::Done(Some(out)) => Bounded::Done(out),
+        Bounded::Done(None) => {
+            bounded(
+                &mut connect,
+                login.deadline(plan),
+                &plan.paused,
+                None,
+                plan.auth_timeout,
+            )
+            .await
+        }
+        Bounded::Expired => Bounded::Expired,
+        Bounded::Cancelled => Bounded::Cancelled,
+    };
     let refused = refusal
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     match (done, refused) {
         (_, Some(refusal)) => Err(SshBackendError::HostKey(Box::new(refusal))),
-        (Bounded::Done(Ok(handle)), None) => Ok(handle),
+        (Bounded::Done(Ok(handle)), None) => Ok((handle, login)),
         (Bounded::Done(Err(e)), None) => Err(SshBackendError::Connect {
             host: plan.host.clone(),
             port: plan.port,

@@ -192,6 +192,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | `embedded.local_user` | OS 사용자 이름 | 문자열 | 출처 `os_default`(`USER`, Windows `USERNAME`). `%u`·`Match localuser`, 원격 사용자를 정하지 않았을 때의 사용자 |
 | `embedded.channel_open_timeout` | 10 s | 100 ms ~ 10 min | 내장 백엔드의 채널 열기 응답 기한 |
 | `embedded.prompt_timeout` | 5 min | 1 s ~ 1 h | `SshPrompt`의 답을 기다리는 시간 |
+| `embedded.auth_timeout` | 2 min | 1 s ~ 1 h | 내장 백엔드가 한 호스트의 키 교환과 인증 전체에 주는 시간(배너 교환이 끝난 뒤부터, `SshPrompt` 질문 시간은 빼고). `ssh.connect_timeout`은 TCP 연결과 배너 교환까지만 묶는다 |
 | `embedded.runtime.worker_threads` | 1 | 1 ~ 16 | 내장 백엔드가 소유하는 tokio 런타임의 워커 수 |
 | `embedded.window_size` | 2 MiB | 32 KiB ~ 64 MiB | russh `Config::window_size` |
 | `embedded.max_packet_size` | 32 KiB | 1 KiB ~ 65535 B | russh `Config::maximum_packet_size`. 65535보다 크면 russh가 경고만 찍는다 |

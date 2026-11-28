@@ -64,6 +64,9 @@ pub(crate) enum AuthRule {
     PasswordAfterAKey(&'static str),
     /// Every key is a partial success that asks for `publickey` again, without end.
     EndlessPartial,
+    /// [`AuthRule::Key`], with the answer to the signed key held back this long (a server
+    /// that waits for a second factor, for example).
+    SlowKey(Duration),
 }
 
 /// What the server saw, in order.
@@ -296,7 +299,7 @@ impl Handle {
     fn judge(&self, key: &PublicKey) -> Auth {
         let only = |method| Some(russh::MethodSet::from(&[method][..]));
         let in_order = match self.rule {
-            AuthRule::Key => true,
+            AuthRule::Key | AuthRule::SlowKey(_) => true,
             AuthRule::PasswordThenKey(_) => self.password_ok,
             AuthRule::Cert => false,
             AuthRule::PasswordAfterAKey(_) => {
@@ -367,6 +370,9 @@ impl Handler for Handle {
         key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         self.note(Event::Key(key.public_key.algorithm().as_str().to_string()));
+        if let AuthRule::SlowKey(wait) = self.rule {
+            tokio::time::sleep(wait).await;
+        }
         Ok(self.judge(key.public_key))
     }
 

@@ -1000,21 +1000,33 @@ fn a_failure_with_another_list_picks_the_method_again_before_the_next_key() {
     );
 }
 
+/// `connector` with `embedded.auth_timeout` set to `timeout`.
+fn with_auth_timeout(
+    connector: SshConnector,
+    timeout: std::time::Duration,
+    prompt: Arc<CountingPrompt>,
+) -> SshConnector {
+    let mut settings = connector.settings().clone();
+    settings
+        .set(
+            "embedded.auth_timeout",
+            crate::settings::Value::Duration(timeout),
+        )
+        .expect("auth_timeout");
+    SshConnector::new(settings).with_prompt(prompt)
+}
+
 #[test]
-fn authentication_that_never_ends_stops_at_the_connect_timeout() {
+fn authentication_that_never_ends_stops_at_the_auth_timeout() {
     use crate::embedded::test_server::AuthRule;
     let dir = Dir::new("endless");
-    let (_server, connector) = on_auth_server(
-        &dir,
-        AuthRule::EndlessPartial,
-        |c| c,
-        Arc::new(CountingPrompt::default()),
-    );
-    // A target option comes before `ssh.connect_timeout` and the file, so it is the value.
-    let mut target = SshTarget::parse("h.example");
-    target.extra_options.push("ConnectTimeout=1".into());
+    let prompt = Arc::new(CountingPrompt::default());
+    let (_server, connector) =
+        on_auth_server(&dir, AuthRule::EndlessPartial, |c| c, Arc::clone(&prompt));
+    // `ssh.connect_timeout` (10 s by default) does not bound authentication.
+    let connector = with_auth_timeout(connector, std::time::Duration::from_secs(1), prompt);
     let started = std::time::Instant::now();
-    let err = open_session_to(&connector, &target).expect_err("a server without an end");
+    let err = open_session(&connector).expect_err("a server without an end");
     assert!(
         matches!(err, crate::SshBackendError::TimedOut { .. }),
         "{err:?}"
@@ -1024,6 +1036,22 @@ fn authentication_that_never_ends_stops_at_the_connect_timeout() {
         "{:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn authentication_longer_than_the_connect_timeout_gets_in_within_the_auth_timeout() {
+    use crate::embedded::test_server::AuthRule;
+    let dir = Dir::new("slow-auth");
+    let (_server, connector) = on_auth_server(
+        &dir,
+        AuthRule::SlowKey(std::time::Duration::from_secs(2)),
+        |c| c,
+        Arc::new(CountingPrompt::default()),
+    );
+    // `ConnectTimeout` bounds the TCP connection and the banner only, as in OpenSSH.
+    let mut target = SshTarget::parse("h.example");
+    target.extra_options.push("ConnectTimeout=1".into());
+    open_session_to(&connector, &target).expect("the slow server lets the key in");
 }
 
 #[test]

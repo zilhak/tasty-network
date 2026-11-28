@@ -196,6 +196,7 @@ const BACKOFF_MULTIPLIER: &str = "backoff.multiplier";
 const BACKOFF_MAX_DELAY: &str = "backoff.max_delay";
 const CHANNEL_OPEN_TIMEOUT: &str = "embedded.channel_open_timeout";
 const PROMPT_TIMEOUT: &str = "embedded.prompt_timeout";
+const AUTH_TIMEOUT: &str = "embedded.auth_timeout";
 const WORKER_THREADS: &str = "embedded.runtime.worker_threads";
 const WINDOW_SIZE: &str = "embedded.window_size";
 const MAX_PACKET_SIZE: &str = "embedded.max_packet_size";
@@ -373,6 +374,13 @@ pub static DEFAULTS: &[Setting] = &[
         "embedded.prompt_timeout",
         Kind::Duration,
         secs(300),
+        secs(1),
+        secs(3600),
+    ),
+    entry(
+        "embedded.auth_timeout",
+        Kind::Duration,
+        secs(120),
         secs(1),
         secs(3600),
     ),
@@ -1296,6 +1304,15 @@ impl SshSettings {
     /// answer.
     pub fn prompt_timeout(&self) -> Duration {
         self.duration(PROMPT_TIMEOUT)
+    }
+
+    /// `embedded.auth_timeout`: how long the embedded backend gives the key exchange and the
+    /// authentication of one host, from the end of the banner exchange (`SshPrompt` time does
+    /// not count). `ssh.connect_timeout` bounds only the TCP connection and the banner
+    /// exchange, as the ssh `ConnectTimeout` does; OpenSSH leaves the rest to the server's
+    /// `LoginGraceTime`, whose default this one has.
+    pub fn auth_timeout(&self) -> Duration {
+        self.duration(AUTH_TIMEOUT)
     }
 
     /// `embedded.runtime.worker_threads`: the worker threads of the embedded backend's runtime.
