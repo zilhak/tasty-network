@@ -317,6 +317,18 @@ fn absorb(notes: &mut Vec<ConfigNote>, res: &Resolution) -> Result<(), SshBacken
             notes.push(note);
         }
     }
+    // The channel timers of `ChannelTimeout` are not in this stage: shown, not silently
+    // dropped (docs/design/ssh-backends.md "후속 작업과 미정").
+    if !res.options.channel_timeouts.is_empty() {
+        let note = backend_note(
+            "channeltimeout",
+            &res.source_of("channeltimeout"),
+            NoteClass::NotSupported,
+        );
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
     if let Some(refusal) = &res.refusal {
         return Err(refused(refusal_note(refusal), notes.clone()));
     }

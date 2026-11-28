@@ -137,7 +137,7 @@ fn unsupported_directives_are_shown_and_host_key_checking_is_kept() {
     let dir = Dir::new("shown");
     let (connector, selected) = embedded_with(
         &dir,
-        "Host *\n  GSSAPIAuthentication yes\n  StrictHostKeyChecking no\n",
+        "Host *\n  GSSAPIAuthentication yes\n  StrictHostKeyChecking no\n  ChannelTimeout session=5\n",
     );
     let (resolved, notes) = connector
         .resolve(
@@ -163,6 +163,11 @@ fn unsupported_directives_are_shown_and_host_key_checking_is_kept() {
     );
     assert!(
         has("stricthostkeychecking", NoteClass::HostKeyCheckKept, 3),
+        "{notes:?}"
+    );
+    // The channel timers are not in this stage: shown rather than dropped.
+    assert!(
+        has("channeltimeout", NoteClass::NotSupported, 4),
         "{notes:?}"
     );
 }
