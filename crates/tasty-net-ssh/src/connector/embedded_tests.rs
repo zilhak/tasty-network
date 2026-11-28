@@ -1000,6 +1000,208 @@ fn a_failure_with_another_list_picks_the_method_again_before_the_next_key() {
     );
 }
 
+#[test]
+fn a_failure_with_another_list_keeps_the_next_public_key() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("keys-kept");
+    let first = dir.0.join("id_first");
+    write_key_file(
+        &first,
+        &rsa_key()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("encode"),
+    );
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::KeyAmidChangingLists,
+        |c| {
+            // The key the server refuses comes first.
+            c.replacen(
+                "  IdentityFile ",
+                &format!("  IdentityFile \"{}\"\n  IdentityFile ", first.display()),
+                1,
+            )
+        },
+        Arc::new(CountingPrompt::default()),
+    );
+    open_session(&connector).expect("the second key after a failure with another list");
+    let events = server.events();
+    // `ssh` keeps the keys tried when the list changes without a partial success
+    // (`sshconnect2.c` `input_userauth_failure`): the refused key is not offered again.
+    let refused = events
+        .iter()
+        .filter(|e| matches!(e, Event::Key(name) if name.contains("rsa")))
+        .count();
+    assert_eq!(refused, 1, "{events:?}");
+}
+
+/// The key list is made once per authentication (`pubkey_prepare`): an agent key refused and
+/// then dropped by the agent does not move the next key, so the key file after it is tried.
+#[cfg(unix)]
+#[test]
+fn a_key_the_agent_drops_after_its_refusal_does_not_skip_the_next_key() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("agent-drops");
+    let socket = dir.0.join("a.sock");
+    let quoted = format!("IdentityAgent \"{}\"", socket.display());
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::KeyAmidChangingLists,
+        |c| {
+            c.replace("  IdentitiesOnly yes\n", "  IdentitiesOnly no\n")
+                .replace("IdentityAgent none", &quoted)
+        },
+        Arc::new(CountingPrompt::default()),
+    );
+    server.agent(&socket, &[rsa_key()]);
+    let gone = socket.clone();
+    server.on_first_refusal(move || async move {
+        let mut agent = russh::keys::agent::client::AgentClient::connect_uds(&gone)
+            .await
+            .expect("agent");
+        // `remove_identity`: the fixed russh's `remove_all_identities` leaves its length field
+        // zero (`keys/agent/client.rs:573`–`:579`).
+        agent
+            .remove_identity(rsa_key().public_key())
+            .await
+            .expect("forget");
+    });
+    open_session(&connector).expect("the key file after the dropped agent key");
+    let events = server.events();
+    let refused = events
+        .iter()
+        .filter(|e| matches!(e, Event::Key(name) if name.contains("rsa")))
+        .count();
+    assert_eq!(refused, 1, "{events:?}");
+}
+
+/// An agent key added after a refusal would sit in front of the key files (agent keys come
+/// first in the list), but the list is made once per authentication (`pubkey_prepare`): the
+/// new agent key is not offered, the refused key file is not offered again, and the next key
+/// file of the list is tried.
+#[cfg(unix)]
+#[test]
+fn an_agent_key_added_after_a_refusal_does_not_send_the_refused_key_again() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    use russh::keys::ssh_key::private::{KeypairData, RsaKeypair};
+    let dir = Dir::new("agent-adds");
+    let socket = dir.0.join("a.sock");
+    let first = dir.0.join("id_first");
+    write_key_file(
+        &first,
+        &rsa_key()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("encode"),
+    );
+    let quoted = format!("IdentityAgent \"{}\"", socket.display());
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::KeyAmidChangingLists,
+        |c| {
+            // The refused RSA key file first, then the key file the server lets in.
+            c.replacen(
+                "  IdentityFile ",
+                &format!("  IdentityFile \"{}\"\n  IdentityFile ", first.display()),
+                1,
+            )
+            .replace("  IdentitiesOnly yes\n", "  IdentitiesOnly no\n")
+            .replace("IdentityAgent none", &quoted)
+        },
+        Arc::new(CountingPrompt::default()),
+    );
+    server.agent(&socket, &[]);
+    // Another RSA key, so an offer of it shows as a second RSA key.
+    let added = russh::keys::PrivateKey::new(
+        KeypairData::Rsa(RsaKeypair::random(&mut TestRng(43), 1024).expect("rsa key")),
+        "added",
+    )
+    .expect("added key");
+    let path = socket.clone();
+    server.on_first_refusal(move || async move {
+        let mut agent = russh::keys::agent::client::AgentClient::connect_uds(&path)
+            .await
+            .expect("agent");
+        agent.add_identity(&added, &[]).await.expect("add");
+    });
+    open_session(&connector).expect("the key file after the refused one");
+    let events = server.events();
+    let rsa = events
+        .iter()
+        .filter(|e| matches!(e, Event::Key(name) if name.contains("rsa")))
+        .count();
+    assert_eq!(rsa, 1, "{events:?}");
+}
+
+/// A certificate file that appears during the authentication is not put in front of the keys
+/// (the list is made once), so the refused key is not sent again.
+#[test]
+fn a_certificate_that_appears_later_does_not_send_a_refused_key_again() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("cert-appears");
+    let first = dir.0.join("id_first");
+    write_key_file(
+        &first,
+        &rsa_key()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("encode"),
+    );
+    let cert = dir.0.join("id_late-cert.pub");
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::KeyAmidChangingLists,
+        |c| {
+            c.replacen(
+                "  IdentityFile ",
+                &format!(
+                    "  CertificateFile \"{}\"\n  IdentityFile \"{}\"\n  IdentityFile ",
+                    cert.display(),
+                    first.display()
+                ),
+                1,
+            )
+        },
+        Arc::new(CountingPrompt::default()),
+    );
+    let text = certificate_of(&rsa_key())
+        .to_openssh()
+        .expect("encode cert");
+    let late = cert.clone();
+    server.on_first_refusal(move || async move {
+        std::fs::write(&late, text).expect("cert file");
+    });
+    open_session(&connector).expect("the second key file");
+    let events = server.events();
+    let refused = events
+        .iter()
+        .filter(|e| matches!(e, Event::Key(name) if name.contains("rsa")))
+        .count();
+    assert_eq!(refused, 1, "{events:?}");
+    assert!(!events.contains(&Event::Cert), "{events:?}");
+}
+
+#[test]
+fn password_questions_add_up_over_changing_lists() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("passwords-add-up");
+    let prompt = Arc::new(CountingPrompt {
+        password: Some("wrong"),
+        ..CountingPrompt::default()
+    });
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::PasswordAmidChangingLists,
+        |c| format!("{c}  PreferredAuthentications password\n  NumberOfPasswordPrompts 2\n"),
+        prompt,
+    );
+    let err = open_session(&connector).expect_err("every password fails");
+    assert!(matches!(err, SshBackendError::AuthFailed { .. }), "{err:?}");
+    // `attempt_passwd` of the authentication context (`sshconnect2.c:1050`): the questions of
+    // every entry of the method count against `NumberOfPasswordPrompts`.
+    let events = server.events();
+    let passwords = events.iter().filter(|e| **e == Event::Password).count();
+    assert_eq!(passwords, 2, "{events:?}");
+}
+
 /// `connector` with `embedded.auth_timeout` set to `timeout`.
 fn with_auth_timeout(
     connector: SshConnector,

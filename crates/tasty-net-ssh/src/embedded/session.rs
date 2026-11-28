@@ -799,7 +799,8 @@ fn name(method: MethodKind) -> String {
 /// more method gives one), the order starts over from the first preferred method with the new
 /// list, as `authmethod_get` (`sshconnect2.c:2457`) does, so a method that comes earlier in the
 /// order can still follow the one the server accepted. A partial success with the same list
-/// tries the same method again from its start (`pubkey_reset`, `sshconnect2.c:636`).
+/// tries the same method again. What a method has used up is kept in [`AuthState`] across
+/// these changes, as in the `Authctxt` of `ssh`.
 async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<(), SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("authentication: {e}"),
@@ -817,15 +818,16 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
     };
     let mut order = plan.methods.iter();
     let mut again = None;
+    let mut state = AuthState::default();
     while let Some(method) = again.take().or_else(|| order.next()) {
         if !remaining.contains(method) {
             continue;
         }
         tried.push(name(*method));
         let outcome = match method {
-            MethodKind::PublicKey => publickey(handle, plan, &remaining).await?,
+            MethodKind::PublicKey => publickey(handle, plan, &remaining, &mut state).await?,
             MethodKind::KeyboardInteractive => keyboard_interactive(handle, plan).await?,
-            MethodKind::Password => password(handle, plan, &remaining).await?,
+            MethodKind::Password => password(handle, plan, &remaining, &mut state).await?,
             _ => Step::FAILED,
         };
         match outcome {
@@ -834,6 +836,14 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
                 next: Some(next),
                 partial,
             } => {
+                if partial && let Some(keys) = &mut state.keys {
+                    // A partial success starts the keys over (`pubkey_reset` in
+                    // `input_userauth_failure`, `sshconnect2.c:636`); a plain failure keeps
+                    // which were tried.
+                    for (_, tried) in &mut keys.list {
+                        *tried = false;
+                    }
+                }
                 if next != remaining {
                     order = plan.methods.iter();
                 } else if partial {
@@ -854,6 +864,30 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone(),
     })
+}
+
+/// What the methods used up in one authentication, kept when the server changes its list of
+/// methods (the `Authctxt` of `sshconnect2.c`).
+#[derive(Default)]
+struct AuthState {
+    /// The public key candidates, made on the first entry of the method (`pubkey_prepare`).
+    keys: Option<KeyList>,
+    /// The password questions asked (`attempt_passwd`, `sshconnect2.c:1050`), never more than
+    /// `NumberOfPasswordPrompts` in one authentication.
+    passwords: u32,
+}
+
+/// The agent connection of a client.
+type Agent = AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>>;
+
+/// The public key candidates of one authentication, made once as `pubkey_prepare` does, with
+/// the agent connection and identities they were made from. Each candidate has whether it was
+/// tried (`Identity.tried`); only a partial success clears them. So a key the agent drops or
+/// adds meanwhile, or a certificate file that appears, does not move which key comes next.
+struct KeyList {
+    agent: Option<Agent>,
+    agent_ids: Vec<AgentIdentity>,
+    list: Vec<(Candidate, bool)>,
 }
 
 /// How one method ended: success, or failure with the methods the server allows next and
@@ -1223,6 +1257,7 @@ async fn publickey(
     handle: &mut Handle<Client>,
     plan: &AuthPlan,
     remaining: &russh::MethodSet,
+    state: &mut AuthState,
 ) -> Result<Step, SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("public key authentication: {e}"),
@@ -1243,19 +1278,41 @@ async fn publickey(
         };
         plan.pubkey_accepted.contains(&alg.to_certificate_type())
     };
-    let mut agent = agent(plan).await;
-    let agent_ids = agent
-        .as_ref()
-        .map(|(_, ids)| ids.clone())
-        .unwrap_or_default();
-    let list = candidates(plan, &agent_ids);
+    if state.keys.is_none() {
+        let (agent, agent_ids) = match agent(plan).await {
+            Some((client, ids)) => (Some(client), ids),
+            None => (None, Vec::new()),
+        };
+        let list = candidates(plan, &agent_ids)
+            .into_iter()
+            .map(|c| (c, false))
+            .collect();
+        state.keys = Some(KeyList {
+            agent,
+            agent_ids,
+            list,
+        });
+    }
+    let Some(KeyList {
+        agent,
+        agent_ids,
+        list,
+    }) = state.keys.as_mut()
+    else {
+        return Ok(Step::FAILED);
+    };
     // Key files read in this round, so one passphrase serves the key and its certificate.
     let mut loaded: Vec<(PathBuf, Option<Arc<PrivateKey>>)> = Vec::new();
     let mut last = Step::FAILED;
-    for candidate in &list {
-        let result = match candidate {
+    for (candidate, tried) in list.iter_mut() {
+        if *tried {
+            continue;
+        }
+        // A candidate is used up when it is reached, sent or not (`id->tried++`).
+        *tried = true;
+        let result = match &*candidate {
             Candidate::Agent(key) => {
-                let Some((client, _)) = agent.as_mut() else {
+                let Some(client) = agent.as_mut() else {
                     continue;
                 };
                 if !accepted(&key.algorithm()) {
@@ -1293,7 +1350,7 @@ async fn publickey(
                         })
                     });
                 let mut signed = None;
-                if let (Some(identity), Some((client, _))) = (agent_identity, agent.as_mut()) {
+                if let (Some(identity), Some(client)) = (agent_identity, agent.as_mut()) {
                     let mut signer = AgentSigner {
                         client,
                         identity: identity.clone(),
@@ -1550,12 +1607,14 @@ async fn password(
     handle: &mut Handle<Client>,
     plan: &AuthPlan,
     remaining: &russh::MethodSet,
+    state: &mut AuthState,
 ) -> Result<Step, SshBackendError> {
     let Some(prompt) = &plan.prompt else {
         return Ok(Step::FAILED);
     };
     let mut last = Step::FAILED;
-    for _ in 0..plan.prompts {
+    while state.passwords < plan.prompts {
+        state.passwords += 1;
         let (user, host) = (plan.user.clone(), plan.host.clone());
         let Some(Some(password)) = ask(
             Arc::clone(prompt),

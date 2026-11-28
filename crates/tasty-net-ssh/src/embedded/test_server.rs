@@ -67,6 +67,11 @@ pub(crate) enum AuthRule {
     /// [`AuthRule::Key`], with the answer to the signed key held back this long (a server
     /// that waits for a second factor, for example).
     SlowKey(Duration),
+    /// The client key gets in; every other key fails with a list of methods that keeps
+    /// changing and keeps `publickey` (no partial success).
+    KeyAmidChangingLists,
+    /// Every password fails with a list of methods that keeps changing and keeps `password`.
+    PasswordAmidChangingLists,
 }
 
 /// What the server saw, in order.
@@ -85,6 +90,9 @@ pub(crate) enum Event {
     Password,
 }
 
+/// What [`TestServer::on_first_refusal`] runs before the server answers.
+type RefusalHook = Box<dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
 pub(crate) struct TestServer {
     runtime: Option<tokio::runtime::Runtime>,
     handle: RunningServerHandle,
@@ -92,6 +100,7 @@ pub(crate) struct TestServer {
     events: Arc<Mutex<Vec<Event>>>,
     opened: Arc<Mutex<Vec<ChannelId>>>,
     host_key: PublicKey,
+    refusal_hook: Arc<Mutex<Option<RefusalHook>>>,
 }
 
 /// The client key the server lets in.
@@ -154,13 +163,16 @@ impl TestServer {
             .expect("runtime");
         let events = Arc::new(Mutex::new(Vec::new()));
         let opened = Arc::new(Mutex::new(Vec::new()));
+        let refusal_hook = Arc::new(Mutex::new(None));
         let mut server = Handle {
+            refusal_hook: Arc::clone(&refusal_hook),
             opened: Arc::clone(&opened),
             allowed: Arc::new(client.public_key().clone()),
             exec,
             direct,
             rule,
             password_ok: false,
+            flip: false,
             events: Arc::clone(&events),
         };
         let (tx, rx) = mpsc::channel();
@@ -181,7 +193,18 @@ impl TestServer {
             events,
             opened,
             host_key,
+            refusal_hook,
         }
+    }
+
+    /// Runs `hook` once, at the first key [`AuthRule::KeyAmidChangingLists`] refuses, before
+    /// the server answers it: something that changes between two entries of the client's
+    /// public key method.
+    pub(crate) fn on_first_refusal<F>(&self, hook: impl FnOnce() -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        *self.refusal_hook.lock().expect("hook") = Some(Box::new(move || Box::pin(hook())));
     }
 
     /// The `known_hosts` line of the server for `127.0.0.1` on its port.
@@ -290,16 +313,39 @@ struct Handle {
     rule: AuthRule,
     /// The password of [`AuthRule::PasswordThenKey`] came on this connection.
     password_ok: bool,
+    /// Which of two lists the next failure of the changing-list rules sends.
+    flip: bool,
+    refusal_hook: Arc<Mutex<Option<RefusalHook>>>,
     events: Arc<Mutex<Vec<Event>>>,
     /// The `session` channels the server confirmed, in order.
     opened: Arc<Mutex<Vec<ChannelId>>>,
 }
 
 impl Handle {
-    fn judge(&self, key: &PublicKey) -> Auth {
+    /// A failure whose list holds `kept` and, in turn, one of two other methods.
+    fn changing_list(&mut self, kept: russh::MethodKind) -> Auth {
+        self.flip = !self.flip;
+        let other = if self.flip {
+            russh::MethodKind::KeyboardInteractive
+        } else {
+            russh::MethodKind::HostBased
+        };
+        Auth::Reject {
+            proceed_with_methods: Some(russh::MethodSet::from(&[kept, other][..])),
+            partial_success: false,
+        }
+    }
+
+    fn judge(&mut self, key: &PublicKey) -> Auth {
         let only = |method| Some(russh::MethodSet::from(&[method][..]));
         let in_order = match self.rule {
-            AuthRule::Key | AuthRule::SlowKey(_) => true,
+            AuthRule::Key | AuthRule::SlowKey(_) | AuthRule::PasswordAmidChangingLists => true,
+            AuthRule::KeyAmidChangingLists => {
+                if key.key_data() == self.allowed.key_data() {
+                    return Auth::Accept;
+                }
+                return self.changing_list(russh::MethodKind::PublicKey);
+            }
             AuthRule::PasswordThenKey(_) => self.password_ok,
             AuthRule::Cert => false,
             AuthRule::PasswordAfterAKey(_) => {
@@ -346,6 +392,14 @@ impl Handler for Handle {
         self.note(Event::Key(
             offer.public_key.algorithm().as_str().to_string(),
         ));
+        if matches!(self.rule, AuthRule::KeyAmidChangingLists)
+            && offer.public_key.key_data() != self.allowed.key_data()
+        {
+            let hook = self.refusal_hook.lock().expect("hook").take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
         if matches!(self.rule, AuthRule::Cert) {
             // The plain key of a certificate is offered here too (russh
             // `server/encrypted.rs`); `auth_publickey` refuses the plain key itself. A request
@@ -404,6 +458,9 @@ impl Handler for Handle {
                 })
             }
             AuthRule::PasswordAfterAKey(want) if password == want => Ok(Auth::Accept),
+            AuthRule::PasswordAmidChangingLists => {
+                Ok(self.changing_list(russh::MethodKind::Password))
+            }
             _ => Ok(Auth::reject()),
         }
     }
