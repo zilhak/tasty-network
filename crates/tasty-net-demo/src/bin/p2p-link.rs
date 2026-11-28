@@ -15,7 +15,8 @@
 //! - `--dial <device ID>`: the holder. The target is paired too. While a new attempt may
 //!   succeed (the peer is not registered yet, the server is not reached yet; the
 //!   `is_retryable` of the attempt error) it asks again, up to `--patience-ms` (default
-//!   30000). Once the link is up, stdin lines drive it: `send <text>` sends a Data
+//!   30000). stdin is read from the start: `quit` or the end of stdin cancels the connect
+//!   and the handshake in progress (exit code 0). Once the link is up, stdin lines drive it: `send <text>` sends a Data
 //!   frame and the echo is printed; `bulk <bytes>` opens a bulk channel under the link, sends
 //!   that many file bytes (a fixed pseudo-random sequence) in chunks of [`BULK_CHUNK_BYTES`],
 //!   reads the echo back and compares; `detach` ends the link with a Detach and keeps the
@@ -67,6 +68,7 @@
 //! | `dialer bulk-done bytes_sent=<n> bytes_received=<n> chunks=<n> chunk_bytes=<n> sha256_sent=<hex> sha256_received=<hex> match=<bool>` | a `bulk` transfer ended and its echo was read |
 //! | `dialer bulk-failed error=<text>` | a `bulk` transfer did not finish |
 //! | `dialer detached finish=<reader_ended\|drain_cap>` | `detach` (or `quit`) ended the link; whether the link's reader ended within the drain cap after the Detach |
+//! | `dialer cancelled` | `quit` or the end of stdin cancelled the connect or the handshake in progress; exit code 0 |
 //! | `dialer declined error=<text>` | the peer (or the server) declined the pairing; exit code 3 |
 //! | `dialer closed reason=<close code name>` | the peer closed the new connection with a code (`not_paired`); exit code 3 |
 //! | `dialer rejected reason=<reason>` | the peer refused with a refusing ACK; exit code 3 |
@@ -81,6 +83,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -119,6 +122,9 @@ const DEFAULT_PATIENCE: Duration = Duration::from_secs(30);
 const ASK_AGAIN: Duration = Duration::from_millis(200);
 /// The default of `--read-timeout-ms`.
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the dialer waits for a stdin line before it looks again whether its connect
+/// attempt ended.
+const STDIN_LOOK: Duration = Duration::from_millis(50);
 /// How long one wait for the next P2P event lasts before the event thread looks again.
 const EVENT_WAIT: Duration = Duration::from_secs(1);
 /// The test hook of the module text.
@@ -565,11 +571,27 @@ fn dial_link(
 ) -> ExitCode {
     let transport = P2pTransport::new(end.endpoint.clone()).with_connections(end.table.clone());
     let dial = DialConfig::new(key, instance_id).with_timeouts(timeouts);
-    let linked = connect(&transport, target, patience)
-        .map_err(HandshakeError::Connect)
-        .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &AttemptCancel::new()));
+    let lines = stdin_lines();
+    let cancel = AttemptCancel::new();
+    let attempt = || {
+        connect(&transport, target, patience, &cancel)
+            .map_err(HandshakeError::Connect)
+            .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &cancel))
+    };
+    let Attempted {
+        linked,
+        quit,
+        early,
+    } = attempt_reading_stdin(attempt, &lines, &cancel, &end);
     let mut link = match linked {
         Ok(link) => link,
+        Err(_) if quit => {
+            emit("dialer cancelled");
+            drop(transport);
+            end.close();
+            emit("dialer bye");
+            return ExitCode::SUCCESS;
+        }
         Err(error) => {
             let code = report_failure(&error);
             drop(transport);
@@ -599,7 +621,9 @@ fn dial_link(
             }
         }
     });
-    for line in stdin_lines() {
+    // A `quit` (or the end of stdin) during the attempt skips the lines.
+    let lines = (!quit).then_some(lines);
+    for line in early.into_iter().chain(lines.into_iter().flatten()) {
         if line == "quit" {
             break;
         }
@@ -647,6 +671,57 @@ fn dial_link(
     ExitCode::SUCCESS
 }
 
+/// What [`attempt_reading_stdin`] got.
+struct Attempted {
+    /// The link, or why it did not come up.
+    linked: Result<Link, HandshakeError>,
+    /// `quit` or the end of stdin came during the attempt, which cancelled it.
+    quit: bool,
+    /// The other stdin lines that came during the attempt (`table` is answered at once).
+    early: Vec<String>,
+}
+
+/// Runs `attempt` (the connect and the handshake under `cancel`) on its own thread while the
+/// stdin lines are read: `quit` or the end of stdin cancels the attempt, `table` prints the
+/// connection table, other lines wait for the link.
+fn attempt_reading_stdin(
+    attempt: impl FnOnce() -> Result<Link, HandshakeError> + Send,
+    lines: &Receiver<String>,
+    cancel: &AttemptCancel,
+    end: &Ends,
+) -> Attempted {
+    let mut quit = false;
+    let mut early = Vec::new();
+    let linked = std::thread::scope(|scope| {
+        let running = std::thread::Builder::new()
+            .name("connect".into())
+            .spawn_scoped(scope, attempt)
+            .map_err(|error| HandshakeError::Connect(ConnectError::Io(error)))?;
+        while !running.is_finished() {
+            match lines.recv_timeout(STDIN_LOOK) {
+                Ok(line) if line == "table" => end.print_table(),
+                Ok(line) if line != "quit" => early.push(line),
+                Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+                    quit = true;
+                    cancel.cancel();
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+        running.join().unwrap_or_else(|_| {
+            Err(HandshakeError::Connect(ConnectError::Io(
+                std::io::Error::other("the connect thread panicked"),
+            )))
+        })
+    });
+    Attempted {
+        linked,
+        quit,
+        early,
+    }
+}
+
 /// A channel to `target`, asking again while the attempt error says a new attempt may
 /// succeed (`P2pConnectError::is_retryable`, docs/design/p2p.md "재시도와 포기"): the peer
 /// or the server is not reached yet, for example. A server connection that stopped is not.
@@ -654,10 +729,12 @@ fn connect(
     transport: &P2pTransport,
     target: DeviceId,
     patience: Duration,
+    cancel: &AttemptCancel,
 ) -> Result<tasty_net_transport::Connection, ConnectError> {
     let started = Instant::now();
     loop {
-        match transport.connect(&target, &AttemptCancel::new()) {
+        // Once `cancel` is cancelled, this ends with `Cancelled`, which is not asked again.
+        match transport.connect(&target, cancel) {
             Err(ConnectError::P2p(error))
                 if started.elapsed() + ASK_AGAIN < patience
                     && error

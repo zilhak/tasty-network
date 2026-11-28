@@ -92,7 +92,7 @@ CI의 P2P 시험은 외부 네트워크를 쓰지 않는다. rendezvous 서버�
 | `tasty-net-p2p` `tests/lifecycle.rs`(조정 프레임) | `first_frame_over_device_limit_is_rejected`, `first_frame_timeout_is_device_setting`, `frame_limits_after_welcome` | 기기 수신 상한·기한: `welcome` 전 첫 프레임은 기기 `rendezvous.max_message_bytes`·`rendezvous.frame_timeout`으로 거절되고(할당 전), 등록 뒤에는 보내는 프레임이 서버 `max_message_bytes` 이하이고 받는 프레임은 기기 값으로 검사되며, 서버 값이 기기 값보다 크면 `server_limits_mismatch` |
 | `tasty-net-rendezvous` `tests/server.rs` | `server_never_forwards_device_bytes`, `unknown_fields_are_not_forwarded`, `second_stream_is_refused`, `stun_answers_only_the_sender`, `stun_rate_limit_per_source`, `access_policy_rejects`, `superseded_registration_is_closed`, `limits_return_busy`, `punch_session_expires`, `frame_timeout_closes`, `advertised_addresses_are_used`, `wrong_alpn_fails_in_tls`, `settings_are_logged_at_start` | 중계 없음(상대에게 가는 값이 [rendezvous](rendezvous.md#중계-없음)의 닫힌 표뿐), 반사와 출발 주소별 속도 제한, 접근 정책, 상태 지우기, 상한, 프레임 기한, 광고 주소, ALPN 불일치, 시작 때 설정 로그 |
 | `tasty-net-transport` `tests/p2p_adapter.rs` | `p2p_ordered_stream_preserves_mixed_tag_order`, `rejected_first_stream_ack_is_read`, `bidirectional_last_frames_are_read` | 어댑터 위 채널 계약([전송 추상화](transport.md#p2p의-닫기-범위)) |
-| `tasty-net-demo` `tests/p2p_attach.rs` | `p2p_attach_echo`, `unpaired_peer_is_refused`, `bulk_transfer_matches_bytes`, `connection_table_reports_p2p` | transport 위 P2P 링크를 별도 OS 프로세스 두 개로 |
+| `tasty-net-demo` `tests/p2p_attach.rs` | `p2p_attach_echo`, `unpaired_peer_is_refused`, `quit_cancels_a_dial_in_progress`, `bulk_transfer_matches_bytes`, `connection_table_reports_p2p` | transport 위 P2P 링크를 별도 OS 프로세스 두 개로 |
 
 ### 실제 망 확인
 

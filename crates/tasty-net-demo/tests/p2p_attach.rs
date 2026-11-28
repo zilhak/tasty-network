@@ -191,6 +191,30 @@ fn unpaired_peer_is_refused() {
     scene.finish();
 }
 
+/// `quit` cancels a dial in progress: with the peer not on the server the dialer asks again,
+/// and a `quit` then ends it with exit code 0 well before its patience (`--patience-ms`,
+/// default 30 s) runs out.
+#[test]
+fn quit_cancels_a_dial_in_progress() {
+    let mut scene = P2pScene::new();
+    let a = scene.device("a");
+    // Never started: the server does not know it.
+    let b = scene.device("b");
+    let mut dialer = scene.dial(&a, &b);
+    dialer.expect_prefix("dialer retry ", P2P_STEP);
+    dialer.send_line("quit");
+    dialer.expect_prefix("dialer cancelled", LOCAL_STEP);
+    dialer.expect_prefix("dialer bye", LOCAL_STEP);
+    let status = dialer.wait_exit(LOCAL_STEP);
+    assert!(
+        status.success(),
+        "the dialer after quit: {status}\n{}",
+        dialer.transcript.render()
+    );
+    drop(dialer);
+    scene.finish();
+}
+
 /// A bulk channel under the link carries more than many bulk chunks: the listener reads the
 /// same number of file bytes and chunks with the same SHA-256 as the dialer sent, and the
 /// dialer reads them all back unchanged. The link still echoes afterwards.
