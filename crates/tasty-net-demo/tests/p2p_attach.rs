@@ -345,27 +345,6 @@ fn bulk_transfer_matches_bytes() {
     linked.finish();
 }
 
-/// For the listener's ended entry: the transition that ended it carries `p2p_closed` (the
-/// dialer closed the connection). Whether the entry's last cause was then replaced by its
-/// link's end (`ended`): the transport may note the link's end on the entry after the
-/// connection's end once the listener finishes its link at once (its reader done), so the
-/// test accepts that case and logs it.
-fn listener_end_replaced(who: &str, entry: &EntryView) -> bool {
-    if who != "listener" {
-        return false;
-    }
-    let history = entry.history();
-    let ending = history.last().and_then(|(_, _, cause)| cause.as_deref());
-    assert_eq!(ending, Some("p2p_closed"), "{who}: {entry:#?}");
-    let replaced = entry.value("last_cause") == "ended";
-    if replaced {
-        log(
-            "listener last_cause=ended after the ending transition p2p_closed (link end noted after the connection end)",
-        );
-    }
-    replaced
-}
-
 /// The three values of a `udp` segment's local side.
 struct UdpLocal {
     bind: SocketAddr,
@@ -514,10 +493,8 @@ fn connection_table_reports_p2p() {
             entry.value("last_cause"),
             entry.get("cause_text").unwrap_or("-")
         ));
-        if !listener_end_replaced(who, entry) {
-            assert_eq!(entry.value("last_cause"), want, "{who}: {entry:#?}");
-            assert_eq!(entry.value("cause_text"), want_text, "{who}: {entry:#?}");
-        }
+        assert_eq!(entry.value("last_cause"), want, "{who}: {entry:#?}");
+        assert_eq!(entry.value("cause_text"), want_text, "{who}: {entry:#?}");
     }
     P2pScene::quit(&mut linked.dialer, "dialer");
     P2pScene::quit(&mut linked.listener, "listener");
