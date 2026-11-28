@@ -1087,47 +1087,55 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                 if !cert_accepted(cert) {
                     continue;
                 }
-                let held = agent_ids.iter().any(|id| {
-                    matches!(id, AgentIdentity::PublicKey { key, .. }
-                        if key.key_data() == cert.public_key())
-                }) || agent_ids.iter().any(|id| {
-                    matches!(id, AgentIdentity::Certificate { certificate, .. }
-                        if certificate == &**cert)
-                });
+                // The agent signs when it holds the certificate, or only its plain key: then the
+                // plain key is the signing identity (`sshconnect2.c` `sign_and_send_pubkey`),
+                // since an agent holding only the plain key refuses a request that names the
+                // certificate. A refused agent signature goes on to the key file.
+                let agent_identity = agent_ids
+                    .iter()
+                    .find(|id| {
+                        matches!(id, AgentIdentity::Certificate { certificate, .. }
+                            if certificate == &**cert)
+                    })
+                    .or_else(|| {
+                        agent_ids.iter().find(|id| {
+                            matches!(id, AgentIdentity::PublicKey { key, .. }
+                                if key.key_data() == cert.public_key())
+                        })
+                    });
                 let mut signed = None;
-                if held && let Some((client, _)) = agent.as_mut() {
+                if let (Some(identity), Some((client, _))) = (agent_identity, agent.as_mut()) {
+                    let mut signer = AgentSigner {
+                        client,
+                        identity: identity.clone(),
+                    };
                     match handle
                         .authenticate_certificate_with(
                             plan.user.clone(),
                             Certificate::clone(cert),
                             rsa_hash,
-                            client,
+                            &mut signer,
                         )
                         .await
                     {
                         Ok(res) => signed = Some(res),
-                        Err(e) => {
-                            tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}");
-                            continue;
-                        }
+                        Err(e) => tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}"),
                     }
                 }
                 if let Some(res) = signed {
                     res
                 } else {
                     // The key file of the certificate: its own file, or a key file with the
-                    // same public key (`sign_and_send_pubkey`).
+                    // same public key (`sign_and_send_pubkey`). The key files of the plan are
+                    // searched, not the list, as the list holds a key file the agent also
+                    // holds as the agent's key, and the agent may have refused to sign.
                     let file = file.clone().or_else(|| {
-                        list.iter().find_map(|c| match c {
-                            Candidate::File {
-                                path,
-                                origin,
-                                public: Some(p),
-                            } if p.key_data() == cert.public_key() => {
-                                Some((path.clone(), origin.clone()))
-                            }
-                            _ => None,
-                        })
+                        plan.identities
+                            .iter()
+                            .find(|(path, _)| {
+                                file_public(path).is_some_and(|p| p.key_data() == cert.public_key())
+                            })
+                            .cloned()
                     });
                     let Some((path, origin)) = file else {
                         continue;
@@ -1189,6 +1197,29 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
         }
     }
     Ok(last)
+}
+
+/// Signs an authentication request with one identity of the agent, whatever identity the
+/// request names: the plain key of a certificate the agent does not hold itself.
+struct AgentSigner<'a> {
+    client: &'a mut AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>>,
+    identity: AgentIdentity,
+}
+
+impl russh::Signer for AgentSigner<'_> {
+    type Error = russh::AgentAuthError;
+
+    async fn auth_sign(
+        &mut self,
+        _key: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        to_sign: Vec<u8>,
+    ) -> Result<Vec<u8>, Self::Error> {
+        self.client
+            .sign_request(&self.identity, hash_alg, to_sign)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 /// Signs an authentication request with a key file's private key, with the RSA hash of the

@@ -1123,6 +1123,104 @@ fn the_key_file_signer_uses_the_hash_it_is_given() {
     }
 }
 
+/// The agent signs a certificate whose plain key it holds, with that plain key as the signing
+/// identity (`sign_and_send_pubkey`), with no key file to fall back on.
+#[cfg(unix)]
+#[test]
+fn a_certificate_is_signed_with_the_agent_plain_key() {
+    use crate::embedded::test_server::{AuthRule, Event, client_key};
+    let dir = Dir::new("agent-cert");
+    let socket = dir.0.join("a.sock");
+    let cert = dir.0.join("id_cert.pub");
+    std::fs::write(&cert, user_certificate().to_openssh().expect("encode cert"))
+        .expect("cert file");
+    let lines = format!(
+        "CertificateFile \"{}\"\n  IdentityAgent \"{}\"",
+        cert.display(),
+        socket.display()
+    );
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::Cert,
+        |c| format!("{}  {lines}\n", c.replace("  IdentityAgent none\n", "")),
+        Arc::new(CountingPrompt::default()),
+    );
+    std::fs::remove_file(dir.0.join("id_test")).expect("remove the private file");
+    server.agent(&socket, &[client_key()]);
+    open_session(&connector).expect("the agent signs the certificate");
+    assert!(server.events().contains(&Event::Cert));
+}
+
+/// The key file that signs a `CertificateFile` certificate is the first `IdentityFile` with
+/// the certificate's public key, as in `ssh` (`sshconnect2.c:1355`–`:1378`): when it cannot
+/// sign (here a public key only), the certificate is not tried with a later file of the same
+/// key; the key itself still gets in.
+#[test]
+fn a_certificate_whose_first_key_file_cannot_sign_is_not_tried_with_a_later_one() {
+    use crate::embedded::test_server::{AuthRule, Event, client_key};
+    let cert_sent = |public_first: bool| {
+        let dir = Dir::new("cert-first-file");
+        let cert = dir.0.join("id_cert.pub");
+        std::fs::write(&cert, user_certificate().to_openssh().expect("encode cert"))
+            .expect("cert file");
+        let public = dir.0.join("id_public_only");
+        std::fs::write(
+            &public,
+            client_key()
+                .public_key()
+                .to_openssh()
+                .expect("encode public key"),
+        )
+        .expect("public file");
+        let first = if public_first {
+            format!("  IdentityFile \"{}\"\n", public.display())
+        } else {
+            String::new()
+        };
+        let (server, connector) = on_auth_server(
+            &dir,
+            AuthRule::Key,
+            |c| {
+                let c = c.replacen("  IdentityFile ", &format!("{first}  IdentityFile "), 1);
+                format!("{c}  CertificateFile \"{}\"\n", cert.display())
+            },
+            Arc::new(CountingPrompt::default()),
+        );
+        open_session(&connector).expect("the key gets in");
+        server.events().contains(&Event::Cert)
+    };
+    // The private key file alone signs the certificate; behind a public key only it does not.
+    assert!(cert_sent(false));
+    assert!(!cert_sent(true));
+}
+
+/// An agent that refuses to sign a certificate's plain key does not end the certificate: its
+/// key file signs it, also when the agent holds that key file.
+#[cfg(unix)]
+#[test]
+fn a_certificate_the_agent_refuses_to_sign_is_signed_by_its_key_file() {
+    use crate::embedded::test_server::{AuthRule, Event, client_key};
+    let dir = Dir::new("agent-refuses");
+    let socket = dir.0.join("a.sock");
+    let cert = dir.0.join("id_cert.pub");
+    std::fs::write(&cert, user_certificate().to_openssh().expect("encode cert"))
+        .expect("cert file");
+    let lines = format!(
+        "CertificateFile \"{}\"\n  IdentityAgent \"{}\"",
+        cert.display(),
+        socket.display()
+    );
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::Cert,
+        |c| format!("{}  {lines}\n", c.replace("  IdentityAgent none\n", "")),
+        Arc::new(CountingPrompt::default()),
+    );
+    server.refusing_agent(&socket, &[client_key()]);
+    open_session(&connector).expect("the key file signs the certificate");
+    assert!(server.events().contains(&Event::Cert));
+}
+
 /// A certificate smaller than `RequiredRSASize` is not offered: the key file signs it without
 /// the setting and nothing is sent with it.
 #[cfg(unix)]

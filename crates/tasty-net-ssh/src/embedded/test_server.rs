@@ -201,7 +201,18 @@ impl TestServer {
     /// Starts an SSH agent on the Unix socket `socket` that holds `keys`.
     #[cfg(unix)]
     pub(crate) fn agent(&self, socket: &Path, keys: &[PrivateKey]) {
-        use russh::keys::agent::client::AgentClient;
+        self.serve_agent(socket, keys, AgentAnswer::Sign);
+    }
+
+    /// An agent that lists `keys` but refuses every signature (a confirmation said no).
+    #[cfg(unix)]
+    pub(crate) fn refusing_agent(&self, socket: &Path, keys: &[PrivateKey]) {
+        self.serve_agent(socket, keys, AgentAnswer::Refuse);
+    }
+
+    #[cfg(unix)]
+    fn serve_agent(&self, socket: &Path, keys: &[PrivateKey], answer: AgentAnswer) {
+        use russh::keys::agent::{Constraint, client::AgentClient};
         let runtime = self.runtime.as_ref().expect("runtime");
         let listener = runtime
             .block_on(async { tokio::net::UnixListener::bind(socket) })
@@ -211,14 +222,21 @@ impl TestServer {
             Some((next, listener))
         });
         runtime.spawn(async move {
-            let _served = russh::keys::agent::server::serve(Box::pin(connections), ())
+            let _served = russh::keys::agent::server::serve(Box::pin(connections), answer)
                 .await
                 .is_ok();
         });
         runtime.block_on(async {
             let mut client = AgentClient::connect_uds(socket).await.expect("agent");
+            let constraints = match answer {
+                AgentAnswer::Sign => Vec::new(),
+                AgentAnswer::Refuse => vec![Constraint::Confirm],
+            };
             for key in keys {
-                client.add_identity(key, &[]).await.expect("add key");
+                client
+                    .add_identity(key, &constraints)
+                    .await
+                    .expect("add key");
             }
         });
     }
@@ -455,5 +473,24 @@ impl Handler for Handle {
         };
         reply.reject(reason).await;
         Ok(())
+    }
+}
+
+/// How the test agent answers a signature request of a key added with a confirmation.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum AgentAnswer {
+    Sign,
+    Refuse,
+}
+
+#[cfg(unix)]
+impl russh::keys::agent::server::Agent for AgentAnswer {
+    fn confirm(
+        self,
+        _pk: Arc<PrivateKey>,
+    ) -> Box<dyn std::future::Future<Output = (Self, bool)> + Unpin + Send> {
+        let yes = matches!(self, AgentAnswer::Sign);
+        Box::new(futures::future::ready((self, yes)))
     }
 }
