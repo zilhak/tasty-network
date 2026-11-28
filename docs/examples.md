@@ -69,7 +69,7 @@ send hello
 
 ## P2P 링크 손으로 돌리기
 
-rendezvous 서버 하나와 기기 둘이 있으면 된다(같은 머신의 단말 셋도 된다). 서버는 [rendezvous 안내](../rendezvous/README.md)대로 띄운다. 아래 `203.0.113.10`은 문서용 주소이고, 같은 머신이면 서버 설정의 `listen.primary`를 `127.0.0.1:3478`로 두고 그 주소를 준다.
+rendezvous 서버 하나와 기기 둘이 있으면 된다(같은 머신의 단말 셋도 된다). 서버는 [rendezvous 안내](../rendezvous/README.md)대로 띄운다. 아래 `203.0.113.10`은 문서용 주소이고, 같은 머신이면 서버 설정의 `listen.primary`를 `127.0.0.1:3478`로 두고 그 주소를 준다. 이때 예시 설정의 `[advertise]` `primary_ip = "203.0.113.10"` 줄도 지우거나 `"127.0.0.1"`로 바꾼다. 남겨 두면 서버가 그 문서용 주소를 보조 STUN 주소로 알려, 기기의 NAT 판별이 닿지 않는 주소로 간다(지우면 서버는 바인딩한 IP를 알린다).
 
 ```bash
 cargo build -p tasty-net-demo --bin p2p-link --locked
