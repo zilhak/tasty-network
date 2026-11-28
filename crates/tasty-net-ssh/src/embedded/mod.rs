@@ -20,8 +20,9 @@ pub(crate) mod tunnel;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::backend::SshBackendError;
@@ -137,21 +138,81 @@ fn runtime_gone() -> SshBackendError {
 }
 
 /// Time spent waiting for [`SshPrompt`] answers, which the connect timeout does not count
-/// (docs/design/ssh-backends.md `embedded.prompt_timeout`).
+/// (docs/design/ssh-backends.md `embedded.prompt_timeout`). While a question is open a
+/// deadline does not run out: [`bounded`] waits for the answer, and the time it took is then
+/// added to the deadline. The time only grows, and each [`bounded`] adds what grew since it
+/// last looked, so nested deadlines that share it each get the whole question time.
 #[derive(Debug, Default)]
 pub(crate) struct Paused {
-    /// Nanoseconds not yet credited to a deadline.
-    pending: AtomicU64,
+    /// Nanoseconds of all ended questions.
+    total: AtomicU64,
+    /// Questions open now.
+    open: AtomicUsize,
+    /// Woken when a question ends.
+    ended: tokio::sync::Notify,
 }
 
 impl Paused {
     pub(crate) fn add(&self, waited: Duration) {
         let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
-        self.pending.fetch_add(nanos, Ordering::AcqRel);
+        self.total.fetch_add(nanos, Ordering::AcqRel);
     }
 
-    fn take(&self) -> Duration {
-        Duration::from_nanos(self.pending.swap(0, Ordering::AcqRel))
+    fn total(&self) -> Duration {
+        Duration::from_nanos(self.total.load(Ordering::Acquire))
+    }
+
+    /// Marks a question open until the guard is dropped, which credits its time.
+    fn open(&self) -> OpenQuestion<'_> {
+        self.open.fetch_add(1, Ordering::AcqRel);
+        OpenQuestion {
+            paused: self,
+            started: Instant::now(),
+        }
+    }
+
+    fn asking(&self) -> bool {
+        self.open.load(Ordering::Acquire) > usize::MIN
+    }
+
+    /// Returns when no question is open.
+    async fn questions_ended(&self) {
+        loop {
+            let ended = self.ended.notified();
+            let mut ended = std::pin::pin!(ended);
+            ended.as_mut().enable();
+            if !self.asking() {
+                return;
+            }
+            ended.await;
+        }
+    }
+}
+
+/// An open question of [`Paused`]; its end (also when the asking future is dropped) credits
+/// the time it was open.
+struct OpenQuestion<'a> {
+    paused: &'a Paused,
+    started: Instant,
+}
+
+impl Drop for OpenQuestion<'_> {
+    fn drop(&mut self) {
+        self.paused.add(self.started.elapsed());
+        self.paused.open.fetch_sub(1, Ordering::AcqRel);
+        self.paused.ended.notify_waiters();
+    }
+}
+
+/// Returns when `cancel` is cancelled (looked at every `poll`); never without one.
+async fn cancelled(cancel: Option<&SshCancel>, poll: Duration) {
+    match cancel {
+        Some(cancel) => {
+            while !cancel.is_cancelled() {
+                tokio::time::sleep(poll).await;
+            }
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -172,6 +233,13 @@ pub(crate) async fn bounded<F: Future>(
     poll: Duration,
 ) -> Bounded<F::Output> {
     let mut fut = std::pin::pin!(fut);
+    // The question time already spent belongs to the deadlines before this one.
+    let mut seen = paused.total();
+    let mut credit = |deadline: &mut Instant| {
+        let now = paused.total();
+        *deadline += now.saturating_sub(seen);
+        seen = now;
+    };
     loop {
         if cancel.is_some_and(SshCancel::is_cancelled) {
             return Bounded::Cancelled;
@@ -183,7 +251,34 @@ pub(crate) async fn bounded<F: Future>(
         match tokio::time::timeout_at(step.into(), &mut fut).await {
             Ok(out) => return Bounded::Done(out),
             Err(_) => {
-                deadline += paused.take();
+                // Whether a question is open is read before the time is: a question that ends
+                // in between is then in the time read, and is not lost.
+                let asking = paused.asking();
+                credit(&mut deadline);
+                if asking && Instant::now() >= deadline {
+                    // A question is open: the deadline waits for its answer, whose time is
+                    // credited when it ends. The future keeps running meanwhile.
+                    let mut ended = std::pin::pin!(paused.questions_ended());
+                    let mut stop = std::pin::pin!(cancelled(cancel, poll));
+                    let woke = std::future::poll_fn(|cx| {
+                        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+                            return Poll::Ready(Some(Bounded::Done(out)));
+                        }
+                        if ended.as_mut().poll(cx).is_ready() {
+                            return Poll::Ready(None);
+                        }
+                        if stop.as_mut().poll(cx).is_ready() {
+                            return Poll::Ready(Some(Bounded::Cancelled));
+                        }
+                        Poll::Pending
+                    })
+                    .await;
+                    if let Some(end) = woke {
+                        return end;
+                    }
+                    credit(&mut deadline);
+                    continue;
+                }
                 if Instant::now() >= deadline {
                     return Bounded::Expired;
                 }
@@ -252,12 +347,175 @@ pub(crate) async fn ask<T: Send + 'static>(
     paused: &Paused,
     question: impl FnOnce(&dyn SshPrompt) -> T + Send + 'static,
 ) -> Option<T> {
-    let started = Instant::now();
+    let open = paused.open();
     let job = tokio::task::spawn_blocking(move || question(prompt.as_ref()));
     let answer = tokio::time::timeout(timeout, job).await;
-    paused.add(started.elapsed());
+    drop(open);
     match answer {
         Ok(Ok(value)) => Some(value),
         Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod paused_tests {
+    use super::*;
+
+    fn run<F: Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(fut)
+    }
+
+    #[test]
+    fn an_open_question_holds_the_deadline_until_it_is_answered() {
+        let paused = Paused::default();
+        let out = run(bounded(
+            async {
+                let open = paused.open();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                drop(open);
+                "answered"
+            },
+            Instant::now() + Duration::from_millis(50),
+            &paused,
+            None,
+            Duration::from_millis(50),
+        ));
+        assert!(matches!(out, Bounded::Done("answered")));
+    }
+
+    #[test]
+    fn the_deadline_still_runs_out_without_a_question_and_after_one() {
+        let paused = Paused::default();
+        // The sleep is made inside the runtime: a tokio timer needs one when it is created.
+        let out = run(bounded(
+            async { tokio::time::sleep(Duration::from_millis(300)).await },
+            Instant::now() + Duration::from_millis(50),
+            &paused,
+            None,
+            Duration::from_millis(50),
+        ));
+        assert!(matches!(out, Bounded::Expired));
+        // The question's 100 ms are credited, and then the rest of the deadline runs out.
+        let started = Instant::now();
+        let out = run(bounded(
+            async {
+                let open = paused.open();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                drop(open);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            },
+            Instant::now() + Duration::from_millis(50),
+            &paused,
+            None,
+            Duration::from_millis(50),
+        ));
+        assert!(matches!(out, Bounded::Expired));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn nested_deadlines_each_get_the_question_time() {
+        let paused = Paused::default();
+        let deadline = || Instant::now() + Duration::from_millis(50);
+        // The question outlasts both deadlines, and the work goes on a while after it.
+        let out = run(bounded(
+            bounded(
+                async {
+                    let open = paused.open();
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    drop(open);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    "answered"
+                },
+                deadline(),
+                &paused,
+                None,
+                Duration::from_millis(50),
+            ),
+            deadline(),
+            &paused,
+            None,
+            Duration::from_millis(50),
+        ));
+        assert!(
+            matches!(out, Bounded::Done(Bounded::Done("answered"))),
+            "the outer deadline expired"
+        );
+    }
+
+    #[test]
+    fn a_question_that_ends_as_the_deadline_runs_out_is_credited() {
+        // The question runs in another task of a runtime with several threads and ends about
+        // when the deadline runs out, so its end falls between the deadline's looks at it.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for round in 0..40u64 {
+            let paused = Arc::new(Paused::default());
+            let question = Arc::clone(&paused);
+            let length = Duration::from_millis(20 + round % 5);
+            let out = runtime.block_on(async {
+                let asker = tokio::spawn(async move {
+                    let _open = question.open();
+                    tokio::time::sleep(length).await;
+                });
+                bounded(
+                    async {
+                        tokio::time::sleep(length + Duration::from_millis(10)).await;
+                        asker.await.is_ok()
+                    },
+                    Instant::now() + Duration::from_millis(20),
+                    &paused,
+                    None,
+                    Duration::from_millis(20),
+                )
+                .await
+            });
+            assert!(matches!(out, Bounded::Done(true)), "round {round}");
+        }
+    }
+
+    #[test]
+    fn an_open_question_does_not_hold_a_cancel() {
+        let paused = Paused::default();
+        let cancel = SshCancel::new();
+        let flag = cancel.clone();
+        let out = run(async {
+            let stopper = async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                flag.cancel();
+            };
+            let wait = bounded(
+                async {
+                    let _open = paused.open();
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                },
+                Instant::now() + Duration::from_millis(20),
+                &paused,
+                Some(&cancel),
+                Duration::from_millis(20),
+            );
+            let mut stopper = std::pin::pin!(stopper);
+            let mut wait = std::pin::pin!(wait);
+            let mut stopped = false;
+            std::future::poll_fn(|cx| {
+                if !stopped {
+                    stopped = stopper.as_mut().poll(cx).is_ready();
+                }
+                wait.as_mut().poll(cx)
+            })
+            .await
+        });
+        assert!(matches!(out, Bounded::Cancelled));
     }
 }

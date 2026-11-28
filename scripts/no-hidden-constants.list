@@ -267,7 +267,9 @@ allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	const PRIVATE_DIR_MODE: u32 =
 allow	crates/tasty-net-ssh/src/embedded/session.rs	const GROUP_OTHER_BITS: u32 = 0o077	OpenSSH sshkey_perm_ok의 그룹·기타 권한 비트 077(authfile.c)
 allow	crates/tasty-net-ssh/src/embedded/session.rs	& GROUP_OTHER_BITS != 0	OpenSSH sshkey_perm_ok: 그룹·기타 비트가 하나라도 있으면 거절(authfile.c)
 allow	crates/tasty-net-ssh/src/embedded/mod.rs	unwrap_or(u64::MAX)	나노초 변환이 넘치면 타입 최대로 포화
-allow	crates/tasty-net-ssh/src/embedded/mod.rs	swap(0,	쌓인 대기 시간을 꺼내며 0으로 되돌린다
+allow	crates/tasty-net-ssh/src/embedded/mod.rs	fetch_add(1,	열린 질문 수를 하나 늘린다
+allow	crates/tasty-net-ssh/src/embedded/mod.rs	fetch_sub(1,	끝난 질문 하나를 뺀다
+allow	crates/tasty-net-ssh/src/embedded/mod.rs	> usize::MIN	열린 질문이 하나라도 있으면 기한을 멈춘다
 allow	crates/tasty-net-ssh/src/embedded/session.rs	const ATTEMPT_PAUSE: Duration = Duration::from_secs(1)	OpenSSH: ConnectionAttempts 사이 sleep(1) (sshconnect.c)
 allow	crates/tasty-net-ssh/src/embedded/session.rs	const CONNECTION_ATTEMPTS: i32 = 1	OpenSSH ConnectionAttempts 기본 1(readconf.c)
 allow	crates/tasty-net-ssh/src/embedded/session.rs	const PASSWORD_PROMPTS: i32 = 3	OpenSSH NumberOfPasswordPrompts 기본 3(readconf.c)

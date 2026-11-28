@@ -597,7 +597,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `embedded.ssh_dir` | `<embedded.home>/.ssh` | 경로 | 추가 결정 4. 모바일은 바인딩 층이 앱 저장소의 `ssh/`를 넣는다 |
 | `embedded.local_user` | OS 사용자 이름(`USER`, Windows `USERNAME`) | 문자열 | `%u`·`Match localuser`, 원격 사용자를 정하지 않았을 때의 기본 사용자. 값이 없고 설정도 없으면 원격 사용자가 정해지지 않은 연결은 `UserRequired`로 끝난다 |
 | `embedded.channel_open_timeout` | 10 s | 100 ms ~ 10 min | 채널 열기 응답 기한. `ssh.connect_timeout` 기본과 같은 값 |
-| `embedded.prompt_timeout` | 5 min | 1 s ~ 1 h | `SshPrompt`의 답을 기다리는 시간. 사람이 passphrase를 치는 시간이다. 이 대기 동안 `ssh.connect_timeout`은 멈춘다 |
+| `embedded.prompt_timeout` | 5 min | 1 s ~ 1 h | `SshPrompt`의 답을 기다리는 시간. 사람이 passphrase를 치는 시간이다. 이 대기 동안 `ssh.connect_timeout`은 멈춘다. 기한이 겹쳐 있으면(포트 발견 기한 안의 핸드셰이크·인증 기한) 각 기한이 질문 시간 전체를 돌려받는다 |
 | `embedded.runtime.worker_threads` | 1 | 1 ~ 16 | 몇 개의 SSH 세션에 워커 하나로 충분하다. 모바일 스레드 비용을 줄인다 |
 | `embedded.window_size` | 2 MiB | 32 KiB ~ 64 MiB | russh `Config::window_size` 기본(2097152, `client/mod.rs:2790`) |
 | `embedded.max_packet_size` | 32 KiB | 1 KiB ~ 65535 bytes | russh 기본(32768). russh는 65535보다 큰 값을 받으면 경고만 찍고 계속하므로(`client/mod.rs:1232`) 상한을 65535로 둔다(64 KiB = 65536은 그 경고에 걸린다) |
