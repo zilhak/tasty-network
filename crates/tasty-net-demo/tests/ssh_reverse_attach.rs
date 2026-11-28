@@ -226,11 +226,24 @@ fn reconnect_after_tunnel_kill() {
 
 #[test]
 fn refused_proposal_stops_without_retry() {
+    refused_proposal_stops(|scene| start_reversing_dialer(scene, &[]));
+}
+
+/// The D3 refusal step on the embedded backend.
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn refused_proposal_stops_without_retry_embedded() {
+    refused_proposal_stops(|scene| start_embedded_reversing_dialer(scene, &[]));
+}
+
+/// A reversing dialer started by `start` whose proposal the server refuses ends with
+/// `role_refused` after one attempt.
+fn refused_proposal_stops(start: impl FnOnce(&mut Scene) -> Proc) {
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     // The default answers every proposal with a refusal.
     let (mut server, _ready) = scene.start_server();
-    let mut dialer = start_reversing_dialer(&mut scene, &[]);
+    let mut dialer = start(&mut scene);
 
     let rejected = dialer.expect_prefix("dialer rejected ", SSH_STEP);
     log(&format!("the dialer ended with: {rejected}"));
@@ -277,11 +290,24 @@ fn refused_proposal_stops_without_retry() {
 
 #[test]
 fn self_attach_is_rejected() {
+    self_attach_rejected(start_reversing_dialer);
+}
+
+/// The D3 self-attach step on the embedded backend.
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn self_attach_is_rejected_embedded() {
+    self_attach_rejected(start_embedded_reversing_dialer);
+}
+
+/// A reversing dialer started by `start` (with extra arguments) that claims the server's own
+/// instance is rejected with `self_attach` after one attempt, and the server makes no link.
+fn self_attach_rejected(start: impl FnOnce(&mut Scene, &[&str]) -> Proc) {
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     let (mut server, ready) = start_accepting_server(&mut scene);
     // The dialer claims the server's own instance: the link would attach the server to itself.
-    let mut dialer = start_reversing_dialer(&mut scene, &["--instance-id", &ready.instance]);
+    let mut dialer = start(&mut scene, &["--instance-id", &ready.instance]);
 
     let rejected = dialer.expect_prefix("dialer rejected ", SSH_STEP);
     log(&format!("the dialer ended with: {rejected}"));
@@ -516,9 +542,10 @@ fn mixed_holders_on_one_tunnel() {
 }
 
 /// A reversing dialer on the embedded backend (docs/design/ssh-backends.md "시험 목록" 내장
-/// 백엔드 attach): `--ssh ssh` and a `PATH` of one empty folder, so `auto` falls back.
+/// 백엔드 attach), with extra arguments: `--ssh ssh` and a `PATH` of one empty folder, so
+/// `auto` falls back.
 #[cfg(feature = "embedded-ssh")]
-fn start_embedded_reversing_dialer(scene: &mut Scene) -> Proc {
+fn start_embedded_reversing_dialer(scene: &mut Scene, args: &[&str]) -> Proc {
     let empty = scene
         .dir
         .as_ref()
@@ -528,11 +555,9 @@ fn start_embedded_reversing_dialer(scene: &mut Scene) -> Proc {
     std::fs::create_dir_all(&empty).expect("the empty PATH folder");
     let empty = empty.to_string_lossy().into_owned();
     let record = scene.record.clone();
-    scene.start_dialer_with(
-        &record,
-        &["--holder", "acceptor", "--ssh", "ssh"],
-        &[("PATH", empty.as_str())],
-    )
+    let mut all = vec!["--holder", "acceptor", "--ssh", "ssh"];
+    all.extend_from_slice(args);
+    scene.start_dialer_with(&record, &all, &[("PATH", empty.as_str())])
 }
 
 /// The session of the dialer's last `connected` line, which must name the embedded backend.
@@ -569,7 +594,7 @@ fn reversed_holder_echo_embedded() {
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     let (mut server, ready) = start_accepting_server(&mut scene);
-    let mut dialer = start_embedded_reversing_dialer(&mut scene);
+    let mut dialer = start_embedded_reversing_dialer(&mut scene, &[]);
     reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
     let session = embedded_session(&dialer);
     check_embedded_entry(&mut dialer, session);
@@ -591,7 +616,7 @@ fn reconnect_after_session_drop_embedded() {
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     let (mut server, ready) = start_accepting_server(&mut scene);
-    let mut dialer = start_embedded_reversing_dialer(&mut scene);
+    let mut dialer = start_embedded_reversing_dialer(&mut scene, &[]);
     reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
     held_echo(&mut server, &mut dialer, 1, "hello-1");
     let before = embedded_session(&dialer);

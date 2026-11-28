@@ -188,6 +188,21 @@ fn connection_table_reports_ssh_forward() {
 
 #[test]
 fn wrong_token_is_rejected_without_retry() {
+    wrong_token_is_rejected(|scene, record| scene.start_dialer(record));
+}
+
+/// The D2 refusal step on the embedded backend: the same wrong token, the same single attempt.
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn wrong_token_is_rejected_without_retry_embedded() {
+    wrong_token_is_rejected(|scene, record| start_embedded_dialer(scene, record, &[]));
+}
+
+/// A dialer started by `start` with a record whose token is wrong is refused once
+/// (`token_invalid`, exit code 3) and does not try again.
+fn wrong_token_is_rejected(
+    start: impl FnOnce(&mut Scene, &std::path::Path) -> support::process::Proc,
+) {
     let _one = one_at_a_time();
     let mut scene = Scene::new();
     let (mut server, ready) = scene.start_server();
@@ -204,7 +219,7 @@ fn wrong_token_is_rejected_without_retry() {
         .path()
         .join("wrong-token.json");
     std::fs::write(&bad_record, wrong.to_line()).expect("write the wrong record");
-    let mut dialer = scene.start_dialer(&bad_record);
+    let mut dialer = start(&mut scene, &bad_record);
 
     let rejected = dialer.expect_prefix("dialer rejected ", SSH_STEP);
     log(&format!("the dialer ended with: {rejected}"));
