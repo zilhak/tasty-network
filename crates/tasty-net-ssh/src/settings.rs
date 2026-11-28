@@ -648,23 +648,36 @@ impl fmt::Display for TextEntry {
 
 /// Why an `ssh.overrides` entry is refused. A library setting never weakens host key checking
 /// and never starts another program (docs/design/ssh-backends.md "옵션 적용 순서").
+///
+/// The value is judged the way `ssh` reads it: split like OpenSSH `argv_split` (quotes and
+/// `\\` escapes removed, `#` starts a comment), so `StrictHostKeyChecking="no"` is `no`.
+/// `ProxyCommand` and `KnownHostsCommand` take the rest of the line as written, so they are
+/// judged on the written text. A keyword with a quote or a backslash, and a value whose quote
+/// does not close, are refused: `ssh` would read them in a way this check does not.
 fn override_refusal(option: &str) -> Option<&'static str> {
-    let (keyword, value) = split_option(option)?;
+    let (keyword, raw) = split_option(option)?;
+    if keyword.contains(['"', '\'', '\\']) {
+        return Some("a keyword is written without quotes or escapes");
+    }
     let keyword = keyword.to_ascii_lowercase();
-    let value = value.trim().to_ascii_lowercase();
+    let raw = raw.trim().to_ascii_lowercase();
+    let Some(args) = argv_split(&raw) else {
+        return Some("a quote in the value does not close");
+    };
+    let value = args.first().map_or("", String::as_str);
     match keyword.as_str() {
-        "stricthostkeychecking" if matches!(value.as_str(), "no" | "off" | "false") => {
+        "stricthostkeychecking" if matches!(value, "no" | "off" | "false") => {
             Some("a setting does not turn host key checking off")
         }
-        "nohostauthenticationforlocalhost" if matches!(value.as_str(), "yes" | "true") => {
+        "nohostauthenticationforlocalhost" if matches!(value, "yes" | "true") => {
             Some("a setting does not turn host key checking off")
         }
-        "proxycommand" if value != "none" => Some("a setting does not run another program"),
+        "proxycommand" if raw != "none" => Some("a setting does not run another program"),
         "knownhostscommand" => Some("a setting does not run another program"),
-        "verifyhostkeydns" if matches!(value.as_str(), "yes" | "ask" | "true") => {
+        "verifyhostkeydns" if matches!(value, "yes" | "ask" | "true") => {
             Some("the embedded backend does not implement it and refuses it")
         }
-        "canonicalizehostname" if matches!(value.as_str(), "yes" | "always" | "true") => {
+        "canonicalizehostname" if matches!(value, "yes" | "always" | "true") => {
             Some("the embedded backend does not implement it and refuses it")
         }
         "pubkeyauthentication" if value == "host-bound" => {
@@ -674,6 +687,54 @@ fn override_refusal(option: &str) -> Option<&'static str> {
         "match" | "host" | "include" => Some("only options, not blocks or includes"),
         _ => unknown_keyword(&keyword),
     }
+}
+
+/// The arguments of a value as OpenSSH `argv_split` (`misc.c`) makes them with
+/// `terminate_on_comment`: blanks separate, `"` and `'` quote, `\\` escapes a quote, a
+/// backslash or (outside quotes) a space, and an unquoted `#` at the start of an argument ends
+/// the line. `None` when a quote does not close (`SSH_ERR_INVALID_FORMAT`).
+fn argv_split(text: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut args = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ' ' || chars[i] == '\t' {
+            i += 1;
+            continue;
+        }
+        if chars[i] == '#' {
+            break;
+        }
+        let mut arg = String::new();
+        let mut quote: Option<char> = None;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if c == '\\' {
+                if matches!(next, Some('\'' | '"' | '\\')) || (quote.is_none() && next == Some(' '))
+                {
+                    i += 1;
+                    arg.push(chars[i]);
+                } else {
+                    arg.push(c);
+                }
+            } else if quote.is_none() && (c == ' ' || c == '\t') {
+                break;
+            } else if quote.is_none() && (c == '"' || c == '\'') {
+                quote = Some(c);
+            } else if quote == Some(c) {
+                quote = None;
+            } else {
+                arg.push(c);
+            }
+            i += 1;
+        }
+        if quote.is_some() {
+            return None;
+        }
+        args.push(arg);
+    }
+    Some(args)
 }
 
 /// `Keyword=Value` or `Keyword Value`, as `ssh -o` takes it.

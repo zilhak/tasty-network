@@ -342,6 +342,19 @@ fn overrides_refuse_what_a_setting_must_not_do() {
         "BindInterface=tun0",
         "Port",
         "=22",
+        // Quoted and escaped forms `ssh` reads as the same values.
+        "StrictHostKeyChecking=\"no\"",
+        "StrictHostKeyChecking 'off'",
+        "StrictHostKeyChecking=n\"\"o",
+        "StrictHostKeyChecking=\"no\" # comment",
+        "NoHostAuthenticationForLocalhost \"yes\"",
+        "ProxyCommand=\"sh -c x\"",
+        "ProxyCommand=\"none\"",
+        "VerifyHostKeyDNS='yes'",
+        "PubkeyAuthentication=\"host-bound\"",
+        // A quoted keyword, and a quote that does not close.
+        "\"StrictHostKeyChecking\"=no",
+        "StrictHostKeyChecking=\"no",
     ] {
         let error = settings.set_list("ssh.overrides", &[refused]).unwrap_err();
         assert!(
@@ -365,10 +378,11 @@ fn overrides_refuse_what_a_setting_must_not_do() {
                 "StrictHostKeyChecking=yes",
                 "ProxyCommand=none",
                 "User=deploy",
+                "StrictHostKeyChecking=\"accept-new\"",
             ],
         )
         .unwrap();
-    assert_eq!(settings.overrides().len(), 3);
+    assert_eq!(settings.overrides().len(), 4);
     assert_eq!(
         settings.set_list("ssh.backend", &["auto"]).unwrap_err(),
         SettingsError::WrongTextType { key: "ssh.backend" }
@@ -628,4 +642,20 @@ fn the_target_connect_timeout_follows_the_lookup_contract() {
     ] {
         assert_eq!(parse_openssh_time(refused), None, "{refused:?}");
     }
+}
+
+/// The value split of `ssh.overrides` follows OpenSSH `argv_split`.
+#[test]
+fn override_values_are_split_like_openssh() {
+    let split = |s: &str| super::argv_split(s);
+    assert_eq!(split("no"), Some(vec!["no".to_string()]));
+    assert_eq!(split("\"no\""), Some(vec!["no".to_string()]));
+    assert_eq!(split("'o''f'f"), Some(vec!["off".to_string()]));
+    assert_eq!(
+        split("a\\ b c"),
+        Some(vec!["a b".to_string(), "c".to_string()])
+    );
+    assert_eq!(split("\"a b\" # c"), Some(vec!["a b".to_string()]));
+    assert_eq!(split("x\\y"), Some(vec!["x\\y".to_string()]));
+    assert_eq!(split("\"open"), None);
 }
