@@ -14,7 +14,7 @@
 | `tasty-net-p2p` | `crates/tasty-net-p2p` | 다시 정함(2026-11-27, iroh 제거) | P2P 소켓과 패킷 나누기, NAT 판별, 펀칭, quinn 연결과 스트림, 기기 키 인증, 페어링 허용 목록, 상태 기계·연결 정보·설정값 조회, `P2pCloseReason`과 QUIC 종료 코드 표, 소유 런타임과 동기 API | identity, rendezvous |
 | `tasty-net-rendezvous` | `crates/tasty-net-rendezvous` | 새로 정함(2026-11-27) | 라이브러리: 조정 메시지 형식, STUN 부분 집합 코덱, 펀칭 프로브 형식, raw public key TLS 설정, 서버 본체(상태·상한·접근 정책). 실행 파일 `tasty-rendezvous` | identity |
 | `tasty-net-topology` | `crates/tasty-net-topology` | 가안 그대로 | 노드·엣지 모델, 질의·결과 메시지, 탐색 상태 기계 | frame, identity |
-| `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 전송 계층 두 프로세스 통합 시험(SSH, transport 위 P2P), 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, rendezvous, ssh, identity, frame |
+| `tasty-net-demo` | `crates/tasty-net-demo` | 새로 정함 | 예제 바이너리, 전송 계층 두 프로세스 통합 시험(SSH, transport 위 P2P), 시험용 sshd 도우미. 배포하지 않는다(`publish = false`) | transport, p2p, ssh, identity, frame. 시험 전용으로 rendezvous(아래 "의존 방향") |
 | `tasty-net-ffi` | `crates/tasty-net-ffi` | 새로 정함(2026-11-27, 후속 작업이 만든다) | UniFFI로 Kotlin·Swift 바인딩을 만드는 경계, FFI용 레코드·오류 enum, 이벤트 끌어오기, 앱 수명 이벤트 전달, SSH exec·SFTP 노출([모바일](mobile.md#바인딩-층)) | transport, ssh, p2p, identity, topology |
 | (크레이트 아님) | `rendezvous/` | 다시 정함(2026-11-27) | rendezvous 서버 이미지 빌드 파일, 설정 예시, compose 예시, 설정 검사 스크립트, 자체 운영 안내([rendezvous](rendezvous.md#배포-형태)) | 없음 |
 
@@ -42,7 +42,7 @@ transport  ─> frame, ssh, identity, p2p
 p2p        ─> rendezvous, identity
 rendezvous ─> identity
 topology   ─> frame, identity
-demo       ─> transport, p2p, rendezvous, ssh, identity, frame
+demo       ─> transport, p2p, ssh, identity, frame
 ffi        ─> transport, ssh, p2p, identity, topology
 ssh        ─> ssh-config   (embedded-ssh feature에서만)
 frame, ssh-config, identity ─> (없음)
@@ -52,6 +52,7 @@ frame, ssh-config, identity ─> (없음)
 
 ```
 transport  ─dev─> rendezvous   (tests/p2p_adapter.rs가 프로세스 안 서버를 띄운다. tokio도 시험 전용)
+demo       ─dev─> rendezvous   (tests/p2p_attach.rs가 프로세스 안 서버를 띄운다. p2p-link 바이너리는 서버 주소·공개키만 받는다)
 ```
 
 - 이 그림에 없는 의존은 만들지 않는다(위 시험 전용 의존은 예외로 적어 둔 것만 둔다). 특히 화살표를 거꾸로 가는 의존(의존 대상이 의존하는 크레이트에 의존)은 순환이라 만들 수 없고, 만들지 않는다. p2p와 rendezvous는 transport에 의존하지 않는다(아래 "P2P 크레이트 격리"). topology는 transport에 의존하지 않는다. 탐색은 "이웃에게 질의를 보내는 함수"를 주입받는 순수 상태 기계라서 전송을 몰라도 된다([토폴로지](topology.md)).
