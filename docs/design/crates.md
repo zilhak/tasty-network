@@ -80,7 +80,7 @@ ffi-link-test ─> ffi           (시험 전용 cdylib. 일반 의존이지만 �
 ## 외부 의존 원칙
 
 - 제품 크레이트의 외부 의존은 필요한 것만 둔다. 예정: `tracing`(모두), `serde`·`serde_json`(identity의 연결 레코드와 그 파서, transport·topology·rendezvous·p2p), `ed25519-dalek`(identity, 아래), `quinn`·`rustls`·`tokio`(p2p·rendezvous, 정확한 판 고정, [P2P](p2p.md#외부-의존과-고정)·[버전·호환](versioning.md)), Windows API 바인딩 `windows-sys`(identity의 ACL, transport의 소켓 깨우기, rendezvous의 보내기 오류 번호). transport는 서명 대상 해시 `sha2`와 nonce·bulk 자격용 OS 난수 `getrandom`을 쓴다. topology는 질의의 `request_id`·`branch`용 OS 난수 `getrandom`을 쓴다. identity는 이 밖에 OS 난수 `getrandom`(기기 키 seed와 토큰), 상수 시간 비교 `subtle`, Unix의 `libc`(유효 사용자 ID와 `O_NOFOLLOW`)를 쓴다. rendezvous는 펀칭 토큰에 `getrandom`을, 서버 설정 파일(TOML) 파싱에 `toml`을, 작은 차수 공개키 거절에 `ed25519-dalek`(identity와 같은 판)의 `VerifyingKey::is_weak`를, 경로보다 큰 보내기의 오류 번호(`EMSGSIZE`)에 Unix의 `libc`를, IPv6 소켓의 `IPV6_V6ONLY`에 `socket2`를 쓴다. p2p는 페어링 메시지에 `serde`·`serde_json`을, 재연결 지연의 무작위 폭에 `getrandom`을, P2P 소켓의 `IPV6_V6ONLY`와 버퍼 크기에 `socket2`를 쓴다.
-- 모바일 작업에서 더할 예정: `russh`(ssh의 `embedded-ssh`, `default-features = false`, `ring`·`rsa`), `russh-sftp`(ssh의 `embedded-ssh`), `uniffi`(ffi). 판·라이선스와 근거는 [SSH 백엔드](ssh-backends.md#의존-사실)·[모바일](mobile.md#바인딩-층). `russh-config`는 쓰지 않는다. CI에 `cargo audit` 단계를 둔다(내장 백엔드 작업). `tasty-net-ssh-config`의 `sha1`(`%C`)·`hmac`·`base64`(known_hosts 해시 호스트와 키 blob)는 이식 크레이트가 이미 더했다.
+- 모바일 작업에서 더할 예정: `russh`(ssh의 `embedded-ssh`, `default-features = false`, `ring`·`rsa`), `russh-sftp`(ssh의 `embedded-ssh`), `uniffi`(ffi). 판·라이선스와 근거는 [SSH 백엔드](ssh-backends.md#의존-사실)·[모바일](mobile.md#바인딩-층). `russh-config`는 쓰지 않는다. CI에 `cargo audit` 단계를 둔다(내장 백엔드 작업). 내장 백엔드 첫 커밋 묶음에서 `russh` `=0.65.4`(`default-features = false`, `ring`·`rsa`)와 `tasty-net-ssh`의 직접 의존 `ring`·`base64`(`accept-new`가 쓰는 해시 이름과 키 blob, 그래프에 이미 있던 판)가 들어갔고 CI `audit` 잡이 생겼다. `russh-sftp`는 SFTP와 함께 든다. `tasty-net-ssh-config`의 `sha1`(`%C`)·`hmac`·`base64`(known_hosts 해시 호스트와 키 blob)는 이식 크레이트가 이미 더했다.
 - iroh 계열 의존(`iroh`, `iroh-relay`, `iroh-base`)은 두지 않는다(사용자 결정 2026-11-27, iroh 제거).
 - 기기 키의 ed25519 구현은 `ed25519-dalek`을 직접 쓴다. identity는 `ed25519-dalek` 3.0.0을 정확한 판으로 직접 선언하고 기본 feature와 같은 `fast`·`zeroize`만 켠다. 전에 거치던 `iroh-base` 1.5.0(`key` feature)과 같은 판이라 키 바이트·서명·기기 ID 문자열은 바뀌지 않았다. `iroh-base`의 `relay` feature 몫으로 들어오던 `url`·`idna`·`icu_*`는 빠졌다([기기 키·토큰](identity.md)).
 
@@ -122,6 +122,7 @@ ffi-link-test ─> ffi           (시험 전용 cdylib. 일반 의존이지만 �
 - `tasty-net-ffi`는 크레이트 루트에 `#![deny(unsafe_code)]`를 둔다. UniFFI 매크로가 만드는 `extern "C"` 함수가 그 규칙에 걸리면 매크로 호출 자리(`uniffi::setup_scaffolding!`)에만 허용을 둔다. 손으로 쓰는 `unsafe`는 없다.
 - OS API를 불러야 하는 크레이트(identity의 Windows ACL, transport의 Windows 소켓 I/O 취소)는 크레이트 루트에 `#![deny(unsafe_code)]`를 두고 OS 호출 모듈에서만 허용한다. 모든 `unsafe` 블록에 `SAFETY:` 주석을 단다.
 - `tasty-net-ssh`(내장 백엔드 작업부터, director 2937): Android 지역망 차단 사유를 읽는 NDK 호출([모바일](mobile.md#직접-lan-연결-android-지역망-권한)) 때문에 크레이트 루트를 `#![deny(unsafe_code)]`로 바꾸고, `cfg(target_os = "android")` 모듈 하나에서만 허용한다. 블록마다 `SAFETY:` 주석을 단다. 그 모듈 밖의 `unsafe`가 0건인지는 검사(grep 또는 clippy 설정)로 보인다.
+  - 들어간 것: 크레이트 루트가 `#![deny(unsafe_code)]`이고, 시험 `crates/tasty-net-ssh/tests/unsafe_scope.rs`가 `src/` 안 `src/android*` 밖의 `allow`·`expect`·`warn(unsafe_code)`를 실패로 본다. android 모듈은 NDK 호출(android 요구 #14)과 함께 생기고, 그 전에는 크레이트에 `unsafe`가 없다.
 
 ## 시험의 자리
 

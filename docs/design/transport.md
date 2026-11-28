@@ -321,6 +321,7 @@ ACK 뒤 순서 채널의 첫 Control(descriptor, O2)은 언제나 workspace 제�
 | `links` | 그 위의 링크·채널 | attach 링크(링크마다 `link_id`([handshake v2](handshake.md#bulk-자격)), holder, 연 시각, 그 링크에 적용된 `link.*` 값 `applied`), bulk·요청 채널 수 | 그 연결이 나르는 채널 하나(attach·bulk·요청 중 하나) | 같음(SSH를 띄운 쪽과 같은 모양) |
 | `rtt` | 지연 | 없음(SSH는 재지 않는다) | 없음 | quinn RTT |
 | `applied` | 이 연결에 적용된 설정값. 항목마다 `{key, value, source}`. 재연결 시도 번호와 다음 시도까지 남은 시간은 `redial` 필드에 있다 | 적용된 시간 값(`LinkTimeouts`, `redial.*`)과 각 출처(`default`·`configured`). 한 터널 위 링크·채널은 시간 값이 서로 다를 수 있어, 항목의 `link.*`는 항목을 처음 `connected`로 만든 채널의 값이고 링크마다의 값은 `links`의 `applied`에 있다 | 적용된 시간 값과 출처 | P2P 연결의 `applied`(출처 `server` 포함)·`attempt`를 그대로. `applied`에는 그 위 링크의 `link.*` 값도 함께 있고, `attempt`는 항목의 `attempt` 필드다 |
+| `ssh` | SSH 백엔드의 선택과 해석(`transport` `ssh` feature 빌드에만). `SshEntryInfo{backend, resolved, config_notes, session_id}`([SSH 백엔드 연결 정보](ssh-backends.md#transport-연결-목록)) | 백엔드를 고른 직후 채운다. 고르지 못한 시도도 이유(`not_found{searched}`)가 남는다. 원인 `ssh_backend_unavailable`(프로그램 없음, 재시도함)·`ssh_config_refused`(해석 거부, 재시도하지 않음)·`target_mismatch`(포트 발견과 터널의 대상이 다름, 재시도하지 않음) | `None` | `None` |
 
 - 같은 SSH 터널을 양쪽에서 보면 항목은 두 기기에 하나씩(받는 쪽은 채널마다) 생긴다. 토폴로지 엣지는 attach 링크마다 하나이고 양쪽 보고를 `link_id`로 합쳐 하나로 만든다(아래 "토폴로지와의 관계").
 
