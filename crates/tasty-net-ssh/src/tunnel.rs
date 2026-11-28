@@ -7,6 +7,7 @@ use std::io;
 use std::time::Duration;
 
 use crate::backend::{EffectiveTarget, SelectedBackend, SshBackendError};
+use crate::inspect::{ConfigNote, ResolvedTarget};
 use crate::listener::ListenerVerdict;
 // The child's exit status, from the system module (this module builds without a process).
 #[cfg(feature = "system-ssh")]
@@ -101,11 +102,15 @@ pub struct SshTunnel {
     backend: SelectedBackend,
     target: Option<EffectiveTarget>,
     session_id: Option<u64>,
+    resolved: Option<ResolvedTarget>,
+    notes: Vec<ConfigNote>,
 }
 
 enum Inner {
     #[cfg(feature = "system-ssh")]
     System(crate::system::tunnel::SshTunnel),
+    #[cfg(feature = "embedded-ssh")]
+    Embedded(crate::embedded::tunnel::Tunnel),
 }
 
 impl SshTunnel {
@@ -142,6 +147,25 @@ impl SshTunnel {
             backend,
             target,
             session_id,
+            resolved: None,
+            notes: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    pub(crate) fn embedded(
+        tunnel: crate::embedded::tunnel::Tunnel,
+        backend: SelectedBackend,
+        target: EffectiveTarget,
+        resolved: ResolvedTarget,
+    ) -> Self {
+        Self {
+            session_id: Some(tunnel.session_id()),
+            notes: tunnel.notes().to_vec(),
+            inner: Inner::Embedded(tunnel),
+            backend,
+            target: Some(target),
+            resolved: Some(resolved),
         }
     }
 
@@ -150,6 +174,8 @@ impl SshTunnel {
         match &self.inner {
             #[cfg(feature = "system-ssh")]
             Inner::System(t) => t.local_port(),
+            #[cfg(feature = "embedded-ssh")]
+            Inner::Embedded(t) => t.local_port(),
         }
     }
 
@@ -158,6 +184,8 @@ impl SshTunnel {
         match &self.inner {
             #[cfg(feature = "system-ssh")]
             Inner::System(t) => t.remote_port(),
+            #[cfg(feature = "embedded-ssh")]
+            Inner::Embedded(t) => t.remote_port(),
         }
     }
 
@@ -167,6 +195,11 @@ impl SshTunnel {
         match &self.inner {
             #[cfg(feature = "system-ssh")]
             Inner::System(t) => t.terminate_and_reap().map(drop),
+            #[cfg(feature = "embedded-ssh")]
+            Inner::Embedded(t) => {
+                t.terminate();
+                Ok(())
+            }
         }
     }
 
@@ -175,6 +208,8 @@ impl SshTunnel {
         match &self.inner {
             #[cfg(feature = "system-ssh")]
             Inner::System(t) => t.is_alive(),
+            #[cfg(feature = "embedded-ssh")]
+            Inner::Embedded(t) => t.is_alive(),
         }
     }
 
@@ -185,6 +220,8 @@ impl SshTunnel {
         match &self.inner {
             #[cfg(feature = "system-ssh")]
             Inner::System(t) => t.listener_verdict(),
+            #[cfg(feature = "embedded-ssh")]
+            Inner::Embedded(t) => t.listener_verdict(),
         }
     }
 
@@ -203,6 +240,18 @@ impl SshTunnel {
     /// backend: its `ssh` child). `None` for a tunnel not opened through a connector.
     pub fn session_id(&self) -> Option<u64> {
         self.session_id
+    }
+
+    /// The embedded backend's resolution of the target (`None` for the system backend, whose
+    /// `ssh` resolves it).
+    pub fn resolved(&self) -> Option<&ResolvedTarget> {
+        self.resolved.as_ref()
+    }
+
+    /// The notes of the resolution and of the session's connection (empty for the system
+    /// backend).
+    pub fn config_notes(&self) -> &[ConfigNote] {
+        &self.notes
     }
 }
 

@@ -8,7 +8,9 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+use crate::inspect::{ConfigNote, RefusalNote};
 
 /// An SSH backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,12 +105,23 @@ impl SelectedBackend {
         }
     }
 
+    #[cfg(feature = "system-ssh")]
     pub(crate) fn system(reason: BackendReason, program: PathBuf) -> Self {
         Self {
             backend: Some(SshBackendKind::System),
             reason,
             selected_at: SystemTime::now(),
             program: Some(program),
+        }
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    pub(crate) fn embedded(reason: BackendReason) -> Self {
+        Self {
+            backend: Some(SshBackendKind::Embedded),
+            reason,
+            selected_at: SystemTime::now(),
+            program: None,
         }
     }
 
@@ -137,6 +150,138 @@ pub enum SshBackendError {
         /// What failed.
         detail: String,
     },
+    /// The embedded backend's configuration resolution was refused (an unknown keyword, a
+    /// security directive it does not implement, a configuration error, `RefuseConnection`,
+    /// or a value it cannot judge). Nothing reached the network.
+    ConfigRefused {
+        /// Why, with the keyword and where it is written.
+        refusal: Box<RefusalNote>,
+        /// The notes of the resolution up to the refusal.
+        notes: Vec<ConfigNote>,
+    },
+    /// Neither the target, the configuration nor `embedded.local_user` gives the remote user.
+    UserRequired {
+        /// The host.
+        host: String,
+    },
+    /// The TCP connection to a host could not be made (name lookup, connect, or the SSH
+    /// handshake before the host key check).
+    Connect {
+        /// The host.
+        host: String,
+        /// The port.
+        port: u16,
+        /// What failed.
+        detail: String,
+    },
+    /// The connection did not get through within `ConnectTimeout` (time spent waiting for an
+    /// [`crate::SshPrompt`] answer does not count).
+    TimedOut {
+        /// The host.
+        host: String,
+        /// How long it waited.
+        waited: Duration,
+    },
+    /// The host key was not accepted.
+    HostKey(Box<HostKeyRefusal>),
+    /// No authentication method the server allows succeeded.
+    AuthFailed {
+        /// The remote user.
+        user: String,
+        /// The host.
+        host: String,
+        /// The methods tried, in order (`none`, `publickey`, `keyboard-interactive`,
+        /// `password`).
+        tried: Vec<String>,
+    },
+    /// The SSH session failed after it was set up, or the embedded runtime could not run it.
+    Session {
+        /// What failed.
+        detail: String,
+    },
+}
+
+/// Why a host key was not accepted (docs/design/ssh-backends.md "호스트 키 판정").
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HostKeyReason {
+    /// A known_hosts line names the host with another key (`HOST_CHANGED`).
+    Changed {
+        /// The file of that line.
+        file: PathBuf,
+        /// The line.
+        line: usize,
+    },
+    /// An `@revoked` line or a `RevokedHostKeys` file has the key.
+    Revoked {
+        /// The file.
+        file: PathBuf,
+        /// The line, when a known_hosts line is the cause.
+        line: Option<usize>,
+    },
+    /// The host is not known and `StrictHostKeyChecking yes` (or `ask` without an answer, or
+    /// under `BatchMode yes`).
+    Unknown,
+    /// A `RevokedHostKeys` file is missing or cannot be read.
+    RevokedListUnreadable {
+        /// The file.
+        file: PathBuf,
+    },
+    /// An RSA host key smaller than `RequiredRSASize`.
+    RsaTooSmall {
+        /// The key's size.
+        bits: u32,
+        /// `RequiredRSASize`.
+        required: u32,
+    },
+}
+
+/// A host key that was not accepted, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostKeyRefusal {
+    /// The name the key was looked up under.
+    pub host: String,
+    /// The key type the server offered.
+    pub key_type: String,
+    /// Why.
+    pub reason: HostKeyReason,
+}
+
+impl fmt::Display for HostKeyRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (host, key) = (&self.host, &self.key_type);
+        match &self.reason {
+            HostKeyReason::Changed { file, line } => write!(
+                f,
+                "The {key} host key of {host} is not the one known at {}:{line}; the host key may have changed or the connection may be intercepted.",
+                file.display()
+            ),
+            HostKeyReason::Revoked { file, line } => {
+                write!(
+                    f,
+                    "The {key} host key of {host} is revoked in {}",
+                    file.display()
+                )?;
+                match line {
+                    Some(line) => write!(f, ":{line}."),
+                    None => f.write_str("."),
+                }
+            }
+            HostKeyReason::Unknown => write!(
+                f,
+                "The {key} host key of {host} is not known and was not accepted."
+            ),
+            HostKeyReason::RevokedListUnreadable { file } => write!(
+                f,
+                "The revoked host key list {} cannot be read, so the host key of {host} cannot be checked.",
+                file.display()
+            ),
+            HostKeyReason::RsaTooSmall { bits, required } => write!(
+                f,
+                "The RSA host key of {host} has {bits} bits; at least {required} are required."
+            ),
+        }
+    }
 }
 
 impl SshBackendError {
@@ -147,7 +292,7 @@ impl SshBackendError {
             SshBackendError::NotFound { searched } => {
                 Some(SelectedBackend::not_found(searched.clone()))
             }
-            SshBackendError::TargetUnresolved { .. } => None,
+            _ => None,
         }
     }
 }
@@ -173,6 +318,29 @@ impl fmt::Display for SshBackendError {
                 f,
                 "Could not read the effective SSH target of the {purpose}: {detail}"
             ),
+            SshBackendError::ConfigRefused { refusal, .. } => {
+                write!(f, "The SSH configuration was refused: {refusal}")
+            }
+            SshBackendError::UserRequired { host } => write!(
+                f,
+                "No remote user for {host}: give one in the target, the SSH configuration or embedded.local_user."
+            ),
+            SshBackendError::Connect { host, port, detail } => {
+                write!(f, "Could not connect to {host} port {port}: {detail}")
+            }
+            SshBackendError::TimedOut { host, waited } => {
+                write!(
+                    f,
+                    "The SSH connection to {host} timed out after {waited:?}."
+                )
+            }
+            SshBackendError::HostKey(refusal) => write!(f, "{refusal}"),
+            SshBackendError::AuthFailed { user, host, tried } => write!(
+                f,
+                "SSH authentication of {user} on {host} failed (tried: {}).",
+                tried.join(", ")
+            ),
+            SshBackendError::Session { detail } => write!(f, "The SSH session failed: {detail}"),
         }
     }
 }

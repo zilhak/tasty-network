@@ -14,9 +14,13 @@
 
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(feature = "system-ssh")]
+use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "system-ssh")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::settings::SshSettings;
@@ -42,6 +46,7 @@ impl VerdictTiming {
 
 /// Whether an ssh stderr line reports a channel that could not open because the connect to the
 /// remote port failed.
+#[cfg(feature = "system-ssh")]
 pub(crate) fn is_channel_connect_failure(line: &str) -> bool {
     line.trim_start().starts_with("channel ") && line.contains("open failed: connect failed")
 }
@@ -50,6 +55,7 @@ pub(crate) fn is_channel_connect_failure(line: &str) -> bool {
 /// (OpenSSH before 8.7: `command-line: line 0: Bad configuration option: forkafterauthentication`).
 /// The option name must end there: a newer ssh refusing a longer name that starts the same
 /// (`forkafterauthenticationextra`) is a different error.
+#[cfg(feature = "system-ssh")]
 pub(crate) fn is_fork_option_refusal(line: &str) -> bool {
     const REFUSAL: &str = "bad configuration option: forkafterauthentication";
     let line = line.to_ascii_lowercase();
@@ -68,6 +74,7 @@ pub(crate) struct StderrMarks {
     /// so the marks of a tunnel keep the same size however long it lives.
     connect_failures: AtomicU64,
     /// ssh refused `ForkAfterAuthentication` ([`is_fork_option_refusal`]).
+    #[cfg(feature = "system-ssh")]
     pub(crate) fork_option_refused: AtomicBool,
 }
 
@@ -120,6 +127,7 @@ pub fn connection_closed_error(message: impl Into<String>) -> io::Error {
 }
 
 /// Collects stderr bytes into lines and looks for the channel connect failure line.
+#[cfg(feature = "system-ssh")]
 struct LineScanner {
     line: Vec<u8>,
     /// A line longer than this loses its tail (`tunnel.stderr_max_line`). The lines to judge
@@ -132,6 +140,7 @@ struct LineScanner {
     pending_cr: bool,
 }
 
+#[cfg(feature = "system-ssh")]
 impl LineScanner {
     fn new(max_line: usize) -> Self {
         Self {
@@ -186,6 +195,7 @@ impl LineScanner {
 /// Passes the tunnel ssh's stderr on unchanged and marks the channel connect failure line. It
 /// reads until stderr closes (ssh exits). Reading goes on even if passing on fails; if it
 /// stopped, ssh would block on the pipe. Lines are judged up to `max_line` bytes.
+#[cfg(feature = "system-ssh")]
 pub(crate) fn relay_stderr(
     mut from: impl Read,
     mut to: impl Write,
@@ -329,7 +339,8 @@ impl fmt::Display for RemoteListenerAbsent {
 
 impl Error for RemoteListenerAbsent {}
 
-#[cfg(test)]
+// These tests drive the system backend's helpers; the default build runs them.
+#[cfg(all(test, feature = "system-ssh"))]
 mod tests {
     use super::*;
 

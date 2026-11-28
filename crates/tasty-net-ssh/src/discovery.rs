@@ -398,8 +398,11 @@ pub(crate) struct Limits {
     pub(crate) output_limit: usize,
     pub(crate) stderr_limit: usize,
     pub(crate) stderr_detail_limit: usize,
+    #[cfg(feature = "system-ssh")]
     pub(crate) overflow_exit_grace: Duration,
+    #[cfg(feature = "system-ssh")]
     pub(crate) stderr_grace: Duration,
+    #[cfg(feature = "system-ssh")]
     pub(crate) poll_min: Duration,
     pub(crate) poll_max: Duration,
 }
@@ -412,8 +415,11 @@ impl Limits {
             output_limit: settings.output_limit(),
             stderr_limit: settings.stderr_limit(),
             stderr_detail_limit: settings.stderr_detail_limit(),
+            #[cfg(feature = "system-ssh")]
             overflow_exit_grace: settings.overflow_exit_grace(),
+            #[cfg(feature = "system-ssh")]
             stderr_grace: settings.stderr_grace(),
+            #[cfg(feature = "system-ssh")]
             poll_min: settings.poll_min(),
             poll_max: settings.poll_max(),
         }

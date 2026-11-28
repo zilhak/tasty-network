@@ -259,6 +259,32 @@ allow	crates/tasty-net-ssh/src/system/tunnel.rs	static TUNNEL_DROP_NANOS: Atomic
 allow	crates/tasty-net-ssh/src/system/tunnel.rs	static TUNNEL_DROP_COUNT: AtomicU64 = AtomicU64::new(0)	터널 해제 횟수는 0에서 시작
 allow	crates/tasty-net-ssh/src/system/tunnel.rs	unwrap_or(u64::MAX)	나노초 변환이 넘치면 타입 최대로 포화
 allow	crates/tasty-net-ssh/src/system/tunnel.rs	TUNNEL_DROP_COUNT.fetch_add(1,	터널 해제 한 번을 센다
+allow	crates/tasty-net-ssh/src/embedded/resolve.rs	const SSH_PORT: u16 = 22	OpenSSH 기본 포트 22(Port가 없을 때)
+allow	crates/tasty-net-ssh/src/embedded/resolve.rs	const RSA_MINIMUM_BITS: i32 = 1024	OpenSSH RequiredRSASize 기본 1024(SSH_RSA_MINIMUM_MODULUS_SIZE)
+allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	const HASH_SALT_LEN: usize = 20	known_hosts 해시 이름의 salt 20 B(SHA1 길이, hostfile.c)
+allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	[0u8;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-ssh/src/embedded/mod.rs	unwrap_or(u64::MAX)	나노초 변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-ssh/src/embedded/mod.rs	swap(0,	쌓인 대기 시간을 꺼내며 0으로 되돌린다
+allow	crates/tasty-net-ssh/src/embedded/session.rs	const ATTEMPT_PAUSE: Duration = Duration::from_secs(1)	OpenSSH: ConnectionAttempts 사이 sleep(1) (sshconnect.c)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	const CONNECTION_ATTEMPTS: i32 = 1	OpenSSH ConnectionAttempts 기본 1(readconf.c)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	const PASSWORD_PROMPTS: i32 = 3	OpenSSH NumberOfPasswordPrompts 기본 3(readconf.c)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	const PER_CHANNEL: [&str; 5] = ["sessiontype", "sendenv", "setenv", "remotecommand", "requesttty",]	세션 키에서 빼는 채널별 지시어 다섯(배열 길이)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	fetch_add(1,	세션 번호를 하나씩 늘린다
+allow	crates/tasty-net-ssh/src/embedded/session.rs	strong_count() > 0	풀에서 살아 있는 세션만 남긴다(강한 참조가 하나라도 있으면 산다)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	limit > usize::MIN	OpenSSH: RekeyLimit 0은 데이터 한도 없음(설정값을 쓴다)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	*s > u64::MIN	OpenSSH: RekeyLimit 시간·ServerAliveInterval 0은 끔
+allow	crates/tasty-net-ssh/src/embedded/session.rs	unwrap_or(usize::MAX)	변환이 넘치면 타입 최대로 포화
+allow	crates/tasty-net-ssh/src/embedded/session.rs	u32::from(u16::MIN)	점프 채널의 발신 포트 0(ssh -W가 보내는 값)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	(b.as_str(), u16::MIN)	BindAddress는 포트 0(OS가 고른다)
+allow	crates/tasty-net-ssh/src/embedded/session.rs	.max(1)	연결 시도는 적어도 한 번
+allow	crates/tasty-net-ssh/src/embedded/session.rs	0..plan.attempts	연결 시도 회차는 0부터
+allow	crates/tasty-net-ssh/src/embedded/session.rs	round > u32::MIN	첫 회차 앞에는 쉬지 않는다
+allow	crates/tasty-net-ssh/src/embedded/session.rs	0..plan.prompts	암호·암호문 묻기 횟수는 0부터
+allow	crates/tasty-net-ssh/src/embedded/session.rs	rounds = u32::MIN	keyboard-interactive 질문 회차는 0에서 시작
+allow	crates/tasty-net-ssh/src/embedded/session.rs	+= 1	세기: keyboard-interactive 질문 회차 하나
+allow	crates/tasty-net-ssh/src/embedded/tunnel.rs	(Ipv4Addr::LOCALHOST, u16::MIN)	터널 리스너는 127.0.0.1의 포트 0(OS가 고른다)
+allow	crates/tasty-net-ssh/src/embedded/discovery.rs	c == 0	원격 명령 종료 코드 0은 성공
+allow	crates/tasty-net-ssh/src/embedded/discovery.rs	Some(0)	원격 명령 종료 코드 0은 성공
 # tasty-net-p2p
 target	crates/tasty-net-p2p/src/
 settings	crates/tasty-net-p2p/src/settings.rs

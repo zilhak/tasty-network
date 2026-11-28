@@ -3,9 +3,16 @@
 // test checks that no other file allows it.
 #![deny(unsafe_code)]
 
-//! System `ssh` delegation of the Tasty network library.
+//! The SSH connections of the Tasty network library, over one of two backends
+//! (docs/design/ssh-backends.md).
 //!
-//! The crate runs the system `ssh` client. It does not speak the SSH protocol itself.
+//! - The system backend (`system-ssh`) runs the system `ssh` client as a child process.
+//! - The embedded backend (`embedded-ssh`) is an in-process client: russh speaks the protocol
+//!   and the OpenSSH port `tasty-net-ssh-config` reads the configuration and known_hosts files
+//!   the way `ssh` does.
+//!
+//! `ssh.backend` chooses per attempt ([`SshConnector::select`]); `auto` falls back to the
+//! embedded backend only when the system program file is not found.
 //!
 //! # Public contract
 //!
@@ -29,6 +36,10 @@
 //! | [`SelectedBackend`] · [`SshBackendKind`] · [`BackendReason`] · [`SshBackendError`] · [`find_program`] · [`BackendChoice`] | consumers that show which backend an attempt used and why |
 //! | [`EffectiveTarget`] · [`TunnelError::TargetMismatch`] | the check that port discovery and the tunnel reach the same target |
 //! | [`SshInspection`] ([`SshConnector::inspect`]) · [`SshPurpose`] · [`InspectedSetting`] · [`ResolverState`] · [`ConfigNote`] · [`ResolvedTarget`] · [`TargetInspection`] and their parts | the settings query |
+//! | [`SshConnector::resolve`] · [`SshTunnel::resolved`] · [`SshTunnel::config_notes`] | the connection info of the embedded backend (the resolution and the directives it did not apply) |
+//! | [`SshPrompt`] · [`HostKeyQuestion`] · [`KeyboardInteractiveRequest`] ([`SshConnector::with_prompt`]) | applications that answer passphrase, password, keyboard-interactive and host key questions |
+//! | [`HostKeyRefusal`] · [`HostKeyReason`] | consumers that show why a host key was not accepted |
+//! | `SessionHook` · `SessionControl` (`embedded-ssh`) | tests that end an embedded session from outside, like [`SpawnHook`] sees `ssh` children |
 //!
 //! Profile handling (building an [`SshTarget`] from a stored profile, saving detection results)
 //! is not here; the consumer does it with these value types. Host key checking is
@@ -37,7 +48,7 @@
 //! (`HOME`/`USERPROFILE`, `USER`/`USERNAME`, `PROGRAMDATA`) when they are queried.
 
 // An SSH crate without a backend is not built (docs/design/ssh-backends.md "feature 계약").
-#[cfg(not(feature = "system-ssh"))]
+#[cfg(not(any(feature = "system-ssh", feature = "embedded-ssh")))]
 compile_error!("tasty-net-ssh needs the system-ssh or embedded-ssh feature");
 
 mod backend;
@@ -45,15 +56,19 @@ mod backoff;
 mod cancel;
 mod connector;
 mod discovery;
+#[cfg(feature = "embedded-ssh")]
+mod embedded;
 mod inspect;
 mod listener;
+mod prompt;
 pub mod settings;
 #[cfg(feature = "system-ssh")]
 mod system;
 mod tunnel;
 
 pub use backend::{
-    BackendReason, EffectiveTarget, SelectedBackend, SshBackendError, SshBackendKind, find_program,
+    BackendReason, EffectiveTarget, HostKeyReason, HostKeyRefusal, SelectedBackend,
+    SshBackendError, SshBackendKind, find_program,
 };
 pub use backoff::Backoff;
 pub use cancel::{SshCancel, SshCancelScope};
@@ -62,6 +77,8 @@ pub use discovery::{
     PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
     PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port,
 };
+#[cfg(feature = "embedded-ssh")]
+pub use embedded::{SessionControl, SessionHook};
 pub use inspect::{
     ConfigFileReport, ConfigFileState, ConfigNote, InspectedSetting, JumpHop, NoteAction,
     NoteClass, RefusalNote, ResolvedTarget, ResolverState, SshInspection, SshPurpose,
@@ -70,6 +87,7 @@ pub use inspect::{
 pub use listener::{
     ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
 };
+pub use prompt::{HostKeyQuestion, KeyboardInteractiveRequest, SshPrompt};
 pub use settings::{
     BackendChoice, PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT,
     SshSettings,
@@ -134,7 +152,7 @@ impl SshTarget {
 /// that a user `ConnectTimeout` wins over the setting. Command line `-o` options also win over
 /// the ssh config file. [`SshLauncher::applied_options`] reports the result
 /// (docs/design/ssh-backends.md "옵션 적용 순서").
-#[cfg(test)]
+#[cfg(all(test, feature = "system-ssh"))]
 pub(crate) fn push_common_opts(
     args: &mut Vec<String>,
     target: &SshTarget,
@@ -149,6 +167,7 @@ pub(crate) fn push_common_opts(
 /// options, before the target's options: OpenSSH fails when `-N` meets a session type that is
 /// already set, and the first `-o SessionType` wins (docs/design/ssh-backends.md "옵션 적용
 /// 순서" 4).
+#[cfg(feature = "system-ssh")]
 pub(crate) fn push_opts(
     args: &mut Vec<String>,
     target: &SshTarget,
@@ -450,6 +469,7 @@ pub(crate) fn applied_options(settings: &SshSettings, target: &SshTarget) -> Vec
 
 /// Expands a leading `~` or `~/` to the home directory. ssh is started without a shell, so
 /// nothing else expands `-i ~/.ssh/id_ed25519`.
+#[cfg(feature = "system-ssh")]
 fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
         let home = std::env::var("HOME")
@@ -466,7 +486,7 @@ fn expand_tilde(path: &str) -> String {
 /// Writes an executable test script. A write fd open in this process could be inherited by a
 /// child another test thread forks, and running the script would then fail with ETXTBSY until
 /// that child execs. A separate `sh` writes the file, so this process never holds a write fd.
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "system-ssh"))]
 pub(crate) fn write_test_script(path: &std::path::Path, script: &str) {
     let status = std::process::Command::new("sh")
         .args([
@@ -487,7 +507,7 @@ pub(crate) fn write_test_script(path: &std::path::Path, script: &str) {
 
 /// A test helper: this test binary run again in one mode, so the fakes behave the same on every
 /// OS. Only the `orphan` mode leaves a descendant, and its test ends it ([`test_helper::Orphan`]).
-#[cfg(test)]
+#[cfg(all(test, feature = "system-ssh"))]
 pub(crate) mod test_helper {
     use std::io::Write;
     use std::path::PathBuf;
@@ -771,7 +791,8 @@ pub(crate) mod test_helper {
     }
 }
 
-#[cfg(test)]
+// These tests drive the system backend's helpers; the default build runs them.
+#[cfg(all(test, feature = "system-ssh"))]
 mod tests {
     use super::*;
 

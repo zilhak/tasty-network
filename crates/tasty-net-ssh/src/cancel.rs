@@ -105,6 +105,7 @@ pub(crate) fn current_cancel() -> Option<SshCancel> {
 }
 
 /// Whether the port discovery of the current thread is cancelled (false without a scope).
+#[cfg(any(test, feature = "system-ssh"))]
 pub(crate) fn cancel_requested() -> bool {
     current_cancel().is_some_and(|c| c.is_cancelled())
 }

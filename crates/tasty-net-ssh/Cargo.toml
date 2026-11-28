@@ -11,11 +11,25 @@ publish = false
 [features]
 # The SSH backend feature contract (docs/design/ssh-backends.md "feature 계약"). system-ssh is
 # the system ssh backend in src/system/; a build without any backend stops with compile_error!.
+# embedded-ssh is the in-process backend in src/embedded/. It is not in the defaults until the
+# embedded fallback criterion is met (docs/design/done-criteria.md "내장 폴백 활성 기준").
 default = ["system-ssh"]
 system-ssh = []
+embedded-ssh = ["dep:russh", "dep:tasty-net-ssh-config", "dep:tokio", "dep:ring", "dep:base64"]
 
 [dependencies]
 tracing = "0.1"
+# The embedded backend (docs/design/ssh-backends.md "2단계: 내장 백엔드", "의존 사실"). russh
+# does the connection, the cryptography and the channels with ring; the OpenSSH port reads the
+# configuration and known_hosts.
+russh = { version = "=0.65.4", default-features = false, features = ["ring", "rsa"], optional = true }
+tasty-net-ssh-config = { path = "../tasty-net-ssh-config", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "io-util"], optional = true }
+# The salt and the HMAC-SHA1 of a hashed known_hosts name written by accept-new
+# (hostfile.c host_hash), with the ring russh already uses.
+ring = { version = "=0.17.14", optional = true }
+# The key blob of a written known_hosts line, the same version the OpenSSH port uses.
+base64 = { version = "=0.23.1", default-features = false, features = ["alloc"], optional = true }
 
 [lints]
 workspace = true

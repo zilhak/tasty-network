@@ -482,8 +482,7 @@ impl BackendChoice {
         match self {
             BackendChoice::Auto => true,
             BackendChoice::System => cfg!(feature = "system-ssh"),
-            // The embedded backend is not built yet.
-            BackendChoice::Embedded => false,
+            BackendChoice::Embedded => cfg!(feature = "embedded-ssh"),
         }
     }
 }
@@ -686,8 +685,23 @@ fn split_option(option: &str) -> Option<(&str, &str)> {
     (!keyword.is_empty() && !value.is_empty()).then_some((keyword, value))
 }
 
-/// A keyword OpenSSH does not know. This build has no keyword table (it comes with the
-/// embedded backend) and leaves unknown keywords to `ssh`, which refuses them.
+/// A keyword OpenSSH does not know, or one the embedded backend refuses whatever its value
+/// ("보안 관련 미구현"), from the OpenSSH port's keyword table.
+#[cfg(feature = "embedded-ssh")]
+fn unknown_keyword(keyword: &str) -> Option<&'static str> {
+    use tasty_net_ssh_config::keywords::{Treatment, known_keywords};
+    match known_keywords().find(|(name, _, _)| *name == keyword) {
+        None => Some("OpenSSH does not know this keyword"),
+        Some((_, _, Treatment::SecurityRefused)) => {
+            Some("the embedded backend does not implement it and refuses it")
+        }
+        Some(_) => None,
+    }
+}
+
+/// A keyword OpenSSH does not know. A build without the embedded backend has no keyword table
+/// and leaves unknown keywords to `ssh`, which refuses them.
+#[cfg(not(feature = "embedded-ssh"))]
 fn unknown_keyword(_keyword: &str) -> Option<&'static str> {
     None
 }
@@ -1272,5 +1286,6 @@ impl SshSettings {
     }
 }
 
-#[cfg(test)]
+// These tests drive the system backend's helpers; the default build runs them.
+#[cfg(all(test, feature = "system-ssh"))]
 mod tests;

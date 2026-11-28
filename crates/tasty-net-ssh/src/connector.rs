@@ -3,33 +3,51 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "system-ssh")]
+use std::sync::atomic::Ordering;
 
 use crate::backend::{EffectiveTarget, SelectedBackend, SshBackendError};
 use crate::discovery::{PortDiscoveryConfig, PortDiscoveryError, PortMode};
-use crate::inspect::{InspectedSetting, ResolverState, SshInspection, SshPurpose};
+use crate::inspect::{
+    ConfigNote, InspectedSetting, ResolvedTarget, ResolverState, SshInspection, SshPurpose,
+};
+use crate::prompt::SshPrompt;
 use crate::settings::{BackendChoice, SshSettings};
 use crate::tunnel::{SshTunnel, TunnelError};
+use crate::{BackendReason, SshBackendKind, SshTarget};
 #[cfg(feature = "system-ssh")]
-use crate::{BackendReason, SshLauncher, find_program};
-use crate::{SshBackendKind, SshTarget};
+use crate::{SshLauncher, find_program};
 
 /// What a port discovery read, and the remote command that read it.
 #[derive(Clone, Debug)]
 pub struct Discovered<T> {
     /// The decoded record.
     pub value: T,
-    /// The remote command (as argument words) that gave the record.
+    /// The remote command (as argument words) that gave the record. Only the system backend
+    /// compares the target of it in this stage; the embedded comparison is the design's later
+    /// stage.
+    #[cfg_attr(not(feature = "system-ssh"), allow(dead_code))]
     pub(crate) remote_argv: Vec<String>,
 }
 
 /// Chooses the SSH backend of each connection attempt and opens port discovery and tunnels
-/// over it. Cloning shares the session numbering.
+/// over it. Cloning shares the session numbering (and the embedded backend's runtime and open
+/// sessions).
 #[derive(Clone)]
 pub struct SshConnector {
     settings: SshSettings,
     #[cfg(feature = "system-ssh")]
     launcher: SshLauncher,
+    prompt: Option<Arc<dyn SshPrompt>>,
+    /// Whether the embedded backend puts `StrictHostKeyChecking=accept-new` in the option
+    /// order (the system backend's launcher keeps its own).
+    #[cfg(feature = "embedded-ssh")]
+    verify: bool,
+    #[cfg(feature = "embedded-ssh")]
+    hook: Option<crate::embedded::SessionHook>,
+    #[cfg(feature = "embedded-ssh")]
+    embedded: Arc<crate::embedded::Embedded>,
     /// The next session number (from 1): one per `ssh` child of a tunnel, one per embedded
     /// SSH session.
     next_session: Arc<AtomicU64>,
@@ -41,7 +59,25 @@ impl fmt::Debug for SshConnector {
         d.field("backend", &self.settings.backend());
         #[cfg(feature = "system-ssh")]
         d.field("launcher", &self.launcher);
+        d.field("prompt", &self.prompt.is_some());
+        #[cfg(feature = "embedded-ssh")]
+        d.field("embedded", &self.embedded);
         d.finish_non_exhaustive()
+    }
+}
+
+/// The settings query's answer when no resolver can say more.
+fn empty_inspection(
+    settings: Vec<InspectedSetting>,
+    backend: Result<SelectedBackend, SshBackendError>,
+) -> SshInspection {
+    SshInspection {
+        settings,
+        backend,
+        resolver: ResolverState::NotBuilt,
+        files: Vec::new(),
+        file_notes: Vec::new(),
+        target: None,
     }
 }
 
@@ -53,15 +89,41 @@ impl SshConnector {
             #[cfg(feature = "system-ssh")]
             launcher: SshLauncher::system().with_settings(settings.clone()),
             settings,
+            prompt: None,
+            #[cfg(feature = "embedded-ssh")]
+            verify: false,
+            #[cfg(feature = "embedded-ssh")]
+            hook: None,
+            #[cfg(feature = "embedded-ssh")]
+            embedded: Arc::default(),
             next_session: Arc::new(AtomicU64::new(1)),
         }
     }
 
     /// The system backend's program, child creation hook and host key checking. The
-    /// connector's settings win over the launcher's.
+    /// connector's settings win over the launcher's, and the launcher's `with_verify` becomes
+    /// the connector's ([`Self::with_verify`]).
     #[cfg(feature = "system-ssh")]
     pub fn with_launcher(mut self, launcher: SshLauncher) -> Self {
+        #[cfg(feature = "embedded-ssh")]
+        {
+            self.verify = launcher.verifies_host_keys();
+        }
         self.launcher = launcher.with_settings(self.settings.clone());
+        self
+    }
+
+    /// Puts `StrictHostKeyChecking=accept-new` in the option order of both backends (place 3
+    /// of docs/design/ssh-backends.md "옵션 적용 순서").
+    pub fn with_verify(mut self, verify: bool) -> Self {
+        #[cfg(feature = "embedded-ssh")]
+        {
+            self.verify = verify;
+        }
+        #[cfg(feature = "system-ssh")]
+        {
+            self.launcher = self.launcher.with_verify(verify);
+        }
         self
     }
 
@@ -71,40 +133,146 @@ impl SshConnector {
         &self.launcher
     }
 
+    /// The callback the embedded backend asks for passphrases, passwords,
+    /// keyboard-interactive answers and unknown host keys. Without one it asks nothing.
+    pub fn with_prompt(mut self, prompt: Arc<dyn SshPrompt>) -> Self {
+        self.prompt = Some(prompt);
+        self
+    }
+
+    /// A hook that sees each new embedded session (tests end sessions with it, like the system
+    /// backend's [`crate::SpawnHook`] sees each `ssh` child).
+    #[cfg(feature = "embedded-ssh")]
+    pub fn with_session_hook(mut self, hook: crate::embedded::SessionHook) -> Self {
+        self.hook = Some(hook);
+        self
+    }
+
     /// The settings in effect.
     pub fn settings(&self) -> &SshSettings {
         &self.settings
     }
 
+    /// The ssh options from settings as either backend uses them for `target`
+    /// (`SshLauncher::applied_options` for the order): both pass them in the same place of
+    /// the option order (docs/design/ssh-backends.md "옵션 적용 순서").
+    pub fn applied_options(&self, target: &SshTarget) -> Vec<crate::AppliedOption> {
+        crate::applied_options(&self.settings, target)
+    }
+
+    /// Whether the backends put `StrictHostKeyChecking=accept-new` in the option order.
+    #[cfg(feature = "embedded-ssh")]
+    fn verify(&self) -> bool {
+        self.verify
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    fn embedded_ctx(&self) -> crate::embedded::Ctx<'_> {
+        crate::embedded::Ctx {
+            shared: &self.embedded,
+            settings: &self.settings,
+            prompt: self.prompt.as_ref(),
+            hook: self.hook.as_ref(),
+            verify: self.verify(),
+            next_session: &self.next_session,
+        }
+    }
+
     /// The backend an attempt for `target` would use now, and why. It looks at files only: no
     /// connection, no other program. Each attempt chooses once; its port discovery and its
-    /// tunnel use that choice.
+    /// tunnel use that choice. `auto` falls back to the embedded backend only when the system
+    /// program file is not found, and only in a build that has both.
     pub fn select(&self, _target: &SshTarget) -> Result<SelectedBackend, SshBackendError> {
-        let choice = self.settings.backend();
-        match choice {
-            BackendChoice::Auto | BackendChoice::System => self.select_system(choice),
+        match self.settings.backend() {
+            BackendChoice::Auto => self.select_auto(),
+            BackendChoice::System => self.select_system(BackendReason::Configured),
             // `SshSettings::set_text` refuses a backend this build does not have.
-            BackendChoice::Embedded => Err(SshBackendError::NotFound {
-                searched: Vec::new(),
-            }),
+            BackendChoice::Embedded => self.select_embedded(BackendReason::Configured),
         }
     }
 
     #[cfg(feature = "system-ssh")]
-    fn select_system(&self, choice: BackendChoice) -> Result<SelectedBackend, SshBackendError> {
+    fn select_auto(&self) -> Result<SelectedBackend, SshBackendError> {
+        match self.select_system(BackendReason::Found {
+            path: std::path::PathBuf::new(),
+        }) {
+            Err(SshBackendError::NotFound { searched }) if cfg!(feature = "embedded-ssh") => {
+                self.select_embedded(BackendReason::NotFound { searched })
+            }
+            other => other,
+        }
+    }
+
+    #[cfg(not(feature = "system-ssh"))]
+    fn select_auto(&self) -> Result<SelectedBackend, SshBackendError> {
+        self.select_embedded(BackendReason::SystemNotBuilt)
+    }
+
+    /// The system backend if its program file is found. `reason` is `Configured`, or `Found`
+    /// (whose path is filled with the file).
+    #[cfg(feature = "system-ssh")]
+    fn select_system(&self, reason: BackendReason) -> Result<SelectedBackend, SshBackendError> {
         let path = std::env::var_os("PATH");
         match find_program(self.launcher.program(), path.as_deref(), cfg!(windows)) {
             Ok(found) => {
-                let reason = match choice {
-                    BackendChoice::Auto => BackendReason::Found {
+                let reason = match reason {
+                    BackendReason::Found { .. } => BackendReason::Found {
                         path: found.clone(),
                     },
-                    _ => BackendReason::Configured,
+                    other => other,
                 };
                 Ok(SelectedBackend::system(reason, found))
             }
             Err(searched) => Err(SshBackendError::NotFound { searched }),
         }
+    }
+
+    #[cfg(not(feature = "system-ssh"))]
+    fn select_system(&self, _reason: BackendReason) -> Result<SelectedBackend, SshBackendError> {
+        Err(SshBackendError::NotFound {
+            searched: Vec::new(),
+        })
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    fn select_embedded(&self, reason: BackendReason) -> Result<SelectedBackend, SshBackendError> {
+        Ok(SelectedBackend::embedded(reason))
+    }
+
+    #[cfg(not(feature = "embedded-ssh"))]
+    fn select_embedded(&self, reason: BackendReason) -> Result<SelectedBackend, SshBackendError> {
+        match reason {
+            BackendReason::NotFound { searched } => Err(SshBackendError::NotFound { searched }),
+            _ => Err(SshBackendError::NotFound {
+                searched: Vec::new(),
+            }),
+        }
+    }
+
+    /// The embedded backend's resolution of `target` for `purpose`, with its notes, before
+    /// anything connects: `None` for the system backend. A refused resolution ends with
+    /// [`SshBackendError::ConfigRefused`] and nothing reaches the network.
+    pub fn resolve(
+        &self,
+        selected: &SelectedBackend,
+        target: &SshTarget,
+        purpose: &SshPurpose,
+    ) -> Result<Option<(ResolvedTarget, Vec<ConfigNote>)>, SshBackendError> {
+        #[cfg(feature = "embedded-ssh")]
+        if selected.backend == Some(SshBackendKind::Embedded) {
+            let ctx = self.embedded_ctx();
+            let set = crate::embedded::resolve::load(ctx.settings)?;
+            let chain = crate::embedded::resolve::resolve_chain(
+                &set,
+                ctx.settings,
+                target,
+                embedded_purpose(purpose),
+                ctx.verify,
+            )?;
+            return Ok(Some((chain.resolved(), chain.notes)));
+        }
+        let _ = (selected, target, purpose);
+        Ok(None)
     }
 
     /// Reads the remote record over the chosen backend and decodes it with `decode`
@@ -118,28 +286,34 @@ impl SshConnector {
         config: &PortDiscoveryConfig,
         decode: impl Fn(&str) -> Result<T, E>,
     ) -> Result<Discovered<T>, PortDiscoveryError> {
+        let run = |runner: &dyn crate::discovery::RemoteRun| {
+            let recording = crate::discovery::Recording {
+                inner: runner,
+                last: std::sync::Mutex::new(None),
+            };
+            let probe = crate::discovery::Probe::new(&recording, &self.settings, target, config);
+            let value = crate::discovery::discover(&probe, mode, &decode)?;
+            let remote_argv = recording
+                .last
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_default();
+            Ok(Discovered { value, remote_argv })
+        };
         match (selected.backend, selected.program()) {
             #[cfg(feature = "system-ssh")]
             (Some(SshBackendKind::System), Some(program)) => {
                 let launcher = self.launcher.with_program(program);
-                let runner = crate::system::discovery::SystemRun {
+                run(&crate::system::discovery::SystemRun {
                     launcher: &launcher,
                     target,
-                };
-                let recording = crate::discovery::Recording {
-                    inner: &runner,
-                    last: std::sync::Mutex::new(None),
-                };
-                let probe =
-                    crate::discovery::Probe::new(&recording, &self.settings, target, config);
-                let value = crate::discovery::discover(&probe, mode, &decode)?;
-                let remote_argv = recording
-                    .last
-                    .into_inner()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .unwrap_or_default();
-                Ok(Discovered { value, remote_argv })
+                })
             }
+            #[cfg(feature = "embedded-ssh")]
+            (Some(SshBackendKind::Embedded), _) => run(&crate::embedded::discovery::EmbeddedRun {
+                ctx: self.embedded_ctx(),
+                target,
+            }),
             _ => Err(no_backend_for_discovery()),
         }
     }
@@ -153,52 +327,61 @@ impl SshConnector {
         config: &PortDiscoveryConfig,
         decode: impl Fn(&str) -> Result<T, E>,
     ) -> Result<PortMode, PortDiscoveryError> {
+        let run = |runner: &dyn crate::discovery::RemoteRun| {
+            let probe = crate::discovery::Probe::new(runner, &self.settings, target, config);
+            crate::discovery::detect(&probe, &decode)
+        };
         match (selected.backend, selected.program()) {
             #[cfg(feature = "system-ssh")]
             (Some(SshBackendKind::System), Some(program)) => {
                 let launcher = self.launcher.with_program(program);
-                let runner = crate::system::discovery::SystemRun {
+                run(&crate::system::discovery::SystemRun {
                     launcher: &launcher,
                     target,
-                };
-                let probe = crate::discovery::Probe::new(&runner, &self.settings, target, config);
-                crate::discovery::detect(&probe, &decode)
+                })
             }
+            #[cfg(feature = "embedded-ssh")]
+            (Some(SshBackendKind::Embedded), _) => run(&crate::embedded::discovery::EmbeddedRun {
+                ctx: self.embedded_ctx(),
+                target,
+            }),
             _ => Err(no_backend_for_discovery()),
         }
     }
 
     /// The effective target of the port discovery that gave `discovered`. The system backend
     /// runs `ssh -G` with the discovery child's arguments (a configuration's `Match exec` runs
-    /// once more); `None` when the backend does not report one.
+    /// once more); `None` when the backend does not report one (the embedded backend's
+    /// comparison is a later stage of the design).
     pub fn discovery_target<T>(
         &self,
         selected: &SelectedBackend,
         target: &SshTarget,
         discovered: &Discovered<T>,
     ) -> Result<Option<EffectiveTarget>, SshBackendError> {
-        match (selected.backend, selected.program()) {
-            #[cfg(feature = "system-ssh")]
-            (Some(SshBackendKind::System), Some(program)) => {
-                let launcher = self.launcher.with_program(program);
-                let argv: Vec<&str> = discovered.remote_argv.iter().map(String::as_str).collect();
-                let cmd = launcher.resolve_command(
-                    target,
-                    &crate::system::discovery::DISCOVERY_FORCED_OPTIONS,
-                    &[],
-                    &argv,
-                );
-                crate::system::resolve::effective_target(&launcher, target, cmd, "discovery")
-                    .map(Some)
-            }
-            _ => Ok(None),
+        #[cfg(feature = "system-ssh")]
+        if let (Some(SshBackendKind::System), Some(program)) =
+            (selected.backend, selected.program())
+        {
+            let launcher = self.launcher.with_program(program);
+            let argv: Vec<&str> = discovered.remote_argv.iter().map(String::as_str).collect();
+            let cmd = launcher.resolve_command(
+                target,
+                &crate::system::discovery::DISCOVERY_FORCED_OPTIONS,
+                &[],
+                &argv,
+            );
+            return crate::system::resolve::effective_target(&launcher, target, cmd, "discovery")
+                .map(Some);
         }
+        let _ = (selected, target, discovered);
+        Ok(None)
     }
 
     /// Opens a tunnel from a local loopback port to `remote_port` over the chosen backend. With
-    /// `expected` (the port discovery's effective target) the tunnel's effective target is
-    /// read first and a different one ends with [`TunnelError::TargetMismatch`] before anything
-    /// starts.
+    /// `expected` (the port discovery's effective target) the system backend reads the
+    /// tunnel's effective target first and a different one ends with
+    /// [`TunnelError::TargetMismatch`] before anything starts.
     pub fn tunnel(
         &self,
         selected: &SelectedBackend,
@@ -237,9 +420,38 @@ impl SshConnector {
                     Some(session),
                 ))
             }
-            _ => Err(TunnelError::Backend(SshBackendError::NotFound {
-                searched: Vec::new(),
-            })),
+            #[cfg(feature = "embedded-ssh")]
+            (Some(SshBackendKind::Embedded), _) => {
+                let _ = expected;
+                let ctx = self.embedded_ctx();
+                let set =
+                    crate::embedded::resolve::load(ctx.settings).map_err(TunnelError::Backend)?;
+                let chain = crate::embedded::resolve::resolve_chain(
+                    &set,
+                    ctx.settings,
+                    target,
+                    crate::embedded::resolve::Purpose::Tunnel,
+                    ctx.verify,
+                )
+                .map_err(TunnelError::Backend)?;
+                let session =
+                    crate::embedded::session::open(ctx, &chain).map_err(TunnelError::Backend)?;
+                let tunnel =
+                    crate::embedded::tunnel::Tunnel::open(session, remote_port, ctx.settings)
+                        .map_err(TunnelError::LocalPort)?;
+                Ok(SshTunnel::embedded(
+                    tunnel,
+                    selected.clone(),
+                    chain.effective(),
+                    chain.resolved(),
+                ))
+            }
+            _ => {
+                let _ = (target, remote_port, expected);
+                Err(TunnelError::Backend(SshBackendError::NotFound {
+                    searched: Vec::new(),
+                }))
+            }
         }
     }
 
@@ -247,16 +459,115 @@ impl SshConnector {
     /// `target` (or for the launcher's program), and the resolver's diagnostics for `purpose`.
     /// It does not connect and runs no other program.
     pub fn inspect(&self, target: Option<&SshTarget>, purpose: SshPurpose) -> SshInspection {
-        let _ = purpose;
-        let target = target.cloned().unwrap_or_default();
-        SshInspection {
-            settings: inspected_settings(&self.settings),
-            backend: self.select(&target),
-            resolver: ResolverState::NotBuilt,
-            files: Vec::new(),
-            file_notes: Vec::new(),
-            target: None,
+        let settings = inspected_settings(&self.settings);
+        let backend = self.select(&target.cloned().unwrap_or_default());
+        #[cfg(feature = "embedded-ssh")]
+        {
+            self.inspect_embedded(settings, backend, target, &purpose)
         }
+        #[cfg(not(feature = "embedded-ssh"))]
+        {
+            let _ = (target, purpose);
+            empty_inspection(settings, backend)
+        }
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    fn inspect_embedded(
+        &self,
+        settings: Vec<InspectedSetting>,
+        backend: Result<SelectedBackend, SshBackendError>,
+        target: Option<&SshTarget>,
+        purpose: &SshPurpose,
+    ) -> SshInspection {
+        use crate::embedded::resolve;
+        use crate::inspect::{NoteClass, TargetInspection};
+        let resolver = match &backend {
+            Ok(SelectedBackend {
+                backend: Some(SshBackendKind::Embedded),
+                ..
+            }) => ResolverState::Embedded,
+            _ => ResolverState::EmbeddedPreview,
+        };
+        let set = match resolve::load(&self.settings) {
+            Ok(set) => set,
+            Err(e) => {
+                let mut inspection = empty_inspection(settings, backend);
+                inspection.resolver = resolver;
+                if let SshBackendError::ConfigRefused { refusal, notes } = e {
+                    inspection.target = target.map(|_| TargetInspection {
+                        resolved: None,
+                        notes,
+                        refusal: Some(*refusal),
+                    });
+                }
+                return inspection;
+            }
+        };
+        let Some(target) = target else {
+            let mut inspection = empty_inspection(settings, backend);
+            inspection.resolver = resolver;
+            inspection.files = resolve::file_reports(&set, None);
+            return inspection;
+        };
+        let (dest, chain) = resolve::inspect(
+            &set,
+            &self.settings,
+            target,
+            embedded_purpose(purpose),
+            self.verify(),
+        );
+        let (resolved, notes, refusal) = match chain {
+            Ok(chain) => (Some(chain.resolved()), chain.notes, None),
+            Err(SshBackendError::ConfigRefused { refusal, notes }) => {
+                (Some(resolve::resolved_target(&dest)), notes, Some(*refusal))
+            }
+            Err(e) => (
+                Some(resolve::resolved_target(&dest)),
+                dest.notes.iter().map(resolve::config_note).collect(),
+                Some(crate::inspect::RefusalNote {
+                    kind: "undeterminable",
+                    keyword: None,
+                    origin: None,
+                    message: e.to_string(),
+                }),
+            ),
+        };
+        let file_level = |n: &ConfigNote| {
+            matches!(
+                n.class,
+                NoteClass::UnknownKeyword
+                    | NoteClass::IgnoredUnknownKeyword
+                    | NoteClass::DroppedByOpenSsh
+            )
+        };
+        let (file_notes, notes): (Vec<ConfigNote>, Vec<ConfigNote>) =
+            notes.into_iter().partition(file_level);
+        SshInspection {
+            settings,
+            backend,
+            resolver,
+            files: resolve::file_reports(&set, dest.refusal.as_ref()),
+            file_notes,
+            target: Some(TargetInspection {
+                resolved,
+                notes,
+                refusal,
+            }),
+        }
+    }
+}
+
+/// The embedded resolution's purpose. Exec and SFTP are a later stage: they resolve as a
+/// command (`exec` with their command, `sftp`).
+#[cfg(feature = "embedded-ssh")]
+fn embedded_purpose(purpose: &SshPurpose) -> crate::embedded::resolve::Purpose<'_> {
+    use crate::embedded::resolve::Purpose;
+    match purpose {
+        SshPurpose::Tunnel => Purpose::Tunnel,
+        SshPurpose::Discovery => Purpose::Discovery(""),
+        SshPurpose::Exec { command } => Purpose::Discovery(command),
+        SshPurpose::Sftp => Purpose::Discovery("sftp"),
     }
 }
 
@@ -284,6 +595,9 @@ fn no_backend_for_discovery() -> PortDiscoveryError {
         "no SSH backend was chosen for this discovery",
     )
 }
+
+#[cfg(all(test, feature = "embedded-ssh"))]
+mod embedded_tests;
 
 #[cfg(all(test, unix, feature = "system-ssh"))]
 mod tests {
@@ -381,7 +695,13 @@ mod tests {
     #[test]
     fn a_missing_program_ends_with_not_found_and_no_fallback() {
         let missing = std::env::temp_dir().join("tasty-net-ssh-connector-no-such-ssh");
-        for backend in ["auto", "system"] {
+        // With the embedded backend built, `auto` falls back (embedded_tests).
+        let backends: &[&str] = if cfg!(feature = "embedded-ssh") {
+            &["system"]
+        } else {
+            &["auto", "system"]
+        };
+        for &backend in backends {
             let mut settings = SshSettings::new();
             settings.set_text("ssh.backend", backend).expect("backend");
             let connector = SshConnector::new(settings).with_launcher(SshLauncher::new(&missing));
@@ -395,8 +715,13 @@ mod tests {
             );
             let inspection = connector.inspect(None, SshPurpose::Tunnel);
             assert_eq!(inspection.backend, Err(error));
-            assert_eq!(inspection.resolver, ResolverState::NotBuilt);
-            assert!(inspection.files.is_empty() && inspection.target.is_none());
+            // With the embedded backend built, its resolver previews the files
+            // (embedded_tests).
+            if cfg!(not(feature = "embedded-ssh")) {
+                assert_eq!(inspection.resolver, ResolverState::NotBuilt);
+                assert!(inspection.files.is_empty());
+            }
+            assert!(inspection.target.is_none());
             assert!(
                 inspection
                     .settings
