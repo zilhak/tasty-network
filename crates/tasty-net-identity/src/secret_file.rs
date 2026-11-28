@@ -537,25 +537,53 @@ pub(crate) mod fault {
         }
     }
 
+    /// One directory sync seen by the test hook.
+    #[cfg_attr(
+        windows,
+        allow(dead_code, reason = "only the Unix tests read the notes")
+    )]
+    pub(crate) struct SyncNote {
+        pub(crate) dir: std::path::PathBuf,
+        /// The temporary file names in `dir` when the sync was called.
+        pub(crate) temps: Vec<std::ffi::OsString>,
+    }
+
     thread_local! {
-        static SYNCED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        static SYNCED: std::cell::RefCell<Vec<SyncNote>> =
             const { std::cell::RefCell::new(Vec::new()) };
         static SYNC_FAILS: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Note a directory sync on this thread; the injected failure comes after the note.
     pub(super) fn record_sync(dir: &std::path::Path) -> std::io::Result<()> {
-        SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+        let temps = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp-"))
+            .collect();
+        let note = SyncNote {
+            dir: dir.to_path_buf(),
+            temps,
+        };
+        SYNCED.with(|synced| synced.borrow_mut().push(note));
         if SYNC_FAILS.with(Cell::get) {
             return Err(std::io::Error::other("injected directory sync failure"));
         }
         Ok(())
     }
 
+    /// The directory syncs on this thread since the last call, in order (Unix tests).
+    #[cfg(unix)]
+    pub(crate) fn take_sync_notes() -> Vec<SyncNote> {
+        SYNCED.with(std::cell::RefCell::take)
+    }
+
     /// The directories synced on this thread since the last call, in order (Unix tests).
     #[cfg(unix)]
     pub(crate) fn take_synced() -> Vec<std::path::PathBuf> {
-        SYNCED.with(|synced| synced.take())
+        take_sync_notes().into_iter().map(|note| note.dir).collect()
     }
 
     /// Make directory syncs fail on this thread while the guard lives (Unix tests).

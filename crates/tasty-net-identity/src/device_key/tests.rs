@@ -358,7 +358,12 @@ mod no_replace_rename {
             DeviceKey::load_or_create(dir.path()).unwrap();
         }
         assert!(temps_in(dir.path()).is_empty());
-        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+        let notes = fault::take_sync_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].dir, dir.path());
+        // The temporary name was removed before the sync, so one sync covers the link and the
+        // removal.
+        assert!(notes[0].temps.is_empty(), "{:?}", notes[0].temps);
     }
 
     #[test]
@@ -688,7 +693,11 @@ mod dir_sync {
         fault::take_synced();
         fault::publish_first(OTHER_KEY);
         DeviceKey::load_or_create(dir.path()).unwrap();
-        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+        let notes = fault::take_sync_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].dir, dir.path());
+        // The temporary name was removed before the sync, so the sync covers its removal.
+        assert!(notes[0].temps.is_empty(), "{:?}", notes[0].temps);
         assert!(temps_in(dir.path()).is_empty());
     }
 
@@ -705,7 +714,11 @@ mod dir_sync {
             matches!(error, IdentityError::Leftover { cause: None, .. }),
             "{error:?}"
         );
-        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+        // The removal was tried first and failed, so the temporary name is still there.
+        let notes = fault::take_sync_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].dir, dir.path());
+        assert_eq!(notes[0].temps.len(), 1, "{:?}", notes[0].temps);
     }
 
     #[test]
