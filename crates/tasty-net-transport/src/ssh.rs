@@ -14,8 +14,9 @@ use tasty_net_identity::{ConnectionRecord, ParsedRecord};
 #[cfg(feature = "system-ssh")]
 use tasty_net_ssh::SshLauncher;
 use tasty_net_ssh::{
-    Discovered, PortDiscoveryConfig, PortDiscoveryFailureKind, PortMode, SelectedBackend,
-    SshBackendError, SshBackendKind, SshConnector, SshPurpose, SshTarget, SshTunnel, TunnelError,
+    Discovered, PortDiscoveryConfig, PortDiscoveryError, PortDiscoveryFailureKind, PortMode,
+    SelectedBackend, SshBackendError, SshBackendKind, SshConnector, SshPurpose, SshTarget,
+    SshTunnel, TunnelError,
 };
 
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
@@ -267,11 +268,16 @@ impl SshTransport {
         Ok(selected)
     }
 
+    /// Discovers the record over the attempt's backend. A configuration refusal of the
+    /// discovery purpose only (`Match command`, `Match sessiontype`) ends like the tunnel
+    /// purpose's refusal in [`Self::choose`]: [`ConnectError::Backend`] with the entry's notes,
+    /// not a retried discovery failure. A cancel comes before it ([`discovery_error`]).
     fn discover(
         &self,
         selected: &SelectedBackend,
         target: &SshTarget,
         cancel: &AttemptCancel,
+        entry: Option<&EntryRef>,
     ) -> Result<(ConnectionRecord, Discovered<ParsedRecord>), ConnectError> {
         let _scope = cancel.ssh_cancel().scope();
         let discovered = self
@@ -283,13 +289,7 @@ impl SshTransport {
                 &self.discovery,
                 ConnectionRecord::parse,
             )
-            .map_err(|e| {
-                if e.kind() == PortDiscoveryFailureKind::Cancelled || cancel.is_cancelled() {
-                    ConnectError::Cancelled
-                } else {
-                    ConnectError::Discovery(e)
-                }
-            })?;
+            .map_err(|e| discovery_error(e, cancel.is_cancelled(), entry))?;
         match &discovered.value {
             ParsedRecord::Record(record) => Ok((record.clone(), discovered)),
             // No token: none of the v2 purposes can be opened, so nothing is connected.
@@ -392,7 +392,7 @@ impl SshTransport {
         entry: Option<&EntryRef>,
     ) -> Result<Connection, ConnectError> {
         let selected = self.choose(target, entry)?;
-        let (record, discovered) = self.discover(&selected, target, cancel)?;
+        let (record, discovered) = self.discover(&selected, target, cancel, entry)?;
         if let Some(entry) = entry {
             entry.update(|info| {
                 if let Via::Ssh { remote_port, .. } = &mut info.via {
@@ -718,6 +718,33 @@ fn tunnel_info(selected: &SelectedBackend, tunnel: &SshTunnel) -> SshEntryInfo {
     }
 }
 
+/// The error of a failed port discovery. A cancel comes first, even when the lookup ended on a
+/// configuration refusal while the cancel was being set: the attempt was stopped, and a stopped
+/// attempt is not shown as refused. A refusal of the discovery purpose only (`Match command`,
+/// `Match sessiontype`) ends like the tunnel purpose's refusal in [`SshTransport::choose`]:
+/// [`ConnectError::Backend`] with the entry's notes, not a retried discovery failure.
+fn discovery_error(
+    e: PortDiscoveryError,
+    cancelled: bool,
+    entry: Option<&EntryRef>,
+) -> ConnectError {
+    if e.kind() == PortDiscoveryFailureKind::Cancelled || cancelled {
+        return ConnectError::Cancelled;
+    }
+    let Some(refusal) = e.config_refused() else {
+        return ConnectError::Discovery(e);
+    };
+    if let (Some(entry), SshBackendError::ConfigRefused { notes, .. }) = (entry, refusal) {
+        let notes = notes.clone();
+        entry.update(|info| {
+            if let Some(ssh) = &mut info.ssh {
+                ssh.config_notes = notes;
+            }
+        });
+    }
+    ConnectError::Backend(refusal.clone())
+}
+
 /// The endpoint one discovery and tunnel reached.
 struct SshEndpoint {
     hold: Arc<TunnelHold>,
@@ -1032,6 +1059,72 @@ mod tunnel_key_tests {
                 .expect("backend");
             assert_ne!(key(&system(&first)), key(&SshConnector::new(settings)));
         }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!("could not remove {}: {e}", dir.display());
+        }
+    }
+}
+
+#[cfg(all(test, feature = "embedded-ssh"))]
+mod discovery_error_tests {
+    use super::*;
+    use tasty_net_ssh::SshSettings;
+
+    /// A port discovery that the embedded resolution refuses for the discovery purpose only.
+    fn refused_discovery(dir: &Path) -> PortDiscoveryError {
+        let file = dir.join("config");
+        std::fs::write(
+            &file,
+            "Host *\n  HostName 127.0.0.1\n  Port 9\nMatch sessiontype exec\n  ProxyCommand nc %h %p\n",
+        )
+        .expect("config");
+        let mut settings = SshSettings::new();
+        for (key, value) in [
+            ("ssh.backend", "embedded".to_string()),
+            ("embedded.config_file", file.to_string_lossy().into_owned()),
+            ("embedded.system_config_file", "none".to_string()),
+            ("embedded.home", dir.to_string_lossy().into_owned()),
+            ("embedded.local_user", "u".to_string()),
+        ] {
+            settings.set_text(key, &value).expect(key);
+        }
+        let connector = SshConnector::new(settings);
+        let target = SshTarget::parse("h.example");
+        let selected = connector.select(&target).expect("embedded");
+        connector
+            .discover_remote_port(
+                &selected,
+                &target,
+                PortMode::Auto,
+                &PortDiscoveryConfig {
+                    remote_program: "tasty".into(),
+                    remote_args: vec!["port".into()],
+                    data_dir: ".tasty".into(),
+                    port_file: "port".into(),
+                    explicit_port_file: None,
+                },
+                ConnectionRecord::parse,
+            )
+            .expect_err("refused")
+    }
+
+    #[test]
+    fn a_cancel_comes_before_a_refusal_of_the_discovery_purpose() {
+        let dir = std::env::temp_dir().join(format!(
+            "tasty-net-transport-discovery-error-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let error = refused_discovery(&dir);
+        assert!(error.config_refused().is_some(), "{error:?}");
+        assert!(matches!(
+            discovery_error(error, false, None),
+            ConnectError::Backend(SshBackendError::ConfigRefused { .. })
+        ));
+        assert!(matches!(
+            discovery_error(refused_discovery(&dir), true, None),
+            ConnectError::Cancelled
+        ));
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             eprintln!("could not remove {}: {e}", dir.display());
         }

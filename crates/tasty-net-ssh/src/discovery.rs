@@ -12,6 +12,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use crate::backend::SshBackendError;
 use crate::settings::SshSettings;
 use crate::{SshTarget, connect_timeout_for};
 
@@ -271,6 +272,9 @@ pub struct PortDiscoveryError {
     pub(crate) detail: String,
     /// Exit code of the remote command. `None` if it did not finish or ended by a signal.
     pub(crate) exit_code: Option<i32>,
+    /// The embedded backend's resolution for port discovery refused the target
+    /// ([`SshBackendError::ConfigRefused`]) before anything reached the network.
+    pub(crate) refusal: Option<Box<SshBackendError>>,
 }
 
 impl PortDiscoveryError {
@@ -281,7 +285,26 @@ impl PortDiscoveryError {
             kind,
             detail,
             exit_code: None,
+            refusal: None,
         }
+    }
+
+    /// The error of a lookup whose configuration resolution refused the target: `refusal` is
+    /// the [`SshBackendError::ConfigRefused`]. Its kind is a failed connection, and no other
+    /// step or mode runs after it (the same configuration refuses them too).
+    #[cfg(feature = "embedded-ssh")]
+    pub(crate) fn refused(what: &str, refusal: SshBackendError) -> Self {
+        let mut error = Self::new(
+            PortDiscoveryFailureKind::SshConnectionFailed,
+            format!("{what}: {refusal}"),
+        );
+        error.refusal = Some(Box::new(refusal));
+        error
+    }
+
+    /// Whether the lookup stops here: a cancel, or a refused configuration.
+    fn stops(&self) -> bool {
+        self.kind == PortDiscoveryFailureKind::Cancelled || self.refusal.is_some()
     }
 
     pub fn kind(&self) -> PortDiscoveryFailureKind {
@@ -296,6 +319,15 @@ impl PortDiscoveryError {
     /// Exit code of the remote command, when it finished with one.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
+    }
+
+    /// The configuration refusal that ended the lookup before it reached the network: the
+    /// embedded backend's resolution for port discovery (`Match command`, `Match sessiontype`
+    /// included) refused the target ([`SshBackendError::ConfigRefused`], with the refused
+    /// directive and the notes). The same configuration refuses again, so a caller does not
+    /// retry it.
+    pub fn config_refused(&self) -> Option<&SshBackendError> {
+        self.refusal.as_deref()
     }
 }
 
@@ -628,7 +660,7 @@ impl Probe<'_> {
         let cmds = explicit_file_commands(path);
         match self.run(&[&cmds[0]], decode) {
             Ok(found) => return Ok(found),
-            Err(e) if e.kind == PortDiscoveryFailureKind::Cancelled => return Err(e),
+            Err(e) if e.stops() => return Err(e),
             Err(e) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -673,7 +705,7 @@ where
             // Cancellation does not fall back: the next mode would start a new ssh for a
             // lookup that was just stopped. An exited instance stops too: the file modes
             // would read the record it left behind and report success.
-            Err(e) if stops_auto_chain(e.kind) => return Err(e),
+            Err(e) if stops_auto_chain(e.kind) || e.stops() => return Err(e),
             Err(e) => {
                 tracing::debug!(
                     target: LOG_TARGET,
@@ -734,6 +766,10 @@ pub(crate) fn pick_most_informative(mut errors: Vec<PortDiscoveryError>) -> Port
         PortDiscoveryFailureKind::RemoteInstanceNotRunning,
         PortDiscoveryFailureKind::PortParseFailed,
     ];
+    // A refused configuration first: it is the reason, not a guess.
+    if let Some(pos) = errors.iter().position(|e| e.refusal.is_some()) {
+        return errors.remove(pos);
+    }
     for kind in PRIORITY {
         if let Some(pos) = errors.iter().position(|e| e.kind == kind) {
             return errors.remove(pos);
@@ -773,7 +809,7 @@ where
             // The remote side answered with its finding, so this mode works. The instance is
             // just not running.
             Err(e) if e.kind == PortDiscoveryFailureKind::RemoteInstanceExited => return Ok(m),
-            Err(e) if e.kind == PortDiscoveryFailureKind::Cancelled => return Err(e),
+            Err(e) if e.stops() => return Err(e),
             Err(e) => {
                 tracing::debug!(
                     target: LOG_TARGET,

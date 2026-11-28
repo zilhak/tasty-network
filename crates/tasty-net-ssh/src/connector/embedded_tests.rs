@@ -801,3 +801,46 @@ fn ended_forwards_leave_no_slot_in_the_tunnel() {
     drop(tunnel);
     assert_eq!(probe.kept(), 0);
 }
+
+#[test]
+fn a_refusal_of_the_discovery_purpose_only_stays_a_configuration_refusal() {
+    let dir = Dir::new("discovery-refused");
+    // Only the port discovery meets the security directive: it runs a command, which
+    // `Match sessiontype` sees as `exec` (`readconf.c` `match_cfg_line`); the tunnel is `none`.
+    let (connector, selected) = embedded_with(
+        &dir,
+        "Host *\n  HostName 127.0.0.1\n  Port 9\nMatch sessiontype exec\n  ProxyCommand nc %h %p\n",
+    );
+    let target = SshTarget::parse("h.example");
+    assert!(
+        connector
+            .resolve(&selected, &target, &SshPurpose::Tunnel)
+            .is_ok(),
+        "the tunnel purpose is not refused"
+    );
+    let error = connector
+        .discover_remote_port(
+            &selected,
+            &target,
+            crate::PortMode::Auto,
+            &crate::PortDiscoveryConfig {
+                remote_program: "tasty".into(),
+                remote_args: vec!["port".into()],
+                data_dir: ".tasty".into(),
+                port_file: "port".into(),
+                explicit_port_file: None,
+            },
+            crate::decode_port,
+        )
+        .expect_err("refused");
+    match error.config_refused() {
+        Some(SshBackendError::ConfigRefused { refusal, .. }) => {
+            assert_eq!(
+                refusal.keyword.as_deref(),
+                Some("proxycommand"),
+                "{refusal:?}"
+            );
+        }
+        other => panic!("not a configuration refusal: {other:?} ({error:?})"),
+    }
+}

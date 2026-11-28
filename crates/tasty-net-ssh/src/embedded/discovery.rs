@@ -66,7 +66,13 @@ impl RemoteRun for EmbeddedRun<'_> {
             );
             PortDiscoveryError::new(kind, format!("{what}: {e}"))
         };
-        let set = load(self.ctx.settings).map_err(connection_failed)?;
+        // A refused resolution (this purpose and command only, such as `Match command`) keeps
+        // its structure, so the caller sees the refused directive and does not retry.
+        let failed = |e: SshBackendError| match e {
+            SshBackendError::ConfigRefused { .. } => PortDiscoveryError::refused(what, e),
+            other => connection_failed(other),
+        };
+        let set = load(self.ctx.settings).map_err(failed)?;
         let chain = resolve_chain(
             &set,
             self.ctx.settings,
@@ -74,7 +80,7 @@ impl RemoteRun for EmbeddedRun<'_> {
             Purpose::Discovery(&command),
             self.ctx.verify,
         )
-        .map_err(connection_failed)?;
+        .map_err(failed)?;
         // Connecting, the host key check and authentication (agent answers included) stop at
         // the discovery budget and the cancel too.
         let bound = OpenBound {
@@ -84,7 +90,7 @@ impl RemoteRun for EmbeddedRun<'_> {
         };
         let session = match open_within(self.ctx, &chain, Some(bound)) {
             Ok(session) => session,
-            Err(OpenStop::Failed(e)) => return Err(connection_failed(e)),
+            Err(OpenStop::Failed(e)) => return Err(failed(e)),
             Err(OpenStop::Cancelled) => return Err(cancelled_error(what)),
             Err(OpenStop::Expired) => {
                 return Err(PortDiscoveryError::new(
