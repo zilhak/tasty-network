@@ -62,7 +62,7 @@ fn held_echo(server: &mut Proc, dialer: &mut Proc, client: u32, text: &str) {
 
 /// Waits for one reversed attach: the dialer's `connected` and roles lines, the server's
 /// accepted proposal, attach, roles line and the dialer's descriptor. Checks both role tables
-/// and returns the tunnel PID.
+/// and returns the tunnel PID (0 for the embedded backend, which has no tunnel `ssh`).
 fn reversed_attach(
     scene: &mut Scene,
     server: &mut Proc,
@@ -73,7 +73,11 @@ fn reversed_attach(
     let line = scene.connected(dialer);
     assert_eq!(decoded(&line, "instance"), ready.instance, "{line}");
     let tunnel: u32 = number(&line, "tunnel_pid");
-    assert_ne!(tunnel, 0, "the dialer reported its tunnel ssh");
+    if field(&line, "backend") == Some("embedded") {
+        assert_eq!(tunnel, 0, "{line}");
+    } else {
+        assert_ne!(tunnel, 0, "the dialer reported its tunnel ssh");
+    }
     let dialer_roles = dialer.expect_prefix("dialer roles ", LOCAL_STEP);
 
     let proposal = server.expect_prefix("server proposal ", LOCAL_STEP);
@@ -505,6 +509,105 @@ fn mixed_holders_on_one_tunnel() {
         assert!(link.number("opened_at_ms") > 0 && far_link.number("opened_at_ms") > 0);
         assert_eq!((link.get("rtt_ms"), far_link.get("rtt_ms")), (None, None));
     }
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// A reversing dialer on the embedded backend (docs/design/ssh-backends.md "시험 목록" 내장
+/// 백엔드 attach): `--ssh ssh` and a `PATH` of one empty folder, so `auto` falls back.
+#[cfg(feature = "embedded-ssh")]
+fn start_embedded_reversing_dialer(scene: &mut Scene) -> Proc {
+    let empty = scene
+        .dir
+        .as_ref()
+        .expect("the scene folder")
+        .path()
+        .join("empty-path");
+    std::fs::create_dir_all(&empty).expect("the empty PATH folder");
+    let empty = empty.to_string_lossy().into_owned();
+    let record = scene.record.clone();
+    scene.start_dialer_with(
+        &record,
+        &["--holder", "acceptor", "--ssh", "ssh"],
+        &[("PATH", empty.as_str())],
+    )
+}
+
+/// The session of the dialer's last `connected` line, which must name the embedded backend.
+#[cfg(feature = "embedded-ssh")]
+fn embedded_session(dialer: &Proc) -> u64 {
+    let line = dialer
+        .transcript
+        .lines()
+        .into_iter()
+        .rev()
+        .find(|l| l.starts_with("dialer connected "))
+        .expect("a connected line");
+    assert_eq!(field(&line, "backend"), Some("embedded"), "{line}");
+    number(&line, "session")
+}
+
+/// The dialer's connected entry of `session`: embedded, chosen as `not_found`.
+#[cfg(feature = "embedded-ssh")]
+fn check_embedded_entry(dialer: &mut Proc, session: u64) {
+    let view = read_table(dialer, "dialer");
+    let entry = view
+        .entries
+        .iter()
+        .find(|e| e.get("ssh_session") == Some(session.to_string().as_str()))
+        .unwrap_or_else(|| panic!("no entry of session {session}: {view:#?}"));
+    assert_eq!(entry.value("path"), "ssh_role_reversed", "{entry:?}");
+    assert_eq!(entry.value("ssh_backend"), "embedded", "{entry:?}");
+    assert_eq!(entry.value("ssh_reason"), "not_found", "{entry:?}");
+}
+
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn reversed_holder_echo_embedded() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let mut dialer = start_embedded_reversing_dialer(&mut scene);
+    reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
+    let session = embedded_session(&dialer);
+    check_embedded_entry(&mut dialer, session);
+    held_echo(&mut server, &mut dialer, 1, "hello-1");
+    held_echo(&mut server, &mut dialer, 1, "hello-2");
+
+    scene.quit_dialer(dialer);
+    let ended = server.expect_prefix("server link-ended client=1 ", LOCAL_STEP);
+    assert_eq!(field(&ended, "end"), Some("detach"), "{ended}");
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// The tunnel step of D3 with the embedded backend: the session hook ends the SSH session,
+/// the launcher connects again over a new session and proposes the reversal again.
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn reconnect_after_session_drop_embedded() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = start_accepting_server(&mut scene);
+    let mut dialer = start_embedded_reversing_dialer(&mut scene);
+    reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 1);
+    held_echo(&mut server, &mut dialer, 1, "hello-1");
+    let before = embedded_session(&dialer);
+
+    dialer.send_line("drop-session");
+    let dropped = dialer.expect_prefix("dialer session-dropped ", LOCAL_STEP);
+    assert_eq!(number::<u64>(&dropped, "id"), before, "{dropped}");
+    dialer.expect_prefix("dialer lost ", SSH_STEP);
+    server.expect_prefix("server link-ended client=1 ", SSH_STEP);
+
+    reversed_attach(&mut scene, &mut server, &ready, &mut dialer, 2);
+    let after = embedded_session(&dialer);
+    log(&format!("embedded session before={before} after={after}"));
+    assert_ne!(before, after, "the reconnect opened a new SSH session");
+    held_echo(&mut server, &mut dialer, 2, "hello-again");
+    check_embedded_entry(&mut dialer, after);
 
     scene.quit_dialer(dialer);
     Scene::stop_server(server);

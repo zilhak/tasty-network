@@ -15,7 +15,9 @@
 //! the redialer gives up (`redial.give_up_after`). `quit` or the end of stdin detaches and
 //! ends with exit code 0, also when it cancelled an attempt in the SSH connection or in the
 //! handshake. The stdin line `table` prints the connection table in the lines of
-//! `tasty_net_demo::table`.
+//! `tasty_net_demo::table`. Built with the `embedded-ssh` feature, the stdin line
+//! `drop-session` ends the embedded SSH session the last tunnel opened (the test hook
+//! `SessionHook`), as a test ends the tunnel's `ssh` child of the system backend.
 //!
 //! `--holder acceptor` proposes the role reversal (docs/design/transport.md "역할" (b)): the
 //! server holds and this end provides the workspace over the same `-L` tunnel, and this end
@@ -64,7 +66,8 @@
 //! | `dialer pid=<pid>` | at start |
 //! | `dialer ssh-spawned pid=<pid> role=<tunnel\|discovery>` | an `ssh` child was created |
 //! | `dialer attempt n=<n>` | an attempt starts |
-//! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid>` | the handshake succeeded (the server's ID encoded as in `tasty_net_demo::table`) |
+//! | `dialer connected attempt=<n> instance=<id> tunnel_pid=<pid> backend=<system\|embedded> session=<n>` | the handshake succeeded (the server's ID encoded as in `tasty_net_demo::table`; `tunnel_pid` is 0 and `session` the SSH session number for the embedded backend) |
+//! | `dialer session-dropped id=<n>` · `dialer drop-session-failed error=<text>` | the stdin line `drop-session` ended the embedded session, or found none |
 //! | `dialer roles local=dialer launcher=<side> dialer=<side> provider=<side> holder=<side> redialer=<side>` | right after `connected` (`<side>` is `dialer` or `acceptor`) |
 //! | `dialer channels-open instance=<id>` | `--channels`: the bulk and request channels are up and `system.info` answered (the value encoded as in `tasty_net_demo::table`) |
 //! | `dialer call method=<method> answer=<result\|error>` | `--channels --also-call`: the request channel answered that method (the value encoded as in `tasty_net_demo::table`) |
@@ -99,7 +102,11 @@ use tasty_net_demo::table::{encode_value, table_lines};
 use tasty_net_demo::{Args, Snapshot, emit, emit_lines, error_chain, failure_name, link_timeouts};
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::DeviceKey;
-use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
+use tasty_net_ssh::{
+    PortDiscoveryConfig, PortMode, SpawnHook, SshConnector, SshLauncher, SshTarget,
+};
+#[cfg(feature = "embedded-ssh")]
+use tasty_net_ssh::{SessionControl, SessionHook};
 use tasty_net_transport::{
     AttemptCancel, BulkChannel, ChannelReader, ChannelWriter, ConnectError, ConnectOptions,
     ConnectionId, ConnectionTable, DialConfig, EndReason, HandshakeError, Holder, Link, LinkCloser,
@@ -156,6 +163,9 @@ struct Shared {
     connections: ConnectionTable,
     /// This device's ID, for the `table` line.
     device: String,
+    /// The embedded SSH session the last tunnel opened, for `drop-session`.
+    #[cfg(feature = "embedded-ssh")]
+    session: Arc<Mutex<Option<SessionControl>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -244,8 +254,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     .with_verify(args.flag("verify-host-keys"))
     .with_spawn_hook(spawn_hook(Arc::clone(&tunnel_pid)));
+    let connector = SshConnector::new(launcher.settings().clone()).with_launcher(launcher);
+    #[cfg(feature = "embedded-ssh")]
+    let session: Arc<Mutex<Option<SessionControl>>> = Arc::default();
+    #[cfg(feature = "embedded-ssh")]
+    let connector = {
+        let slot = Arc::clone(&session);
+        connector.with_session_hook(SessionHook::new(move |control| {
+            *lock(&slot) = Some(control);
+        }))
+    };
     let connections = ConnectionTable::default();
-    let transport = SshTransport::new(launcher, discovery, PortMode::FileUnix)
+    let transport = SshTransport::from_connector(connector, discovery, PortMode::FileUnix)
         .with_connections(connections.clone());
     let redialer = Redialer::new(&connections, RedialerConfig::new())?;
     let instance_id = match args.value("instance-id") {
@@ -279,6 +299,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         hold_writer,
         connections: connections.clone(),
         device,
+        #[cfg(feature = "embedded-ssh")]
+        session,
         ..Shared::default()
     });
     let stdin_thread = {
@@ -374,10 +396,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let Some(roles) = link.peer().roles() else {
             return Err("an attach link has no roles".into());
         };
+        let ssh = entry
+            .and_then(|id| connections.connection(id))
+            .and_then(|e| e.ssh);
         emit(&format!(
-            "dialer connected attempt={attempt} instance={} tunnel_pid={}",
+            "dialer connected attempt={attempt} instance={} tunnel_pid={} backend={} session={}",
             encode_value(link.peer().instance_id()),
-            tunnel_pid.load(Ordering::SeqCst)
+            tunnel_pid.load(Ordering::SeqCst),
+            ssh.as_ref()
+                .and_then(|s| s.backend.backend)
+                .map_or("-", |b| b.name()),
+            ssh.and_then(|s| s.session_id)
+                .map_or_else(|| "-".to_string(), |id| id.to_string()),
         ));
         emit(&format!(
             "dialer roles local=dialer launcher={} dialer={} provider={} holder={} redialer={}",
@@ -743,6 +773,10 @@ fn read_stdin(shared: &Shared) {
         if line == "quit" {
             break;
         }
+        if line == "drop-session" {
+            drop_session(shared);
+            continue;
+        }
         if line == "table" {
             emit_lines(&table_lines(
                 "dialer",
@@ -768,6 +802,18 @@ fn read_stdin(shared: &Shared) {
     request_quit(shared);
     detach(&shared.link, shared.hold_writer);
     detach(&shared.extra, Duration::ZERO);
+}
+
+/// Ends the embedded SSH session the last tunnel opened (`drop-session`).
+fn drop_session(shared: &Shared) {
+    #[cfg(feature = "embedded-ssh")]
+    if let Some(control) = lock(&shared.session).take() {
+        control.disconnect();
+        emit(&format!("dialer session-dropped id={}", control.id()));
+        return;
+    }
+    let _ = shared;
+    emit("dialer drop-session-failed error=no embedded session");
 }
 
 /// Sends Detach on the link in `slot` and ends its writer; the server answers by ending its

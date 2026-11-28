@@ -18,6 +18,8 @@ mod support;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "embedded-ssh")]
+use support::process::Proc;
 use support::process::{Transcript, is_running, log, terminate, wait_all_gone};
 use support::scene::{
     DropReport, LOCAL_STEP, SSH_STEP, Scene, connect_and_check, decoded, echo, number,
@@ -448,5 +450,149 @@ fn channel_lines_encode_their_values() {
 
     scene.quit_dialer(dialer);
     Scene::stop_server(server);
+    scene.finish();
+}
+
+/// The dialer for the embedded backend (docs/design/ssh-backends.md "시험 목록" 내장 백엔드
+/// attach): `--ssh ssh` (a name without a separator) and a `PATH` of one empty folder, so
+/// `auto` finds no OpenSSH client on any OS and falls back to the embedded backend.
+#[cfg(feature = "embedded-ssh")]
+fn start_embedded_dialer(scene: &mut Scene, record: &std::path::Path, args: &[&str]) -> Proc {
+    let empty = scene
+        .dir
+        .as_ref()
+        .expect("the scene folder")
+        .path()
+        .join("empty-path");
+    std::fs::create_dir_all(&empty).expect("the empty PATH folder");
+    let empty = empty.to_string_lossy().into_owned();
+    let mut all = vec!["--ssh", "ssh"];
+    all.extend_from_slice(args);
+    scene.start_dialer_with(record, &all, &[("PATH", empty.as_str())])
+}
+
+/// The `connected` line of the embedded backend: no tunnel `ssh` child, and an SSH session.
+/// Returns the session number.
+#[cfg(feature = "embedded-ssh")]
+fn embedded_connected(scene: &mut Scene, dialer: &mut Proc, instance: &str) -> u64 {
+    let line = scene.connected(dialer);
+    assert_eq!(decoded(&line, "instance"), instance, "{line}");
+    assert_eq!(field(&line, "backend"), Some("embedded"), "{line}");
+    assert_eq!(number::<u32>(&line, "tunnel_pid"), 0, "{line}");
+    let session: u64 = number(&line, "session");
+    log(&format!("embedded session={session}"));
+    session
+}
+
+/// The dialer's entry for `session`: the embedded backend, chosen because no OpenSSH client
+/// file was found.
+#[cfg(feature = "embedded-ssh")]
+fn check_embedded_entry(dialer: &mut Proc, session: u64) -> tasty_net_demo::table::EntryView {
+    let view = support::table::read_table(dialer, "dialer");
+    let entry = view
+        .entries
+        .iter()
+        .find(|e| e.get("ssh_session") == Some(session.to_string().as_str()))
+        .unwrap_or_else(|| panic!("no entry of session {session}: {view:#?}"))
+        .clone();
+    assert_eq!(entry.value("ssh_backend"), "embedded", "{entry:?}");
+    assert_eq!(entry.value("ssh_reason"), "not_found", "{entry:?}");
+    assert_eq!(entry.value("state"), "connected", "{entry:?}");
+    entry
+}
+
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn connect_and_echo_embedded() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = scene.start_server();
+    let record = scene.record.clone();
+    let mut dialer = start_embedded_dialer(&mut scene, &record, &[]);
+    let session = embedded_connected(&mut scene, &mut dialer, &ready.instance);
+    let control = dialer.expect_prefix("dialer control ", SSH_STEP);
+    assert!(control.contains(&ready.instance), "{control}");
+    server.expect_prefix("server attached ", LOCAL_STEP);
+    echo(&mut dialer, "hello-1");
+    check_embedded_entry(&mut dialer, session);
+    echo(&mut dialer, "hello-2");
+    scene.quit_dialer(dialer);
+    let released = server.expect_prefix("server released ", LOCAL_STEP);
+    assert_eq!(field(&released, "live"), Some("0"), "{released}");
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+/// The tunnel step of D2 with the embedded backend: the test ends the SSH session through
+/// the session hook (instead of the tunnel's `ssh` child), and the dialer connects again over
+/// a new session with a new entry that names the lost one.
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn reconnect_after_session_drop_embedded() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = scene.start_server();
+    let record = scene.record.clone();
+    let mut dialer = start_embedded_dialer(&mut scene, &record, &[]);
+    let before = embedded_connected(&mut scene, &mut dialer, &ready.instance);
+    dialer.expect_prefix("dialer control ", SSH_STEP);
+    server.expect_prefix("server attached ", LOCAL_STEP);
+    echo(&mut dialer, "hello-1");
+    let first = check_embedded_entry(&mut dialer, before);
+
+    dialer.send_line("drop-session");
+    let dropped = dialer.expect_prefix("dialer session-dropped ", LOCAL_STEP);
+    assert_eq!(number::<u64>(&dropped, "id"), before, "{dropped}");
+    let lost = dialer.expect_prefix("dialer lost ", SSH_STEP);
+    log(&format!("the dialer saw: {lost}"));
+
+    let after = embedded_connected(&mut scene, &mut dialer, &ready.instance);
+    assert_ne!(before, after, "the reconnect opened a new SSH session");
+    echo(&mut dialer, "hello-again");
+    let second = check_embedded_entry(&mut dialer, after);
+    assert_ne!(first.id(), second.id(), "a new entry");
+    assert_eq!(
+        second.get("previous"),
+        Some(first.id().to_string().as_str()),
+        "{second:?}"
+    );
+    server.expect("\"server released client=1\"", LOCAL_STEP, |l| {
+        l.starts_with("server released client=1 ")
+    });
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(server);
+    scene.finish();
+}
+
+#[cfg(feature = "embedded-ssh")]
+#[test]
+fn reconnect_after_server_restart_embedded() {
+    let _one = one_at_a_time();
+    let mut scene = Scene::new();
+    let (mut server, ready) = scene.start_server();
+    let record = scene.record.clone();
+    let mut dialer = start_embedded_dialer(&mut scene, &record, &[]);
+    embedded_connected(&mut scene, &mut dialer, &ready.instance);
+    server.expect_prefix("server attached ", LOCAL_STEP);
+    echo(&mut dialer, "hello-1");
+
+    log(&format!("killing demo-server pid={}", server.pid()));
+    server.kill();
+    let lost = dialer.expect_prefix("dialer lost ", LOCAL_STEP);
+    log(&format!("the dialer saw: {lost}"));
+
+    let (mut restarted, ready2) = scene.start_server();
+    assert_ne!(ready.instance, ready2.instance);
+    // Attempts that still read the old record fail and are retried; the one that reads the
+    // new record reaches the new instance.
+    let session = embedded_connected(&mut scene, &mut dialer, &ready2.instance);
+    restarted.expect_prefix("server attached client=1 live=1", LOCAL_STEP);
+    echo(&mut dialer, "hello-restarted");
+    check_embedded_entry(&mut dialer, session);
+
+    scene.quit_dialer(dialer);
+    Scene::stop_server(restarted);
+    drop(server);
     scene.finish();
 }

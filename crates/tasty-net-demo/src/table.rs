@@ -62,6 +62,9 @@ pub const ENTRY_KEYS: &[&str] = &[
     "requests",
     "rtt_ms",
     "redial_attempt",
+    "ssh_backend",
+    "ssh_reason",
+    "ssh_session",
 ];
 
 /// The keys of a `link` line, in the order they are printed.
@@ -259,6 +262,37 @@ fn entry_line(who: &str, entry: &ConnectionInfo) -> String {
         format!(
             "redial_attempt={}",
             optional(entry.redial.as_ref().map(|r| r.attempt.to_string()))
+        ),
+        // The SSH backend the attempt chose and why, and the tunnel's session
+        // (docs/design/ssh-backends.md "transport 연결 목록").
+        format!(
+            "ssh_backend={}",
+            optional(
+                entry
+                    .ssh
+                    .as_ref()
+                    .and_then(|s| s.backend.backend)
+                    .map(|b| b.name().to_string())
+            )
+        ),
+        format!(
+            "ssh_reason={}",
+            optional(
+                entry
+                    .ssh
+                    .as_ref()
+                    .map(|s| s.backend.reason.name().to_string())
+            )
+        ),
+        format!(
+            "ssh_session={}",
+            optional(
+                entry
+                    .ssh
+                    .as_ref()
+                    .and_then(|s| s.session_id)
+                    .map(|id| id.to_string())
+            )
         ),
     ]);
     words.join(" ")
