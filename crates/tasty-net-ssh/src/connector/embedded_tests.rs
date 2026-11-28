@@ -216,7 +216,8 @@ fn the_resolved_target_carries_only_the_values_that_choose_the_target() {
     let dir = Dir::new("sources");
     let (connector, selected) = embedded_with(
         &dir,
-        "Host *\n  HostName real.example\n  Port 2222\n  SetEnv TOKEN=s3cret-value\n  SendEnv LANG\n",
+        "Host *\n  HostName real.example\n  Port 2222\n  SetEnv TOKEN=s3cret-value\n  SendEnv LANG\n  \
+         ConnectionAttempts 2\n  NumberOfPasswordPrompts 1\n",
     );
     let (resolved, _) = connector
         .resolve(
@@ -233,9 +234,59 @@ fn the_resolved_target_carries_only_the_values_that_choose_the_target() {
         .collect();
     assert!(keywords.contains(&"hostname"), "{keywords:?}");
     assert!(keywords.contains(&"port"), "{keywords:?}");
+    // The counts that are no settings value can be looked up too.
+    let value = |k: &str| {
+        resolved
+            .sources
+            .iter()
+            .find(|s| s.keyword == k)
+            .map(|s| s.value.clone())
+    };
+    assert_eq!(
+        value("connectionattempts").as_deref(),
+        Some("2"),
+        "{keywords:?}"
+    );
+    assert_eq!(
+        value("numberofpasswordprompts").as_deref(),
+        Some("1"),
+        "{keywords:?}"
+    );
     assert!(!keywords.contains(&"setenv"), "{keywords:?}");
     assert!(!keywords.contains(&"sendenv"), "{keywords:?}");
     assert!(!format!("{resolved:?}").contains("s3cret"), "{resolved:?}");
+}
+
+#[test]
+fn an_unwritten_count_shows_the_value_in_use_from_the_default() {
+    let dir = Dir::new("count-defaults");
+    let (connector, selected) = embedded_with(&dir, "Host *\n  Port 2222\n");
+    let (resolved, _) = connector
+        .resolve(
+            &selected,
+            &SshTarget::parse("h.example"),
+            &SshPurpose::Tunnel,
+        )
+        .expect("resolved")
+        .expect("the embedded backend resolves");
+    let entry = |k: &str| {
+        resolved
+            .sources
+            .iter()
+            .find(|s| s.keyword == k)
+            .map(|s| (s.value.clone(), s.source.clone()))
+    };
+    // OpenSSH: ConnectionAttempts 1 and NumberOfPasswordPrompts 3 when no line writes them.
+    assert_eq!(
+        entry("connectionattempts"),
+        Some(("1".to_string(), "default".to_string())),
+        "{resolved:?}"
+    );
+    assert_eq!(
+        entry("numberofpasswordprompts"),
+        Some(("3".to_string(), "default".to_string())),
+        "{resolved:?}"
+    );
 }
 
 /// OpenSSH `sshkey_perm_ok` on desktop Unix: a key file the group or others can read is not

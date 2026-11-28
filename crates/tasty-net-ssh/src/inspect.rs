@@ -216,8 +216,9 @@ pub struct ResolvedTarget {
     /// The jump hosts, first hop first.
     pub proxy_jump: Vec<JumpHop>,
     /// The values that choose where the connection goes (`hostname`, `user`, `port`,
-    /// `hostkeyalias`, `proxyjump`, `identityfile`, `certificatefile`) with their sources, in
-    /// order. Other values can hold secrets and are not carried.
+    /// `hostkeyalias`, `proxyjump`, `identityfile`, `certificatefile`) and the counts that are
+    /// no settings value (`connectionattempts`, `numberofpasswordprompts`), with their sources,
+    /// in order. Other values can hold secrets and are not carried.
     pub sources: Vec<ValueSource>,
 }
 

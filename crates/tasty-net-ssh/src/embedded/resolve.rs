@@ -413,9 +413,11 @@ pub(crate) fn refusal_note(r: &Refusal) -> RefusalNote {
 /// The resolution of one host as the connection info shows it (up to the refusal, when it
 /// was refused).
 /// The keywords whose values the connection info and the settings query show: the ones that
-/// choose where the connection goes (docs/design/ssh-backends.md "연결 정보"). Other values
-/// (`SetEnv`, `SendEnv`, `RemoteCommand`, `LocalCommand`, ...) can hold secrets and are left
-/// out, as the value of a `ConfigNote` is.
+/// choose where the connection goes, and the counts that are no settings value
+/// (`ConnectionAttempts`, `NumberOfPasswordPrompts`), as every count can be looked up
+/// (docs/design/ssh-backends.md "연결 정보"). Other values (`SetEnv`, `SendEnv`,
+/// `RemoteCommand`, `LocalCommand`, ...) can hold secrets and are left out, as the value of a
+/// `ConfigNote` is.
 const TARGET_KEYWORDS: &[&str] = &[
     "hostname",
     "user",
@@ -424,9 +426,41 @@ const TARGET_KEYWORDS: &[&str] = &[
     "proxyjump",
     "identityfile",
     "certificatefile",
+    "connectionattempts",
+    "numberofpasswordprompts",
 ];
 
 pub(crate) fn resolved_target(res: &Resolution) -> ResolvedTarget {
+    let mut sources: Vec<ValueSource> = res
+        .sources
+        .iter()
+        .filter(|s| TARGET_KEYWORDS.contains(&s.keyword))
+        .map(|s| ValueSource {
+            keyword: s.keyword.to_string(),
+            value: s.value.clone(),
+            source: s.origin.to_string(),
+        })
+        .collect();
+    // A count no line wrote is still shown, with the value in use and the source `default`
+    // (the sources of a resolution are the written values only).
+    let counts = [
+        ("connectionattempts", res.options.connection_attempts),
+        (
+            "numberofpasswordprompts",
+            res.options.number_of_password_prompts,
+        ),
+    ];
+    for (keyword, value) in counts {
+        if let Some(value) = value
+            && !sources.iter().any(|s| s.keyword == keyword)
+        {
+            sources.push(ValueSource {
+                keyword: keyword.to_string(),
+                value: value.to_string(),
+                source: tasty_net_ssh_config::Origin::Default.to_string(),
+            });
+        }
+    }
     ResolvedTarget {
         hostname: res.host.clone(),
         user: res.options.user.clone().filter(|u| !u.is_empty()),
@@ -437,16 +471,7 @@ pub(crate) fn resolved_target(res: &Resolution) -> ResolvedTarget {
             .filter_map(|k| k.path.as_ref().map(PathBuf::from))
             .collect(),
         proxy_jump: Vec::new(),
-        sources: res
-            .sources
-            .iter()
-            .filter(|s| TARGET_KEYWORDS.contains(&s.keyword))
-            .map(|s| ValueSource {
-                keyword: s.keyword.to_string(),
-                value: s.value.clone(),
-                source: s.origin.to_string(),
-            })
-            .collect(),
+        sources,
     }
 }
 
