@@ -416,7 +416,7 @@ fn settled(captured: Captured, what: &str) -> Result<Captured, PortDiscoveryErro
 /// up to `discovery.stderr_grace` (within the deadline): stderr only feeds the diagnostic
 /// detail, so a descendant holding it open does not keep the lookup. If it does not arrive, or
 /// cancellation comes, the detail goes without it.
-fn run_capture_with_budget(
+pub(crate) fn run_capture_with_budget(
     mut cmd: Command,
     budget: Duration,
     what: &str,
@@ -522,11 +522,16 @@ fn run_capture_with_budget(
     Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
 }
 
+/// Options every discovery child forces before the target's options: no connection sharing,
+/// so the child does not run its command over a master process of the user's config
+/// (docs/design/ssh-backends.md "시스템 ssh 백엔드: 기능마다 자식 하나").
+pub(crate) const DISCOVERY_FORCED_OPTIONS: [&str; 2] = ["ControlMaster=no", "ControlPath=none"];
+
 /// The system backend's [`RemoteRun`]: one `ssh` child per command, through the launcher's
 /// [`SpawnHook`].
-struct SystemRun<'a> {
-    launcher: &'a SshLauncher,
-    target: &'a SshTarget,
+pub(crate) struct SystemRun<'a> {
+    pub(crate) launcher: &'a SshLauncher,
+    pub(crate) target: &'a SshTarget,
 }
 
 impl RemoteRun for SystemRun<'_> {
@@ -541,7 +546,9 @@ impl RemoteRun for SystemRun<'_> {
         what: &str,
         limits: Limits,
     ) -> Result<String, PortDiscoveryError> {
-        let cmd = self.launcher.command(self.target, &[], &[], remote_argv);
+        let cmd = self
+            .launcher
+            .command(self.target, &DISCOVERY_FORCED_OPTIONS, &[], remote_argv);
         run_capture_with_budget(cmd, budget, what, self.launcher.spawn_hook(), limits)
     }
 }

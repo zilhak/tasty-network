@@ -53,10 +53,24 @@ fn normalize(cell: &str) -> String {
 
 #[test]
 fn defaults_match_design_tables() {
-    let rows = table_rows("transport.md", "SSH 크레이트 설정값");
+    let all = table_rows("transport.md", "SSH 크레이트 설정값");
+    // The text settings have their own code table; each table keeps the document's order.
+    let (text_rows, rows): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|(k, _)| text_setting(k).is_some());
     let doc_keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
     let code_keys: Vec<&str> = DEFAULTS.iter().map(|s| s.key).collect();
     assert_eq!(code_keys, doc_keys, "the keys and their order");
+    let doc_text_keys: Vec<&str> = text_rows.iter().map(|(k, _)| k.as_str()).collect();
+    let code_text_keys: Vec<&str> = TEXT_DEFAULTS.iter().map(|s| s.key).collect();
+    assert_eq!(
+        code_text_keys, doc_text_keys,
+        "the text keys and their order"
+    );
+    for ((key, cells), s) in text_rows.iter().zip(TEXT_DEFAULTS) {
+        assert_eq!(s.default_text, normalize(&cells["기본"]), "{key}: default");
+        assert_eq!(s.range_text, normalize(&cells["범위"]), "{key}: range");
+    }
     for ((key, cells), s) in rows.iter().zip(DEFAULTS) {
         assert_eq!(
             normalize(&s.default.to_string()),
@@ -174,12 +188,211 @@ fn settings_list_matches_query() {
         );
     }
     assert_eq!(settings, before);
-    // Both ends of a range are accepted.
+    // Both ends of a range are accepted (the group-exchange sizes with the others at the same
+    // end, so they keep their order).
     for s in DEFAULTS {
         let mut one = SshSettings::new();
+        if s.key.starts_with("embedded.gex.") {
+            let (min, preferred, max) = (
+                "embedded.gex.min_bits",
+                "embedded.gex.preferred_bits",
+                "embedded.gex.max_bits",
+            );
+            for k in [min, preferred, max] {
+                one.set(k, s.min).unwrap();
+            }
+            let mut high = SshSettings::new();
+            for k in [max, preferred, min] {
+                high.set(k, s.max).unwrap();
+            }
+            continue;
+        }
         one.set(s.key, s.min).unwrap();
         one.set(s.key, s.max).unwrap();
     }
+}
+
+/// The group-exchange sizes keep `min <= preferred <= max`, as russh's `GexParams` checks; a
+/// change that breaks it is refused and changes nothing.
+#[test]
+fn the_group_exchange_sizes_keep_their_order() {
+    let mut settings = SshSettings::new();
+    assert_eq!(settings.gex_bits(), (3072, 8192, 8192));
+    let before = settings.clone();
+    assert_eq!(
+        settings
+            .set("embedded.gex.preferred_bits", Value::Count(2048))
+            .unwrap_err(),
+        SettingsError::GexOrder {
+            min: 3072,
+            preferred: 2048,
+            max: 8192
+        }
+    );
+    assert_eq!(settings, before);
+    settings
+        .set("embedded.gex.min_bits", Value::Count(2048))
+        .unwrap()
+        .set("embedded.gex.preferred_bits", Value::Count(4096))
+        .unwrap()
+        .set("embedded.gex.max_bits", Value::Count(4096))
+        .unwrap();
+    assert_eq!(settings.gex_bits(), (2048, 4096, 4096));
+    assert!(
+        settings
+            .set("embedded.gex.max_bits", Value::Count(3072))
+            .is_err()
+    );
+    assert_eq!(settings.gex_bits(), (2048, 4096, 4096));
+}
+
+/// The text settings: their defaults and sources, values this build refuses, and the query.
+#[test]
+fn text_settings_follow_their_table() {
+    let mut settings = SshSettings::new();
+    assert_eq!(settings.backend(), BackendChoice::Auto);
+    assert!(settings.overrides().is_empty());
+    assert_eq!(settings.embedded_config_file(), None);
+    let backend = settings.get_text("ssh.backend").expect("ssh.backend");
+    assert_eq!(backend.to_string(), "ssh.backend = auto (default)");
+    let keys: Vec<&str> = settings.text_entries().iter().map(|e| e.key).collect();
+    let listed: Vec<&str> = TEXT_DEFAULTS.iter().map(|s| s.key).collect();
+    assert_eq!(keys, listed);
+    // The OS gives the home (when there is one); the ssh folder follows it.
+    if let Some(home) = settings.embedded_home() {
+        let entry = settings.get_text("embedded.home").expect("embedded.home");
+        assert_eq!(entry.source, Source::OsDefault);
+        assert_eq!(settings.embedded_ssh_dir(), Some(home.join(".ssh")));
+    }
+    settings
+        .set_text("embedded.home", "/data/app")
+        .unwrap()
+        .set_text("embedded.config_file", "none")
+        .unwrap()
+        .set_text("embedded.local_user", "me")
+        .unwrap();
+    assert_eq!(
+        settings.embedded_ssh_dir(),
+        Some(std::path::PathBuf::from("/data/app/.ssh"))
+    );
+    assert_eq!(settings.embedded_config_file(), Some(None));
+    assert_eq!(settings.embedded_local_user().as_deref(), Some("me"));
+    settings
+        .set_text("embedded.ssh_dir", "/data/app/ssh")
+        .unwrap();
+    assert_eq!(
+        settings.embedded_ssh_dir(),
+        Some(std::path::PathBuf::from("/data/app/ssh"))
+    );
+    let before = settings.clone();
+    for (key, value) in [
+        ("ssh.backend", "openssh"),
+        ("embedded.home", ""),
+        ("embedded.local_user", ""),
+    ] {
+        assert!(
+            matches!(
+                settings.set_text(key, value),
+                Err(SettingsError::TextOutOfRange { .. })
+            ),
+            "{key} = {value:?}"
+        );
+    }
+    assert_eq!(
+        settings.set_text("ssh.overrides", "Port=22").unwrap_err(),
+        SettingsError::WrongTextType {
+            key: "ssh.overrides"
+        }
+    );
+    assert_eq!(
+        settings.set_text("ssh.nothing", "x").unwrap_err(),
+        SettingsError::UnknownKey("ssh.nothing".to_owned())
+    );
+    // A backend this build does not have is out of range.
+    let embedded = settings.set_text("ssh.backend", "embedded");
+    if BackendChoice::Embedded.built() {
+        assert!(embedded.is_ok());
+    } else {
+        assert!(matches!(
+            embedded,
+            Err(SettingsError::TextOutOfRange { .. })
+        ));
+        assert_eq!(settings, before);
+    }
+    settings.set_text("ssh.backend", "system").unwrap();
+    assert_eq!(settings.backend(), BackendChoice::System);
+}
+
+/// `ssh.overrides` never weakens host key checking or starts another program, whichever
+/// backend runs (docs/design/ssh-backends.md "옵션 적용 순서", test list "ssh.overrides 거부").
+#[test]
+fn overrides_refuse_what_a_setting_must_not_do() {
+    let mut settings = SshSettings::new();
+    for refused in [
+        "StrictHostKeyChecking=no",
+        "StrictHostKeyChecking=off",
+        "stricthostkeychecking no",
+        "StrictHostKeyChecking=false",
+        "NoHostAuthenticationForLocalhost=yes",
+        "ProxyCommand=nc %h %p",
+        "KnownHostsCommand=/bin/true",
+        "VerifyHostKeyDNS=yes",
+        "CanonicalizeHostname=always",
+        "PubkeyAuthentication=host-bound",
+        "BindInterface=tun0",
+        "Port",
+        "=22",
+    ] {
+        let error = settings.set_list("ssh.overrides", &[refused]).unwrap_err();
+        assert!(
+            matches!(&error, SettingsError::TextOutOfRange { value, .. } if value == refused),
+            "{refused}: {error}"
+        );
+        assert!(settings.overrides().is_empty(), "{refused}");
+    }
+    // A known keyword OpenSSH does not know is refused where the keyword table is built.
+    let unknown = settings.set_list("ssh.overrides", &["NoSuchKeyword=1"]);
+    assert_eq!(unknown.is_err(), unknown_keyword("nosuchkeyword").is_some());
+    settings.set_list("ssh.overrides", &[]).unwrap();
+    let too_many: Vec<String> = (0..65).map(|i| format!("SendEnv=V{i}")).collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    assert!(settings.set_list("ssh.overrides", &too_many).is_err());
+    assert!(settings.set_list("ssh.overrides", &too_many[..64]).is_ok());
+    settings
+        .set_list(
+            "ssh.overrides",
+            &[
+                "StrictHostKeyChecking=yes",
+                "ProxyCommand=none",
+                "User=deploy",
+            ],
+        )
+        .unwrap();
+    assert_eq!(settings.overrides().len(), 3);
+    assert_eq!(
+        settings.set_list("ssh.backend", &["auto"]).unwrap_err(),
+        SettingsError::WrongTextType { key: "ssh.backend" }
+    );
+}
+
+/// `ssh.overrides` go after the target's options and before `ConnectTimeout` (order 7 of
+/// "옵션 적용 순서"), so the target wins over them and they win over the setting.
+#[test]
+fn overrides_go_between_the_target_and_the_connect_timeout() {
+    let mut settings = SshSettings::new();
+    settings
+        .set_list("ssh.overrides", &["User=global", "ConnectTimeout=3"])
+        .unwrap();
+    let mut target = SshTarget::parse("host");
+    target.extra_options = vec!["User=mine".into()];
+    let built = args(&settings, &target);
+    let at = |want: &str| built.iter().position(|a| a == want).expect(want);
+    assert!(at("User=mine") < at("User=global"), "{built:?}");
+    assert!(at("User=global") < at("ConnectTimeout=3"), "{built:?}");
+    assert!(
+        at("ConnectTimeout=3") < at("ConnectTimeout=10"),
+        "{built:?}"
+    );
 }
 
 fn args(settings: &SshSettings, target: &SshTarget) -> Vec<String> {

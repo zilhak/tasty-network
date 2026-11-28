@@ -223,6 +223,11 @@ target	crates/tasty-net-ssh/src/
 settings	crates/tasty-net-ssh/src/settings.rs
 table	crates/tasty-net-ssh/src/settings.rs	transport.md	SSH 크레이트 설정값
 allow	crates/tasty-net-ssh/src/system/cancel.rs	next_id.fetch_add(1,	자식 등록 번호를 하나씩 늘린다
+allow	crates/tasty-net-ssh/src/backend.rs	const ANY_EXECUTE_BIT: u32 = 0o111	Unix 권한의 실행 비트 셋(소유자·그룹·다른 사용자). 발견이 보는 파일 형식의 값이다
+allow	crates/tasty-net-ssh/src/backend.rs	ANY_EXECUTE_BIT != 0	실행 비트가 하나라도 켜졌는지(비트 마스크 결과가 0이 아닌지)
+allow	crates/tasty-net-ssh/src/connector.rs	AtomicU64::new(1)	세션 번호는 커넥터 안에서 1부터(ssh-backends.md 연결 정보)
+allow	crates/tasty-net-ssh/src/connector.rs	fetch_add(1,	세션 번호를 하나씩 늘린다
+allow	crates/tasty-net-ssh/src/system/discovery.rs	const DISCOVERY_FORCED_OPTIONS: [&str; 2] = ["ControlMaster=no", "ControlPath=none"]	발견 자식이 고정하는 옵션 두 개(배열 길이)
 allow	crates/tasty-net-ssh/src/discovery.rs	const PORT_COMMAND_EXITED_INSTANCE_CODE: i32 = 3	원격 하위 명령과의 약속: 인스턴스가 끝났다 (transport.md SSH 크레이트 설정값)
 allow	crates/tasty-net-ssh/src/discovery.rs	Some(255) |	ssh 종료 코드 255는 연결 실패
 allow	crates/tasty-net-ssh/src/system/discovery.rs	nap * 2	발견 폴링 간격을 두 배씩 늘린다(discovery.poll_min에서 poll_max까지)

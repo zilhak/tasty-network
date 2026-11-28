@@ -140,7 +140,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 `tasty-net-ssh`는 [크레이트 구성](crates.md#설정값-규칙)의 규칙을 따른다. 기본값의 원천은 코드의 기본값 표 하나다(`tasty_net_ssh::settings::DEFAULTS`). 시험이 아래 표를 읽어 코드와 값·범위까지 대조한다([CI와 시험 환경](testing.md#설정값-시험)).
 
 - 바꾸기: `SshSettings::set(키, 값)`. 모르는 키, 다른 종류의 값(초 단위 항목에 1초로 나누어떨어지지 않는 시간 포함), 범위 밖의 값은 `SettingsError`로 거절하고 아무것도 바꾸지 않는다. 설정은 `SshLauncher::with_settings(settings)`로 런처에 준다. 그 런처로 띄우는 ssh 옵션, 포트 발견, 터널, 판정 핸들이 모두 그 값을 쓴다. `Backoff::from_settings(&settings)`는 `backoff.*`를 쓴다. 설정 없는 `SshLauncher::new`·`Backoff::new()`는 기본값이다. 공개 상수 `SSH_CONNECT_TIMEOUT`·`PORT_DISCOVERY_STEP_TIMEOUT`·`PORT_DISCOVERY_TOTAL_TIMEOUT`은 해당 키의 기본값으로 남는다.
-- 조회: `SshLauncher::settings().entries()`(항목마다 `{key, value, source}`, 출처 `default`·`configured`)와 `get(키)`.
+- 조회: `SshLauncher::settings().entries()`(항목마다 `{key, value, source}`, 출처 `default`·`configured`)와 `get(키)`. 글자·목록 항목(`ssh.backend`, `ssh.overrides`, `embedded.*`의 경로와 이름)은 `text_entries()`·`get_text(키)`이고 출처에 `os_default`(OS가 주는 기본값)가 더해진다. 둘을 합친 조회는 `SshConnector::inspect`의 `settings`다.
 - 대상마다의 적용값: 앞의 세 키는 ssh 옵션이 된다. 대상의 `extra_options`에 같은 옵션이 있으면 ssh는 먼저 나온 값을 쓴다. 그래서 `ServerAliveInterval`·`ServerAliveCountMax`는 대상 옵션보다 앞에 넘겨 설정값이 이기고, `ConnectTimeout`은 맨 뒤에 넘겨 대상의 값이 이긴다. `SshLauncher::applied_options(&target)`가 옵션마다 `{key, option, value, source}`를 돌려준다. `source`는 `default`·`configured`(설정값이 쓰인다)나 `target`(대상의 `ConnectTimeout`이 쓰인다)이다. 포트 발견이 느린 연결 실패를 시간 초과로 분류할 때도 이 적용값을 쓴다. 연결 목록의 `applied`에 싣는 일은 transport 쪽이 한다.
 - 대상의 `ConnectTimeout`은 이 크레이트가 조회와 발견 분류를 위해 아래 규칙으로 읽는다. 이 규칙은 OpenSSH의 규칙과 같지 않다(그다음 항목).
   - 인자 분리: 값은 OpenSSH의 인자 분리(`argv_split`)처럼 먼저 나눈다. 작은따옴표·큰따옴표는 묶은 뒤 벗기고, 역슬래시는 따옴표·역슬래시·(따옴표 밖) 공백을 잇는다. 따옴표 밖에서 새 인자를 시작하는 `#`부터 끝까지는 주석으로 버린다(`ConnectTimeout=60 # slow link`는 60초). 그 뒤에 `none`인지, 숫자인지를 본다(`ConnectTimeout="none"`은 정하지 않은 것, `'60'`은 60초). 인자가 없거나 둘 이상이거나 따옴표가 닫히지 않으면 읽지 못하는 값이다. 값 없이 이름만 있는 항목(`ConnectTimeout`, `ConnectTimeout=`)도 건너뛰지 않고 인자가 없는 읽지 못하는 값으로 다룬다.
@@ -183,6 +183,24 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | `backoff.initial` | 500 ms | 1 ms ~ 1 min | `Backoff`의 처음 대기이자 `reset`이 돌아가는 값 |
 | `backoff.multiplier` | 2 | 1 ~ 10 | 단계마다 대기에 곱하는 수 |
 | `backoff.max_delay` | 30 s | 1 ms ~ 1 h | 대기의 상한 |
+| `ssh.backend` | `auto` | `auto`·`system`·`embedded` | 연결 시도마다 고르는 백엔드([SSH 백엔드](ssh-backends.md#선택-규칙)). `auto`는 시스템 ssh 파일을 찾으면 시스템, 못 찾으면 내장(빌드에 있을 때). 빌드에 없는 백엔드 이름은 거절한다. `SshSettings::set_text`로 준다 |
+| `ssh.overrides` | 빈 목록 | 지시어=값 목록, 64개까지 | `ssh -o`와 같은 뜻으로 두 백엔드에 넣는다(적용 순서 7: 대상 옵션 뒤, `ConnectTimeout` 앞). 호스트 키 확인을 끄는 값, 다른 프로그램을 실행하는 값, 내장 백엔드가 구현하지 않은 보안 지시어, (내장 백엔드가 있는 빌드에서) 모르는 지시어는 거절한다. `SshSettings::set_list`로 준다 |
+| `embedded.config_file` | 없음 | 경로 하나 또는 none | 내장 백엔드의 `ssh -F`. 없으면 사용자 설정과 시스템 설정을 읽고, 주면 그 파일만 읽는다 |
+| `embedded.system_config_file` | OS의 시스템 설정 경로 | 경로 또는 none | 출처 `os_default`(Unix `/etc/ssh/ssh_config`, Windows `%PROGRAMDATA%\ssh\ssh_config`). 모바일에는 없다 |
+| `embedded.home` | OS 홈 | 경로 | 출처 `os_default`(`HOME`, Windows `USERPROFILE`). `~` 펼침과 `%d` |
+| `embedded.ssh_dir` | `<embedded.home>/.ssh` | 경로 | 내장 백엔드의 `~/.ssh`. 모바일은 바인딩 층이 앱 저장소의 `ssh/`를 넣는다 |
+| `embedded.local_user` | OS 사용자 이름 | 문자열 | 출처 `os_default`(`USER`, Windows `USERNAME`). `%u`·`Match localuser`, 원격 사용자를 정하지 않았을 때의 사용자 |
+| `embedded.channel_open_timeout` | 10 s | 100 ms ~ 10 min | 내장 백엔드의 채널 열기 응답 기한 |
+| `embedded.prompt_timeout` | 5 min | 1 s ~ 1 h | `SshPrompt`의 답을 기다리는 시간 |
+| `embedded.runtime.worker_threads` | 1 | 1 ~ 16 | 내장 백엔드가 소유하는 tokio 런타임의 워커 수 |
+| `embedded.window_size` | 2 MiB | 32 KiB ~ 64 MiB | russh `Config::window_size` |
+| `embedded.max_packet_size` | 32 KiB | 1 KiB ~ 65535 B | russh `Config::maximum_packet_size`. 65535보다 크면 russh가 경고만 찍는다 |
+| `embedded.channel_buffer` | 100 | 1 ~ 10 000 | russh `Config::channel_buffer_size` |
+| `embedded.rekey.bytes` | 1 GiB | 1 MiB ~ 1 GiB | russh `Limits`의 읽기·쓰기 한도. `RekeyLimit` 지시어가 이기고 1 GiB를 넘으면 자른다 |
+| `embedded.rekey.time` | 1 h | 1 min ~ 24 h | russh `Limits::rekey_time_limit` |
+| `embedded.gex.min_bits` | 3072 | 2048 ~ 8192 | russh `GexParams`. 세 값은 `min ≤ preferred ≤ max`여야 하고 어긋나면 `SettingsError`로 거절한다 |
+| `embedded.gex.preferred_bits` | 8192 | 2048 ~ 8192 | 같다 |
+| `embedded.gex.max_bits` | 8192 | 2048 ~ 8192 | 같다 |
 
 - `backoff.*`와 transport의 `redial.initial`·`redial.multiplier`·`redial.max_delay`(아래 "보관 상한과 재연결 도우미")는 기본값이 같지만 원천은 따로다. `Backoff`는 소비자가 직접 쓰는 도구이고, `Redialer`는 transport 설정으로 받는다. 한쪽을 바꿔도 다른 쪽은 바뀌지 않는다.
 - 설정이 아닌 값:

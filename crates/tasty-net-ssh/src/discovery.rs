@@ -233,7 +233,7 @@ pub enum PortDiscoveryFailureKind {
     /// The polling budget ran out, or a connection failure took at least the connect timeout.
     /// Cancellation is reported separately.
     TimedOut,
-    /// The caller stopped the lookup with [`SshCancel::cancel`]. It wins over a timeout.
+    /// The caller stopped the lookup with [`SshCancel::cancel`](crate::SshCancel::cancel). It wins over a timeout.
     Cancelled,
 }
 
@@ -523,6 +523,35 @@ pub(crate) trait RemoteRun {
 
 /// One discovery call: the backend's runner, names, the shared deadline, and the values in
 /// effect.
+/// A [`RemoteRun`] that remembers the last command that ran to the end, so the effective
+/// target of the command the discovery used can be read afterwards.
+pub(crate) struct Recording<'a> {
+    pub(crate) inner: &'a dyn RemoteRun,
+    pub(crate) last: std::sync::Mutex<Option<Vec<String>>>,
+}
+
+impl RemoteRun for Recording<'_> {
+    fn what(&self) -> String {
+        self.inner.what()
+    }
+
+    fn run(
+        &self,
+        remote_argv: &[&str],
+        budget: Duration,
+        what: &str,
+        limits: Limits,
+    ) -> Result<String, PortDiscoveryError> {
+        let out = self.inner.run(remote_argv, budget, what, limits)?;
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *last = Some(remote_argv.iter().map(|a| (*a).to_owned()).collect());
+        Ok(out)
+    }
+}
+
 pub(crate) struct Probe<'a> {
     runner: &'a dyn RemoteRun,
     config: &'a PortDiscoveryConfig,

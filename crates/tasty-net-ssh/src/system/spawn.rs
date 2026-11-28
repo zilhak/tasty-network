@@ -8,7 +8,7 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{AppliedOption, SshSettings, SshTarget, push_common_opts, resolve_ssh_path};
+use crate::{AppliedOption, SshSettings, SshTarget, push_opts, resolve_ssh_path};
 
 /// Signature of a custom child creation function.
 pub type SpawnFn = dyn Fn(Command) -> io::Result<Child> + Send + Sync;
@@ -141,8 +141,9 @@ impl SshLauncher {
         self.fork_option_refused.store(true, Ordering::Relaxed);
     }
 
-    /// The ssh command for `target`: common options with `forced` before the target's extra
-    /// options, then `before` (flags), the destination, then `after` (the remote command).
+    /// The ssh command for `target`: common options with `forced`, then `before` (the
+    /// purpose's flags), the target's options, `ssh.overrides`, the destination, then `after`
+    /// (the remote command).
     pub(crate) fn command(
         &self,
         target: &SshTarget,
@@ -150,9 +151,47 @@ impl SshLauncher {
         before: &[String],
         after: &[&str],
     ) -> Command {
-        let mut args: Vec<String> = Vec::new();
-        push_common_opts(&mut args, target, self.verify, forced, &self.settings);
-        args.extend(before.iter().cloned());
+        self.command_with(&[], target, forced, before, after)
+    }
+
+    /// The `ssh -G` of [`Self::command`]: the same arguments after `-G`, so ssh prints the
+    /// configuration it would connect with and exits without connecting.
+    pub(crate) fn resolve_command(
+        &self,
+        target: &SshTarget,
+        forced: &[&str],
+        before: &[String],
+        after: &[&str],
+    ) -> Command {
+        self.command_with(&["-G"], target, forced, before, after)
+    }
+
+    /// The same launcher running `program` (the file the backend choice found). Clones share
+    /// what the launcher learned about its ssh.
+    pub(crate) fn with_program(&self, program: &Path) -> Self {
+        Self {
+            program: program.to_path_buf(),
+            ..self.clone()
+        }
+    }
+
+    fn command_with(
+        &self,
+        first: &[&str],
+        target: &SshTarget,
+        forced: &[&str],
+        before: &[String],
+        after: &[&str],
+    ) -> Command {
+        let mut args: Vec<String> = first.iter().map(|a| (*a).to_string()).collect();
+        push_opts(
+            &mut args,
+            target,
+            self.verify,
+            forced,
+            before,
+            &self.settings,
+        );
         args.push(target.destination.clone());
         args.extend(after.iter().map(|a| (*a).to_string()));
         let mut cmd = Command::new(&self.program);
@@ -256,7 +295,8 @@ mod tests {
             .iter()
             .position(|a| a == "ExitOnForwardFailure=yes")
             .expect("forced option");
-        assert!(forced < jump && jump < n && n < dest, "{args:?}");
+        // The purpose's flags go before the target's options (ssh-backends.md "옵션 적용 순서").
+        assert!(forced < n && n < jump && jump < dest, "{args:?}");
         assert_eq!(&args[dest + 1..], ["prog", "port"]);
     }
 }

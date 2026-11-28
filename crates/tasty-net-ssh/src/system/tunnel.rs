@@ -1,7 +1,5 @@
 //! Starting and reaping `ssh -L` tunnels.
 
-use std::error::Error;
-use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ExitStatus, Stdio};
@@ -14,10 +12,14 @@ use crate::cancel::recover_mutex;
 use crate::listener::{ListenerVerdict, StderrMarks, VerdictTiming, relay_stderr};
 use crate::settings::SshSettings;
 use crate::system::cancel::kill_and_reap;
+use crate::tunnel::TunnelError;
 use crate::{SshLauncher, SshTarget};
-// The tests of this module also cover the reconnect wait, which moved to `crate::backoff`.
+// The tests of this module also cover the reconnect wait, which moved to `crate::backoff`, and
+// the tunnel error, which moved to `crate::tunnel`.
 #[cfg(test)]
 use crate::Backoff;
+#[cfg(test)]
+use std::error::Error;
 
 /// The tracing target of this module's events: its module path before it moved into
 /// `system`, so log filters on the old path keep selecting them.
@@ -29,49 +31,6 @@ fn reserve_local_port() -> io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))
-}
-
-/// Why a tunnel did not come up.
-#[derive(Debug)]
-pub enum TunnelError {
-    /// No local port could be reserved for the forward.
-    LocalPort(io::Error),
-    /// The ssh child could not be created.
-    Spawn(io::Error),
-    /// ssh exited before the local end was ready (authentication or forward failure, for
-    /// example). Its stderr was passed on before this error returned.
-    ExitedBeforeReady { status: ExitStatus },
-    /// The local end did not accept connections in time.
-    ReadyTimeout { local_port: u16, waited: Duration },
-    /// The state of the ssh child could not be read.
-    Wait(io::Error),
-}
-
-impl fmt::Display for TunnelError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LocalPort(_) => f.write_str("Could not reserve a local port for the SSH tunnel."),
-            Self::Spawn(_) => f.write_str("Could not start ssh for the tunnel."),
-            Self::ExitedBeforeReady { status } => write!(
-                f,
-                "ssh exited before the tunnel was ready ({status}); authentication or the port forward may have failed."
-            ),
-            Self::ReadyTimeout { local_port, waited } => write!(
-                f,
-                "The SSH tunnel on local port {local_port} was not ready within {waited:?}."
-            ),
-            Self::Wait(_) => f.write_str("Could not read the state of the ssh tunnel process."),
-        }
-    }
-}
-
-impl Error for TunnelError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::LocalPort(e) | Self::Spawn(e) | Self::Wait(e) => Some(e),
-            Self::ExitedBeforeReady { .. } | Self::ReadyTimeout { .. } => None,
-        }
-    }
 }
 
 /// Owns an `ssh -L` child. Dropping it kills and reaps the child.
@@ -125,6 +84,15 @@ fn tunnel_command(
     // No remote command, only the tunnel.
     let flags = ["-N".to_string(), "-L".to_string(), forward];
     launcher.command(target, &forced, &flags, &[])
+}
+
+/// The `ssh -G` of a tunnel child for `target`: the tunnel's forced options and `-N` (the
+/// session type), without the `-L` forward, which does not change the target.
+pub(crate) fn tunnel_resolve_command(
+    launcher: &SshLauncher,
+    target: &SshTarget,
+) -> std::process::Command {
+    launcher.resolve_command(target, &TUNNEL_FORCED_OPTIONS, &["-N".to_string()], &[])
 }
 
 /// Why one start attempt failed.

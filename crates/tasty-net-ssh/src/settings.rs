@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Default of `ssh.connect_timeout`: the ssh `ConnectTimeout`. It bounds connection setup, not
@@ -34,8 +35,10 @@ pub const PORT_DISCOVERY_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 pub enum Source {
     /// The default in [`DEFAULTS`].
     Default,
-    /// Given with [`SshSettings::set`].
+    /// Given with [`SshSettings::set`] (or `set_text`, `set_list`).
     Configured,
+    /// Read from the OS when it is queried (a text setting whose default the OS gives).
+    OsDefault,
 }
 
 impl Source {
@@ -44,6 +47,7 @@ impl Source {
         match self {
             Source::Default => "default",
             Source::Configured => "configured",
+            Source::OsDefault => "os_default",
         }
     }
 }
@@ -80,6 +84,7 @@ pub enum Value {
 
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * KIB;
+const GIB: u64 = MIB * KIB;
 const NANOS_PER_MILLI: u32 = 1_000_000;
 const MILLIS_PER_SEC: u128 = 1000;
 const MILLIS_PER_MIN: u128 = 60 * MILLIS_PER_SEC;
@@ -115,6 +120,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Count(n) => write!(f, "{n}"),
+            Value::Bytes(b) if b != 0 && b % GIB == 0 => write!(f, "{} GiB", b / GIB),
             Value::Bytes(b) if b != 0 && b % MIB == 0 => write!(f, "{} MiB", b / MIB),
             Value::Bytes(b) if b != 0 && b % KIB == 0 => write!(f, "{} KiB", b / KIB),
             Value::Bytes(b) => write!(f, "{b} B"),
@@ -188,6 +194,17 @@ const VERDICT_POLL: &str = "tunnel.verdict_poll";
 const BACKOFF_INITIAL: &str = "backoff.initial";
 const BACKOFF_MULTIPLIER: &str = "backoff.multiplier";
 const BACKOFF_MAX_DELAY: &str = "backoff.max_delay";
+const CHANNEL_OPEN_TIMEOUT: &str = "embedded.channel_open_timeout";
+const PROMPT_TIMEOUT: &str = "embedded.prompt_timeout";
+const WORKER_THREADS: &str = "embedded.runtime.worker_threads";
+const WINDOW_SIZE: &str = "embedded.window_size";
+const MAX_PACKET_SIZE: &str = "embedded.max_packet_size";
+const CHANNEL_BUFFER: &str = "embedded.channel_buffer";
+const REKEY_BYTES: &str = "embedded.rekey.bytes";
+const REKEY_TIME: &str = "embedded.rekey.time";
+const GEX_MIN_BITS: &str = "embedded.gex.min_bits";
+const GEX_PREFERRED_BITS: &str = "embedded.gex.preferred_bits";
+const GEX_MAX_BITS: &str = "embedded.gex.max_bits";
 
 /// Every setting with its default and range, in the order of the design table.
 pub static DEFAULTS: &[Setting] = &[
@@ -345,11 +362,363 @@ pub static DEFAULTS: &[Setting] = &[
         millis(1),
         secs(3600),
     ),
+    entry(
+        "embedded.channel_open_timeout",
+        Kind::Duration,
+        secs(10),
+        millis(100),
+        secs(600),
+    ),
+    entry(
+        "embedded.prompt_timeout",
+        Kind::Duration,
+        secs(300),
+        secs(1),
+        secs(3600),
+    ),
+    entry(
+        "embedded.runtime.worker_threads",
+        Kind::Count,
+        Value::Count(1),
+        Value::Count(1),
+        Value::Count(16),
+    ),
+    entry(
+        "embedded.window_size",
+        Kind::Bytes,
+        Value::Bytes(2 * MIB),
+        Value::Bytes(32 * KIB),
+        Value::Bytes(64 * MIB),
+    ),
+    entry(
+        "embedded.max_packet_size",
+        Kind::Bytes,
+        Value::Bytes(32 * KIB),
+        Value::Bytes(KIB),
+        Value::Bytes(65_535),
+    ),
+    entry(
+        "embedded.channel_buffer",
+        Kind::Count,
+        Value::Count(100),
+        Value::Count(1),
+        Value::Count(10_000),
+    ),
+    entry(
+        "embedded.rekey.bytes",
+        Kind::Bytes,
+        Value::Bytes(GIB),
+        Value::Bytes(MIB),
+        Value::Bytes(GIB),
+    ),
+    entry(
+        "embedded.rekey.time",
+        Kind::Duration,
+        secs(3600),
+        secs(60),
+        secs(86_400),
+    ),
+    entry(
+        "embedded.gex.min_bits",
+        Kind::Count,
+        Value::Count(3072),
+        Value::Count(2048),
+        Value::Count(8192),
+    ),
+    entry(
+        "embedded.gex.preferred_bits",
+        Kind::Count,
+        Value::Count(8192),
+        Value::Count(2048),
+        Value::Count(8192),
+    ),
+    entry(
+        "embedded.gex.max_bits",
+        Kind::Count,
+        Value::Count(8192),
+        Value::Count(2048),
+        Value::Count(8192),
+    ),
 ];
 
 /// The setting with `key`.
 pub fn setting(key: &str) -> Option<&'static Setting> {
     DEFAULTS.iter().find(|s| s.key == key)
+}
+
+/// The backends `ssh.backend` chooses between (docs/design/ssh-backends.md "선택 규칙").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackendChoice {
+    /// The system `ssh` when its file is found, otherwise the embedded backend (when it is
+    /// built).
+    Auto,
+    /// Always the system `ssh` (`system-ssh` builds).
+    System,
+    /// Always the embedded backend (`embedded-ssh` builds).
+    Embedded,
+}
+
+impl BackendChoice {
+    /// `auto`, `system` or `embedded`.
+    pub fn name(self) -> &'static str {
+        match self {
+            BackendChoice::Auto => "auto",
+            BackendChoice::System => "system",
+            BackendChoice::Embedded => "embedded",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(BackendChoice::Auto),
+            "system" => Some(BackendChoice::System),
+            "embedded" => Some(BackendChoice::Embedded),
+            _ => None,
+        }
+    }
+
+    /// Whether this build has the backend the value names.
+    fn built(self) -> bool {
+        match self {
+            BackendChoice::Auto => true,
+            BackendChoice::System => cfg!(feature = "system-ssh"),
+            // The embedded backend is not built yet.
+            BackendChoice::Embedded => false,
+        }
+    }
+}
+
+impl fmt::Display for BackendChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The type of a text setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextKind {
+    /// `auto`, `system` or `embedded` ([`BackendChoice`]).
+    Backend,
+    /// A list of `Keyword=Value` ssh options ([`SshSettings::set_list`]).
+    Options,
+    /// A path, or `none` for no file.
+    PathOrNone,
+    /// A path.
+    Path,
+    /// A name.
+    Name,
+}
+
+/// One text setting: key, type, and the default and range as the design table writes them.
+/// A default the OS gives (`embedded.home`, for example) is read when it is queried, with the
+/// source [`Source::OsDefault`].
+#[derive(Clone, Copy, Debug)]
+pub struct TextSetting {
+    /// The key.
+    pub key: &'static str,
+    /// The type.
+    pub kind: TextKind,
+    /// The default, as the design table writes it.
+    pub default_text: &'static str,
+    /// The accepted values, as the design table writes them.
+    pub range_text: &'static str,
+}
+
+mod text {
+    use super::{TextKind, TextSetting};
+
+    pub(super) const fn entry(
+        key: &'static str,
+        kind: TextKind,
+        default_text: &'static str,
+        range_text: &'static str,
+    ) -> TextSetting {
+        TextSetting {
+            key,
+            kind,
+            default_text,
+            range_text,
+        }
+    }
+}
+
+pub(crate) const BACKEND: &str = "ssh.backend";
+pub(crate) const OVERRIDES: &str = "ssh.overrides";
+const CONFIG_FILE: &str = "embedded.config_file";
+const SYSTEM_CONFIG_FILE: &str = "embedded.system_config_file";
+const HOME: &str = "embedded.home";
+const SSH_DIR: &str = "embedded.ssh_dir";
+const LOCAL_USER: &str = "embedded.local_user";
+
+/// The most entries `ssh.overrides` takes.
+const OVERRIDES_MAX: usize = 64;
+
+/// Every text setting, in the order of the design table.
+pub static TEXT_DEFAULTS: &[TextSetting] = &[
+    text::entry(
+        "ssh.backend",
+        TextKind::Backend,
+        "auto",
+        "auto·system·embedded",
+    ),
+    text::entry(
+        "ssh.overrides",
+        TextKind::Options,
+        "빈 목록",
+        "지시어=값 목록, 64개까지",
+    ),
+    text::entry(
+        "embedded.config_file",
+        TextKind::PathOrNone,
+        "없음",
+        "경로 하나 또는 none",
+    ),
+    text::entry(
+        "embedded.system_config_file",
+        TextKind::PathOrNone,
+        "OS의 시스템 설정 경로",
+        "경로 또는 none",
+    ),
+    text::entry("embedded.home", TextKind::Path, "OS 홈", "경로"),
+    text::entry(
+        "embedded.ssh_dir",
+        TextKind::Path,
+        "<embedded.home>/.ssh",
+        "경로",
+    ),
+    text::entry(
+        "embedded.local_user",
+        TextKind::Name,
+        "OS 사용자 이름",
+        "문자열",
+    ),
+];
+
+/// The text setting with `key`.
+pub fn text_setting(key: &str) -> Option<&'static TextSetting> {
+    TEXT_DEFAULTS.iter().find(|s| s.key == key)
+}
+
+/// A text setting value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextValue {
+    /// `ssh.backend`.
+    Backend(BackendChoice),
+    /// `ssh.overrides`, in order.
+    Options(Vec<String>),
+    /// A path.
+    Path(PathBuf),
+    /// `none`: no file.
+    NoFile,
+    /// A name.
+    Name(String),
+}
+
+impl fmt::Display for TextValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TextValue::Backend(b) => f.write_str(b.name()),
+            TextValue::Options(list) => f.write_str(&list.join(", ")),
+            TextValue::Path(p) => write!(f, "{}", p.display()),
+            TextValue::NoFile => f.write_str("none"),
+            TextValue::Name(n) => f.write_str(n),
+        }
+    }
+}
+
+/// One line of the text settings query. `value` is `None` when there is no value (no OS home,
+/// for example).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEntry {
+    /// The key.
+    pub key: &'static str,
+    /// The value in effect.
+    pub value: Option<TextValue>,
+    /// Where it comes from.
+    pub source: Source,
+}
+
+impl fmt::Display for TextEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.value {
+            Some(v) => write!(f, "{} = {v} ({})", self.key, self.source),
+            None => write!(f, "{} = - ({})", self.key, self.source),
+        }
+    }
+}
+
+/// Why an `ssh.overrides` entry is refused. A library setting never weakens host key checking
+/// and never starts another program (docs/design/ssh-backends.md "옵션 적용 순서").
+fn override_refusal(option: &str) -> Option<&'static str> {
+    let (keyword, value) = split_option(option)?;
+    let keyword = keyword.to_ascii_lowercase();
+    let value = value.trim().to_ascii_lowercase();
+    match keyword.as_str() {
+        "stricthostkeychecking" if matches!(value.as_str(), "no" | "off" | "false") => {
+            Some("a setting does not turn host key checking off")
+        }
+        "nohostauthenticationforlocalhost" if matches!(value.as_str(), "yes" | "true") => {
+            Some("a setting does not turn host key checking off")
+        }
+        "proxycommand" if value != "none" => Some("a setting does not run another program"),
+        "knownhostscommand" => Some("a setting does not run another program"),
+        "verifyhostkeydns" if matches!(value.as_str(), "yes" | "ask" | "true") => {
+            Some("the embedded backend does not implement it and refuses it")
+        }
+        "canonicalizehostname" if matches!(value.as_str(), "yes" | "always" | "true") => {
+            Some("the embedded backend does not implement it and refuses it")
+        }
+        "pubkeyauthentication" if value == "host-bound" => {
+            Some("the embedded backend does not implement it and refuses it")
+        }
+        "bindinterface" => Some("the embedded backend does not implement it and refuses it"),
+        "match" | "host" | "include" => Some("only options, not blocks or includes"),
+        _ => unknown_keyword(&keyword),
+    }
+}
+
+/// `Keyword=Value` or `Keyword Value`, as `ssh -o` takes it.
+fn split_option(option: &str) -> Option<(&str, &str)> {
+    let option = option.trim();
+    let end = option.find(|c: char| c == '=' || c.is_whitespace())?;
+    let (keyword, rest) = option.split_at(end);
+    let value = rest.trim_start().strip_prefix('=').unwrap_or(rest).trim();
+    (!keyword.is_empty() && !value.is_empty()).then_some((keyword, value))
+}
+
+/// A keyword OpenSSH does not know. This build has no keyword table (it comes with the
+/// embedded backend) and leaves unknown keywords to `ssh`, which refuses them.
+fn unknown_keyword(_keyword: &str) -> Option<&'static str> {
+    None
+}
+
+/// The OS value of a setting whose default the OS gives.
+fn os_default(key: &str) -> Option<TextValue> {
+    match key {
+        SYSTEM_CONFIG_FILE => system_config_path().map(TextValue::Path),
+        HOME => env_text(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(|h| TextValue::Path(PathBuf::from(h))),
+        LOCAL_USER => {
+            env_text(if cfg!(windows) { "USERNAME" } else { "USER" }).map(TextValue::Name)
+        }
+        _ => None,
+    }
+}
+
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// OpenSSH's system configuration file: `/etc/ssh/ssh_config`, Windows
+/// `%PROGRAMDATA%\ssh\ssh_config`. Mobile systems have none.
+fn system_config_path() -> Option<PathBuf> {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        None
+    } else if cfg!(windows) {
+        env_text("PROGRAMDATA").map(|d| PathBuf::from(d).join("ssh").join("ssh_config"))
+    } else {
+        Some(PathBuf::from("/etc/ssh/ssh_config"))
+    }
 }
 
 /// A value [`SshSettings::set`] refuses.
@@ -375,6 +744,30 @@ pub enum SettingsError {
         /// The accepted range, as [`Setting::range_text`] writes it.
         range: String,
     },
+    /// The values of `embedded.gex.min_bits`, `preferred_bits` and `max_bits` would not keep
+    /// `min ≤ preferred ≤ max`.
+    GexOrder {
+        /// The three values the change would give.
+        min: u64,
+        preferred: u64,
+        max: u64,
+    },
+    /// A text value outside the accepted values (a backend this build does not have, an
+    /// empty path, a refused or malformed `ssh.overrides` entry, too many entries).
+    TextOutOfRange {
+        /// The key.
+        key: &'static str,
+        /// The value (for `ssh.overrides`, the refused entry).
+        value: String,
+        /// Why.
+        reason: String,
+    },
+    /// The setting takes a list ([`SshSettings::set_list`]) or a single text
+    /// ([`SshSettings::set_text`]), not the other.
+    WrongTextType {
+        /// The key.
+        key: &'static str,
+    },
 }
 
 impl fmt::Display for SettingsError {
@@ -386,6 +779,20 @@ impl fmt::Display for SettingsError {
             }
             SettingsError::OutOfRange { key, value, range } => {
                 write!(f, "setting {key} = {value} is out of range ({range})")
+            }
+            SettingsError::GexOrder {
+                min,
+                preferred,
+                max,
+            } => write!(
+                f,
+                "embedded.gex.* must keep min <= preferred <= max (would be {min}, {preferred}, {max})"
+            ),
+            SettingsError::TextOutOfRange { key, value, reason } => {
+                write!(f, "setting {key} does not take {value:?}: {reason}")
+            }
+            SettingsError::WrongTextType { key } => {
+                write!(f, "setting {key} is not set this way")
             }
         }
     }
@@ -416,6 +823,7 @@ impl fmt::Display for SettingEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SshSettings {
     configured: BTreeMap<&'static str, Value>,
+    text: BTreeMap<&'static str, TextValue>,
 }
 
 impl SshSettings {
@@ -441,8 +849,190 @@ impl SshSettings {
                 range: s.range_text(),
             });
         }
-        self.configured.insert(s.key, value);
+        let previous = self.configured.insert(s.key, value);
+        let (min, preferred, max) = self.gex_bits_raw();
+        if !(min <= preferred && preferred <= max) {
+            match previous {
+                Some(p) => self.configured.insert(s.key, p),
+                None => self.configured.remove(s.key),
+            };
+            return Err(SettingsError::GexOrder {
+                min,
+                preferred,
+                max,
+            });
+        }
         Ok(self)
+    }
+
+    /// Set one text setting (`ssh.backend`, `embedded.*` paths and names). A path setting
+    /// that allows it takes `none` for no file.
+    pub fn set_text(&mut self, key: &str, value: &str) -> Result<&mut Self, SettingsError> {
+        let s = text_setting(key).ok_or_else(|| SettingsError::UnknownKey(key.to_owned()))?;
+        let refuse = |reason: &str| SettingsError::TextOutOfRange {
+            key: s.key,
+            value: value.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let parsed = match s.kind {
+            TextKind::Backend => match BackendChoice::parse(value) {
+                Some(b) if b.built() => TextValue::Backend(b),
+                Some(_) => return Err(refuse("this build does not have that backend")),
+                None => return Err(refuse("not auto, system or embedded")),
+            },
+            TextKind::Options => return Err(SettingsError::WrongTextType { key: s.key }),
+            TextKind::PathOrNone if value == "none" => TextValue::NoFile,
+            TextKind::PathOrNone | TextKind::Path if value.is_empty() => {
+                return Err(refuse("an empty path"));
+            }
+            TextKind::PathOrNone | TextKind::Path => TextValue::Path(PathBuf::from(value)),
+            TextKind::Name if value.is_empty() => return Err(refuse("an empty name")),
+            TextKind::Name => TextValue::Name(value.to_owned()),
+        };
+        self.text.insert(s.key, parsed);
+        Ok(self)
+    }
+
+    /// Set a list setting (`ssh.overrides`: `Keyword=Value` entries, as `ssh -o` takes them).
+    /// It refuses, whichever backend runs, entries that turn host key checking off
+    /// (`StrictHostKeyChecking=no`/`off`, `NoHostAuthenticationForLocalhost=yes`), that run
+    /// another program (`ProxyCommand`, `KnownHostsCommand`), the security directives the
+    /// embedded backend does not implement, and keywords OpenSSH does not know (in builds
+    /// with the embedded backend, which has the keyword table).
+    pub fn set_list(&mut self, key: &str, values: &[&str]) -> Result<&mut Self, SettingsError> {
+        let s = text_setting(key).ok_or_else(|| SettingsError::UnknownKey(key.to_owned()))?;
+        if s.kind != TextKind::Options {
+            return Err(SettingsError::WrongTextType { key: s.key });
+        }
+        if values.len() > OVERRIDES_MAX {
+            return Err(SettingsError::TextOutOfRange {
+                key: s.key,
+                value: format!("{} entries", values.len()),
+                reason: format!("at most {OVERRIDES_MAX} entries"),
+            });
+        }
+        for v in values {
+            let reason = match split_option(v) {
+                None => Some("not Keyword=Value"),
+                Some(_) => override_refusal(v),
+            };
+            if let Some(reason) = reason {
+                return Err(SettingsError::TextOutOfRange {
+                    key: s.key,
+                    value: (*v).to_owned(),
+                    reason: reason.to_owned(),
+                });
+            }
+        }
+        self.text.insert(
+            s.key,
+            TextValue::Options(values.iter().map(|v| (*v).to_owned()).collect()),
+        );
+        Ok(self)
+    }
+
+    /// The text value in effect for `key` and its source.
+    pub fn get_text(&self, key: &str) -> Option<TextEntry> {
+        let s = text_setting(key)?;
+        if let Some(v) = self.text.get(s.key) {
+            return Some(TextEntry {
+                key: s.key,
+                value: Some(v.clone()),
+                source: Source::Configured,
+            });
+        }
+        let (value, source) = match s.key {
+            BACKEND => (
+                Some(TextValue::Backend(BackendChoice::Auto)),
+                Source::Default,
+            ),
+            OVERRIDES => (Some(TextValue::Options(Vec::new())), Source::Default),
+            CONFIG_FILE => (None, Source::Default),
+            SSH_DIR => (
+                self.embedded_home()
+                    .map(|h| TextValue::Path(h.join(".ssh"))),
+                Source::Default,
+            ),
+            other => match os_default(other) {
+                Some(v) => (Some(v), Source::OsDefault),
+                None => (None, Source::Default),
+            },
+        };
+        Some(TextEntry {
+            key: s.key,
+            value,
+            source,
+        })
+    }
+
+    /// Every text setting with the value in effect and its source, in [`TEXT_DEFAULTS`] order.
+    pub fn text_entries(&self) -> Vec<TextEntry> {
+        TEXT_DEFAULTS
+            .iter()
+            .filter_map(|s| self.get_text(s.key))
+            .collect()
+    }
+
+    /// `ssh.backend`.
+    pub fn backend(&self) -> BackendChoice {
+        match self.text.get(BACKEND) {
+            Some(TextValue::Backend(b)) => *b,
+            _ => BackendChoice::Auto,
+        }
+    }
+
+    /// `ssh.overrides`, in order.
+    pub fn overrides(&self) -> &[String] {
+        match self.text.get(OVERRIDES) {
+            Some(TextValue::Options(list)) => list,
+            _ => &[],
+        }
+    }
+
+    fn text_path(&self, key: &str) -> Option<TextValue> {
+        self.get_text(key).and_then(|e| e.value)
+    }
+
+    /// `embedded.config_file`: `None` reads the user and the system file, `Some(None)` reads
+    /// none (`none`), `Some(Some(path))` reads only that file (`ssh -F`).
+    pub fn embedded_config_file(&self) -> Option<Option<PathBuf>> {
+        match self.text_path(CONFIG_FILE) {
+            Some(TextValue::Path(p)) => Some(Some(p)),
+            Some(TextValue::NoFile) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// `embedded.system_config_file` (`None`: no system file).
+    pub fn embedded_system_config_file(&self) -> Option<PathBuf> {
+        match self.text_path(SYSTEM_CONFIG_FILE) {
+            Some(TextValue::Path(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `embedded.home` (`None`: not known).
+    pub fn embedded_home(&self) -> Option<PathBuf> {
+        match self.text.get(HOME).cloned().or_else(|| os_default(HOME)) {
+            Some(TextValue::Path(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `embedded.ssh_dir` (`None`: neither it nor the home is known).
+    pub fn embedded_ssh_dir(&self) -> Option<PathBuf> {
+        match self.text_path(SSH_DIR) {
+            Some(TextValue::Path(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `embedded.local_user` (`None`: not known).
+    pub fn embedded_local_user(&self) -> Option<String> {
+        match self.text_path(LOCAL_USER) {
+            Some(TextValue::Name(n)) => Some(n),
+            _ => None,
+        }
     }
 
     /// The value in effect for `key` and its source.
@@ -488,9 +1078,17 @@ impl SshSettings {
         }
     }
 
+    fn gex_bits_raw(&self) -> (u64, u64, u64) {
+        (
+            self.count(GEX_MIN_BITS),
+            self.count(GEX_PREFERRED_BITS),
+            self.count(GEX_MAX_BITS),
+        )
+    }
+
     fn bytes(&self, key: &'static str) -> usize {
         match self.get(key).map(|e| e.value) {
-            // Every size range ends at 1 MiB or below, which fits usize on every platform.
+            // Every size range ends at 1 GiB or below, which fits usize on every platform.
             Some(Value::Bytes(b)) => usize::try_from(b).unwrap_or(usize::MAX),
             other => panic!("{key} is a size of DEFAULTS, got {other:?}"),
         }
@@ -617,6 +1215,60 @@ impl SshSettings {
     /// `backoff.max_delay`: the longest wait of a [`crate::Backoff`].
     pub fn backoff_max_delay(&self) -> Duration {
         self.duration(BACKOFF_MAX_DELAY)
+    }
+
+    /// `embedded.channel_open_timeout`: how long the embedded backend waits for the answer to
+    /// a channel open.
+    pub fn channel_open_timeout(&self) -> Duration {
+        self.duration(CHANNEL_OPEN_TIMEOUT)
+    }
+
+    /// `embedded.prompt_timeout`: how long the embedded backend waits for an `SshPrompt`
+    /// answer.
+    pub fn prompt_timeout(&self) -> Duration {
+        self.duration(PROMPT_TIMEOUT)
+    }
+
+    /// `embedded.runtime.worker_threads`: the worker threads of the embedded backend's runtime.
+    pub fn worker_threads(&self) -> usize {
+        // The range (at most 16) fits usize.
+        usize::try_from(self.count(WORKER_THREADS)).unwrap_or(usize::MAX)
+    }
+
+    /// `embedded.window_size`: the russh `Config::window_size`.
+    pub fn window_size(&self) -> u32 {
+        // The range (at most 64 MiB) fits u32.
+        u32::try_from(self.bytes(WINDOW_SIZE)).unwrap_or(u32::MAX)
+    }
+
+    /// `embedded.max_packet_size`: the russh `Config::maximum_packet_size`.
+    pub fn max_packet_size(&self) -> u32 {
+        // The range (at most 65535) fits u32.
+        u32::try_from(self.bytes(MAX_PACKET_SIZE)).unwrap_or(u32::MAX)
+    }
+
+    /// `embedded.channel_buffer`: the russh `Config::channel_buffer_size`.
+    pub fn channel_buffer(&self) -> usize {
+        // The range (at most 10 000) fits usize.
+        usize::try_from(self.count(CHANNEL_BUFFER)).unwrap_or(usize::MAX)
+    }
+
+    /// `embedded.rekey.bytes`: the russh `Limits` read and write limits.
+    pub fn rekey_bytes(&self) -> usize {
+        self.bytes(REKEY_BYTES)
+    }
+
+    /// `embedded.rekey.time`: the russh `Limits::rekey_time_limit`.
+    pub fn rekey_time(&self) -> Duration {
+        self.duration(REKEY_TIME)
+    }
+
+    /// `embedded.gex.min_bits`, `preferred_bits`, `max_bits` (`min ≤ preferred ≤ max`).
+    pub fn gex_bits(&self) -> (usize, usize, usize) {
+        let (min, preferred, max) = self.gex_bits_raw();
+        // The ranges (at most 8192) fit usize.
+        let to = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        (to(min), to(preferred), to(max))
     }
 }
 

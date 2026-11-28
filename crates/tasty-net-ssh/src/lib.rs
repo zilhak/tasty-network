@@ -22,34 +22,54 @@
 //! | [`PORT_COMMAND_EXITED_INSTANCE_CODE`] | the remote subcommand and port discovery, which share this exit code |
 //! | [`tunnel_drop_totals`] | hosts that measure the time spent releasing tunnels |
 //! | [`ListenerVerdict`] ([`SshTunnel::listener_verdict`]) · [`RemoteListenerAbsent`] · [`connection_closed_error`] · [`is_dropped_connection`] | consumers that classify a channel's failure behind a tunnel (one verdict per channel, taken before opening it) |
+//! | [`SshConnector`] · [`Discovered`] | consumers that let `ssh.backend` choose the backend of each attempt and open port discovery and tunnels over it |
+//! | [`SelectedBackend`] · [`SshBackendKind`] · [`BackendReason`] · [`SshBackendError`] · [`find_program`] · [`BackendChoice`] | consumers that show which backend an attempt used and why |
+//! | [`EffectiveTarget`] · [`TunnelError::TargetMismatch`] | the check that port discovery and the tunnel reach the same target |
+//! | [`SshInspection`] ([`SshConnector::inspect`]) · [`SshPurpose`] · [`InspectedSetting`] · [`ResolverState`] · [`ConfigNote`] · [`ResolvedTarget`] · [`TargetInspection`] and their parts | the settings query |
 //!
 //! Profile handling (building an [`SshTarget`] from a stored profile, saving detection results)
-//! is not here; the consumer does it with these value types. The crate reads no environment
-//! variable: host key checking is [`SshLauncher::with_verify`].
+//! is not here; the consumer does it with these value types. Host key checking is
+//! [`SshLauncher::with_verify`]. The environment the crate reads: `PATH` when the backend
+//! choice looks for the ssh program, and the OS defaults of the `embedded.*` text settings
+//! (`HOME`/`USERPROFILE`, `USER`/`USERNAME`, `PROGRAMDATA`) when they are queried.
 
 // An SSH crate without a backend is not built (docs/design/ssh-backends.md "feature 계약").
 #[cfg(not(feature = "system-ssh"))]
 compile_error!("tasty-net-ssh needs the system-ssh or embedded-ssh feature");
 
+mod backend;
 mod backoff;
 mod cancel;
+mod connector;
 mod discovery;
+mod inspect;
 mod listener;
 pub mod settings;
 #[cfg(feature = "system-ssh")]
 mod system;
+mod tunnel;
 
+pub use backend::{
+    BackendReason, EffectiveTarget, SelectedBackend, SshBackendError, SshBackendKind, find_program,
+};
 pub use backoff::Backoff;
 pub use cancel::{SshCancel, SshCancelScope};
+pub use connector::{Discovered, SshConnector};
 pub use discovery::{
     PORT_COMMAND_EXITED_INSTANCE_CODE, PortDecodeError, PortDiscoveryConfig, PortDiscoveryError,
     PortDiscoveryFailureKind, PortMode, PortModeParseError, decode_port,
+};
+pub use inspect::{
+    ConfigFileReport, ConfigFileState, ConfigNote, InspectedSetting, JumpHop, NoteAction,
+    NoteClass, RefusalNote, ResolvedTarget, ResolverState, SshInspection, SshPurpose,
+    TargetInspection, ValueSource,
 };
 pub use listener::{
     ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
 };
 pub use settings::{
-    PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT, SshSettings,
+    BackendChoice, PORT_DISCOVERY_STEP_TIMEOUT, PORT_DISCOVERY_TOTAL_TIMEOUT, SSH_CONNECT_TIMEOUT,
+    SshSettings,
 };
 #[cfg(feature = "system-ssh")]
 pub use system::discovery::{detect_port_mode, discover_remote_port};
@@ -58,7 +78,8 @@ pub use system::resolve_ssh_path;
 #[cfg(feature = "system-ssh")]
 pub use system::spawn::{SpawnFn, SpawnHook, SshLauncher};
 #[cfg(feature = "system-ssh")]
-pub use system::tunnel::{SshTunnel, TunnelError, tunnel_drop_totals};
+pub use system::tunnel::tunnel_drop_totals;
+pub use tunnel::{SshTunnel, TunnelError};
 
 use std::fmt;
 use std::time::Duration;
@@ -101,17 +122,36 @@ impl SshTarget {
 ///   passed, so the user's options, the ssh config, or the ssh default (`ask`) decide.
 /// - `forced`: options the caller requires (`Key=Value`, each after `-o`), such as the tunnel's
 ///   `ExitOnForwardFailure=yes`.
+/// - The target's port (`-p`), identity file (`-i`) and `extra_options`.
+/// - `ssh.overrides` (`Key=Value`, each after `-o`).
 /// - `ConnectTimeout` (`ssh.connect_timeout`, by default [`SSH_CONNECT_TIMEOUT`]).
 ///
 /// ssh uses the **first** value of an option. The options above `extra_options` therefore win
-/// over them, and `ConnectTimeout` goes last so that a user `ConnectTimeout` in
-/// `extra_options` wins over the setting. Command line `-o` options also win over the ssh
-/// config file. [`SshLauncher::applied_options`] reports the result.
+/// over them, the target's options win over `ssh.overrides`, and `ConnectTimeout` goes last so
+/// that a user `ConnectTimeout` wins over the setting. Command line `-o` options also win over
+/// the ssh config file. [`SshLauncher::applied_options`] reports the result
+/// (docs/design/ssh-backends.md "옵션 적용 순서").
+#[cfg(test)]
 pub(crate) fn push_common_opts(
     args: &mut Vec<String>,
     target: &SshTarget,
     verify: bool,
     forced: &[&str],
+    settings: &SshSettings,
+) {
+    push_opts(args, target, verify, forced, &[], settings);
+}
+
+/// `push_common_opts` with the purpose's session flags (`-N`, `-L …`) right after the forced
+/// options, before the target's options: OpenSSH fails when `-N` meets a session type that is
+/// already set, and the first `-o SessionType` wins (docs/design/ssh-backends.md "옵션 적용
+/// 순서" 4).
+pub(crate) fn push_opts(
+    args: &mut Vec<String>,
+    target: &SshTarget,
+    verify: bool,
+    forced: &[&str],
+    session: &[String],
     settings: &SshSettings,
 ) {
     args.push("-o".into());
@@ -134,6 +174,7 @@ pub(crate) fn push_common_opts(
         args.push("-o".into());
         args.push((*opt).to_string());
     }
+    args.extend(session.iter().cloned());
     if let Some(p) = target.ssh_port {
         args.push("-p".into());
         args.push(p.to_string());
@@ -143,6 +184,10 @@ pub(crate) fn push_common_opts(
         args.push(expand_tilde(identity));
     }
     for opt in &target.extra_options {
+        args.push("-o".into());
+        args.push(opt.clone());
+    }
+    for opt in settings.overrides() {
         args.push("-o".into());
         args.push(opt.clone());
     }

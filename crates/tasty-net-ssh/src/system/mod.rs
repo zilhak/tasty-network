@@ -7,8 +7,11 @@
 
 pub(crate) mod cancel;
 pub(crate) mod discovery;
+pub(crate) mod resolve;
 pub(crate) mod spawn;
 pub(crate) mod tunnel;
+
+pub(crate) use std::process::ExitStatus;
 
 use std::path::PathBuf;
 
