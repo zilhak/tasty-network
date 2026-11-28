@@ -167,8 +167,8 @@ impl P2pScene {
         );
     }
 
-    /// Checks that no process of the scene is left, shuts the server down (every device
-    /// closed its server connection, so it ends in time) and removes the key directories.
+    /// Checks that no process of the scene is left, shuts the server down within its bound
+    /// and removes the key directories.
     pub fn finish(mut self) {
         let gone = check_all_gone(&self.tracked, END_AFTER_QUIT);
         log(&format!(

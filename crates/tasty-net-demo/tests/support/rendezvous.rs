@@ -10,9 +10,8 @@ use tasty_net_rendezvous::settings::{ServerSettings, Value};
 
 use super::process::log;
 
-/// How long the server's shutdown may take. The devices close their server connections
-/// before they exit, so it ends at once; a device that was killed leaves its connection to
-/// the server's idle timeout, which is longer.
+/// How long the server's shutdown may take. `Server::shutdown` closes every connection that is
+/// left and waits until its endpoint is idle.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(10);
 
 /// A running server and the runtime it runs on. Dropping it shuts the server down, waiting at
@@ -66,8 +65,8 @@ impl Rendezvous {
             .is_ok()
     }
 
-    /// Shuts the server down and checks that it ended in time: every device closed its
-    /// connection to it.
+    /// Shuts the server down and checks that it ended within [`SHUTDOWN_LIMIT`]. Whether the
+    /// devices closed their connections first is not checked.
     pub fn stop(mut self) {
         assert!(
             self.shut(),

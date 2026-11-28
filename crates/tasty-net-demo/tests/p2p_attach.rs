@@ -3,9 +3,9 @@
 //! (docs/design/done-criteria.md D4 (c), D9; docs/design/testing.md "P2P 시험", "연결 목록
 //! 시험").
 //!
-//! Every test has its own server and devices, so the tests run in parallel. Each ends both
-//! processes with `quit`, checks that none is left, shuts the server down in time (every
-//! device closed its server connection) and removes the key directories.
+//! Every test has its own server and devices, so the tests run in parallel. Each ends its
+//! processes with `quit`, checks that none is left, shuts the server down within its bound
+//! and removes the key directories.
 
 mod support;
 
