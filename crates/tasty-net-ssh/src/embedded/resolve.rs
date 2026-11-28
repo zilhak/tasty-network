@@ -31,7 +31,26 @@ pub(crate) enum Purpose<'a> {
     Tunnel,
     /// Port discovery: `sessiontype default` and the discovery command.
     Discovery(&'a str),
+    /// A command on an `exec` channel: `sessiontype default` and the command (`ssh -o
+    /// SessionType=default <target> -- <command>`).
+    Exec(&'a str),
+    /// SFTP: `sessiontype subsystem` and the command `sftp` (`ssh -s <target> sftp`).
+    Sftp,
 }
+
+impl Purpose<'_> {
+    /// The remote command `Match command` sees (`None` for a tunnel).
+    fn command(self) -> Option<String> {
+        match self {
+            Purpose::Tunnel => None,
+            Purpose::Discovery(command) | Purpose::Exec(command) => Some(command.to_string()),
+            Purpose::Sftp => Some(SFTP_SUBSYSTEM.to_string()),
+        }
+    }
+}
+
+/// The subsystem name of SFTP (`sftp.c` runs `ssh -s <target> sftp`).
+const SFTP_SUBSYSTEM: &str = "sftp";
 
 /// The resolutions of one purpose: the jump hosts (first hop first) and the destination.
 #[derive(Debug)]
@@ -152,7 +171,11 @@ fn command_line(
             value: CommandLine::NoCommand,
             label: "forced".into(),
         },
-        Purpose::Discovery(_) => option("SessionType=default".into(), "forced"),
+        Purpose::Discovery(_) | Purpose::Exec(_) => option("SessionType=default".into(), "forced"),
+        Purpose::Sftp => CommandLineValue {
+            value: CommandLine::Subsystem,
+            label: "forced".into(),
+        },
     });
     if let Some(port) = target.ssh_port {
         cl.push(CommandLineValue {
@@ -236,10 +259,7 @@ pub(crate) fn resolve_chain(
 ) -> Result<Chain, SshBackendError> {
     let mut ctx = local_context(settings);
     ctx.command_line = command_line(settings, target, purpose, verify);
-    ctx.command = match purpose {
-        Purpose::Tunnel => None,
-        Purpose::Discovery(command) => Some(command.to_string()),
-    };
+    ctx.command = purpose.command();
     let dest = set.resolve(&target.destination, &ctx);
     let mut notes = Vec::new();
     absorb(&mut notes, &dest)?;
@@ -512,10 +532,7 @@ pub(crate) fn inspect(
 ) -> (Resolution, Result<Chain, SshBackendError>) {
     let mut ctx = local_context(settings);
     ctx.command_line = command_line(settings, target, purpose, verify);
-    ctx.command = match purpose {
-        Purpose::Tunnel => None,
-        Purpose::Discovery(command) => Some(command.to_string()),
-    };
+    ctx.command = purpose.command();
     let dest = set.resolve(&target.destination, &ctx);
     let chain = resolve_chain(set, settings, target, purpose, verify);
     (dest, chain)

@@ -558,16 +558,16 @@ impl SshConnector {
     }
 }
 
-/// The embedded resolution's purpose. Exec and SFTP are a later stage: they resolve as a
-/// command (`exec` with their command, `sftp`).
+/// The embedded resolution's purpose: exec with its command, SFTP as the `sftp` subsystem
+/// (docs/design/ssh-backends.md "용도마다 해석하고, 같을 때만 세션을 나눈다").
 #[cfg(feature = "embedded-ssh")]
 fn embedded_purpose(purpose: &SshPurpose) -> crate::embedded::resolve::Purpose<'_> {
     use crate::embedded::resolve::Purpose;
     match purpose {
         SshPurpose::Tunnel => Purpose::Tunnel,
         SshPurpose::Discovery => Purpose::Discovery(""),
-        SshPurpose::Exec { command } => Purpose::Discovery(command),
-        SshPurpose::Sftp => Purpose::Discovery("sftp"),
+        SshPurpose::Exec { command } => Purpose::Exec(command),
+        SshPurpose::Sftp => Purpose::Sftp,
     }
 }
 

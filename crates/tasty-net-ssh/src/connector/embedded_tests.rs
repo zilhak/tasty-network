@@ -257,6 +257,39 @@ fn the_resolved_target_carries_only_the_values_that_choose_the_target() {
     assert!(!format!("{resolved:?}").contains("s3cret"), "{resolved:?}");
 }
 
+/// SFTP resolves as the `sftp` subsystem (`ssh -s <target> sftp`): `Match sessiontype
+/// subsystem` and `Match command sftp` hold for it and for no other purpose.
+#[test]
+fn match_sessiontype_subsystem_and_command_sftp_hold_for_sftp_only() {
+    let dir = Dir::new("sftp-match");
+    let (connector, _) = embedded_with(
+        &dir,
+        "Match sessiontype subsystem\n  User by-subsystem\nMatch command sftp\n  Port 2201\n\
+         Host *\n  User other\n  Port 22\n",
+    );
+    let seen = |purpose: SshPurpose| {
+        let inspection = connector.inspect(Some(&SshTarget::parse("h.example")), purpose);
+        let target = inspection.target.expect("target");
+        assert_eq!(target.refusal, None);
+        let resolved = target.resolved.expect("resolved");
+        (resolved.user, resolved.port)
+    };
+    assert_eq!(
+        seen(SshPurpose::Sftp),
+        (Some("by-subsystem".to_string()), 2201)
+    );
+    for purpose in [
+        SshPurpose::Tunnel,
+        SshPurpose::Discovery,
+        SshPurpose::Exec {
+            command: "ls".to_string(),
+        },
+    ] {
+        let shown = format!("{purpose:?}");
+        assert_eq!(seen(purpose), (Some("other".to_string()), 22), "{shown}");
+    }
+}
+
 #[test]
 fn an_unwritten_count_shows_the_value_in_use_from_the_default() {
     let dir = Dir::new("count-defaults");
