@@ -62,6 +62,7 @@ pub(crate) fn parse_dump(out: &str) -> Option<EffectiveTarget> {
         port: port?,
         user: user?,
         jump,
+        hops: Vec::new(),
     })
 }
 
@@ -80,6 +81,7 @@ mod tests {
                 port: 2222,
                 user: "me".into(),
                 jump: "bastion,u@hop:22".into(),
+                hops: Vec::new(),
             })
         );
         let no_jump = parse_dump("hostname h\nport 22\nuser u\n").expect("dump");

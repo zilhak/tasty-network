@@ -24,11 +24,14 @@ use crate::{SshLauncher, find_program};
 pub struct Discovered<T> {
     /// The decoded record.
     pub value: T,
-    /// The remote command (as argument words) that gave the record. Only the system backend
-    /// compares the target of it in this stage; the embedded comparison is the design's later
-    /// stage.
+    /// The remote command (as argument words) that gave the record: the system backend reads
+    /// the discovery's target with it (`ssh -G`, [`SshConnector::discovery_target`]).
     #[cfg_attr(not(feature = "system-ssh"), allow(dead_code))]
     pub(crate) remote_argv: Vec<String>,
+    /// The effective target the run that gave the record reached, when the backend resolves
+    /// it for the run (the embedded backend): the tunnel is compared with this one.
+    #[cfg_attr(not(feature = "embedded-ssh"), allow(dead_code))]
+    pub(crate) target: Option<EffectiveTarget>,
 }
 
 /// Chooses the SSH backend of each connection attempt and opens port discovery and tunnels
@@ -293,12 +296,16 @@ impl SshConnector {
             };
             let probe = crate::discovery::Probe::new(&recording, &self.settings, target, config);
             let value = crate::discovery::discover(&probe, mode, &decode)?;
-            let remote_argv = recording
+            let recorded = recording
                 .last
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .unwrap_or_default();
-            Ok(Discovered { value, remote_argv })
+            Ok(Discovered {
+                value,
+                remote_argv: recorded.argv,
+                target: recorded.target,
+            })
         };
         match (selected.backend, selected.program()) {
             #[cfg(feature = "system-ssh")]
@@ -310,10 +317,9 @@ impl SshConnector {
                 })
             }
             #[cfg(feature = "embedded-ssh")]
-            (Some(SshBackendKind::Embedded), _) => run(&crate::embedded::discovery::EmbeddedRun {
-                ctx: self.embedded_ctx(),
-                target,
-            }),
+            (Some(SshBackendKind::Embedded), _) => run(
+                &crate::embedded::discovery::EmbeddedRun::new(self.embedded_ctx(), target),
+            ),
             _ => Err(no_backend_for_discovery()),
         }
     }
@@ -341,18 +347,18 @@ impl SshConnector {
                 })
             }
             #[cfg(feature = "embedded-ssh")]
-            (Some(SshBackendKind::Embedded), _) => run(&crate::embedded::discovery::EmbeddedRun {
-                ctx: self.embedded_ctx(),
-                target,
-            }),
+            (Some(SshBackendKind::Embedded), _) => run(
+                &crate::embedded::discovery::EmbeddedRun::new(self.embedded_ctx(), target),
+            ),
             _ => Err(no_backend_for_discovery()),
         }
     }
 
     /// The effective target of the port discovery that gave `discovered`. The system backend
     /// runs `ssh -G` with the discovery child's arguments (a configuration's `Match exec` runs
-    /// once more); `None` when the backend does not report one (the embedded backend's
-    /// comparison is a later stage of the design).
+    /// once more); the embedded backend gives the target the discovery's session reached (its
+    /// host, port, user and each jump host's), kept with the record, without reading the
+    /// configuration again. `None` when no backend is built for the choice.
     pub fn discovery_target<T>(
         &self,
         selected: &SelectedBackend,
@@ -374,14 +380,28 @@ impl SshConnector {
             return crate::system::resolve::effective_target(&launcher, target, cmd, "discovery")
                 .map(Some);
         }
+        // The target the discovery's session reached, kept with its record: the
+        // configuration is not read again, so a change after the discovery is not compared.
+        #[cfg(feature = "embedded-ssh")]
+        if selected.backend == Some(SshBackendKind::Embedded) {
+            return discovered
+                .target
+                .clone()
+                .map(Some)
+                .ok_or(SshBackendError::TargetUnresolved {
+                    purpose: "discovery",
+                    detail: "the port discovery kept no target".into(),
+                });
+        }
         let _ = (selected, target, discovered);
         Ok(None)
     }
 
     /// Opens a tunnel from a local loopback port to `remote_port` over the chosen backend. With
-    /// `expected` (the port discovery's effective target) the system backend reads the
-    /// tunnel's effective target first and a different one ends with
-    /// [`TunnelError::TargetMismatch`] before anything starts.
+    /// `expected` (the port discovery's effective target) the backend reads the tunnel's
+    /// effective target first (the system backend's `ssh -G`, the embedded backend's
+    /// resolution) and a different one ends with [`TunnelError::TargetMismatch`] before
+    /// anything starts.
     pub fn tunnel(
         &self,
         selected: &SelectedBackend,
@@ -422,7 +442,6 @@ impl SshConnector {
             }
             #[cfg(feature = "embedded-ssh")]
             (Some(SshBackendKind::Embedded), _) => {
-                let _ = expected;
                 let ctx = self.embedded_ctx();
                 let set =
                     crate::embedded::resolve::load(ctx.settings).map_err(TunnelError::Backend)?;
@@ -434,6 +453,15 @@ impl SshConnector {
                     ctx.verify,
                 )
                 .map_err(TunnelError::Backend)?;
+                if let Some(expected) = expected {
+                    let tunnel_target = chain.effective();
+                    if tunnel_target != *expected {
+                        return Err(TunnelError::TargetMismatch {
+                            discovery: Box::new(expected.clone()),
+                            tunnel: Box::new(tunnel_target),
+                        });
+                    }
+                }
                 let session =
                     crate::embedded::session::open(ctx, &chain).map_err(TunnelError::Backend)?;
                 let tunnel =
@@ -783,6 +811,7 @@ mod tests {
             port: 22,
             user: "disc".into(),
             jump: String::new(),
+            hops: Vec::new(),
         };
         let error = connector
             .tunnel(&selected, &target, 4242, Some(&discovery))

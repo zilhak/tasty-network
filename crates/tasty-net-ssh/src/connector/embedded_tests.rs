@@ -364,10 +364,7 @@ fn discover_on(
     budget: std::time::Duration,
 ) -> Result<String, crate::discovery::PortDiscoveryError> {
     use crate::discovery::RemoteRun;
-    let run = crate::embedded::discovery::EmbeddedRun {
-        ctx: connector.embedded_ctx(),
-        target,
-    };
+    let run = crate::embedded::discovery::EmbeddedRun::new(connector.embedded_ctx(), target);
     let limits = crate::discovery::Limits::new(connector.settings(), target);
     run.run(&["echo", "x"], budget, "test discovery", limits)
 }
@@ -2114,4 +2111,193 @@ fn connect_named(tunnel: &crate::SshTunnel) -> (crate::ListenerVerdict, std::net
         stream.set_nonblocking(false).expect("blocking");
         (verdict, stream)
     })
+}
+
+// The port discovery and the tunnel reach the same target (docs/design/ssh-backends.md "포트
+// 발견과 터널의 대상 일치", android #7+, the embedded side).
+
+/// The record of a port discovery that ran `tasty-port-probe` for `target` on `connector`,
+/// with the target the discovery's resolution reaches, as a discovery that ran would keep it.
+fn discovered_by_probe(connector: &SshConnector, target: &SshTarget) -> Discovered<u16> {
+    use crate::embedded::resolve::{Purpose, load, resolve_chain};
+    let ctx = connector.embedded_ctx();
+    let set = load(ctx.settings).expect("configuration");
+    let chain = resolve_chain(
+        &set,
+        ctx.settings,
+        target,
+        Purpose::Discovery("tasty-port-probe"),
+        ctx.verify,
+    )
+    .expect("the discovery resolution");
+    Discovered {
+        value: 4242,
+        remote_argv: vec!["tasty-port-probe".into()],
+        target: Some(chain.effective()),
+    }
+}
+
+/// A loopback port nothing listens on.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    listener.local_addr().expect("addr").port()
+}
+
+/// `Match command` gives the port discovery another user, or another jump host, than the
+/// tunnel: the tunnel ends with `TargetMismatch` before it connects. With the same target the
+/// tunnel goes on and connects.
+#[test]
+fn an_embedded_tunnel_to_another_target_is_refused_before_it_starts() {
+    let port = closed_port();
+    let base = format!("Host *\n  HostName 127.0.0.1\n  Port {port}\n  User tun\n");
+    let target = SshTarget::parse("h.example");
+    for (name, discovery_only, want_user, want_jump) in [
+        ("user", "  User disc\n", "disc", String::new()),
+        (
+            "jump",
+            "  ProxyJump j@127.0.0.1:9\n",
+            "tun",
+            "j@127.0.0.1:9".to_string(),
+        ),
+    ] {
+        let dir = Dir::new(&format!("mismatch-{name}"));
+        let config = format!("Match command tasty-port-probe\n{discovery_only}{base}");
+        let (connector, selected) = embedded_with(&dir, &config);
+        let discovery = connector
+            .discovery_target(
+                &selected,
+                &target,
+                &discovered_by_probe(&connector, &target),
+            )
+            .expect("resolved")
+            .expect("the embedded backend reports it");
+        assert_eq!(discovery.user, want_user, "{name}");
+        assert_eq!(discovery.jump, want_jump, "{name}");
+        assert_eq!(
+            (discovery.hostname.as_str(), discovery.port),
+            ("127.0.0.1", port)
+        );
+        match connector.tunnel(&selected, &target, 4242, Some(&discovery)) {
+            Err(TunnelError::TargetMismatch {
+                discovery: d,
+                tunnel,
+            }) => {
+                assert_eq!(*d, discovery, "{name}");
+                assert_eq!(tunnel.user, "tun", "{name}");
+                assert_eq!(tunnel.jump, "", "{name}");
+            }
+            Err(other) => panic!("{name}: {other}"),
+            Ok(_) => panic!("{name}: the tunnel opened"),
+        }
+    }
+    // The same target: the comparison passes and the tunnel connects (to a closed port).
+    let dir = Dir::new("mismatch-none");
+    let (connector, selected) = embedded_with(&dir, &base);
+    let discovery = connector
+        .discovery_target(
+            &selected,
+            &target,
+            &discovered_by_probe(&connector, &target),
+        )
+        .expect("resolved")
+        .expect("the embedded backend reports it");
+    match connector.tunnel(&selected, &target, 4242, Some(&discovery)) {
+        Err(TunnelError::Backend(_)) => {}
+        Err(other) => panic!("not a connect failure: {other}"),
+        Ok(_) => panic!("nothing listens on {port}"),
+    }
+}
+
+/// Gate 4 SE: the configuration changes to another user after the port discovery read the
+/// record (here inside the public discovery's decode callback). The tunnel is compared with
+/// the target the discovery's session reached, not with the configuration read again, so it
+/// ends with `TargetMismatch` before it opens a session.
+#[test]
+fn a_configuration_changed_after_the_discovery_is_compared_with_the_discovered_target() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    let dir = Dir::new("changed-after-discovery");
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Answer("4242\n"), DirectReply::Open);
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let before = server.config(&key, &known);
+    assert!(before.contains("  User u\n"), "{before}");
+    let after = before.replace("  User u\n", "  User changed\n");
+    let (connector, selected) = embedded_with(&dir, &before);
+    let file = dir.0.join("config");
+    let target = SshTarget::parse("h.example");
+    let found = connector
+        .discover_remote_port(
+            &selected,
+            &target,
+            crate::PortMode::FileUnix,
+            &crate::PortDiscoveryConfig {
+                remote_program: "tasty".into(),
+                remote_args: Vec::new(),
+                data_dir: ".tasty".into(),
+                port_file: "port".into(),
+                explicit_port_file: None,
+            },
+            |stdout: &str| {
+                std::fs::write(&file, &after).expect("the changed configuration");
+                crate::decode_port(stdout)
+            },
+        )
+        .expect("discovered");
+    assert_eq!(found.value, 4242);
+    let discovery = connector
+        .discovery_target(&selected, &target, &found)
+        .expect("kept")
+        .expect("the embedded backend reports it");
+    assert_eq!(discovery.user, "u");
+    match connector.tunnel(&selected, &target, 4242, Some(&discovery)) {
+        Err(TunnelError::TargetMismatch {
+            discovery: d,
+            tunnel,
+        }) => {
+            assert_eq!(*d, discovery);
+            assert_eq!(tunnel.user, "changed");
+        }
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("the tunnel opened under the changed configuration"),
+    }
+}
+
+/// Gate 4 SF: two jump hosts and one whose user holds the separators print the same jump text
+/// (`a@127.0.0.1:2201,b@127.0.0.1:2202`), and are still different targets: the hops are
+/// compared by count, order and each hop's host, port and user.
+#[test]
+fn jump_hosts_that_print_the_same_text_are_still_compared_hop_by_hop() {
+    let port = closed_port();
+    let dir = Dir::new("jump-text");
+    let config = format!(
+        "Match command tasty-port-probe\n  ProxyJump a@127.0.0.1:2201,b@127.0.0.1:2202\n\
+         Host single\n  HostName 127.0.0.1\n  Port 2202\n  User a@127.0.0.1:2201,b\n\
+         Host h.example\n  ProxyJump single\n\
+         Host *\n  HostName 127.0.0.1\n  Port {port}\n  User tun\n"
+    );
+    let (connector, selected) = embedded_with(&dir, &config);
+    let target = SshTarget::parse("h.example");
+    let discovery = connector
+        .discovery_target(
+            &selected,
+            &target,
+            &discovered_by_probe(&connector, &target),
+        )
+        .expect("kept")
+        .expect("the embedded backend reports it");
+    assert_eq!(discovery.jump, "a@127.0.0.1:2201,b@127.0.0.1:2202");
+    match connector.tunnel(&selected, &target, 4242, Some(&discovery)) {
+        Err(TunnelError::TargetMismatch {
+            discovery: d,
+            tunnel,
+        }) => {
+            assert_eq!(*d, discovery);
+            // The same text, another target.
+            assert_eq!(tunnel.jump, discovery.jump);
+            assert_eq!((tunnel.hostname.as_str(), tunnel.port), ("127.0.0.1", port));
+        }
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("the tunnel opened through another jump host"),
+    }
 }

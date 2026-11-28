@@ -12,7 +12,7 @@ use tasty_net_ssh_config::{
 };
 
 use crate::SshTarget;
-use crate::backend::{EffectiveTarget, SshBackendError};
+use crate::backend::{EffectiveTarget, HopTarget, SshBackendError};
 use crate::inspect::{
     ConfigFileReport, ConfigFileState, ConfigNote, JumpHop, NoteAction, NoteClass, RefusalNote,
     ResolvedTarget, ValueSource,
@@ -83,6 +83,15 @@ impl Chain {
                 .map(|h| format!("{}@{}:{}", Self::user(h), h.host, Self::port(h)))
                 .collect::<Vec<_>>()
                 .join(","),
+            hops: self
+                .hops
+                .iter()
+                .map(|h| HopTarget {
+                    host: h.host.clone(),
+                    port: Self::port(h),
+                    user: Self::user(h).to_string(),
+                })
+                .collect(),
         }
     }
 

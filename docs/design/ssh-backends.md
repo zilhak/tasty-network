@@ -224,12 +224,12 @@ OpenSSH의 `Match command`·`Match sessiontype`은 용도와 명령에 따라 �
 
 - 비교하는 값: 실제 호스트·포트·사용자와 `ProxyJump` 홉마다의 같은 세 값(시스템 백엔드는 아래처럼 홉 명세 문자열까지). 세션 키의 첫 두 묶음과 같다(위).
 - 비교하는 자리: 발견 결과로 터널을 만들거나 공유 터널을 다시 쓰고 레코드의 토큰을 넣는 transport 경로(`tasty-net-transport/src/ssh.rs`). 터널을 열거나 다시 쓰기 전, 토큰을 보내기 전에 비교한다. 다시 쓰는 공유 터널은 그 터널을 열 때의 해석 결과와 비교한다. 연결 전 설정 조회(`inspect`)의 결과로는 비교하지 않는다. 실제로 쓴 해석이 아니기 때문이다.
-- 내장 백엔드는 두 용도의 해석 결과를 그대로 비교한다. 홉마다의 값도 이 레포가 해석하므로 홉별로 비교한다.
+- 내장 백엔드는 포트 발견 시도가 실제로 쓴 해석 결과와 터널 용도의 해석 결과를 비교한다. 홉마다의 값도 이 레포가 해석하므로 홉별로 비교한다(아래).
 - 시스템 백엔드(director 2937): 용도마다 실제 자식과 같은 인자로 `ssh -G`를 돌려 그 해석의 `hostname`·`port`·`user`와 `proxyjump`를 비교한다. 다르면 토큰을 보내기 전에 `TargetMismatch`로 끝낸다. `proxyjump`는 설정에 적힌 홉 명세를 다시 짠 문자열이다(`readconf.c:3943`–`:3965`). 각 홉의 설정은 그 홉을 여는 `ssh` 프로세스가 따로 해석하므로(`ssh.c:1307`–`:1325`) 최종 목적지의 `ssh -G`(`ssh.c:1612`–`:1615`)로는 홉마다의 유효 호스트·포트·사용자를 얻지 못한다. 그래서 시스템 백엔드의 홉 비교는 홉 명세 문자열 비교까지다.
 - 시스템 백엔드의 한계: 사용자 설정의 `Match exec` 명령이 `ssh -G` 때 한 번 더 실행된다. 두 `ssh -G`와 실제 자식 사이에 설정 파일이 바뀌면 판정이 늦을 수 있다(바뀐 설정은 그다음 시도에서 걸린다).
 - 다르면 연결 시도는 `ConnectError::TargetMismatch`로 끝난다(transport의 새 변형, `ConnectError`는 `#[non_exhaustive]`). 설정이 같으면 다시 걸어도 결과가 같으므로 재시도하지 않는다: `HandshakeError::is_retryable`이 `Connect`에 싸인 이 변형도 `Cancelled`·`PeerTooOld`처럼 false로 본다(`reject.rs:259`). FFI는 같은 이름의 변형으로 넘긴다([모바일 바인딩 층](mobile.md#android-요구의-자리) #7+).
 - 연결 목록 원인은 `Cause::TargetMismatch`(`target_mismatch`)이고, 그 시도는 다시 걸지 않는다. 비교에 쓰는 `ssh -G`는 터널을 열기 전에 포트 발견용 인자로 한 번, 터널용 인자로 한 번 돈다(`SshConnector::discovery_target`, `SshConnector::tunnel`의 `expected`). 그 `ssh -G`가 실패하면 시도는 `ConnectError::Tunnel(TunnelError::Backend)`로 끝난다.
-- 내장 백엔드의 비교는 아직 없다. `discovery_target`이 내장 백엔드에서 `None`을 돌려주면 터널은 비교 없이 열린다. 내장 쪽 #7+는 exec·SFTP와 같은 다음 커밋 묶음이 넣는다.
+- 내장 백엔드(android #7+ 내장 쪽): 포트 발견은 레코드를 읽은 시도가 실제로 연 세션의 해석 결과(실제 호스트·포트·사용자와 홉마다의 같은 세 값, 첫 홉부터의 순서)를 레코드와 함께 둔다(`Discovered`의 내부 값). `SshConnector::discovery_target`은 설정을 다시 읽지 않고 그 값을 돌려주고, `SshConnector::tunnel`이 터널 용도의 해석 결과와 비교한다. 홉은 수와 순서, 홉마다의 호스트·포트·사용자를 따로 비교한다(보이는 문자열 `jump`가 같아도 홉이 다르면 다른 대상이다). 그래서 발견 뒤 설정이 바뀌어도 터널은 발견이 실제로 간 대상과 비교된다. 다르면 세션을 열기 전에 `TunnelError::TargetMismatch`로 끝나고, transport는 시스템 백엔드와 같은 `ConnectError::TargetMismatch`(재시도하지 않음, 원인 `target_mismatch`)로 낸다(시험 `connector/embedded_tests.rs`의 `an_embedded_tunnel_to_another_target_is_refused_before_it_starts`·`a_configuration_changed_after_the_discovery_is_compared_with_the_discovered_target`·`jump_hosts_that_print_the_same_text_are_still_compared_hop_by_hop`, conductor M4 2단계 Gate 4 SE·SF).
 
 ### 내장 백엔드: 세션 하나에 채널 여럿
 
@@ -742,7 +742,7 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | `ChannelTimeout` 구현 | 결정됨(conductor M4 1단계 판단 답): 1단계는 적용된 값을 `not_supported` 노트로 표시만 하고, 2단계에서 exec·SFTP와 함께 구현한다. 타이머의 자리는 `session` 채널 열기 도우미가 채널과 함께 돌려주는 `ChannelTimer`이고(`embedded/session.rs`), 채널 읽기가 그것을 거친다. 지금은 제한이 없다. 2단계가 정할 것: 기준판 규칙대로의 종류 패턴(예: `sess*`) 비교와 `0`을 포함한 첫 일치, `global` 타이머의 뜻, 용도마다 다른 `global` 값을 고른 경우의 세션 공유, 시험 |
 | 터널 자식 stderr의 출처 | 후속 작업(내장 SSH 백엔드). 시스템 터널의 `ForkAfterAuthentication` 재시도는 자식 stderr의 문구로 정하는데, 그 stderr에는 로컬 `Match exec` 명령의 출력과 서버의 인증 전 Banner도 섞일 수 있다. 원격 출력과 무관한 증거(8.7 미만 판정과 같은 `ssh -G` 확인 등)로 바꿀지 |
 | 8.7 미만 판정의 기억 수명 | 후속 작업(내장 SSH 백엔드). 같은 경로의 `ssh`가 갱신으로 판이 바뀐 경우, 기억을 프로세스 동안 둘지와 파일이 같은지를 경로만으로 볼지(수정 시각 등도 볼지) |
-| 포트 발견과 터널의 대상 일치 | 시스템 백엔드는 들어갔다(director 2937, 원인 `target_mismatch`, 재시도하지 않음, 시험 `connector.rs` `a_tunnel_to_another_target_is_refused_before_it_starts`). 남은 것: 내장 백엔드의 비교(android #7+ 내장 쪽) |
+| 포트 발견과 터널의 대상 일치 | 두 백엔드 모두 들어갔다(director 2937, 원인 `target_mismatch`, 재시도하지 않음). 시스템 백엔드는 시험 `connector.rs` `a_tunnel_to_another_target_is_refused_before_it_starts`, 내장 백엔드(conductor M4 2단계 S2)는 `connector/embedded_tests.rs` `an_embedded_tunnel_to_another_target_is_refused_before_it_starts`. 남은 것: transport 경로에서 내장 백엔드로 끝까지 도는 시험(포트 발견에 답하는 시험 SSH 서버가 transport 시험에 없다) |
 | 메모리 키와 `IdentityFile` 이름 | 후속 작업(내장 SSH 백엔드). 앱 제안(감싼 키 이름이 `IdentityFile ~/.ssh/<이름>`이나 기본 키 자리 이름과 같으면 그 자리의 키로 쓰기)을 대상 옵션과 따로 더할지. `ProxyJump` 홉에 메모리 키를 내밀지(OpenSSH는 점프 홉의 `ssh`에 `-i`를 넘기지 않는다, `ssh.c:1307`–`:1325`). 기본 키 목록을 채우지 않는 것과 `IdentitiesOnly`의 시험 |
 | 호스트 키 알고리즘 목록의 결과 API | 후속 작업(내장 SSH 백엔드, 2단계). 이식 크레이트는 조립(`kex_assemble_names`)에 실패하는 `HostKeyAlgorithms`(예: `!ssh-rsa`)를 `resolve`에서 설정 오류로 거부하고, 조립한 목록은 `ssh -G` 형식 출력에만 쓴다. 조립 결과를 구조화된 API로 내기, known_hosts에 있는 키 종류를 앞에 두는 순서 변경(`sshconnect2.c:150`–`:236`), russh가 아는 알고리즘과의 교집합은 2단계가 정한다 |
 | 메모리 키를 넣는 해석 입구 | 175500 질문. 메모리 키를 `-i`처럼 명령행 identity로 넣어 기본 키 채움(`readconf.c:2930`–`:2941`)을 OpenSSH와 같게 하는 입구와, 메모리 키를 `IdentityFile`·`IdentitiesOnly` 값에 잇는 규칙. 결과 API의 구별은 이식 2단계가 냈다: `identity_files`의 `origin`이 `default`면 기본 키 자리, 그 밖은 사용자가 적은 값이다([결과 API](#결과-api)) |

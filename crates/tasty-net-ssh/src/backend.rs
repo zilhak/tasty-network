@@ -381,8 +381,19 @@ pub struct EffectiveTarget {
     pub user: String,
     /// The jump hosts: the system backend's `proxyjump` value as `ssh -G` prints it (empty
     /// when there is none), the embedded backend's resolved hops (`user@host:port` joined by
-    /// `,`).
+    /// `,`). The text is for showing; the embedded backend compares its hops one by one.
     pub jump: String,
+    /// The embedded backend's resolved hops, first hop first (empty for the system backend):
+    /// two targets are the same only with the same hops in the same order.
+    pub(crate) hops: Vec<HopTarget>,
+}
+
+/// One jump host of an embedded resolution: host, port and user.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HopTarget {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) user: String,
 }
 
 /// Looks for the program file of the system backend without running anything.

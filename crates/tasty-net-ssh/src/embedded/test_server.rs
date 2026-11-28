@@ -26,6 +26,8 @@ pub(crate) enum ExecReply {
     LateOpen(Duration),
     /// Never answers the `session` channel open (neither confirms nor refuses it).
     NeverOpen,
+    /// Accepts it, writes this as stdout, exits with status 0 and closes the channel.
+    Answer(&'static str),
 }
 
 /// How the server answers a `direct-tcpip` open.
@@ -475,7 +477,7 @@ impl Handler for Handle {
         let opened = Arc::clone(&self.opened);
         let late = match self.exec {
             ExecReply::LateOpen(after) => after,
-            ExecReply::Silent | ExecReply::Flood(_) => Duration::ZERO,
+            ExecReply::Silent | ExecReply::Flood(_) | ExecReply::Answer(_) => Duration::ZERO,
             ExecReply::NeverOpen => {
                 // The answer is held, not dropped, so russh sends no refusal either.
                 tokio::spawn(async move {
@@ -507,6 +509,15 @@ impl Handler for Handle {
             let handle = session.handle();
             tokio::spawn(async move {
                 let _sent = handle.data(channel, vec![b'x'; n]).await.is_ok();
+            });
+        }
+        if let ExecReply::Answer(text) = self.exec {
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let _sent = handle.data(channel, text.as_bytes().to_vec()).await.is_ok();
+                let _status = handle.exit_status_request(channel, 0).await.is_ok();
+                let _eof = handle.eof(channel).await.is_ok();
+                let _closed = handle.close(channel).await.is_ok();
             });
         }
         Ok(())

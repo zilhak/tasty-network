@@ -25,6 +25,18 @@ use super::{Bounded, Ctx, Paused, blocking, bounded, run_blocking};
 pub(crate) struct EmbeddedRun<'a> {
     pub(crate) ctx: Ctx<'a>,
     pub(crate) target: &'a SshTarget,
+    /// The effective target of the resolution the last successful run used.
+    pub(crate) reached: std::sync::Mutex<Option<crate::EffectiveTarget>>,
+}
+
+impl<'a> EmbeddedRun<'a> {
+    pub(crate) fn new(ctx: Ctx<'a>, target: &'a SshTarget) -> Self {
+        Self {
+            ctx,
+            target,
+            reached: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 /// What one `exec` channel gave.
@@ -183,7 +195,20 @@ impl RemoteRun for EmbeddedRun<'_> {
             error.exit_code = out.code;
             return Err(error);
         }
+        // The target this run reached, so the tunnel is compared with it and not with a
+        // resolution read again later.
+        *self
+            .reached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(chain.effective());
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn last_target(&self) -> Option<crate::EffectiveTarget> {
+        self.reached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

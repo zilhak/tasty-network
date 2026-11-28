@@ -557,15 +557,29 @@ pub(crate) trait RemoteRun {
         what: &str,
         limits: Limits,
     ) -> Result<String, PortDiscoveryError>;
+
+    /// The effective target the last successful run reached, for a backend that resolves it
+    /// for the run (the embedded backend); `None` otherwise.
+    fn last_target(&self) -> Option<crate::EffectiveTarget> {
+        None
+    }
 }
 
 /// One discovery call: the backend's runner, names, the shared deadline, and the values in
 /// effect.
-/// A [`RemoteRun`] that remembers the last command that ran to the end, so the effective
-/// target of the command the discovery used can be read afterwards.
+/// A [`RemoteRun`] that remembers the last command that ran to the end and the effective
+/// target that run reached (if the backend knows it), so the discovery's target can be read
+/// afterwards.
 pub(crate) struct Recording<'a> {
     pub(crate) inner: &'a dyn RemoteRun,
-    pub(crate) last: std::sync::Mutex<Option<Vec<String>>>,
+    pub(crate) last: std::sync::Mutex<Option<Recorded>>,
+}
+
+/// The last command of a [`Recording`] and the target its run reached.
+#[derive(Default)]
+pub(crate) struct Recorded {
+    pub(crate) argv: Vec<String>,
+    pub(crate) target: Option<crate::EffectiveTarget>,
 }
 
 impl RemoteRun for Recording<'_> {
@@ -585,7 +599,10 @@ impl RemoteRun for Recording<'_> {
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *last = Some(remote_argv.iter().map(|a| (*a).to_owned()).collect());
+        *last = Some(Recorded {
+            argv: remote_argv.iter().map(|a| (*a).to_owned()).collect(),
+            target: self.inner.last_target(),
+        });
         Ok(out)
     }
 }
