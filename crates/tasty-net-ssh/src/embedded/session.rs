@@ -41,6 +41,9 @@ const DEFAULT_METHODS: &str = "gssapi-with-mic,hostbased,publickey,keyboard-inte
 pub(crate) const ORIGINATOR: &str = "127.0.0.1";
 /// The start of a PuTTY key file, which OpenSSH does not read.
 const PPK_HEADER: &str = "PuTTY-User-Key-File-";
+/// The PEM line of an encrypted PKCS#8 key. russh decodes such a file without a passphrase as
+/// a plain one and gives a DER error, not `KeyIsEncrypted` (`keys/format/pkcs8.rs`).
+const PKCS8_ENCRYPTED_HEADER: &str = "-----BEGIN ENCRYPTED PRIVATE KEY-----";
 
 /// One SSH connection: a russh handle and the jump host connection it runs over.
 pub(crate) struct Conn {
@@ -740,9 +743,12 @@ async fn load_key(plan: &AuthPlan, path: &Path, origin: &Origin) -> LoadedKey {
         return LoadedKey::Skipped;
     }
     let mut key = russh::keys::decode_secret_key(&text, None);
-    if matches!(key, Err(russh::keys::Error::KeyIsEncrypted))
-        && let Some(prompt) = &plan.prompt
-    {
+    let encrypted = match &key {
+        Err(russh::keys::Error::KeyIsEncrypted) => true,
+        Err(_) => text.lines().any(|l| l.trim() == PKCS8_ENCRYPTED_HEADER),
+        Ok(_) => false,
+    };
+    if encrypted && let Some(prompt) = &plan.prompt {
         for _ in 0..plan.prompts {
             let file = path.to_path_buf();
             let Some(Some(passphrase)) = ask(

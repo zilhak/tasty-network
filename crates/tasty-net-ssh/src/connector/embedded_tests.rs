@@ -540,10 +540,12 @@ fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
     crate::embedded::session::open(ctx, &chain).map(drop)
 }
 
-/// Answers passwords with `password` and counts the passphrase questions.
+/// Answers passwords with `password` and passphrases with `passphrase`, and counts the
+/// passphrase questions.
 #[derive(Default)]
 struct CountingPrompt {
     password: Option<&'static str>,
+    passphrase: Option<&'static str>,
     passphrases: std::sync::atomic::AtomicUsize,
 }
 
@@ -551,7 +553,7 @@ impl crate::SshPrompt for CountingPrompt {
     fn passphrase(&self, _key_file: &std::path::Path) -> Option<String> {
         self.passphrases
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        None
+        self.passphrase.map(str::to_string)
     }
 
     fn password(&self, _user: &str, _host: &str) -> Option<String> {
@@ -576,7 +578,6 @@ fn on_auth_server(
     (server, connector.with_prompt(prompt))
 }
 
-#[cfg(unix)]
 /// Writes `text` as a key file only the user can read.
 fn write_key_file(path: &std::path::Path, text: &str) {
     if let Err(e) = std::fs::remove_file(path) {
@@ -881,5 +882,28 @@ fn a_partial_success_starts_the_method_order_over() {
                 .iter()
                 .any(|e| matches!(e, Event::Key(_))),
         "{events:?}"
+    );
+}
+
+#[test]
+fn an_encrypted_pkcs8_key_file_asks_for_its_passphrase() {
+    use crate::embedded::test_server::{AuthRule, client_key};
+    let dir = Dir::new("pkcs8");
+    let prompt = Arc::new(CountingPrompt {
+        passphrase: Some("secret"),
+        ..CountingPrompt::default()
+    });
+    let (_server, connector) = on_auth_server(&dir, AuthRule::Key, |c| c, Arc::clone(&prompt));
+    let mut pem = Vec::new();
+    russh::keys::encode_pkcs8_pem_encrypted(&client_key(), b"secret", 2, &mut pem).expect("encode");
+    write_key_file(
+        &dir.0.join("id_test"),
+        std::str::from_utf8(&pem).expect("pem text"),
+    );
+    open_session(&connector).expect("the key gets in with its passphrase");
+    assert_eq!(
+        prompt.passphrases.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the passphrase is asked once"
     );
 }
