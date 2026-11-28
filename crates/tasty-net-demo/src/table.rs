@@ -17,6 +17,11 @@
 //! ([`encode_value`]); a value that is `-` itself is written `%2D`. So [`crate::field`] reads
 //! every key, and [`decode_value`] gives the value back.
 //!
+//! `via` is `ssh` (with `via_target` and `via_remote_port`), `loopback`, or `rendezvous` for a
+//! P2P entry (with the introducing server's `via_server` address and `via_server_key`, and
+//! `via_candidate`, the kind of the peer candidate that worked); `p2p_id` is a P2P entry's
+//! connection number in `tasty-net-p2p`.
+//!
 //! Segments come as `segments=<names, comma separated>` and, per segment,
 //! `seg.<name>.local=` and `seg.<name>.remote=`. The history is
 //! `history=<state>/<phase>/<cause>,...`, oldest first, with `-` for a missing phase or
@@ -46,6 +51,10 @@ pub const ENTRY_KEYS: &[&str] = &[
     "via",
     "via_target",
     "via_remote_port",
+    "via_server",
+    "via_server_key",
+    "via_candidate",
+    "p2p_id",
     "segments",
     "history",
     "links",
@@ -149,17 +158,29 @@ pub fn table_lines(who: &str, device: &str, entries: &[ConnectionInfo]) -> Vec<S
 }
 
 fn entry_line(who: &str, entry: &ConnectionInfo) -> String {
-    let (via, target, port) = match &entry.via {
+    let (mut target, mut port, mut server, mut server_key, mut candidate) =
+        (None, None, None, None, None);
+    let via = match &entry.via {
         Via::Ssh {
-            target,
+            target: ssh_target,
             remote_port,
-        } => (
-            "ssh",
-            Some(target.clone()),
-            remote_port.map(|p| p.to_string()),
-        ),
-        Via::Loopback => ("loopback", None, None),
-        _ => ("other", None, None),
+        } => {
+            target = Some(ssh_target.clone());
+            port = remote_port.map(|p| p.to_string());
+            "ssh"
+        }
+        Via::Loopback => "loopback",
+        Via::Rendezvous {
+            server: introduced,
+            candidate: kind,
+            ..
+        } => {
+            server = introduced.map(|s| s.addr.to_string());
+            server_key = introduced.map(|s| s.public_key.to_string());
+            candidate = kind.map(|k| k.name().to_string());
+            "rendezvous"
+        }
+        _ => "other",
     };
     let segments: Vec<&str> = entry.segments.iter().map(|s| s.name).collect();
     let history: Vec<String> = entry
@@ -205,6 +226,10 @@ fn entry_line(who: &str, entry: &ConnectionInfo) -> String {
         format!("via={via}"),
         format!("via_target={}", optional(target)),
         format!("via_remote_port={}", optional(port)),
+        format!("via_server={}", optional(server)),
+        format!("via_server_key={}", optional(server_key)),
+        format!("via_candidate={}", optional(candidate)),
+        format!("p2p_id={}", optional(entry.p2p_id.map(|id| id.to_string()))),
         format!(
             "segments={}",
             optional((!segments.is_empty()).then(|| segments.join(",")))

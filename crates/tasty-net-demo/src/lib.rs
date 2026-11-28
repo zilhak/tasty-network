@@ -11,6 +11,7 @@
 //! |--------|------|
 //! | `demo-server` | the accepting end: publishes a connection record and accepts handshake v2 on a loopback port. On a forward link it provides the workspace (one Control snapshot, Data echoed); on an accepted role reversal it holds (waits for the dialer's descriptor, sends its stdin lines, prints the echo) |
 //! | `demo-dialer` | reaches the server over SSH (record discovery, `-L` tunnel) as the holder (forward) or, with `--holder acceptor`, as the provider of the role reversal; connects again with backoff after a loss |
+//! | `p2p-link` | one attach link over the P2P transport: `--listen` provides the workspace (snapshot, echo, bulk chunks back), `--dial <device ID>` holds it (echo, a bulk transfer, detach); both meet through the rendezvous server given by address and public key |
 #![forbid(unsafe_code)]
 
 pub mod table;

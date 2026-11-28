@@ -16,10 +16,17 @@ path = "src/bin/demo-server.rs"
 name = "demo-dialer"
 path = "src/bin/demo-dialer.rs"
 
+[[bin]]
+name = "p2p-link"
+path = "src/bin/p2p-link.rs"
+
 [dependencies]
 serde_json = "1"
+# The SHA-256 of the bulk bytes p2p-link sends and reads back.
+sha2 = { version = "0.11", default-features = false }
 tasty-net-frame = { path = "../tasty-net-frame" }
 tasty-net-identity = { path = "../tasty-net-identity" }
+tasty-net-p2p = { path = "../tasty-net-p2p" }
 tasty-net-ssh = { path = "../tasty-net-ssh" }
 tasty-net-transport = { path = "../tasty-net-transport" }
 
