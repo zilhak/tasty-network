@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use tasty_net_identity::{ConnectionRecord, ParsedRecord};
 use tasty_net_ssh::SshLauncher;
 use tasty_net_ssh::{
     Discovered, PortDiscoveryConfig, PortDiscoveryFailureKind, PortMode, SelectedBackend,
-    SshBackendError, SshConnector, SshPurpose, SshTarget, SshTunnel, TunnelError,
+    SshBackendError, SshBackendKind, SshConnector, SshPurpose, SshTarget, SshTunnel, TunnelError,
 };
 
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
@@ -34,9 +35,13 @@ use crate::transport::{
 /// Bound of one loopback connect to the tunnel's local port.
 pub const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What makes two connections share a tunnel: the same target and the same discovery result.
-/// A new port or instance ID after a restart gives a new key, so an old tunnel is not used for
-/// new channels.
+/// What makes two connections share a tunnel: the same target, the same discovery result and
+/// the same backend choice (the backend and, for the system backend, the file it runs). A new
+/// port or instance ID after a restart gives a new key, so an old tunnel is not used for new
+/// channels. A new choice gives a new key too, so an attempt that chose another backend (or
+/// found another `ssh` on `PATH`) does not run over a tunnel of the old choice, and the
+/// connection table's backend is the one of the tunnel the channel uses
+/// (docs/design/ssh-backends.md "선택 규칙").
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TunnelKey {
     destination: String,
@@ -45,10 +50,12 @@ struct TunnelKey {
     extra_options: Vec<String>,
     remote_port: u16,
     instance_id: String,
+    backend: Option<SshBackendKind>,
+    program: Option<PathBuf>,
 }
 
 impl TunnelKey {
-    fn new(target: &SshTarget, record: &ConnectionRecord) -> Self {
+    fn new(target: &SshTarget, record: &ConnectionRecord, selected: &SelectedBackend) -> Self {
         Self {
             destination: target.destination.clone(),
             ssh_port: target.ssh_port,
@@ -56,6 +63,8 @@ impl TunnelKey {
             extra_options: target.extra_options.clone(),
             remote_port: record.port,
             instance_id: record.instance_id.clone(),
+            backend: selected.backend,
+            program: selected.program().map(Path::to_path_buf),
         }
     }
 }
@@ -67,6 +76,10 @@ type Published = Arc<Mutex<HashMap<TunnelKey, Weak<TunnelHold>>>>;
 struct TunnelHold {
     tunnel: Arc<SshTunnel>,
     entry: Option<EntryRef>,
+    /// The selection and session of the attempt that opened the tunnel. A reconnection that
+    /// joins the tunnel shows these, since its channel passes through this tunnel and not
+    /// through one of its own selection (the selection can name other files looked at).
+    ssh: SshEntryInfo,
 }
 
 impl Drop for TunnelHold {
@@ -395,7 +408,7 @@ impl SshTransport {
                 });
             });
         }
-        let key = TunnelKey::new(target, &record);
+        let key = TunnelKey::new(target, &record, &selected);
         let mut joined = None;
         let (hold, owned) = match self.shared_tunnel(&key) {
             Some(hold) => {
@@ -408,6 +421,8 @@ impl SshTransport {
                         // tunnel succeeds it ends naming the entry it joined; until then it
                         // stays `reconnecting`.
                         (Some(shared), true) => {
+                            let ssh = hold.ssh.clone();
+                            entry.update(|info| info.ssh = Some(ssh));
                             joined = Some(Joined::new(entry.clone(), shared.id()));
                         }
                         _ => entry.remove(),
@@ -451,6 +466,7 @@ impl SshTransport {
                     entry.phase(Phase::Handshake);
                 }
                 let hold = Arc::new(TunnelHold {
+                    ssh: tunnel_info(&selected, &tunnel),
                     tunnel: Arc::clone(&tunnel),
                     entry: entry.cloned(),
                 });
@@ -688,6 +704,17 @@ impl Transport for SshTransport {
             entry.end(Cause::of_connect(error));
         }
         connected
+    }
+}
+
+/// The selection and session a tunnel was opened with, as the attempt that opened it records
+/// them ([`SshTransport::connect_on`]).
+fn tunnel_info(selected: &SelectedBackend, tunnel: &SshTunnel) -> SshEntryInfo {
+    SshEntryInfo {
+        backend: selected.clone(),
+        resolved: tunnel.resolved().cloned(),
+        config_notes: tunnel.config_notes().to_vec(),
+        session_id: tunnel.session_id(),
     }
 }
 
@@ -942,5 +969,71 @@ mod tests {
         closing.join().expect("the first link's close");
         let want = Some(Cause::Lost);
         assert_eq!(ended(&table, &entry), [want.clone(), want.clone(), want]);
+    }
+}
+
+/// Needs the system backend: it is the choice whose executable can differ.
+#[cfg(all(test, feature = "system-ssh"))]
+mod tunnel_key_tests {
+    use tasty_net_identity::ConnectionToken;
+    use tasty_net_ssh::SshSettings;
+
+    use super::*;
+
+    fn record() -> ConnectionRecord {
+        ConnectionRecord {
+            port: 4100,
+            token: ConnectionToken::issue().expect("token"),
+            instance_id: "instance".into(),
+        }
+    }
+
+    fn key(connector: &SshConnector) -> TunnelKey {
+        let target = SshTarget::parse("h.example");
+        let selected = connector.select(&target).expect("a backend");
+        TunnelKey::new(&target, &record(), &selected)
+    }
+
+    /// The system backend running the file `program`.
+    fn system(program: &Path) -> SshConnector {
+        let mut settings = SshSettings::new();
+        settings.set_text("ssh.backend", "system").expect("backend");
+        SshConnector::new(settings).with_launcher(SshLauncher::new(program))
+    }
+
+    /// A file the system backend can choose.
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "").expect("program");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        }
+        path
+    }
+
+    #[test]
+    fn a_tunnel_is_shared_only_under_the_same_system_program() {
+        let dir = std::env::temp_dir().join(format!(
+            "tasty-net-transport-tunnel-key-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let first = program(&dir, "ssh-one");
+        let second = program(&dir, "ssh-two");
+        assert_eq!(key(&system(&first)), key(&system(&first)));
+        assert_ne!(key(&system(&first)), key(&system(&second)));
+        #[cfg(feature = "embedded-ssh")]
+        {
+            let mut settings = SshSettings::new();
+            settings
+                .set_text("ssh.backend", "embedded")
+                .expect("backend");
+            assert_ne!(key(&system(&first)), key(&SshConnector::new(settings)));
+        }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!("could not remove {}: {e}", dir.display());
+        }
     }
 }
