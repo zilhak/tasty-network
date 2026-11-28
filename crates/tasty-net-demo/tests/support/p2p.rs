@@ -17,6 +17,11 @@ use tasty_net_demo::field;
 pub const P2P_STEP: Duration = Duration::from_secs(60);
 /// Link read timeout of both ends.
 pub const READ_TIMEOUT_MS: &str = "10000";
+/// The test hook of `p2p-link` (its module text): with `1`, the listener's pairing list says
+/// "paired" only at the first check of a device. Every `p2p-link` the tests start runs without
+/// it (an inherited value is removed); a test turns it on for one process with the `env` of
+/// [`P2pScene::listen`].
+pub const UNPAIR_AFTER_OFFER: &str = "TASTY_NET_DEMO_UNPAIR_AFTER_OFFER";
 /// How long a `p2p-link` may take to end after `quit`: it detaches, turns P2P off and exits.
 const END_AFTER_QUIT: Duration = Duration::from_secs(30);
 
@@ -38,10 +43,11 @@ pub struct P2pScene {
     devices: Vec<TempDir>,
 }
 
-/// A `p2p-link` command with `args`.
+/// A `p2p-link` command with `args`, without the test hook the test process may have in its
+/// environment.
 fn link_command(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_p2p-link"));
-    command.args(args);
+    command.args(args).env_remove(UNPAIR_AFTER_OFFER);
     command
 }
 

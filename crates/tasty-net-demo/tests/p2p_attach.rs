@@ -11,7 +11,7 @@ mod support;
 
 use std::net::SocketAddr;
 
-use support::p2p::{Device, P2P_STEP, P2pScene};
+use support::p2p::{Device, P2P_STEP, P2pScene, UNPAIR_AFTER_OFFER};
 use support::process::{Proc, log};
 use support::scene::{LOCAL_STEP, decoded};
 use support::table::{read_table, wait_table};
@@ -154,7 +154,7 @@ fn unpaired_peer_is_refused() {
     // Paired at the offer, not after it: the QUIC connection is closed with `not_paired`.
     let c = scene.device("c");
     let d = scene.device("d");
-    let mut withdrawn = scene.listen(&d, &[&c], &[("TASTY_NET_DEMO_UNPAIR_AFTER_OFFER", "1")]);
+    let mut withdrawn = scene.listen(&d, &[&c], &[(UNPAIR_AFTER_OFFER, "1")]);
     let mut late = scene.dial(&c, &d);
     let closed_link = late.expect_prefix("dialer closed ", P2P_STEP);
     assert_eq!(
