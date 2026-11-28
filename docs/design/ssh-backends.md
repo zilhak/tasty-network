@@ -492,7 +492,7 @@ OpenSSH 10.6p2의 `keywords[]`(`readconf.c:178`–`:325`)에는 132개 항목이
 | `PreferredAuthentications`, `PasswordAuthentication`, `KbdInteractiveAuthentication`(`ChallengeResponseAuthentication`·`SkeyAuthentication`·`TisAuthentication`), `KbdInteractiveDevices`, `NumberOfPasswordPrompts`, `BatchMode` | `BatchMode yes`면 `SshPrompt`를 부르지 않는다 |
 | `PubkeyAuthentication`(`DSAAuthentication`) | `no`·`unbound`는 같은 뜻으로 지원한다. `yes`(기본)는 OpenSSH에서 서버가 주면 host-bound 인증을 쓰지만 russh 0.65.4에는 host-bound 인증이 없다(`publickey-hostbound` 검색 0건, 대조: 같은 소스에서 `ext-info-c` 1건). 그래서 `yes`는 unbound로 인증한다. 적어 둔 `yes`에만 `shown`을 남긴다. `host-bound`는 거부 |
 | `StrictHostKeyChecking` | `yes`, `ask`(`SshPrompt`가 없거나 `BatchMode yes`면 `yes`), `accept-new`. 설정 파일·대상 옵션의 `no`·`off`는 적용하지 않고 표시한다(아래 표). `ssh.overrides`로는 받지 않는다([옵션 적용 순서](#옵션-적용-순서)) |
-| `UserKnownHostsFile`, `GlobalKnownHostsFile`, `CheckHostIP`, `HashKnownHosts` | |
+| `UserKnownHostsFile`, `GlobalKnownHostsFile`, `CheckHostIP`, `HashKnownHosts` | `accept-new`가 첫 `UserKnownHostsFile`의 폴더를 만들 때 Unix에서는 `0700`으로 만든다(OpenSSH `hostfile_create_user_ssh_dir`, 결정됨, conductor M4 Gate 4) |
 | `RevokedHostKeys` | 공개키 목록 파일. 파일이 KRL 바이너리면 거부. 파일이 없거나 읽지 못하면 OpenSSH처럼 호스트 인증을 실패시킨다(`sshconnect.c:1544`–`:1563`) |
 | `RequiredRSASize` | 기본 1024(`readconf.c:3032`–`:3033`, `SSH_RSA_MINIMUM_MODULUS_SIZE`). 그보다 작은 RSA 호스트 키는 연결을 끊고, 작은 RSA 사용자 키는 건너뛴다(`sshconnect2.c:96`·`:1593`·`:1847`) |
 | `HostKeyAlgorithms`, `KexAlgorithms`, `Ciphers`, `MACs`, `PubkeyAcceptedAlgorithms`(`PubkeyAcceptedKeyTypes`), `CASignatureAlgorithms` | [알고리즘](#알고리즘) |

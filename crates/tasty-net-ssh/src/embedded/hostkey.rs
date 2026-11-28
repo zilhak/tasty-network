@@ -500,7 +500,7 @@ fn append_locked(file: &std::path::Path, lines: &[String]) -> std::io::Result<()
         && !dir.as_os_str().is_empty()
         && !dir.exists()
     {
-        std::fs::create_dir_all(dir)?;
+        create_private_dir(dir)?;
     }
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -508,6 +508,24 @@ fn append_locked(file: &std::path::Path, lines: &[String]) -> std::io::Result<()
         .open(file)?;
     f.write_all(buffer.as_bytes())?;
     f.flush()
+}
+
+/// Makes `dir` and its missing parents. On Unix they are made `0700`, as
+/// `hostfile_create_user_ssh_dir` makes `~/.ssh` (`hostfile.c`).
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        const PRIVATE_DIR_MODE: u32 = 0o700;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(PRIVATE_DIR_MODE)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
 }
 
 /// The russh handler of one host: the host key check, and the refusal when it said no.

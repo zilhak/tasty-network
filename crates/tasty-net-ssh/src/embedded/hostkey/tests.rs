@@ -361,7 +361,17 @@ fn the_record_goes_to_the_first_user_file() {
     )
     .expect("check");
     assert_eq!(judge(&c, &ed25519(10)), Ok(()));
-    // The folder of the first file is made, as `ssh` makes `~/.ssh`.
+    // The folder of the first file is made, as `ssh` makes `~/.ssh`, readable by the user
+    // only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(first.parent().expect("parent"))
+            .expect("folder")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
     assert_eq!(
         std::fs::read_to_string(&first).expect("first"),
         line("h.example", &ed25519(10))

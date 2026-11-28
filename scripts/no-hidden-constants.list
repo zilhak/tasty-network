@@ -263,6 +263,7 @@ allow	crates/tasty-net-ssh/src/embedded/resolve.rs	const SSH_PORT: u16 = 22	Open
 allow	crates/tasty-net-ssh/src/embedded/resolve.rs	const RSA_MINIMUM_BITS: i32 = 1024	OpenSSH RequiredRSASize 기본 1024(SSH_RSA_MINIMUM_MODULUS_SIZE)
 allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	const HASH_SALT_LEN: usize = 20	known_hosts 해시 이름의 salt 20 B(SHA1 길이, hostfile.c)
 allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	[0u8;	버퍼를 0으로 채워 만든다
+allow	crates/tasty-net-ssh/src/embedded/hostkey.rs	const PRIVATE_DIR_MODE: u32 = 0o700	OpenSSH가 ~/.ssh를 만드는 권한 0700(hostfile_create_user_ssh_dir)
 allow	crates/tasty-net-ssh/src/embedded/mod.rs	unwrap_or(u64::MAX)	나노초 변환이 넘치면 타입 최대로 포화
 allow	crates/tasty-net-ssh/src/embedded/mod.rs	swap(0,	쌓인 대기 시간을 꺼내며 0으로 되돌린다
 allow	crates/tasty-net-ssh/src/embedded/session.rs	const ATTEMPT_PAUSE: Duration = Duration::from_secs(1)	OpenSSH: ConnectionAttempts 사이 sleep(1) (sshconnect.c)
