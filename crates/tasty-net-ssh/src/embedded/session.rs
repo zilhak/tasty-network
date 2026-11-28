@@ -1758,3 +1758,117 @@ async fn password(
     }
     Ok(last)
 }
+
+/// The `ChannelTimeout` timer of a channel this backend opens (docs/design/ssh-backends.md
+/// "지시어 분류" `ChannelTimeout`): how long the channel may go without a message before it
+/// ends. The values are not applied yet: the resolution shows them as `not_supported` and
+/// every channel gets [`ChannelTimer::NONE`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ChannelTimer {
+    idle: Option<Duration>,
+}
+
+impl ChannelTimer {
+    /// No timer.
+    pub(crate) const NONE: Self = Self { idle: None };
+
+    /// The next message of `channel` (`Channel::wait`). With a timer, `None` also when no
+    /// message came within it, as when the channel ends.
+    pub(crate) async fn wait(
+        self,
+        channel: &mut russh::Channel<russh::client::Msg>,
+    ) -> Option<russh::ChannelMsg> {
+        match self.idle {
+            None => channel.wait().await,
+            Some(idle) => tokio::time::timeout(idle, channel.wait())
+                .await
+                .ok()
+                .flatten(),
+        }
+    }
+}
+
+/// A `session` channel [`open_session_channel`] opened, with its timer.
+pub(crate) struct SessionChannel {
+    pub(crate) channel: russh::Channel<russh::client::Msg>,
+    pub(crate) timer: ChannelTimer,
+}
+
+/// Opens a `session` channel on `handle` within `open_timeout`, `deadline` (prompt time in
+/// `paused` not counted) and `cancel` (looked at every `poll`). The open runs as its own task,
+/// so a confirmation that comes after this wait gave up still gets its channel closed
+/// ([`close_late`]): the session may stay open for a tunnel, and russh drops a late
+/// confirmation without a close.
+pub(crate) async fn open_session_channel(
+    handle: Arc<Handle<Client>>,
+    timer: ChannelTimer,
+    open_timeout: Duration,
+    deadline: Instant,
+    paused: &Paused,
+    cancel: Option<&SshCancel>,
+    poll: Duration,
+) -> Result<Bounded<SessionChannel>, SshBackendError> {
+    let mut open = tokio::spawn(async move { handle.channel_open_session().await });
+    let opened = bounded(
+        tokio::time::timeout(open_timeout, &mut open),
+        deadline,
+        paused,
+        cancel,
+        poll,
+    )
+    .await;
+    let gave_up = |open: tokio::task::JoinHandle<_>| {
+        tokio::spawn(close_late(open, open_timeout));
+    };
+    match opened {
+        Bounded::Done(Ok(Ok(Ok(channel)))) => Ok(Bounded::Done(SessionChannel { channel, timer })),
+        Bounded::Done(Ok(Ok(Err(e)))) => Err(SshBackendError::Session {
+            detail: format!("the exec channel did not open: {e}"),
+        }),
+        Bounded::Done(Ok(Err(e))) => Err(SshBackendError::Session {
+            detail: format!("the exec channel open stopped: {e}"),
+        }),
+        Bounded::Done(Err(_)) => {
+            gave_up(open);
+            Err(SshBackendError::Session {
+                detail: format!("the exec channel did not open in {open_timeout:?}"),
+            })
+        }
+        Bounded::Expired => {
+            gave_up(open);
+            Ok(Bounded::Expired)
+        }
+        Bounded::Cancelled => {
+            gave_up(open);
+            Ok(Bounded::Cancelled)
+        }
+    }
+}
+
+/// Asks the server to close `channel`: a russh `Channel` sends no close when it drops, and the
+/// session may stay open for a tunnel. The request only queues a message; it is bounded by
+/// `open_timeout` in case the session is stuck.
+pub(crate) async fn close_channel(
+    channel: &russh::Channel<russh::client::Msg>,
+    open_timeout: Duration,
+) {
+    let _closed = tokio::time::timeout(open_timeout, channel.close())
+        .await
+        .is_ok_and(|sent| sent.is_ok());
+}
+
+/// Waits for a channel open that [`open_session_channel`] gave up on and closes the channel if
+/// it opens. Both tasks end with the session at the latest, and an open the server never
+/// answers is given up once more `open_timeout` has gone by: its task is stopped, so
+/// unanswered opens do not pile up on a session a tunnel keeps open
+/// (docs/design/ssh-backends.md `embedded.channel_open_timeout`).
+async fn close_late(
+    mut open: tokio::task::JoinHandle<Result<russh::Channel<russh::client::Msg>, russh::Error>>,
+    open_timeout: Duration,
+) {
+    match tokio::time::timeout(open_timeout, &mut open).await {
+        Ok(Ok(Ok(channel))) => close_channel(&channel, open_timeout).await,
+        Ok(_) => {}
+        Err(_) => open.abort(),
+    }
+}

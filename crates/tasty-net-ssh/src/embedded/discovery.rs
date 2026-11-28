@@ -15,7 +15,10 @@ use crate::discovery::{
 };
 
 use super::resolve::{Purpose, load, resolve_chain};
-use super::session::{OpenBound, OpenStop, Session, open_within};
+use super::session::{
+    ChannelTimer, OpenBound, OpenStop, Session, SessionChannel, close_channel,
+    open_session_channel, open_within,
+};
 use super::{Bounded, Ctx, Paused, blocking, bounded, run_blocking};
 
 /// The embedded backend's [`RemoteRun`]: one `exec` channel per command.
@@ -229,26 +232,6 @@ fn glob(pattern: &str, name: &str) -> bool {
     go(pattern.as_bytes(), name.as_bytes())
 }
 
-/// Waits for a channel open that [`exec`] gave up on and closes the channel if it opens. Both
-/// tasks end with the session at the latest, and an open the server never answers is given up
-/// once more `open_timeout` has gone by: its task is stopped, so unanswered opens do not pile
-/// up on a session a tunnel keeps open (docs/design/ssh-backends.md
-/// `embedded.channel_open_timeout`).
-async fn close_late(
-    mut open: tokio::task::JoinHandle<Result<russh::Channel<russh::client::Msg>, russh::Error>>,
-    open_timeout: Duration,
-) {
-    match tokio::time::timeout(open_timeout, &mut open).await {
-        Ok(Ok(Ok(channel))) => {
-            let _closed = tokio::time::timeout(open_timeout, channel.close())
-                .await
-                .is_ok_and(|sent| sent.is_ok());
-        }
-        Ok(_) => {}
-        Err(_) => open.abort(),
-    }
-}
-
 /// Runs `command` on a new `session` channel and reads it to its end within `budget`, stopping
 /// on cancellation.
 async fn exec(
@@ -262,48 +245,21 @@ async fn exec(
 ) -> Result<Bounded<Output>, SshBackendError> {
     let paused = Paused::default();
     let deadline = Instant::now() + budget;
-    let handle = std::sync::Arc::clone(&session.conn.handle);
-    // The open runs as its own task, so a confirmation that comes after this wait gave up
-    // (the open timeout, the deadline, a cancel) still gets its channel closed: the session
-    // may stay open for a tunnel, and russh drops a late confirmation without a close.
-    let mut open = tokio::spawn(async move { handle.channel_open_session().await });
-    let opened = bounded(
-        tokio::time::timeout(open_timeout, &mut open),
+    // `ChannelTimeout` is not applied yet (shown as `not_supported` by the resolution).
+    let opened = open_session_channel(
+        std::sync::Arc::clone(&session.conn.handle),
+        ChannelTimer::NONE,
+        open_timeout,
         deadline,
         &paused,
         cancel.as_ref(),
         limits.poll_max,
     )
-    .await;
-    let gave_up = |open: tokio::task::JoinHandle<_>| {
-        tokio::spawn(close_late(open, open_timeout));
-    };
-    let mut channel = match opened {
-        Bounded::Done(Ok(Ok(Ok(channel)))) => channel,
-        Bounded::Done(Ok(Ok(Err(e)))) => {
-            return Err(SshBackendError::Session {
-                detail: format!("the exec channel did not open: {e}"),
-            });
-        }
-        Bounded::Done(Ok(Err(e))) => {
-            return Err(SshBackendError::Session {
-                detail: format!("the exec channel open stopped: {e}"),
-            });
-        }
-        Bounded::Done(Err(_)) => {
-            gave_up(open);
-            return Err(SshBackendError::Session {
-                detail: format!("the exec channel did not open in {open_timeout:?}"),
-            });
-        }
-        Bounded::Expired => {
-            gave_up(open);
-            return Ok(Bounded::Expired);
-        }
-        Bounded::Cancelled => {
-            gave_up(open);
-            return Ok(Bounded::Cancelled);
-        }
+    .await?;
+    let SessionChannel { mut channel, timer } = match opened {
+        Bounded::Done(opened) => opened,
+        Bounded::Expired => return Ok(Bounded::Expired),
+        Bounded::Cancelled => return Ok(Bounded::Cancelled),
     };
     // The `env` and `exec` requests, then the output, all under the deadline and the cancel.
     let body = async {
@@ -335,7 +291,7 @@ async fn exec(
                 *over = true;
             }
         };
-        while let Some(msg) = channel.wait().await {
+        while let Some(msg) = timer.wait(&mut channel).await {
             match msg {
                 ChannelMsg::Data { data } => {
                     keep(
@@ -367,13 +323,9 @@ async fn exec(
         Ok(out)
     };
     let done = bounded(body, deadline, &paused, cancel.as_ref(), limits.poll_max).await;
-    // A russh `Channel` sends no close when it drops, and the session may stay open for a
-    // tunnel, so every end (the output's end, an error, a cancel, the deadline, the output
-    // limit) asks the server to close the channel. The request only queues a message; it is
-    // bounded in case the session is stuck.
-    let _closed = tokio::time::timeout(open_timeout, channel.close())
-        .await
-        .is_ok_and(|sent| sent.is_ok());
+    // Every end (the output's end, an error, a cancel, the deadline, the output limit) asks
+    // the server to close the channel.
+    close_channel(&channel, open_timeout).await;
     match done {
         Bounded::Done(Ok(out)) => Ok(Bounded::Done(out)),
         Bounded::Done(Err(e)) => Err(e),
