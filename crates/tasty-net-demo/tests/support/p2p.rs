@@ -22,6 +22,10 @@ pub const READ_TIMEOUT_MS: &str = "10000";
 /// it (an inherited value is removed); a test turns it on for one process with the `env` of
 /// [`P2pScene::listen`].
 pub const UNPAIR_AFTER_OFFER: &str = "TASTY_NET_DEMO_UNPAIR_AFTER_OFFER";
+/// The dialer's test hook of `p2p-link` (its module text): with `1`, an ended attempt waits
+/// for `quit` or the end of stdin. Removed like [`UNPAIR_AFTER_OFFER`]; a test turns it on
+/// with the `env` of [`P2pScene::dial_with`].
+pub const HOLD_ATTEMPT: &str = "TASTY_NET_DEMO_HOLD_ATTEMPT";
 /// How long a `p2p-link` may take to end after `quit`: it detaches, turns P2P off and exits.
 const END_AFTER_QUIT: Duration = Duration::from_secs(30);
 
@@ -43,11 +47,14 @@ pub struct P2pScene {
     devices: Vec<TempDir>,
 }
 
-/// A `p2p-link` command with `args`, without the test hook the test process may have in its
+/// A `p2p-link` command with `args`, without the test hooks the test process may have in its
 /// environment.
 fn link_command(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_p2p-link"));
-    command.args(args).env_remove(UNPAIR_AFTER_OFFER);
+    command
+        .args(args)
+        .env_remove(UNPAIR_AFTER_OFFER)
+        .env_remove(HOLD_ATTEMPT);
     command
 }
 
@@ -146,9 +153,14 @@ impl P2pScene {
 
     /// `p2p-link --dial <target>` on `device`.
     pub fn dial(&mut self, device: &Device, target: &Device) -> Proc {
+        self.dial_with(device, target, &[])
+    }
+
+    /// [`P2pScene::dial`] started with `env`.
+    pub fn dial_with(&mut self, device: &Device, target: &Device, env: &[(&str, &str)]) -> Proc {
         let mut args = vec!["--dial".to_string(), target.id.clone()];
         args.extend(self.common(device));
-        let mut dialer = self.spawn(&format!("dialer-{}", device.name), &args, &[]);
+        let mut dialer = self.spawn(&format!("dialer-{}", device.name), &args, env);
         let ready = dialer.expect_prefix("dialer ready ", P2P_STEP);
         assert_eq!(field(&ready, "device"), Some(device.id.as_str()), "{ready}");
         dialer

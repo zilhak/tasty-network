@@ -11,7 +11,7 @@ mod support;
 
 use std::net::SocketAddr;
 
-use support::p2p::{Device, P2P_STEP, P2pScene, UNPAIR_AFTER_OFFER};
+use support::p2p::{Device, HOLD_ATTEMPT, P2P_STEP, P2pScene, UNPAIR_AFTER_OFFER};
 use support::process::{Proc, log};
 use support::scene::{LOCAL_STEP, decoded};
 use support::table::{read_table, wait_table};
@@ -218,6 +218,74 @@ fn quit_cancels_a_dial_in_progress() {
         dialer.transcript.render()
     );
     drop(dialer);
+    scene.finish();
+}
+
+/// `quit` right after an attempt ended, before the dialer looked at the result (the dialer's
+/// test hook holds the ended attempt until `quit`): a link that came up is detached at once
+/// and the lines sent during the attempt (a large `bulk`) are not run; a refusal keeps its
+/// own line and exit code 3 instead of a cancel.
+#[test]
+fn quit_after_the_attempt_ended() {
+    let mut scene = P2pScene::new();
+
+    // The link came up first.
+    let a = scene.device("a");
+    let b = scene.device("b");
+    let mut listener = scene.listen(&b, &[&a], &[]);
+    let mut dialer = scene.dial_with(&a, &b, &[(HOLD_ATTEMPT, "1")]);
+    dialer.send_line("bulk 1000000000");
+    let held = dialer.expect_prefix("dialer attempt-held ", P2P_STEP);
+    assert_eq!(field(&held, "ok"), Some("true"), "{held}");
+    dialer.send_line("quit");
+    dialer.expect_prefix("dialer connected ", LOCAL_STEP);
+    let detached = dialer.expect_prefix("dialer detached ", LOCAL_STEP);
+    assert_eq!(
+        field(&detached, "finish"),
+        Some("reader_ended"),
+        "{detached}"
+    );
+    dialer.expect_prefix("dialer bye", LOCAL_STEP);
+    let status = dialer.wait_exit(LOCAL_STEP);
+    assert!(status.success(), "{status}\n{}", dialer.transcript.render());
+    dialer.wait_stdout_end(LOCAL_STEP);
+    assert!(
+        !dialer
+            .transcript
+            .lines()
+            .iter()
+            .any(|l| l.starts_with("dialer bulk-") || l == "dialer cancelled"),
+        "no bulk ran and nothing was cancelled:\n{}",
+        dialer.transcript.render()
+    );
+    listener_link_ended(&mut listener);
+
+    // The attempt was refused first.
+    let c = scene.device("c");
+    let d = scene.device("d");
+    let other = scene.device("other");
+    let mut refusing = scene.listen(&d, &[&other], &[]);
+    let mut refused = scene.dial_with(&c, &d, &[(HOLD_ATTEMPT, "1")]);
+    let held = refused.expect_prefix("dialer attempt-held ", P2P_STEP);
+    assert_eq!(field(&held, "ok"), Some("false"), "{held}");
+    refused.send_line("quit");
+    refused.expect_prefix("dialer declined ", LOCAL_STEP);
+    let status = refused.wait_exit(LOCAL_STEP);
+    assert_eq!(status.code(), Some(EXIT_REFUSED), "{held}");
+    refused.wait_stdout_end(LOCAL_STEP);
+    assert!(
+        !refused
+            .transcript
+            .lines()
+            .iter()
+            .any(|l| l == "dialer cancelled" || l == "dialer bye"),
+        "the refusal is no cancel:\n{}",
+        refused.transcript.render()
+    );
+
+    P2pScene::quit(&mut listener, "listener");
+    P2pScene::quit(&mut refusing, "listener");
+    drop((dialer, refused, listener, refusing));
     scene.finish();
 }
 

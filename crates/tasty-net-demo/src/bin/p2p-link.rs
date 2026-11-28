@@ -35,6 +35,9 @@
 //! "paired" only on the first check of each listed device: the `punch_offer` passes and the
 //! QUIC connection that follows is closed with `not_paired` (docs/design/handshake.md "흐름
 //! (P2P 경로)"), the path of a pairing withdrawn in between (`tests/p2p_attach.rs`).
+//! `TASTY_NET_DEMO_HOLD_ATTEMPT=1` makes the dialer's attempt, once it ended (a link or a
+//! failure), print `dialer attempt-held ok=<bool>` and wait until `quit` or the end of stdin
+//! came (at most `--patience-ms`): the order of an attempt that ends just before `quit`.
 //!
 //! ```text
 //! p2p-link --id --key-dir <dir>
@@ -69,7 +72,8 @@
 //! | `dialer bulk-done bytes_sent=<n> bytes_received=<n> chunks=<n> chunk_bytes=<n> sha256_sent=<hex> sha256_received=<hex> match=<bool>` | a `bulk` transfer ended and its echo was read |
 //! | `dialer bulk-failed error=<text>` | a `bulk` transfer did not finish |
 //! | `dialer detached finish=<reader_ended\|drain_cap>` | `detach` (or `quit`) ended the link; whether the link's reader ended within the drain cap after the Detach |
-//! | `dialer cancelled` | `quit` or the end of stdin cancelled the connect or the handshake in progress; exit code 0 |
+//! | `dialer cancelled` | `quit` or the end of stdin cancelled the connect or the handshake in progress; exit code 0. An attempt that failed otherwise first keeps its own line and code; a link that came up first is detached at once, and the stdin lines that came before `quit` are not run |
+//! | `dialer attempt-held ok=<bool>` | the test hook `TASTY_NET_DEMO_HOLD_ATTEMPT` holds the ended attempt |
 //! | `dialer declined error=<text>` | the peer (or the server) declined the pairing; exit code 3 |
 //! | `dialer closed reason=<close code name>` | the peer closed the new connection with a code (`not_paired`); exit code 3 |
 //! | `dialer rejected reason=<reason>` | the peer refused with a refusing ACK; exit code 3 |
@@ -130,6 +134,8 @@ const STDIN_LOOK: Duration = Duration::from_millis(50);
 const EVENT_WAIT: Duration = Duration::from_secs(1);
 /// The test hook of the module text.
 const UNPAIR_AFTER_OFFER_ENV: &str = "TASTY_NET_DEMO_UNPAIR_AFTER_OFFER";
+/// The dialer's test hook of the module text.
+const HOLD_ATTEMPT_ENV: &str = "TASTY_NET_DEMO_HOLD_ATTEMPT";
 
 /// The peer (or the server) refused: no point in connecting again.
 const EXIT_REFUSED: u8 = 3;
@@ -576,10 +582,15 @@ fn dial_link(
     let dial = DialConfig::new(key, instance_id).with_timeouts(timeouts);
     let lines = stdin_lines();
     let cancel = AttemptCancel::new();
+    let hold = std::env::var_os(HOLD_ATTEMPT_ENV).is_some_and(|v| v == "1");
     let attempt = || {
-        connect(&transport, target, patience, &cancel)
+        let linked = connect(&transport, target, patience, &cancel)
             .map_err(HandshakeError::Connect)
-            .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &cancel))
+            .and_then(|conn| dial_handshake(conn, &dial, Holder::Dialer, None, &cancel));
+        if hold {
+            hold_attempt(&linked, &cancel, patience);
+        }
+        linked
     };
     let Attempted {
         linked,
@@ -588,7 +599,9 @@ fn dial_link(
     } = attempt_reading_stdin(attempt, &lines, &cancel, &end);
     let mut link = match linked {
         Ok(link) => link,
-        Err(_) if quit => {
+        // Only a cancel is the end `quit` asked for: an attempt that failed before (a refusal
+        // included) keeps its own line and exit code.
+        Err(error) if quit && cancelled(&error) => {
             emit("dialer cancelled");
             drop(transport);
             end.close();
@@ -624,8 +637,13 @@ fn dial_link(
             }
         }
     });
-    // A `quit` (or the end of stdin) during the attempt skips the lines.
-    let lines = (!quit).then_some(lines);
+    // A `quit` (or the end of stdin) during the attempt ends a link that came up all the same
+    // (the handshake had made it before the cancel), without the lines that came before it.
+    let (early, lines) = if quit {
+        (Vec::new(), None)
+    } else {
+        (early, Some(lines))
+    };
     for line in early.into_iter().chain(lines.into_iter().flatten()) {
         if line == "quit" {
             break;
@@ -672,6 +690,28 @@ fn dial_link(
     end.close();
     emit("dialer bye");
     ExitCode::SUCCESS
+}
+
+/// Whether `error` is a cancelled attempt: in the connect (its retries included) or in the
+/// handshake.
+fn cancelled(error: &HandshakeError) -> bool {
+    match error {
+        HandshakeError::Cancelled | HandshakeError::Connect(ConnectError::Cancelled) => true,
+        HandshakeError::Connect(ConnectError::P2p(p2p)) => {
+            matches!(p2p.connect_error(), Some(P2pConnectError::Cancelled))
+        }
+        _ => false,
+    }
+}
+
+/// The test hook of the module text: prints that the attempt ended and waits until `quit` (or
+/// the end of stdin) cancelled it, at most `patience`.
+fn hold_attempt(linked: &Result<Link, HandshakeError>, cancel: &AttemptCancel, patience: Duration) {
+    emit(&format!("dialer attempt-held ok={}", linked.is_ok()));
+    let started = Instant::now();
+    while !cancel.is_cancelled() && started.elapsed() < patience {
+        std::thread::sleep(STDIN_LOOK);
+    }
 }
 
 /// What [`attempt_reading_stdin`] got.
