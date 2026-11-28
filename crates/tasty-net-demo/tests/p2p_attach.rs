@@ -26,14 +26,15 @@ const LISTENER_INSTANCE: &str = "p2p listener";
 const EXIT_REFUSED: i32 = 3;
 
 /// A listener paired with the dialer and a dialer whose link is up: the `dialer connected`
-/// line.
+/// line. Fields drop in their order: when a test fails, both processes are killed before the
+/// scene shuts the server down and removes the key directories.
 struct Linked {
-    scene: P2pScene,
-    a: Device,
-    b: Device,
     dialer: Proc,
     listener: Proc,
+    a: Device,
+    b: Device,
     connected: String,
+    scene: P2pScene,
 }
 
 fn linked() -> Linked {
@@ -59,12 +60,12 @@ fn linked() -> Linked {
     assert_eq!(field(&attached, "client"), Some("1"), "{attached}");
     assert_eq!(field(&attached, "peer"), Some(a.id.as_str()), "{attached}");
     Linked {
-        scene,
-        a,
-        b,
         dialer,
         listener,
+        a,
+        b,
         connected,
+        scene,
     }
 }
 

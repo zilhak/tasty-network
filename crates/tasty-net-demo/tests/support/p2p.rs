@@ -28,8 +28,10 @@ pub struct Device {
 }
 
 /// One test's server, devices and processes. Every process it starts is checked at the end.
-/// When a test fails before [`P2pScene::finish`], the test's [`Proc`]s are killed as they
-/// drop, then the server is shut down (bounded) and the key directories are removed.
+/// A test keeps its [`Proc`]s so that they drop before the scene (locals declared after it,
+/// struct fields declared before it): when the test fails before [`P2pScene::finish`], its
+/// processes are killed as they drop, then the server is shut down (bounded) and the key
+/// directories are removed.
 pub struct P2pScene {
     server: Option<Rendezvous>,
     tracked: Vec<(String, u32)>,
