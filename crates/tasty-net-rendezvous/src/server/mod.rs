@@ -9,16 +9,17 @@ mod state;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use quinn::crypto::rustls::QuicServerConfig;
 use tasty_net_identity::{DeviceId, DeviceKey};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -194,6 +195,68 @@ struct Inner {
     queue_full: Arc<std::sync::atomic::AtomicU64>,
     pending: AtomicUsize,
     addrs: ServerAddrs,
+    connection_tasks: Arc<Tasks>,
+}
+
+/// The tasks of the connections: the server's own (handshake and `hello`, reader, writer,
+/// monitor) and the drivers quinn spawns for the endpoint and each connection, which hold the
+/// sockets. [`Server::shutdown`] ends what is left of them once `shutdown_timeout` passed.
+struct Tasks(Mutex<Option<JoinSet<()>>>);
+
+impl fmt::Debug for Tasks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tasks").finish_non_exhaustive()
+    }
+}
+
+impl Tasks {
+    fn new() -> Self {
+        Tasks(Mutex::new(Some(JoinSet::new())))
+    }
+
+    /// Run `task`; after [`Tasks::end`] it is dropped without running.
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut set = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = set.as_mut() {
+            // Finished tasks leave the set here, so it holds only the running ones.
+            while set.try_join_next().is_some() {}
+            set.spawn(task);
+        }
+    }
+
+    /// Abort every task and wait until each has stopped.
+    async fn end(&self) {
+        let set = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(mut set) = set {
+            set.abort_all();
+            while set.join_next().await.is_some() {}
+        }
+    }
+}
+
+/// quinn's tokio runtime with the tasks it spawns kept in [`Tasks`].
+#[derive(Debug)]
+struct QuinnRuntime(Arc<Tasks>);
+
+impl quinn::Runtime for QuinnRuntime {
+    fn new_timer(&self, at: std::time::Instant) -> Pin<Box<dyn quinn::AsyncTimer>> {
+        quinn::TokioRuntime.new_timer(at)
+    }
+
+    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        self.0.spawn(future);
+    }
+
+    fn wrap_udp_socket(
+        &self,
+        socket: std::net::UdpSocket,
+    ) -> io::Result<Arc<dyn quinn::AsyncUdpSocket>> {
+        quinn::TokioRuntime.wrap_udp_socket(socket)
+    }
+
+    fn now(&self) -> std::time::Instant {
+        quinn::TokioRuntime.now()
+    }
 }
 
 /// One connection counted in `Inner::pending` until it is dropped.
@@ -473,6 +536,7 @@ impl Server {
             source: Source::Computed,
         });
         let demux_counters = Arc::<DemuxCounters>::default();
+        let connection_tasks = Arc::new(Tasks::new());
         let inner = Arc::new(Inner {
             params,
             entries,
@@ -488,13 +552,14 @@ impl Server {
             queue_full: Arc::default(),
             pending: AtomicUsize::default(),
             addrs,
+            connection_tasks: connection_tasks.clone(),
         });
         let socket = DemuxSocket::with_counters(io.primary.clone(), inner.clone(), demux_counters);
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             endpoint_config,
             Some(server_config),
             Arc::new(socket),
-            Arc::new(quinn::TokioRuntime),
+            Arc::new(QuinnRuntime(connection_tasks)),
         )
         .map_err(StartError::Bind)?;
 
@@ -560,11 +625,23 @@ impl Server {
         self.inner.key_id
     }
 
-    /// Close every connection with `closed` and stop.
+    /// Close every connection with `closed` and stop. The connections get `shutdown_timeout`
+    /// to finish closing (docs/design/rendezvous.md "서버 종료"); then what is left of them and
+    /// of their tasks ends, and the server's sockets are given up when this returns.
     pub async fn shutdown(mut self) {
         self.stop();
         self.tasks.clear();
-        self.endpoint.wait_idle().await;
+        let limit = self.inner.params.shutdown_timeout;
+        if tokio::time::timeout(limit, self.endpoint.wait_idle())
+            .await
+            .is_err()
+        {
+            info!("connections still closing at shutdown_timeout were dropped");
+        }
+        self.inner.connection_tasks.end().await;
+        // The registrations hold their connections, and through them the primary socket,
+        // which holds the server state: an ended monitor no longer drops its registration.
+        *self.inner.state() = State::new();
     }
 
     /// Close every connection and abort the server's tasks and the punch timers.
@@ -739,7 +816,9 @@ async fn accept_loop(inner: Arc<Inner>, endpoint: quinn::Endpoint) {
             continue;
         }
         let pending = Pending(inner.clone());
-        tokio::spawn(connection(inner.clone(), incoming, pending));
+        inner
+            .connection_tasks
+            .spawn(connection(inner.clone(), incoming, pending));
     }
 }
 
@@ -906,8 +985,12 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
     debug!(device = %device, reflexive = %reflexive, stun = ?advertised, "registered addresses");
     drop(tx);
 
-    tokio::spawn(writer(conn.clone(), send, rx, p.max_message_bytes));
-    tokio::spawn(reader(inner.clone(), conn.clone(), device, conn_id, recv));
+    inner
+        .connection_tasks
+        .spawn(writer(conn.clone(), send, rx, p.max_message_bytes));
+    inner
+        .connection_tasks
+        .spawn(reader(inner.clone(), conn.clone(), device, conn_id, recv));
     monitor(inner.clone(), conn, device, conn_id, reflexive).await;
 }
 

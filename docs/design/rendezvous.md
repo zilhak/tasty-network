@@ -159,6 +159,12 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 - 서버가 절대 갖지 않는 것: 기기 사이 데이터(중계 경로가 없다), 연결 토큰 원문(SSH 경로의 토큰이며 P2P와 서버에는 보내지 않는다, [기기 키·토큰](identity.md)), 페어링 목록, 기기 개인키, handshake v2 내용.
 - 로그: 기본 수준에서 기기 ID와 사건 종류(등록, 펀칭 요청·결과, 종료 코드)를 남기고 IP 주소와 후보 주소는 남기지 않는다. 주소는 디버그 수준에서만 찍는다.
 
+### 서버 종료
+
+- `Server::shutdown()`은 모든 연결을 `closed`로 닫고, 연결이 닫기를 마칠 때까지(quinn `Endpoint::wait_idle`) 기다린다. 기다림의 상한은 `shutdown_timeout`이다. 상한이 지나면 남은 연결과 그 작업(서버의 연결 작업과 quinn이 띄운 endpoint·연결 driver)을 끝내고, 돌아올 때 서버의 소켓을 놓는다. 실행 파일의 종료 신호 처리도 이 함수를 부른다.
+- 상한이 필요한 까닭: 기기가 첫 패킷을 보내기 전에 닫으면 그 기기의 첫 Initial에는 CONNECTION_CLOSE만 든다. 고정한 quinn-proto(0.11.19)는 이 첫 패킷을 받아 연결을 바로 draining으로 두는데, 이 경로는 닫기 타이머(3 PTO)를 걸지 않고 첫 패킷이 건 idle 타이머만 남긴다. 이미 닫힌 상태라 endpoint의 close도 그 연결에 아무 일을 하지 않고, 서버 코드는 그 연결의 핸들을 받지 못한다(handshake 실패로 끝난다). 그래서 그 연결은 `idle_timeout`(기본 45 s)까지 남고, 상한 없이 기다리면 종료도 그만큼 걸린다. 서버 쪽에서 그 연결만 바로 끝낼 방법이 없으므로 기다림에 상한을 두고, 상한 뒤에는 작업을 끝내 소켓과 작업이 `idle_timeout`까지 남지 않게 한다.
+- 시험: `tests/server.rs`의 `shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet`.
+
 ### 알려진 한계
 
 - 요청 이력 표의 포화: 기기 ID별 `punch_requests_per_minute` 이력 표가 `max_devices`만큼 차 있을 때 새 ID가 요청하면, 창 안 이력만 남기면서 이미 연결을 끊은 ID의 이력도 함께 지운다. 지워진 ID가 같은 창 안에 다시 등록해 요청하면 앞선 요청이 합산되지 않는다(그 창 하나의 한도만큼 더 요청할 수 있다).
@@ -204,6 +210,7 @@ iroh 설계 단계의 relay 모드(`punch-only`·`relay-fallback`), 수신 상�
 | `stun_per_source_per_second` | 50 | 출발 주소마다. 판별 한 번은 많아야 12개(대상 4 × 3번). 세는 창은 1초(키의 단위)이고 설정 키가 아니다. `max_stun_sources`도 같은 창으로 센다 |
 | `max_stun_sources` | 65536 | 한 창(1초)에 세는 출발 주소의 수. 항목 하나가 수십 바이트라 몇 MiB 안이다. 넘으면 새 출발 주소의 요청은 답하지 않고 센다(`Server::status()`·주기 로그의 `stun_sources_full`). 창이 바뀌면 계수표를 새로 만들어 메모리를 돌려준다 |
 | `status_log_interval` | 60 s | 운영자가 상태를 보는 주기 |
+| `shutdown_timeout` | 3 s | 종료가 연결이 닫기를 마치기를 기다리는 상한(위 "서버 종료"). RTT를 아직 재지 못한 연결의 닫기 기간은 3 PTO, 기본 `quic.initial_rtt` 333 ms에서 약 3 s(PTO = RTT + 4 × RTT/2)라 정상 연결은 그 안에 끝난다. 0이면 기다리지 않는다 |
 | `quic.max_bidi_streams` | 2 | 기기가 여는 조정 스트림 하나와, 둘째 스트림을 받아 `malformed`로 닫을 자리 하나. 1이면 둘째 스트림이 열리지 못하고 기기 쪽에서 막혀 서버가 규칙 위반을 볼 수 없다(quinn `max_concurrent_bidi_streams`) |
 | `quic.max_uni_streams` | 0 | 단방향 스트림을 쓰지 않는다(quinn `max_concurrent_uni_streams`) |
 

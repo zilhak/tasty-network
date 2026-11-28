@@ -277,6 +277,7 @@ pub static DEFAULTS: &[Setting] = &[
     entry("stun_per_source_per_second", Kind::Count, Value::Count(50)),
     entry("max_stun_sources", Kind::Count, Value::Count(65_536)),
     entry("status_log_interval", Kind::Duration, secs(60)),
+    entry("shutdown_timeout", Kind::Duration, secs(3)),
     entry("quic.max_bidi_streams", Kind::Count, Value::Count(2)),
     entry("quic.max_uni_streams", Kind::Count, Value::Count(0)),
     // docs/design/p2p.md "의존성이 노출하는 값".
@@ -777,6 +778,8 @@ pub struct ServerParams {
     pub max_stun_sources: usize,
     /// `status_log_interval`.
     pub status_log_interval: Duration,
+    /// `shutdown_timeout`.
+    pub shutdown_timeout: Duration,
     /// The window of `punch_requests_per_minute`.
     pub punch_request_window: Duration,
     /// The window of `stun_per_source_per_second`.
@@ -1182,6 +1185,7 @@ impl Resolver<'_> {
             stun_per_source_per_second: self.number("stun_per_source_per_second"),
             max_stun_sources: self.fits("max_stun_sources")?,
             status_log_interval: self.nonzero("status_log_interval")?,
+            shutdown_timeout: self.duration("shutdown_timeout"),
             punch_request_window: ONE_MINUTE,
             stun_rate_window: ONE_SECOND,
             quic,
@@ -1906,7 +1910,12 @@ mod tests {
         let secs = |n: u64| Value::Duration(Duration::from_secs(n));
         let longest = u64::from(u32::MAX);
         // A time over 2^32 - 1 s is refused; the longest time is accepted.
-        for key in ["hello_timeout", "status_log_interval", "quic.cid_lifetime"] {
+        for key in [
+            "hello_timeout",
+            "status_log_interval",
+            "shutdown_timeout",
+            "quic.cid_lifetime",
+        ] {
             let mut s = local();
             s.set(key, secs(longest + 1)).unwrap();
             let err = s.resolve().expect_err(key);

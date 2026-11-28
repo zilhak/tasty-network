@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quinn::crypto::rustls::QuicClientConfig;
 use tasty_net_identity::{DeviceId, DeviceKey};
@@ -1381,6 +1381,54 @@ async fn stun_port_errors_do_not_hold_the_executor() {
         .expect("shutdown ends in time");
 }
 
+/// A device that closes before its first packet goes out sends one Initial that holds only
+/// its CONNECTION_CLOSE. quinn then keeps a server connection the endpoint's close does not
+/// end, until the idle timeout (45 s by default). The shutdown still ends at
+/// `shutdown_timeout` and gives the primary port up (docs/design/rendezvous.md "서버 종료").
+#[tokio::test]
+async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet() {
+    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let bound = Duration::from_millis(500);
+    let mut s = local_settings();
+    s.set("shutdown_timeout", Value::Duration(bound)).unwrap();
+    let server = start(s).await;
+    let primary = server.addrs().primary;
+    let endpoint = client_endpoint();
+    let crypto = tls::client_config(
+        &key(1),
+        server.public_key(),
+        ALPN_RENDEZVOUS,
+        TlsOptions::default(),
+    )
+    .unwrap();
+    let config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+    // Nothing is awaited in between: on this one thread the connection's driver has not run
+    // yet, so the close comes before its first packet.
+    let connecting = endpoint
+        .connect_with(config, primary, tls::SERVER_NAME)
+        .unwrap();
+    endpoint.close(0u32.into(), b"");
+    drop(connecting);
+    eventually("the server takes the handshake and sees it end", || {
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("handshake failed"))
+    })
+    .await;
+    let started = Instant::now();
+    tokio::time::timeout(DEADLINE, server.shutdown())
+        .await
+        .expect("shutdown ends in time");
+    let took = started.elapsed();
+    // The leftover connection did not finish closing by itself: the bound ended it.
+    assert!(took >= bound, "{took:?}");
+    std::net::UdpSocket::bind(primary).expect("the primary port is free again");
+}
+
 #[tokio::test]
 async fn mtu_discovery_follows_the_socket() {
     let mtu = |server: &Server| {
@@ -1679,9 +1727,16 @@ async fn wrong_alpn_fails_in_tls() {
     assert_eq!(server.status().registrations_total, 0);
 }
 
-/// A subscriber that keeps each event as one line.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<String>>>);
+/// A subscriber that keeps each event of this crate as one line, up to a level (`INFO` by
+/// default).
+#[derive(Clone)]
+struct Capture(Arc<Mutex<Vec<String>>>, tracing::Level);
+
+impl Default for Capture {
+    fn default() -> Self {
+        Capture(Arc::default(), tracing::Level::INFO)
+    }
+}
 
 struct Line(String);
 
@@ -1697,7 +1752,7 @@ impl tracing::field::Visit for Line {
 
 impl tracing::Subscriber for Capture {
     fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-        m.target().starts_with("tasty_net_rendezvous") && *m.level() <= tracing::Level::INFO
+        m.target().starts_with("tasty_net_rendezvous") && *m.level() <= self.1
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
