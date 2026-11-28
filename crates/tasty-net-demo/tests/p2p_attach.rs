@@ -18,6 +18,7 @@ use support::table::{read_table, wait_table};
 use tasty_net_demo::Snapshot;
 use tasty_net_demo::field;
 use tasty_net_demo::table::{EntryView, TableView};
+use tasty_net_p2p::P2pCloseReason;
 
 /// The listener's instance ID; a space in it checks that the dialer's line encodes it.
 const LISTENER_INSTANCE: &str = "p2p listener";
@@ -364,6 +365,8 @@ fn connection_table_reports_p2p() {
 
     for (entry, side, peer) in [(a, "dialer", &linked.b), (b, "acceptor", &linked.a)] {
         assert_eq!(entry.value("path"), "p2p_udp", "{entry:#?}");
+        // One link whose holder is the dialer (docs/design/transport.md "연결 목록").
+        assert_eq!(entry.value("direction"), "forward", "{entry:#?}");
         assert_eq!(entry.value("local_side"), side, "{entry:#?}");
         assert_eq!(entry.value("peer_device"), peer.id, "{entry:#?}");
         assert_eq!(entry.value("via"), "rendezvous", "{entry:#?}");
@@ -424,10 +427,18 @@ fn connection_table_reports_p2p() {
     detach(&mut linked.dialer);
     listener_link_ended(&mut linked.listener);
     // The dialer closed it after its last channel (`ended`); the listener saw the close with
-    // code 0 (`p2p_closed`, docs/design/transport.md "P2P의 닫기 범위").
-    for (proc, who, id, want) in [
-        (&mut linked.dialer, "dialer", a_id, "ended"),
-        (&mut linked.listener, "listener", b_id, "p2p_closed"),
+    // code 0 (`p2p_closed` with the code's name `closed`, docs/design/transport.md "P2P의 닫기
+    // 범위").
+    let closed_text = format!("p2p_closed: {}", P2pCloseReason::Closed.name());
+    for (proc, who, id, want, want_text) in [
+        (&mut linked.dialer, "dialer", a_id, "ended", "ended"),
+        (
+            &mut linked.listener,
+            "listener",
+            b_id,
+            "p2p_closed",
+            closed_text.as_str(),
+        ),
     ] {
         let view = wait_table(proc, who, "the entry's end", |view| {
             view.entry(id)
@@ -441,6 +452,7 @@ fn connection_table_reports_p2p() {
         ));
         if !listener_end_replaced(who, entry) {
             assert_eq!(entry.value("last_cause"), want, "{who}: {entry:#?}");
+            assert_eq!(entry.value("cause_text"), want_text, "{who}: {entry:#?}");
         }
     }
     P2pScene::quit(&mut linked.dialer, "dialer");
