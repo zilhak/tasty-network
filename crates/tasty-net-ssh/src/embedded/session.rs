@@ -912,14 +912,24 @@ enum Candidate {
     },
 }
 
-/// The public key of a key file without its passphrase: `<file>.pub`, else the public part of
-/// the file, which the OpenSSH format keeps readable when the key is encrypted
-/// (`sshkey_load_public`, `authfile.c`).
+/// The public key of a key file without its passphrase: the file itself when it is a public
+/// key (an `IdentityFile` may name the `.pub` file of a key the agent holds), else
+/// `<file>.pub`, else the public part of the file, which the OpenSSH format keeps readable when
+/// the key is encrypted (`sshkey_load_public`, `authfile.c`).
 fn file_public(path: &Path) -> Option<russh::keys::PublicKey> {
+    // `sshkey_load_public` (`authfile.c`): the file itself as a public key, then `<file>.pub`,
+    // then the public part of the private key file.
+    let text = std::fs::read_to_string(path).ok();
+    if let Some(public) = text
+        .as_deref()
+        .and_then(|t| russh::keys::PublicKey::from_openssh(t.trim()).ok())
+    {
+        return Some(public);
+    }
     if let Some(public) = read_public(path) {
         return Some(public);
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = text?;
     match PrivateKey::from_openssh(text.trim()) {
         Ok(key) => Some(key.public_key().clone()),
         Err(_) => russh::keys::decode_secret_key(&text, None)

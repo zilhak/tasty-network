@@ -936,3 +936,46 @@ fn a_failed_authentication_carries_the_note_of_a_key_file_not_used() {
         other => panic!("not an authentication failure: {other:?}"),
     }
 }
+
+/// An `IdentityFile` that names a public key file finds the agent's key by that public key
+/// (`sshkey_load_public` reads the named file first), with `IdentitiesOnly`.
+#[cfg(unix)]
+#[test]
+fn an_identity_file_that_names_a_public_key_signs_with_the_agent() {
+    use crate::embedded::test_server::{AuthRule, client_key};
+    let dir = Dir::new("agent-pub");
+    let socket = dir.0.join("a.sock");
+    let private = dir.0.join("id_test");
+    let public = dir.0.join("named.pub");
+    let (from, to) = (
+        format!("\"{}\"", private.display()),
+        format!("\"{}\"", public.display()),
+    );
+    let agent_line = format!("IdentityAgent \"{}\"", socket.display());
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::Key,
+        |c| {
+            c.replace(&from, &to)
+                .replace("IdentityAgent none", &agent_line)
+        },
+        Arc::new(CountingPrompt::default()),
+    );
+    let config = std::fs::read_to_string(dir.0.join("config")).expect("config");
+    assert!(
+        config.contains(&to),
+        "the configuration names the public file"
+    );
+    std::fs::write(
+        &public,
+        client_key()
+            .public_key()
+            .to_openssh()
+            .expect("encode public"),
+    )
+    .expect("public file");
+    // No private key file: only the agent can sign.
+    std::fs::remove_file(&private).expect("remove the private file");
+    server.agent(&socket, &[client_key()]);
+    open_session(&connector).expect("the agent signs for the named public key");
+}
