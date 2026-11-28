@@ -217,10 +217,18 @@ fn quit_cancels_a_dial_in_progress() {
 
 /// A bulk channel under the link carries more than many bulk chunks: the listener reads the
 /// same number of file bytes and chunks with the same SHA-256 as the dialer sent, and the
-/// dialer reads them all back unchanged. The link still echoes afterwards.
+/// dialer reads them all back unchanged. The link still echoes afterwards. A size whose chunks
+/// do not fit the chunk number is refused first.
 #[test]
 fn bulk_transfer_matches_bytes() {
     let mut linked = linked();
+    // A size whose chunk count does not fit the chunk number (u32, 64 KiB chunks) is refused
+    // before a bulk channel opens.
+    let too_large = (u64::from(u32::MAX) + 1) * 64 * 1024;
+    linked.dialer.send_line(&format!("bulk {too_large}"));
+    let refused = linked.dialer.expect_prefix("dialer bulk-", LOCAL_STEP);
+    assert!(refused.starts_with("dialer bulk-failed "), "{refused}");
+
     // Not a multiple of the chunk size, so the last chunk is a short one.
     let size: u64 = 4 * 1024 * 1024 + 12_345;
     linked.dialer.send_line(&format!("bulk {size}"));

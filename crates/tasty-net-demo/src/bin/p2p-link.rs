@@ -19,7 +19,8 @@
 //!   and the handshake in progress (exit code 0). Once the link is up, stdin lines drive it: `send <text>` sends a Data
 //!   frame and the echo is printed; `bulk <bytes>` opens a bulk channel under the link, sends
 //!   that many file bytes (a fixed pseudo-random sequence) in chunks of [`BULK_CHUNK_BYTES`],
-//!   reads the echo back and compares; `detach` ends the link with a Detach and keeps the
+//!   reads the echo back and compares (a size that needs more than `u32::MAX` chunks is
+//!   refused before the channel opens); `detach` ends the link with a Detach and keeps the
 //!   process up (so the connection table shows the ended entry). A failed link ends the
 //!   dialer: exit code 3 when the peer refused (a pairing the peer or the server declined, a
 //!   connection the peer closed with a code, a refusing ACK), 4 for any other failure.
@@ -55,7 +56,7 @@
 //! | `listener attached client=<n> peer=<device>` | the domain check took an attach link |
 //! | `listener link-ended client=<n> end=<detach\|failure name> finish=<reader_ended\|drain_cap>` | the link's reader ended; whether this end's finish ended before the drain cap |
 //! | `listener bulk-accepted peer=<device>` | a bulk channel under an attach link is up |
-//! | `listener bulk-ended bytes=<n> chunks=<n> sha256=<hex> end=<eof\|failure name\|bad_chunk> finish=<reader_ended\|drain_cap>` | a bulk channel ended; whether this end's finish ended before the drain cap |
+//! | `listener bulk-ended bytes=<n> chunks=<n> sha256=<hex> end=<eof\|failure name\|bad_chunk\|too_large> finish=<reader_ended\|drain_cap>` | a bulk channel ended; whether this end's finish ended before the drain cap |
 //! | `listener request-refused` | a request channel came; it is closed |
 //! | `listener refused reason=<wire reason>` | this end refused a handshake |
 //! | `listener handshake-failed error=<text>` | a handshake failed without a refusal |
@@ -498,8 +499,10 @@ fn serve_bulk(mut bulk: BulkChannel) {
                 match decode_bulk_chunk(&frame.payload) {
                     Some((TRANSFER_ID, seq, file)) if seq == chunks => {
                         digest.update(file);
-                        bytes += file.len();
-                        chunks += 1;
+                        match (bytes.checked_add(file.len()), chunks.checked_add(1)) {
+                            (Some(b), Some(c)) => (bytes, chunks) = (b, c),
+                            _ => break "too_large".to_string(),
+                        }
                     }
                     _ => break "bad_chunk".to_string(),
                 }
@@ -829,6 +832,13 @@ impl Pattern {
 /// Sends `size` file bytes on a new bulk channel under `link` and reads the chunks back.
 /// Returns the `dialer bulk-done` line.
 fn bulk_transfer(link: &Link, size: usize) -> Result<String, String> {
+    // A chunk's number is a u32: refuse a size that needs more chunks before any channel.
+    if u32::try_from(size.div_ceil(BULK_CHUNK_BYTES)).is_err() {
+        return Err(format!(
+            "{size} bytes need more than {} chunks of {BULK_CHUNK_BYTES} bytes",
+            u32::MAX
+        ));
+    }
     let bulk = link.open_bulk(None).map_err(|e| error_chain(&e))?;
     let BulkChannel {
         mut reader,
@@ -854,6 +864,7 @@ fn bulk_transfer(link: &Link, size: usize) -> Result<String, String> {
                     )
                     .map_err(|e| format!("writing chunk {seq}: {e}"))?;
                 left -= len;
+                // At most `u32::MAX` chunks (checked above): this does not overflow.
                 seq += 1;
             }
             writer
@@ -869,8 +880,10 @@ fn bulk_transfer(link: &Link, size: usize) -> Result<String, String> {
             Ok(frame) if frame.tag == StreamTag::Data => match decode_bulk_chunk(&frame.payload) {
                 Some((TRANSFER_ID, seq, file)) if seq == chunks => {
                     digest.update(file);
-                    received += file.len();
-                    chunks += 1;
+                    match (received.checked_add(file.len()), chunks.checked_add(1)) {
+                        (Some(r), Some(c)) => (received, chunks) = (r, c),
+                        _ => break Err("more came back than a count holds".to_string()),
+                    }
                 }
                 _ => break Err(format!("chunk {chunks} came back changed")),
             },
