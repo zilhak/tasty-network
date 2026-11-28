@@ -288,8 +288,8 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
 
 /// Windows has no directory sync through the general file API, and `CreateHardLinkW` takes no
 /// write-through flag (docs/design/identity.md "폴더 동기화"): nothing to do.
-pub(super) fn sync_dir(_dir: &Path, _check: super::DirCheck) -> io::Result<()> {
-    Ok(())
+pub(super) fn sync_dir(_dir: &Path, _check: super::DirCheck) -> io::Result<super::Synced> {
+    Ok(super::Synced::AsChecked)
 }
 
 /// Windows syncs no directory, so it compares no directory ID.

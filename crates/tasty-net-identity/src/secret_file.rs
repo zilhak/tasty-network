@@ -295,22 +295,40 @@ pub(crate) enum DirCheck {
     Ancestor,
 }
 
+/// What a directory sync synced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Synced {
+    /// The directory `check` expected.
+    AsChecked,
+    /// A directory with another ID than the checked one: the path names another directory now,
+    /// and the publication went there, so that directory was synced.
+    #[cfg_attr(windows, allow(dead_code, reason = "Windows syncs no directory"))]
+    Replaced,
+}
+
 /// Make the entries of the directory `dir` durable: a name this crate just published or removed
 /// in it, or a directory it just created in it (docs/design/identity.md "폴더 동기화"). Unix
 /// opens the directory as `check` says and syncs it like the key file (`fsync`, on macOS and
 /// iOS `F_FULLFSYNC`); Windows has no directory sync. The name is in place already, so a
-/// failure, also a directory that is not the expected one, is logged and not returned.
+/// failure is logged and not returned, and so is a synced directory that is not the checked
+/// one.
 pub(crate) fn sync_dir(dir: &Path, check: DirCheck) {
-    if let Err(error) = try_sync_dir(dir, check) {
-        tracing::warn!(
+    match try_sync_dir(dir, check) {
+        Ok(Synced::AsChecked) => {}
+        Ok(Synced::Replaced) => tracing::warn!(
+            dir = %dir.display(),
+            "the secret directory was replaced after it was checked; synced the directory \
+             the path names now"
+        ),
+        Err(error) => tracing::warn!(
             dir = %dir.display(),
             %error,
             "could not sync the secret directory; a power loss may lose its new entries"
-        );
+        ),
     }
 }
 
-fn try_sync_dir(dir: &Path, check: DirCheck) -> io::Result<()> {
+fn try_sync_dir(dir: &Path, check: DirCheck) -> io::Result<Synced> {
     #[cfg(test)]
     fault::record_sync(dir, check)?;
     os::sync_dir(dir, check)
@@ -439,15 +457,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let id = os::dir_id(&std::fs::symlink_metadata(dir.path()).unwrap());
         for check in [DirCheck::Same(id), DirCheck::Created, DirCheck::Ancestor] {
-            os::sync_dir(dir.path(), check).unwrap();
+            assert_eq!(os::sync_dir(dir.path(), check).unwrap(), Synced::AsChecked);
             assert!(os::sync_dir(&dir.path().join("missing"), check).is_err());
         }
     }
 
-    /// What took the place of the checked directory is not synced as if it were that directory.
+    /// A link or a non-directory in place of the checked directory is not synced; another
+    /// directory there is synced and reported as replaced.
     #[cfg(unix)]
     #[test]
-    fn a_directory_sync_refuses_what_replaced_the_directory() {
+    fn a_directory_sync_follows_only_a_directory_that_replaced_the_checked_one() {
         use std::fs;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("keys");
@@ -455,11 +474,22 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let id = os::dir_id(&fs::symlink_metadata(&dir).unwrap());
 
-        // Another directory renamed into its place: another ID.
+        // Another directory renamed into its place: another ID. The publication goes by the
+        // path, so that directory is the one to sync; the sync tells it was replaced.
         fs::rename(&dir, &old).unwrap();
         fs::create_dir(&dir).unwrap();
-        assert!(os::sync_dir(&dir, DirCheck::Same(id)).is_err());
-        os::sync_dir(&dir, DirCheck::Created).unwrap();
+        fault::take_sync_notes();
+        assert_eq!(
+            try_sync_dir(&dir, DirCheck::Same(id)).unwrap(),
+            Synced::Replaced
+        );
+        let notes = fault::take_sync_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].dir, dir);
+        assert_eq!(
+            os::sync_dir(&dir, DirCheck::Created).unwrap(),
+            Synced::AsChecked
+        );
 
         // A link to the checked directory: refused at the last element, even with its ID,
         // except for the existing ancestor, which may be a link.
@@ -467,7 +497,10 @@ mod tests {
         std::os::unix::fs::symlink(&old, &dir).unwrap();
         assert!(os::sync_dir(&dir, DirCheck::Same(id)).is_err());
         assert!(os::sync_dir(&dir, DirCheck::Created).is_err());
-        os::sync_dir(&dir, DirCheck::Ancestor).unwrap();
+        assert_eq!(
+            os::sync_dir(&dir, DirCheck::Ancestor).unwrap(),
+            Synced::AsChecked
+        );
 
         // A FIFO: refused, and the open does not wait for a writer.
         fs::remove_file(&dir).unwrap();

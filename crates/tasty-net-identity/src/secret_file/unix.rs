@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use super::{CreateFailure, DirCheck, DirFailure, OpenFailure};
+use super::{CreateFailure, DirCheck, DirFailure, OpenFailure, Synced};
 use crate::error::UnsafeReason;
 use crate::settings::IdentitySettings;
 
@@ -68,10 +68,11 @@ pub(super) fn dir_id(meta: &fs::Metadata) -> DirId {
 
 /// Sync the directory `dir` through a handle opened on it. `O_DIRECTORY` refuses anything else
 /// that took its place, and `O_NONBLOCK` keeps such an open from waiting (a FIFO); `O_NOFOLLOW`
-/// refuses a link at the last element unless `check` is the existing ancestor. A checked
-/// directory must also have its ID. `File::sync_all` is `fsync`, and on macOS and iOS
-/// `fcntl(F_FULLFSYNC)`, the same as for the key file.
-pub(super) fn sync_dir(dir: &Path, check: DirCheck) -> io::Result<()> {
+/// refuses a link at the last element unless `check` is the existing ancestor. A directory
+/// with another ID than the checked one is still synced, because the publication went by the
+/// path to that directory, and is reported as [`Synced::Replaced`]. `File::sync_all` is
+/// `fsync`, and on macOS and iOS `fcntl(F_FULLFSYNC)`, the same as for the key file.
+pub(super) fn sync_dir(dir: &Path, check: DirCheck) -> io::Result<Synced> {
     let flags = match check {
         DirCheck::Ancestor => libc::O_DIRECTORY | libc::O_NONBLOCK,
         DirCheck::Same(_) | DirCheck::Created => {
@@ -82,14 +83,11 @@ pub(super) fn sync_dir(dir: &Path, check: DirCheck) -> io::Result<()> {
         .read(true)
         .custom_flags(flags)
         .open(dir)?;
-    if let DirCheck::Same(id) = check
-        && file_id(&file)? != id
-    {
-        return Err(io::Error::other(
-            "the directory was replaced after it was checked",
-        ));
+    file.sync_all()?;
+    match check {
+        DirCheck::Same(id) if file_id(&file)? != id => Ok(Synced::Replaced),
+        _ => Ok(Synced::AsChecked),
     }
-    file.sync_all()
 }
 
 /// Create one directory element. An element that appeared meanwhile must be a directory, not a
