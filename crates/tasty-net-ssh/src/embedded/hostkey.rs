@@ -348,8 +348,22 @@ fn host_lines(names: &[String], key: &PublicKey, hash: bool) -> Result<Vec<Strin
         .collect()
 }
 
+/// Serializes the known_hosts records of this process: each one is written as a whole while
+/// no other record of the process writes.
+static RECORD_LOCK: Mutex<()> = Mutex::new(());
+
 /// Appends `lines` to `file`, making its folder when it is missing (`ssh` makes `~/.ssh`).
+/// The lines go out in one buffer and one `write_all`, so two records of this process (and a
+/// record of another program that writes whole lines) do not mix inside a line.
 fn append(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
+    let mut buffer = String::new();
+    for line in lines {
+        buffer.push_str(line);
+        buffer.push('\n');
+    }
+    let _guard = RECORD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(dir) = file.parent()
         && !dir.as_os_str().is_empty()
         && !dir.exists()
@@ -360,9 +374,7 @@ fn append(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(file)?;
-    for line in lines {
-        writeln!(f, "{line}")?;
-    }
+    f.write_all(buffer.as_bytes())?;
     f.flush()
 }
 

@@ -349,3 +349,34 @@ fn the_record_goes_to_the_first_user_file() {
         ""
     );
 }
+
+#[test]
+fn records_from_many_threads_keep_whole_lines() {
+    let dir = Dir::new("concurrent");
+    let file = dir.0.join("known_hosts");
+    let writers: Vec<_> = (0..8u8)
+        .map(|n| {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                for i in 0..25u8 {
+                    let host = format!("h{n}-{i}.example");
+                    let key = ed25519(n.wrapping_mul(31).wrapping_add(i));
+                    let lines = host_lines(&[host], &key, false).expect("lines");
+                    append(&file, &lines).expect("append");
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().expect("writer");
+    }
+    let text = known_file(&dir);
+    assert_eq!(text.lines().count(), 200, "{text}");
+    for line in text.lines() {
+        assert_eq!(line.split(' ').count(), 3, "{line}");
+        assert!(
+            line.starts_with('h') && line.contains(".example ssh-ed25519 "),
+            "{line}"
+        );
+    }
+}
