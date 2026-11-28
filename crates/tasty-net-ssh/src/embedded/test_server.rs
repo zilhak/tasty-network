@@ -51,6 +51,11 @@ pub(crate) struct TestServer {
     host_key: PublicKey,
 }
 
+/// The client key the server lets in.
+pub(crate) fn client_key() -> PrivateKey {
+    key(7)
+}
+
 fn key(seed: u8) -> PrivateKey {
     let pair = Ed25519Keypair::from_seed(&[seed; 32]);
     PrivateKey::new(KeypairData::Ed25519(pair), "tasty-net-ssh-test").expect("test key")
@@ -59,7 +64,7 @@ fn key(seed: u8) -> PrivateKey {
 impl TestServer {
     /// Starts the server and writes the client key it lets in to `client_key` (mode 0600).
     pub(crate) fn start(client_key: &Path, exec: ExecReply, direct: DirectReply) -> Self {
-        let client = key(7);
+        let client = self::client_key();
         let text = client.to_openssh(LineEnding::LF).expect("encode");
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -134,6 +139,31 @@ impl TestServer {
             key.display(),
             known.display()
         )
+    }
+
+    /// Starts an SSH agent on the Unix socket `socket` that holds `keys`.
+    #[cfg(unix)]
+    pub(crate) fn agent(&self, socket: &Path, keys: &[PrivateKey]) {
+        use russh::keys::agent::client::AgentClient;
+        let runtime = self.runtime.as_ref().expect("runtime");
+        let listener = runtime
+            .block_on(async { tokio::net::UnixListener::bind(socket) })
+            .expect("agent socket");
+        let connections = futures::stream::unfold(listener, |listener| async move {
+            let next = listener.accept().await.map(|(stream, _)| stream);
+            Some((next, listener))
+        });
+        runtime.spawn(async move {
+            let _served = russh::keys::agent::server::serve(Box::pin(connections), ())
+                .await
+                .is_ok();
+        });
+        runtime.block_on(async {
+            let mut client = AgentClient::connect_uds(socket).await.expect("agent");
+            for key in keys {
+                client.add_identity(key, &[]).await.expect("add key");
+            }
+        });
     }
 
     /// The `session` channels the server confirmed.

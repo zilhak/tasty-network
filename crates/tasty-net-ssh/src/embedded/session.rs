@@ -843,9 +843,121 @@ async fn default_agent()
     None
 }
 
-/// Public key authentication in the order of `ssh` (`pubkey_prepare`): the key files in order
-/// (signed by the agent when it holds the same key), then the agent's other keys unless
-/// `IdentitiesOnly`.
+/// One public key attempt of the list `ssh` makes (`pubkey_prepare`, `sshconnect2.c`).
+enum Candidate {
+    /// A user certificate: a `CertificateFile`, the `<file>-cert` of a key file (`file`), or
+    /// one the agent holds. The agent signs it when it holds the key, else the key file does.
+    Cert {
+        cert: Box<Certificate>,
+        file: Option<(PathBuf, Origin)>,
+    },
+    /// A key the agent holds, signed by the agent: a key file's, or one of its own.
+    Agent(russh::keys::PublicKey),
+    /// A key file the agent does not hold. It is read (with a passphrase when it asks for one)
+    /// when it is tried. `public` is its public key when it can be read without that.
+    File {
+        path: PathBuf,
+        origin: Origin,
+        public: Option<russh::keys::PublicKey>,
+    },
+}
+
+/// The public key of a key file without its passphrase: `<file>.pub`, else the public part of
+/// the file, which the OpenSSH format keeps readable when the key is encrypted
+/// (`sshkey_load_public`, `authfile.c`).
+fn file_public(path: &Path) -> Option<russh::keys::PublicKey> {
+    if let Some(public) = read_public(path) {
+        return Some(public);
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    match PrivateKey::from_openssh(text.trim()) {
+        Ok(key) => Some(key.public_key().clone()),
+        Err(_) => russh::keys::decode_secret_key(&text, None)
+            .ok()
+            .map(|key| key.public_key().clone()),
+    }
+}
+
+/// Whether two public keys are the same key (the comment is not part of it).
+fn same_key(a: &russh::keys::PublicKey, b: &russh::keys::PublicKey) -> bool {
+    a.key_data() == b.key_data()
+}
+
+/// Whether an RSA key is smaller than `RequiredRSASize` (`sshkey_check_rsa_length`).
+fn too_small(key: &russh::keys::PublicKey, required: u32) -> bool {
+    key.key_data()
+        .rsa()
+        .is_some_and(|rsa| rsa.key_size() < required)
+}
+
+/// The list of `ssh` (`pubkey_prepare`): the `CertificateFile` certificates, the agent's keys
+/// that are key files (in the agent's order), the agent's other keys unless `IdentitiesOnly`,
+/// then the key files the agent does not hold, each followed by its `<file>-cert` when no
+/// `CertificateFile` is given.
+fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
+    use russh::keys::ssh_key::certificate::CertType;
+    let user_cert = |cert: &Certificate| cert.cert_type() == CertType::User;
+    let mut files = Vec::new();
+    for (path, origin) in &plan.identities {
+        files.push(Candidate::File {
+            path: path.clone(),
+            origin: origin.clone(),
+            public: file_public(path),
+        });
+        if plan.try_cert_files
+            && let Some(cert) = read_certificate(path).filter(user_cert)
+        {
+            files.push(Candidate::Cert {
+                cert: Box::new(cert),
+                file: Some((path.clone(), origin.clone())),
+            });
+        }
+    }
+    let mut list: Vec<Candidate> = plan
+        .certificates
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|text| Certificate::from_openssh(text.trim()).ok())
+        .filter(user_cert)
+        .map(|cert| Candidate::Cert {
+            cert: Box::new(cert),
+            file: None,
+        })
+        .collect();
+    let mut matched = Vec::new();
+    let mut others = Vec::new();
+    for id in agent_ids {
+        let candidate = match id {
+            AgentIdentity::PublicKey { key, .. } => {
+                let held = files.iter().position(
+                    |f| matches!(f, Candidate::File { public: Some(p), .. } if same_key(p, key)),
+                );
+                if let Some(at) = held {
+                    files.remove(at);
+                    matched.push(Candidate::Agent(key.clone()));
+                    continue;
+                }
+                Candidate::Agent(key.clone())
+            }
+            AgentIdentity::Certificate { certificate, .. } => Candidate::Cert {
+                cert: Box::new(certificate.clone()),
+                file: None,
+            },
+        };
+        if !plan.identities_only {
+            others.push(candidate);
+        }
+    }
+    list.extend(matched);
+    list.extend(others);
+    list.extend(files);
+    list
+}
+
+/// Public key authentication in the order of `ssh` ([`candidates`]). A key is tried only when
+/// `PubkeyAcceptedAlgorithms` has its signature algorithm; a key file whose public key cannot
+/// be read without its passphrase is judged once it is read. A key file is read when it is
+/// tried, so its passphrase is asked only if no agent key or earlier key got in.
 async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("public key authentication: {e}"),
@@ -859,130 +971,136 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
         plan.pubkey_accepted
             .contains(&signature_name(alg, rsa_hash))
     };
-    let mut last = Step::Failed(None);
     let mut agent = agent(plan).await;
-    let mut used_agent: Vec<Vec<u8>> = Vec::new();
-    for (path, origin) in &plan.identities {
-        let key = match load_key(plan, path, origin).await {
-            LoadedKey::Key(key) => key,
-            LoadedKey::Skipped => {
-                // The agent can hold the key of a file it cannot read (a `.pub` next to it).
-                let Some(public) = read_public(path) else {
+    let agent_ids = agent
+        .as_ref()
+        .map(|(_, ids)| ids.clone())
+        .unwrap_or_default();
+    let list = candidates(plan, &agent_ids);
+    // Key files read in this round, so one passphrase serves the key and its certificate.
+    let mut loaded: Vec<(PathBuf, Option<Arc<PrivateKey>>)> = Vec::new();
+    let mut last = Step::Failed(None);
+    for candidate in &list {
+        let result = match candidate {
+            Candidate::Agent(key) => {
+                let Some((client, _)) = agent.as_mut() else {
                     continue;
                 };
-                if let Some((client, ids)) = agent.as_mut()
-                    && let Some(id) = ids.iter().find(|i| *i.public_key() == public)
+                if !accepted(&key.algorithm()) {
+                    continue;
+                }
+                match handle
+                    .authenticate_publickey_with(plan.user.clone(), key.clone(), rsa_hash, client)
+                    .await
                 {
-                    let id_key = id.public_key().into_owned();
-                    used_agent.push(id_key.to_bytes().unwrap_or_default());
-                    if !accepted(&id_key.algorithm()) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}");
                         continue;
                     }
-                    let r = handle
-                        .authenticate_publickey_with(plan.user.clone(), id_key, rsa_hash, client)
-                        .await;
-                    match r {
-                        Ok(res) => last = step(res),
+                }
+            }
+            Candidate::Cert { cert, file } => {
+                let held = agent_ids.iter().any(|id| {
+                    matches!(id, AgentIdentity::PublicKey { key, .. }
+                        if key.key_data() == cert.public_key())
+                }) || agent_ids.iter().any(|id| {
+                    matches!(id, AgentIdentity::Certificate { certificate, .. }
+                        if certificate == &**cert)
+                });
+                if held && let Some((client, _)) = agent.as_mut() {
+                    match handle
+                        .authenticate_certificate_with(
+                            plan.user.clone(),
+                            Certificate::clone(cert),
+                            rsa_hash,
+                            client,
+                        )
+                        .await
+                    {
+                        Ok(res) => res,
                         Err(e) => {
                             tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}");
                             continue;
                         }
                     }
-                    if matches!(last, Step::Done) {
-                        return Ok(last);
+                } else {
+                    // The key file of the certificate: its own file, or a key file with the
+                    // same public key (`sign_and_send_pubkey`).
+                    let file = file.clone().or_else(|| {
+                        list.iter().find_map(|c| match c {
+                            Candidate::File {
+                                path,
+                                origin,
+                                public: Some(p),
+                            } if p.key_data() == cert.public_key() => {
+                                Some((path.clone(), origin.clone()))
+                            }
+                            _ => None,
+                        })
+                    });
+                    let Some((path, origin)) = file else {
+                        continue;
+                    };
+                    let Some(key) = read_key(plan, &mut loaded, &path, &origin).await else {
+                        continue;
+                    };
+                    if key.public_key().key_data() != cert.public_key() {
+                        continue;
                     }
+                    handle
+                        .authenticate_openssh_cert(plan.user.clone(), key, Certificate::clone(cert))
+                        .await
+                        .map_err(session_failed)?
                 }
-                continue;
+            }
+            Candidate::File {
+                path,
+                origin,
+                public,
+            } => {
+                if public.as_ref().is_some_and(|p| !accepted(&p.algorithm())) {
+                    continue;
+                }
+                let Some(key) = read_key(plan, &mut loaded, path, origin).await else {
+                    continue;
+                };
+                if too_small(key.public_key(), plan.required_rsa) || !accepted(&key.algorithm()) {
+                    continue;
+                }
+                handle
+                    .authenticate_publickey(
+                        plan.user.clone(),
+                        PrivateKeyWithHashAlg::new(key, rsa_hash),
+                    )
+                    .await
+                    .map_err(session_failed)?
             }
         };
-        let public = key.public_key().clone();
-        if let Some(rsa) = public.key_data().rsa()
-            && rsa.key_size() < plan.required_rsa
-        {
-            continue;
-        }
-        if !accepted(&key.algorithm()) {
-            continue;
-        }
-        if plan.try_cert_files
-            && let Some(cert) = read_certificate(path)
-        {
-            last = step(
-                handle
-                    .authenticate_openssh_cert(plan.user.clone(), Arc::clone(&key), cert)
-                    .await
-                    .map_err(session_failed)?,
-            );
-            if matches!(last, Step::Done) {
-                return Ok(last);
-            }
-        }
-        last = step(
-            handle
-                .authenticate_publickey(
-                    plan.user.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::clone(&key), rsa_hash),
-                )
-                .await
-                .map_err(session_failed)?,
-        );
+        last = step(result);
         if matches!(last, Step::Done) {
             return Ok(last);
         }
     }
-    for cert_path in &plan.certificates {
-        let Ok(text) = std::fs::read_to_string(cert_path) else {
-            continue;
-        };
-        let Ok(cert) = Certificate::from_openssh(text.trim()) else {
-            continue;
-        };
-        // The private key of the certificate is one of the key files.
-        for (path, origin) in &plan.identities {
-            let LoadedKey::Key(key) = load_key(plan, path, origin).await else {
-                continue;
-            };
-            if key.public_key().key_data() != cert.public_key() {
-                continue;
-            }
-            last = step(
-                handle
-                    .authenticate_openssh_cert(plan.user.clone(), key, cert.clone())
-                    .await
-                    .map_err(session_failed)?,
-            );
-            if matches!(last, Step::Done) {
-                return Ok(last);
-            }
-            break;
-        }
-    }
-    if !plan.identities_only
-        && let Some((client, ids)) = agent.as_mut()
-    {
-        for id in ids.clone() {
-            let key = id.public_key().into_owned();
-            if used_agent.contains(&key.to_bytes().unwrap_or_default())
-                || !accepted(&key.algorithm())
-            {
-                continue;
-            }
-            match handle
-                .authenticate_publickey_with(plan.user.clone(), key, rsa_hash, client)
-                .await
-            {
-                Ok(res) => last = step(res),
-                Err(e) => {
-                    tracing::debug!(target: LOG_TARGET, "agent signing failed: {e}");
-                    continue;
-                }
-            }
-            if matches!(last, Step::Done) {
-                return Ok(last);
-            }
-        }
-    }
     Ok(last)
+}
+
+/// A key file read once per round ([`load_key`]).
+async fn read_key(
+    plan: &AuthPlan,
+    loaded: &mut Vec<(PathBuf, Option<Arc<PrivateKey>>)>,
+    path: &Path,
+    origin: &Origin,
+) -> Option<Arc<PrivateKey>> {
+    if let Some((_, key)) = loaded.iter().find(|(p, _)| p == path) {
+        return key.clone();
+    }
+    let key = match load_key(plan, path, origin).await {
+        LoadedKey::Key(key) => Some(key),
+        LoadedKey::Skipped => None,
+    };
+    loaded.push((path.to_path_buf(), key.clone()));
+    key
 }
 
 /// The public key next to a key file (`<file>.pub`).

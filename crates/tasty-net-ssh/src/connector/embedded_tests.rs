@@ -524,3 +524,105 @@ fn port_discovery_closes_its_channel_at_the_output_limit() {
         server.events()
     );
 }
+
+#[cfg(unix)]
+/// Opens a tunnel session of `connector` to `h.example`.
+fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
+    use crate::embedded::resolve::{Purpose, load, resolve_chain};
+    let ctx = connector.embedded_ctx();
+    let set = load(ctx.settings)?;
+    let chain = resolve_chain(
+        &set,
+        ctx.settings,
+        &SshTarget::parse("h.example"),
+        Purpose::Tunnel,
+        ctx.verify,
+    )?;
+    crate::embedded::session::open(ctx, &chain).map(drop)
+}
+
+#[cfg(unix)]
+/// Counts the passphrase questions and answers none.
+#[derive(Default)]
+struct CountingPrompt {
+    passphrases: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl crate::SshPrompt for CountingPrompt {
+    fn passphrase(&self, _key_file: &std::path::Path) -> Option<String> {
+        self.passphrases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+}
+
+#[cfg(unix)]
+/// A connector on the test server with the server's configuration changed by `edit`, and
+/// `prompt`.
+fn on_auth_server(
+    dir: &Dir,
+    edit: impl Fn(String) -> String,
+    prompt: Arc<CountingPrompt>,
+) -> (crate::embedded::test_server::TestServer, SshConnector) {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(2));
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let (connector, _) = embedded_with(dir, &edit(server.config(&key, &known)));
+    (server, connector.with_prompt(prompt))
+}
+
+#[cfg(unix)]
+/// Writes `text` as a key file only the user can read.
+fn write_key_file(path: &std::path::Path, text: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(path).expect("key file"), text.as_bytes())
+        .expect("write key");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_agent_signs_for_a_key_file_it_holds_before_the_file_is_read() {
+    use crate::embedded::test_server::client_key;
+    use russh::keys::ssh_key::{Cipher, Kdf, LineEnding};
+    let dir = Dir::new("agent");
+    let prompt = Arc::new(CountingPrompt::default());
+    let socket = dir.0.join("a.sock");
+    let quoted = format!("IdentityAgent \"{}\"", socket.display());
+    let (server, connector) = on_auth_server(
+        &dir,
+        |c| c.replace("IdentityAgent none", &quoted),
+        Arc::clone(&prompt),
+    );
+    // The key file is encrypted; its public part is readable without the passphrase.
+    let encrypted = client_key()
+        .encrypt_with(
+            Cipher::Aes256Ctr,
+            Kdf::Bcrypt {
+                salt: vec![1; 16],
+                rounds: 2,
+            },
+            7,
+            "secret",
+        )
+        .expect("encrypt");
+    write_key_file(
+        &dir.0.join("id_test"),
+        &encrypted.to_openssh(LineEnding::LF).expect("encode"),
+    );
+    server.agent(&socket, &[client_key()]);
+    open_session(&connector).expect("the agent signs");
+    assert_eq!(
+        prompt.passphrases.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no passphrase is asked for a key the agent holds"
+    );
+}

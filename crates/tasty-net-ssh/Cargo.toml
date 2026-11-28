@@ -31,5 +31,10 @@ ring = { version = "=0.17.14", optional = true }
 # The key blob of a written known_hosts line, the same version the OpenSSH port uses.
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"], optional = true }
 
+[dev-dependencies]
+# The SSH agent of the embedded backend's tests: russh's agent server takes the connections as
+# a stream (src/embedded/test_server.rs).
+futures = "0.3"
+
 [lints]
 workspace = true
