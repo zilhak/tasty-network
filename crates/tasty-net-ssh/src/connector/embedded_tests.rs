@@ -404,7 +404,7 @@ fn every_exec_closed(events: &[crate::embedded::test_server::Event]) -> bool {
         .iter()
         .filter_map(|e| match e {
             Event::Exec(c) => Some(*c),
-            Event::Close(_) => None,
+            _ => None,
         })
         .collect();
     !execs.is_empty() && execs.iter().all(|c| events.contains(&Event::Close(*c)))
@@ -525,7 +525,6 @@ fn port_discovery_closes_its_channel_at_the_output_limit() {
     );
 }
 
-#[cfg(unix)]
 /// Opens a tunnel session of `connector` to `h.example`.
 fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
     use crate::embedded::resolve::{Purpose, load, resolve_chain};
@@ -541,14 +540,12 @@ fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
     crate::embedded::session::open(ctx, &chain).map(drop)
 }
 
-#[cfg(unix)]
 /// Counts the passphrase questions and answers none.
 #[derive(Default)]
 struct CountingPrompt {
     passphrases: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(unix)]
 impl crate::SshPrompt for CountingPrompt {
     fn passphrase(&self, _key_file: &std::path::Path) -> Option<String> {
         self.passphrases
@@ -557,7 +554,6 @@ impl crate::SshPrompt for CountingPrompt {
     }
 }
 
-#[cfg(unix)]
 /// A connector on the test server with the server's configuration changed by `edit`, and
 /// `prompt`.
 fn on_auth_server(
@@ -625,4 +621,48 @@ fn the_agent_signs_for_a_key_file_it_holds_before_the_file_is_read() {
         0,
         "no passphrase is asked for a key the agent holds"
     );
+}
+
+/// A user certificate of the client key, signed by a test CA.
+fn user_certificate() -> russh::keys::Certificate {
+    use russh::keys::ssh_key::certificate::{Builder, CertType};
+    use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
+    let ca = russh::keys::PrivateKey::new(
+        KeypairData::Ed25519(Ed25519Keypair::from_seed(&[11; 32])),
+        "test ca",
+    )
+    .expect("ca");
+    let key = crate::embedded::test_server::client_key();
+    let mut builder = Builder::new(
+        vec![5; 16],
+        key.public_key().key_data().clone(),
+        0,
+        u64::MAX,
+    )
+    .expect("cert");
+    builder.cert_type(CertType::User).expect("type");
+    builder.valid_principal("u").expect("principal");
+    builder.sign(&ca).expect("sign")
+}
+
+#[test]
+fn a_certificate_outside_pubkey_accepted_algorithms_is_not_offered() {
+    use crate::embedded::test_server::Event;
+    let offered = |accepted: &str| {
+        let dir = Dir::new("cert");
+        let cert = dir.0.join("id_cert.pub");
+        std::fs::write(&cert, user_certificate().to_openssh().expect("encode cert"))
+            .expect("cert file");
+        let line = format!("CertificateFile \"{}\"\n{accepted}", cert.display());
+        let (server, connector) = on_auth_server(
+            &dir,
+            |c| format!("{c}  {line}\n"),
+            Arc::new(CountingPrompt::default()),
+        );
+        open_session(&connector).expect("the key gets in");
+        server.events().contains(&Event::Cert)
+    };
+    // Without a restriction the certificate is offered first; with only ssh-ed25519 it is not.
+    assert!(offered(""));
+    assert!(!offered("  PubkeyAcceptedAlgorithms ssh-ed25519"));
 }

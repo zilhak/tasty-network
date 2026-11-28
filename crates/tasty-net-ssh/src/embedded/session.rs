@@ -893,7 +893,7 @@ fn too_small(key: &russh::keys::PublicKey, required: u32) -> bool {
 /// The list of `ssh` (`pubkey_prepare`): the `CertificateFile` certificates, the agent's keys
 /// that are key files (in the agent's order), the agent's other keys unless `IdentitiesOnly`,
 /// then the key files the agent does not hold, each followed by its `<file>-cert` when no
-/// `CertificateFile` is given.
+/// `CertificateFile` is given. Agent keys smaller than `RequiredRSASize` are left out.
 fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
     use russh::keys::ssh_key::certificate::CertType;
     let user_cert = |cert: &Certificate| cert.cert_type() == CertType::User;
@@ -929,6 +929,9 @@ fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
     for id in agent_ids {
         let candidate = match id {
             AgentIdentity::PublicKey { key, .. } => {
+                if too_small(key, plan.required_rsa) {
+                    continue;
+                }
                 let held = files.iter().position(
                     |f| matches!(f, Candidate::File { public: Some(p), .. } if same_key(p, key)),
                 );
@@ -955,9 +958,10 @@ fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
 }
 
 /// Public key authentication in the order of `ssh` ([`candidates`]). A key is tried only when
-/// `PubkeyAcceptedAlgorithms` has its signature algorithm; a key file whose public key cannot
-/// be read without its passphrase is judged once it is read. A key file is read when it is
-/// tried, so its passphrase is asked only if no agent key or earlier key got in.
+/// `PubkeyAcceptedAlgorithms` has its signature algorithm (a certificate: its certificate
+/// type), as `pubkey_prepare` filters the list; a key file whose public key cannot be read
+/// without its passphrase is judged once it is read. A key file is read when it is tried, so
+/// its passphrase is asked only if no agent key or earlier key got in.
 async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("public key authentication: {e}"),
@@ -970,6 +974,13 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
     let accepted = |alg: &Algorithm| {
         plan.pubkey_accepted
             .contains(&signature_name(alg, rsa_hash))
+    };
+    let cert_accepted = |cert: &Certificate| {
+        let alg = match cert.algorithm() {
+            Algorithm::Rsa { .. } => Algorithm::Rsa { hash: rsa_hash },
+            other => other,
+        };
+        plan.pubkey_accepted.contains(&alg.to_certificate_type())
     };
     let mut agent = agent(plan).await;
     let agent_ids = agent
@@ -1001,6 +1012,9 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                 }
             }
             Candidate::Cert { cert, file } => {
+                if !cert_accepted(cert) {
+                    continue;
+                }
                 let held = agent_ids.iter().any(|id| {
                     matches!(id, AgentIdentity::PublicKey { key, .. }
                         if key.key_data() == cert.public_key())
@@ -1065,7 +1079,7 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
                 let Some(key) = read_key(plan, &mut loaded, path, origin).await else {
                     continue;
                 };
-                if too_small(key.public_key(), plan.required_rsa) || !accepted(&key.algorithm()) {
+                if !accepted(&key.algorithm()) {
                     continue;
                 }
                 handle
@@ -1085,7 +1099,8 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
     Ok(last)
 }
 
-/// A key file read once per round ([`load_key`]).
+/// A key file read once per round ([`load_key`]); a key smaller than `RequiredRSASize` is not
+/// used (`sshconnect2.c` `load_identity_file`).
 async fn read_key(
     plan: &AuthPlan,
     loaded: &mut Vec<(PathBuf, Option<Arc<PrivateKey>>)>,
@@ -1096,8 +1111,8 @@ async fn read_key(
         return key.clone();
     }
     let key = match load_key(plan, path, origin).await {
-        LoadedKey::Key(key) => Some(key),
-        LoadedKey::Skipped => None,
+        LoadedKey::Key(key) if !too_small(key.public_key(), plan.required_rsa) => Some(key),
+        LoadedKey::Key(_) | LoadedKey::Skipped => None,
     };
     loaded.push((path.to_path_buf(), key.clone()));
     key

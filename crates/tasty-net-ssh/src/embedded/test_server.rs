@@ -40,6 +40,8 @@ pub(crate) enum DirectReply {
 pub(crate) enum Event {
     Exec(ChannelId),
     Close(ChannelId),
+    /// A certificate offered.
+    Cert,
 }
 
 pub(crate) struct TestServer {
@@ -248,6 +250,15 @@ impl Handler for Handle {
         key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         Ok(self.judge(key.public_key))
+    }
+
+    async fn auth_openssh_certificate(
+        &mut self,
+        _user: &str,
+        _certificate: &russh::keys::Certificate,
+    ) -> Result<Auth, Self::Error> {
+        self.note(Event::Cert);
+        Ok(Auth::reject())
     }
 
     async fn channel_open_session(
