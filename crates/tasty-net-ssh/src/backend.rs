@@ -490,6 +490,10 @@ mod tests {
         }
     }
 
+    /// Whether the tests judge paths the way this OS does (its `PATH` separator and its path
+    /// separators). The Windows rules on another OS are tested on their own below.
+    const HOST_WINDOWS: bool = cfg!(windows);
+
     fn path_of(dirs: &[&Path], windows: bool) -> OsString {
         let sep = if windows { ";" } else { ":" };
         OsString::from(
@@ -500,6 +504,19 @@ mod tests {
         )
     }
 
+    /// The files a search for `ssh` looks at in `dirs` on this OS: `ssh`, and on Windows
+    /// `ssh.exe` after it.
+    fn looked_at(dirs: &[&Path]) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for dir in dirs {
+            files.push(dir.join("ssh"));
+            if HOST_WINDOWS {
+                files.push(dir.join("ssh.exe"));
+            }
+        }
+        files
+    }
+
     #[test]
     fn a_bare_name_is_found_in_the_first_directory_that_has_it() {
         let empty = Dir::new("empty");
@@ -507,9 +524,12 @@ mod tests {
         let second = Dir::new("second");
         let want = first.file("ssh", true);
         second.file("ssh", true);
-        let path = path_of(&[&empty.0, &first.0, &second.0], false);
+        let path = path_of(&[&empty.0, &first.0, &second.0], HOST_WINDOWS);
         // Outside Unix there is no execute bit to test; the file alone is enough.
-        assert_eq!(find_program(Path::new("ssh"), Some(&path), false), Ok(want));
+        assert_eq!(
+            find_program(Path::new("ssh"), Some(&path), HOST_WINDOWS),
+            Ok(want)
+        );
     }
 
     #[cfg(unix)]
@@ -528,13 +548,16 @@ mod tests {
     fn not_found_lists_every_file_looked_at() {
         let a = Dir::new("a");
         let b = Dir::new("b");
-        let path = path_of(&[&a.0, &b.0], false);
+        let path = path_of(&[&a.0, &b.0], HOST_WINDOWS);
         assert_eq!(
-            find_program(Path::new("ssh"), Some(&path), false),
-            Err(vec![a.0.join("ssh"), b.0.join("ssh")])
+            find_program(Path::new("ssh"), Some(&path), HOST_WINDOWS),
+            Err(looked_at(&[&a.0, &b.0]))
         );
         // No PATH at all: nothing is looked at, and nothing is found.
-        assert_eq!(find_program(Path::new("ssh"), None, false), Err(Vec::new()));
+        assert_eq!(
+            find_program(Path::new("ssh"), None, HOST_WINDOWS),
+            Err(Vec::new())
+        );
     }
 
     #[test]
@@ -563,11 +586,14 @@ mod tests {
         let file = dir.file("my-ssh", true);
         let elsewhere = Dir::new("elsewhere");
         elsewhere.file("my-ssh", true);
-        let path = path_of(&[&elsewhere.0], false);
-        assert_eq!(find_program(&file, Some(&path), false), Ok(file.clone()));
+        let path = path_of(&[&elsewhere.0], HOST_WINDOWS);
+        assert_eq!(
+            find_program(&file, Some(&path), HOST_WINDOWS),
+            Ok(file.clone())
+        );
         let missing = dir.0.join("missing");
         assert_eq!(
-            find_program(&missing, Some(&path), false),
+            find_program(&missing, Some(&path), HOST_WINDOWS),
             Err(vec![missing.clone()])
         );
     }
