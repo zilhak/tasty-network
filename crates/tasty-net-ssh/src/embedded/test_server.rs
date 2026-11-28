@@ -59,6 +59,11 @@ pub(crate) enum AuthRule {
     /// [`Handler::auth_publickey_offered`] with the plain key of a certificate too, so the offer
     /// of the client key passes and the plain key is refused once signed.
     Cert,
+    /// Every key is refused with `password` as the only method left, and this password gets
+    /// in.
+    PasswordAfterAKey(&'static str),
+    /// Every key is a partial success that asks for `publickey` again, without end.
+    EndlessPartial,
 }
 
 /// What the server saw, in order.
@@ -289,10 +294,23 @@ struct Handle {
 
 impl Handle {
     fn judge(&self, key: &PublicKey) -> Auth {
+        let only = |method| Some(russh::MethodSet::from(&[method][..]));
         let in_order = match self.rule {
             AuthRule::Key => true,
             AuthRule::PasswordThenKey(_) => self.password_ok,
             AuthRule::Cert => false,
+            AuthRule::PasswordAfterAKey(_) => {
+                return Auth::Reject {
+                    proceed_with_methods: only(russh::MethodKind::Password),
+                    partial_success: false,
+                };
+            }
+            AuthRule::EndlessPartial => {
+                return Auth::Reject {
+                    proceed_with_methods: only(russh::MethodKind::PublicKey),
+                    partial_success: true,
+                };
+            }
         };
         if in_order && key.key_data() == self.allowed.key_data() {
             Auth::Accept
@@ -379,6 +397,7 @@ impl Handler for Handle {
                     partial_success: true,
                 })
             }
+            AuthRule::PasswordAfterAKey(want) if password == want => Ok(Auth::Accept),
             _ => Ok(Auth::reject()),
         }
     }

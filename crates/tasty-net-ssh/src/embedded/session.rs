@@ -477,7 +477,27 @@ async fn connect_chain(
                 handshake(&plan, channel.into_stream(), None).await?
             }
         };
-        authenticate(&mut handle, &plan.auth).await?;
+        // The whole authentication of the host is bounded by `ConnectTimeout` too (prompt
+        // time does not count), so a server that keeps changing its list of methods or keeps
+        // answering partial success cannot hold the session open forever.
+        let started = Instant::now();
+        match bounded(
+            authenticate(&mut handle, &plan.auth),
+            started + plan.connect_timeout,
+            &plan.paused,
+            None,
+            plan.connect_timeout,
+        )
+        .await
+        {
+            Bounded::Done(done) => done?,
+            Bounded::Expired | Bounded::Cancelled => {
+                return Err(SshBackendError::TimedOut {
+                    host: plan.host.clone(),
+                    waited: started.elapsed(),
+                });
+            }
+        }
         parent = Some(Arc::new(Conn {
             handle: Arc::new(handle),
             rt: rt.clone(),
@@ -644,9 +664,9 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
         }
         tried.push(name(*method));
         let outcome = match method {
-            MethodKind::PublicKey => publickey(handle, plan).await?,
+            MethodKind::PublicKey => publickey(handle, plan, &remaining).await?,
             MethodKind::KeyboardInteractive => keyboard_interactive(handle, plan).await?,
-            MethodKind::Password => password(handle, plan).await?,
+            MethodKind::Password => password(handle, plan, &remaining).await?,
             _ => Step::FAILED,
         };
         match outcome {
@@ -694,10 +714,16 @@ impl Step {
         partial: false,
     };
 
-    /// Whether the method is over: success, or a partial success, after which the order
-    /// goes on with the server's answer.
-    fn ends(&self) -> bool {
-        !matches!(self, Self::Failed { partial: false, .. })
+    /// Whether the method is over: success, a partial success, or a failure whose list of
+    /// methods is not `remaining`. After the last two the order goes on with the server's
+    /// answer, as `ssh` picks the method again on every failure (`input_userauth_failure`).
+    fn ends(&self, remaining: &russh::MethodSet) -> bool {
+        match self {
+            Self::Done => true,
+            Self::Failed { partial, next } => {
+                *partial || next.as_ref().is_some_and(|next| next != remaining)
+            }
+        }
     }
 }
 
@@ -1034,7 +1060,11 @@ fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
 /// type), as `pubkey_prepare` filters the list; a key file whose public key cannot be read
 /// without its passphrase is judged once it is read. A key file is read when it is tried, so
 /// its passphrase is asked only if no agent key or earlier key got in.
-async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, SshBackendError> {
+async fn publickey(
+    handle: &mut Handle<Client>,
+    plan: &AuthPlan,
+    remaining: &russh::MethodSet,
+) -> Result<Step, SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("public key authentication: {e}"),
     };
@@ -1192,7 +1222,7 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
             }
         };
         last = step(result);
-        if last.ends() {
+        if last.ends(remaining) {
             return Ok(last);
         }
     }
@@ -1357,7 +1387,11 @@ async fn keyboard_interactive(
     }
 }
 
-async fn password(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, SshBackendError> {
+async fn password(
+    handle: &mut Handle<Client>,
+    plan: &AuthPlan,
+    remaining: &russh::MethodSet,
+) -> Result<Step, SshBackendError> {
     let Some(prompt) = &plan.prompt else {
         return Ok(Step::FAILED);
     };
@@ -1382,7 +1416,7 @@ async fn password(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, 
                     detail: format!("password authentication: {e}"),
                 })?,
         );
-        if last.ends() {
+        if last.ends(remaining) {
             return Ok(last);
         }
     }

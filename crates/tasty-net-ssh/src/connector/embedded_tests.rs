@@ -527,16 +527,15 @@ fn port_discovery_closes_its_channel_at_the_output_limit() {
 
 /// Opens a tunnel session of `connector` to `h.example`.
 fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
+    open_session_to(connector, &SshTarget::parse("h.example"))
+}
+
+/// [`open_session`] to `target`.
+fn open_session_to(connector: &SshConnector, target: &SshTarget) -> Result<(), SshBackendError> {
     use crate::embedded::resolve::{Purpose, load, resolve_chain};
     let ctx = connector.embedded_ctx();
     let set = load(ctx.settings)?;
-    let chain = resolve_chain(
-        &set,
-        ctx.settings,
-        &SshTarget::parse("h.example"),
-        Purpose::Tunnel,
-        ctx.verify,
-    )?;
+    let chain = resolve_chain(&set, ctx.settings, target, Purpose::Tunnel, ctx.verify)?;
     crate::embedded::session::open(ctx, &chain).map(drop)
 }
 
@@ -909,6 +908,70 @@ fn a_partial_success_starts_the_method_order_over() {
                 .iter()
                 .any(|e| matches!(e, Event::Key(_))),
         "{events:?}"
+    );
+}
+
+#[test]
+fn a_failure_with_another_list_picks_the_method_again_before_the_next_key() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("list-changes");
+    let prompt = Arc::new(CountingPrompt {
+        password: Some("pw"),
+        ..CountingPrompt::default()
+    });
+    let second = dir.0.join("id_second");
+    write_key_file(
+        &second,
+        &rsa_key()
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("encode"),
+    );
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::PasswordAfterAKey("pw"),
+        |c| {
+            format!(
+                "{c}  IdentityFile \"{}\"\n  PreferredAuthentications publickey,password\n",
+                second.display()
+            )
+        },
+        prompt,
+    );
+    open_session(&connector).expect("the password after the first key");
+    let events = server.events();
+    // The first key's failure leaves only `password`: the second key is not sent.
+    assert!(events.contains(&Event::Password), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Key(name) if name.contains("rsa"))),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn authentication_that_never_ends_stops_at_the_connect_timeout() {
+    use crate::embedded::test_server::AuthRule;
+    let dir = Dir::new("endless");
+    let (_server, connector) = on_auth_server(
+        &dir,
+        AuthRule::EndlessPartial,
+        |c| c,
+        Arc::new(CountingPrompt::default()),
+    );
+    // A target option comes before `ssh.connect_timeout` and the file, so it is the value.
+    let mut target = SshTarget::parse("h.example");
+    target.extra_options.push("ConnectTimeout=1".into());
+    let started = std::time::Instant::now();
+    let err = open_session_to(&connector, &target).expect_err("a server without an end");
+    assert!(
+        matches!(err, crate::SshBackendError::TimedOut { .. }),
+        "{err:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
     );
 }
 
