@@ -1427,6 +1427,10 @@ async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet
     let capture = Capture(Arc::default(), tracing::Level::DEBUG);
     let _guard = tracing::subscriber::set_default(capture.clone());
     let bound = Duration::from_millis(500);
+    // Above the bound the shutdown only aborts and joins tasks that are already done or
+    // waiting, a few milliseconds; the margin covers a busy host. It stays below the default
+    // of 3 s, so a shutdown that waited the default instead of the set bound fails here.
+    let margin = Duration::from_millis(1500);
     let server = start(settings_with_shutdown_timeout(bound)).await;
     let primary = server.addrs().primary;
     leave_in_first_packet(&server, &capture).await;
@@ -1435,8 +1439,10 @@ async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet
         .await
         .expect("shutdown ends in time");
     let took = started.elapsed();
-    // The leftover connection did not finish closing by itself: the bound ended it.
+    // The leftover connection did not finish closing by itself: the bound ended it, and the
+    // bound is the one set.
     assert!(took >= bound, "{took:?}");
+    assert!(took < bound + margin, "{took:?}");
     std::net::UdpSocket::bind(primary).expect("the primary port is free again");
 }
 
