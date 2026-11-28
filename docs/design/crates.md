@@ -7,7 +7,7 @@
 | 크레이트 | 경로 | 가안 → 확정 | 맡는 것 | 이 레포 안 의존 |
 |---|---|---|---|---|
 | `tasty-net-frame` | `crates/tasty-net-frame` | 가안 그대로 | 프레임 코덱(`write_frame`·`read_frame`), `StreamTag`, 프레임 상한, heartbeat 상수, 읽기 실패 분류(`ReadFailure`), mesh 청크 분할·재조립, bulk 청크·mux 바이트 형식 | 없음 |
-| `tasty-net-ssh` | `crates/tasty-net-ssh` | 가안 그대로 | 시스템 `ssh` 실행, `-L` 터널, 원격 포트 발견, 셸 감지, 취소, backoff, 리스너 판정, 자식 생성 훅. 후속 작업으로 내장(russh) 백엔드, 백엔드 선택, exec, SFTP가 더해진다([SSH 백엔드](ssh-backends.md)) | `embedded-ssh` feature에서만 ssh-config |
+| `tasty-net-ssh` | `crates/tasty-net-ssh` | 가안 그대로 | 시스템 `ssh` 실행, `-L` 터널, 원격 포트 발견, 셸 감지, 취소, backoff, 리스너 판정, 자식 생성 훅. 후속 작업으로 내장(russh) 백엔드, 백엔드 선택, exec, SFTP가 더해진다([SSH 백엔드](ssh-backends.md)) | ssh-config(시스템 전용 빌드는 지시어 목록만 쓴다) |
 | `tasty-net-ssh-config` | `crates/tasty-net-ssh-config` | 새로 정함(2026-11-27). OpenSSH 해석 이식 1단계가 `ssh_config` 해석으로 만들었고 2단계가 known_hosts 해석과 호스트 키 판정, `IdentityFile`·`CertificateFile` 펼침을 더했다 | OpenSSH 10.6p2의 `ssh_config` 해석과 known_hosts 해석을 옮긴 코드, 지시어 분류, 호스트 키 판정. 라이선스가 다른 유일한 크레이트다(아래 "라이선스", [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트)) | 없음 |
 | `tasty-net-identity` | `crates/tasty-net-identity` | 가안 그대로 | 기기 키·기기 ID, 서명·검증, 연결 토큰, 권한 걸린 비밀 파일, TOFU 판정 | 없음 |
 | `tasty-net-transport` | `crates/tasty-net-transport` | 가안 그대로 | 전송 trait, 논리 채널, handshake v2, 역할, bulk 자격, 요청 채널, heartbeat 송수신, SSH 정방향·역할 반전 전송, 메모리 전송, P2P 어댑터(`tasty-net-p2p`의 스트림 → `RawChannel`, 연결 공유), 세 경로를 모은 연결 목록([전송 추상화](transport.md#연결-목록)). `P2pCloseReason`은 p2p의 것을 다시 내보낸다 | frame, ssh(내부 feature `ssh`가 켜질 때만. `ssh`는 백엔드 feature `system-ssh`(기본)·`embedded-ssh`가 켠다, [SSH 백엔드](ssh-backends.md#feature-계약)), identity, p2p |
@@ -44,7 +44,7 @@ rendezvous ─> identity
 topology   ─> frame, identity
 demo       ─> transport, p2p, ssh, identity, frame
 ffi        ─> transport, p2p, identity, frame   (ssh, topology: 그 바인딩이 들어올 때)
-ssh        ─> ssh-config   (embedded-ssh feature에서만)
+ssh        ─> ssh-config   (시스템 전용 빌드는 지시어 목록만 쓴다)
 frame, ssh-config, identity ─> (없음)
 ```
 
@@ -61,7 +61,7 @@ ffi-link-test ─> ffi           (시험 전용 cdylib. 일반 의존이지만 �
 - tasty 레포의 크레이트에는 경로·git 어느 방식으로도 의존하지 않는다. 확인 방법은 [동작 수준 기준](done-criteria.md)의 D7이다. `cargo metadata`에서 path 의존과 workspace 멤버는 둘 다 `source`가 null이므로, 판별은 git 의존의 `source` URL과 path 의존 패키지의 `manifest_path`가 이 workspace 루트 밖인지를 함께 본다.
 - feature로 기능을 켜고 끄지 않는다. 소비자는 크레이트 단위로 고른다.
 - 위 규칙의 예외는 SSH 백엔드 feature 하나다. `tasty-net-ssh`의 `system-ssh`·`embedded-ssh`와 transport의 내부 feature `ssh`와 `system-ssh`·`embedded-ssh`이고, 두 단계로 들어간다. 계약(단계별 기본값, 꺼진 빌드에서 사라지는 API)은 [SSH 백엔드](ssh-backends.md#feature-계약)에 있다. 모바일 빌드가 다른 프로그램 실행 코드를 빼기 위해서다. `tasty-net-ssh-config`에는 feature가 없다.
-- 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`과 `tasty-net-ssh`(`default-features = false, features = ["system-ssh"]`)를 직접 쓰면 이 의존이 들어오지 않는다. `tasty-net-ssh`의 기본 feature는 내장 백엔드 작업 뒤 `embedded-ssh`를 포함하므로 russh·ring·tokio를 들인다.
+- 의존 비용: transport가 p2p에 의존하므로(사용자 결정 2026-11-27, transport가 p2p를 어댑터로 쓴다) transport를 쓰는 소비자의 의존 그래프에는 quinn·rustls·ring·tokio가 들어온다. SSH 경로만 쓰는 소비자도 같다. 프레임·SSH만 쓰려는 소비자는 `tasty-net-frame`과 `tasty-net-ssh`(`default-features = false, features = ["system-ssh"]`)를 직접 쓰면 이 의존이 들어오지 않는다. 그 빌드에도 `tasty-net-ssh-config`와 그 의존 `sha1`·`hmac`·`base64`와 그 아래 `digest`·`block-buffer`·`crypto-common`·`hybrid-array`·`typenum`·`ctutils`·`cmov`·`cpufeatures`·`cfg-if`는 들어온다(`ssh.overrides`의 지시어 판정, [SSH 백엔드](ssh-backends.md#2단계-내장-백엔드-이식-크레이트-뒤)). `tasty-net-ssh`의 기본 feature는 내장 백엔드 작업 뒤 `embedded-ssh`를 포함하므로 russh·ring·tokio를 들인다.
 
 ## P2P 크레이트 격리
 

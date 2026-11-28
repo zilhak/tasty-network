@@ -747,8 +747,8 @@ fn split_option(option: &str) -> Option<(&str, &str)> {
 }
 
 /// A keyword OpenSSH does not know, or one the embedded backend refuses whatever its value
-/// ("보안 관련 미구현"), from the OpenSSH port's keyword table.
-#[cfg(feature = "embedded-ssh")]
+/// ("보안 관련 미구현"), from the OpenSSH port's keyword table. Builds of either backend judge
+/// it the same way, so a setting a system-only build takes is one every build takes.
 fn unknown_keyword(keyword: &str) -> Option<&'static str> {
     use tasty_net_ssh_config::keywords::{Treatment, known_keywords};
     match known_keywords().find(|(name, _, _)| *name == keyword) {
@@ -758,13 +758,6 @@ fn unknown_keyword(keyword: &str) -> Option<&'static str> {
         }
         Some(_) => None,
     }
-}
-
-/// A keyword OpenSSH does not know. A build without the embedded backend has no keyword table
-/// and leaves unknown keywords to `ssh`, which refuses them.
-#[cfg(not(feature = "embedded-ssh"))]
-fn unknown_keyword(_keyword: &str) -> Option<&'static str> {
-    None
 }
 
 /// The OS value of a setting whose default the OS gives.
@@ -972,8 +965,9 @@ impl SshSettings {
     /// It refuses, whichever backend runs, entries that turn host key checking off
     /// (`StrictHostKeyChecking=no`/`off`, `NoHostAuthenticationForLocalhost=yes`), that run
     /// another program (`ProxyCommand`, `KnownHostsCommand`), the security directives the
-    /// embedded backend does not implement, and keywords OpenSSH does not know (in builds
-    /// with the embedded backend, which has the keyword table).
+    /// embedded backend does not implement, and keywords OpenSSH does not know. Builds of
+    /// either backend, a system-only build included, refuse the same entries: the keyword table
+    /// of the OpenSSH port is in every build.
     pub fn set_list(&mut self, key: &str, values: &[&str]) -> Result<&mut Self, SettingsError> {
         let s = text_setting(key).ok_or_else(|| SettingsError::UnknownKey(key.to_owned()))?;
         if s.kind != TextKind::Options {

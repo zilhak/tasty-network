@@ -184,7 +184,7 @@ P2P에서 두 endpoint 사이의 QUIC 연결 하나를 그 위의 모든 링크�
 | `backoff.multiplier` | 2 | 1 ~ 10 | 단계마다 대기에 곱하는 수 |
 | `backoff.max_delay` | 30 s | 1 ms ~ 1 h | 대기의 상한 |
 | `ssh.backend` | `auto` | `auto`·`system`·`embedded` | 연결 시도마다 고르는 백엔드([SSH 백엔드](ssh-backends.md#선택-규칙)). `auto`는 시스템 ssh 파일을 찾으면 시스템, 못 찾으면 내장(빌드에 있을 때). 빌드에 없는 백엔드 이름은 거절한다. `SshSettings::set_text`로 준다 |
-| `ssh.overrides` | 빈 목록 | 지시어=값 목록, 64개까지 | `ssh -o`와 같은 뜻으로 두 백엔드에 넣는다(적용 순서 7: 대상 옵션 뒤, `ConnectTimeout` 앞). 호스트 키 확인을 끄는 값, 다른 프로그램을 실행하는 값, 내장 백엔드가 구현하지 않은 보안 지시어, (내장 백엔드가 있는 빌드에서) 모르는 지시어는 거절한다. `SshSettings::set_list`로 준다 |
+| `ssh.overrides` | 빈 목록 | 지시어=값 목록, 64개까지 | `ssh -o`와 같은 뜻으로 두 백엔드에 넣는다(적용 순서 7: 대상 옵션 뒤, `ConnectTimeout` 앞). 호스트 키 확인을 끄는 값, 다른 프로그램을 실행하는 값, 내장 백엔드가 구현하지 않은 보안 지시어, 모르는 지시어는 어느 빌드에서나 거절한다. `SshSettings::set_list`로 준다 |
 | `embedded.config_file` | 없음 | 경로 하나 또는 none | 내장 백엔드의 `ssh -F`. 없으면 사용자 설정과 시스템 설정을 읽고, 주면 그 파일만 읽는다 |
 | `embedded.system_config_file` | OS의 시스템 설정 경로 | 경로 또는 none | 출처 `os_default`(Unix `/etc/ssh/ssh_config`, Windows `%PROGRAMDATA%\ssh\ssh_config`). 모바일에는 없다 |
 | `embedded.home` | OS 홈 | 경로 | 출처 `os_default`(`HOME`, Windows `USERPROFILE`). `~` 펼침과 `%d` |

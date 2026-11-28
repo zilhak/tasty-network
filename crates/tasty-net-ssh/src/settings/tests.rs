@@ -363,9 +363,16 @@ fn overrides_refuse_what_a_setting_must_not_do() {
         );
         assert!(settings.overrides().is_empty(), "{refused}");
     }
-    // A known keyword OpenSSH does not know is refused where the keyword table is built.
-    let unknown = settings.set_list("ssh.overrides", &["NoSuchKeyword=1"]);
-    assert_eq!(unknown.is_err(), unknown_keyword("nosuchkeyword").is_some());
+    // A keyword OpenSSH does not know is refused by builds of either backend, the system-only
+    // build included.
+    let unknown = settings
+        .set_list("ssh.overrides", &["NoSuchKeyword=1"])
+        .unwrap_err();
+    assert!(
+        matches!(&unknown, SettingsError::TextOutOfRange { value, .. } if value == "NoSuchKeyword=1"),
+        "{unknown}"
+    );
+    assert!(settings.overrides().is_empty());
     settings.set_list("ssh.overrides", &[]).unwrap();
     let too_many: Vec<String> = (0..65).map(|i| format!("SendEnv=V{i}")).collect();
     let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
