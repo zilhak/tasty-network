@@ -1535,6 +1535,153 @@ async fn every_socket_is_free_when_the_shutdown_returns() {
     }
 }
 
+/// Holds one send in the middle: the first send to `target` after it is set waits in the
+/// sending thread until the gate is released.
+#[derive(Debug, Default)]
+struct Gate {
+    target: Mutex<Option<u16>>,
+    held: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+/// Releases the gate when dropped, so a failing test does not leave a thread held.
+struct Release(Arc<Gate>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        *self.0.released.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.0.wake.notify_all();
+    }
+}
+
+/// A real socket whose sends pass through a [`Gate`].
+#[derive(Debug)]
+struct GatedSend {
+    io: UdpPacketIo,
+    gate: Arc<Gate>,
+}
+
+impl PacketIo for GatedSend {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        self.io.poll_recv_from(cx, buf)
+    }
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)>> {
+        self.io.poll_recv_with_dst(cx, buf)
+    }
+    fn poll_send_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.io.poll_send_ready(cx)
+    }
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        let hold = {
+            let mut target = self.gate.target.lock().unwrap();
+            *target == Some(dest.port()) && target.take().is_some()
+        };
+        if hold {
+            self.gate
+                .held
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut released = self.gate.released.lock().unwrap();
+            while !*released {
+                released = self.gate.wake.wait(released).unwrap();
+            }
+        }
+        self.io.try_send_to(buf, dest)
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+    fn may_fragment(&self) -> bool {
+        self.io.may_fragment()
+    }
+    fn dual_stack(&self) -> bool {
+        self.io.dual_stack()
+    }
+}
+
+/// Polls `f` once in the calling task.
+async fn poll_once<F: Future + Unpin>(f: &mut F) -> std::task::Poll<F::Output> {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(std::pin::Pin::new(&mut *f).poll(cx))).await
+}
+
+/// A shutdown dropped while it waits for the connection tasks to stop, with one of them held
+/// in the middle of a poll (a connection driver inside its send of the close), leaves nothing
+/// behind: once that task returns, the primary port is free. The future is polled by hand, so
+/// the drop comes after the shutdown has taken the tasks and is waiting on them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shutdown_dropped_while_the_tasks_stop_gives_the_primary_port_up() {
+    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let gate = Arc::new(Gate::default());
+    let release = Release(gate.clone());
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let io = UdpPacketIo::bind(local).await.unwrap();
+    let primary = io.local_addr().unwrap();
+    let mut config = ServerConfig::new(key(100));
+    config.settings = settings_with_shutdown_timeout(Duration::from_millis(300));
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(GatedSend {
+                io,
+                gate: gate.clone(),
+            }),
+            alternate_port: Arc::new(UdpPacketIo::bind(local).await.unwrap()),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    // A device that has not said hello: only the connection's tasks refer to it, nothing in
+    // the server's state.
+    let device = Device::open(&server, &key(2)).await;
+    *gate.target.lock().unwrap() = Some(device.local_addr().port());
+    let mut shutdown = Box::pin(server.shutdown());
+    // The first poll closes the endpoint; the driver of the device's connection is held in its
+    // send of the close. Until it is, the shutdown is not polled again.
+    assert!(poll_once(&mut shutdown).await.is_pending());
+    eventually("the connection driver is held in its send", || {
+        gate.held.load(std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
+    let waiting = "waiting for the connection tasks to stop";
+    let deadline = Instant::now() + DEADLINE;
+    while !capture
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains(waiting))
+    {
+        assert!(
+            poll_once(&mut shutdown).await.is_pending(),
+            "the shutdown cannot end while a task is held"
+        );
+        assert!(Instant::now() < deadline, "the shutdown reaches its tasks");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(shutdown);
+    // The held driver still holds the endpoint's socket.
+    assert!(std::net::UdpSocket::bind(primary).is_err());
+    drop(release);
+    eventually("the primary port is free again", || {
+        std::net::UdpSocket::bind(primary).is_ok()
+    })
+    .await;
+    drop(device);
+}
+
 /// Packet I/O on a real port whose receive queue never empties while the flood is on: every
 /// receive gets, at once, a datagram that is neither STUN nor QUIC.
 #[derive(Debug)]

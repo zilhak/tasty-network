@@ -238,6 +238,10 @@ impl Tasks {
         let set = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(mut set) = set {
             set.abort_all();
+            debug!(
+                tasks = set.len(),
+                "waiting for the connection tasks to stop"
+            );
             while set.join_next().await.is_some() {}
         }
     }
