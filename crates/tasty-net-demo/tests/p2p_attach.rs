@@ -73,14 +73,19 @@ impl Linked {
     fn finish(mut self) {
         detach(&mut self.dialer);
         P2pScene::quit(&mut self.dialer, "dialer");
-        let ended = self
-            .listener
-            .expect_prefix("listener link-ended ", LOCAL_STEP);
-        assert_eq!(field(&ended, "end"), Some("detach"), "{ended}");
+        listener_link_ended(&mut self.listener);
         P2pScene::quit(&mut self.listener, "listener");
         drop((self.dialer, self.listener));
         self.scene.finish();
     }
+}
+
+/// Waits for the listener's end of the link: it read the Detach and the EOF after it, and
+/// its own finish ended before the drain cap (its reader was done).
+fn listener_link_ended(listener: &mut Proc) {
+    let ended = listener.expect_prefix("listener link-ended ", LOCAL_STEP);
+    assert_eq!(field(&ended, "end"), Some("detach"), "{ended}");
+    assert_eq!(field(&ended, "finish"), Some("reader_ended"), "{ended}");
 }
 
 /// Ends the link with `detach`. The listener reads the dialer's EOF after the Detach and
@@ -228,9 +233,31 @@ fn bulk_transfer_matches_bytes() {
     assert_eq!(number(&ended, "chunks"), chunks, "{ended}");
     assert_eq!(field(&ended, "sha256"), Some(sent), "{ended}");
     assert_eq!(field(&ended, "end"), Some("eof"), "{ended}");
+    assert_eq!(field(&ended, "finish"), Some("reader_ended"), "{ended}");
 
     echo(&mut linked.dialer, "after the bulk transfer");
     linked.finish();
+}
+
+/// For the listener's ended entry: the transition that ended it carries `p2p_closed` (the
+/// dialer closed the connection). Whether the entry's last cause was then replaced by its
+/// link's end (`ended`): the transport may note the link's end on the entry after the
+/// connection's end once the listener finishes its link at once (its reader done), so the
+/// test accepts that case and logs it.
+fn listener_end_replaced(who: &str, entry: &EntryView) -> bool {
+    if who != "listener" {
+        return false;
+    }
+    let history = entry.history();
+    let ending = history.last().and_then(|(_, _, cause)| cause.as_deref());
+    assert_eq!(ending, Some("p2p_closed"), "{who}: {entry:#?}");
+    let replaced = entry.value("last_cause") == "ended";
+    if replaced {
+        log(
+            "listener last_cause=ended after the ending transition p2p_closed (link end noted after the connection end)",
+        );
+    }
+    replaced
 }
 
 /// The three values of a `udp` segment's local side.
@@ -358,10 +385,7 @@ fn connection_table_reports_p2p() {
     // The link's end ends both entries, each with its cause.
     let (a_id, b_id) = (a.id(), b.id());
     detach(&mut linked.dialer);
-    let ended = linked
-        .listener
-        .expect_prefix("listener link-ended ", LOCAL_STEP);
-    assert_eq!(field(&ended, "end"), Some("detach"), "{ended}");
+    listener_link_ended(&mut linked.listener);
     // The dialer closed it after its last channel (`ended`); the listener saw the close with
     // code 0 (`p2p_closed`, docs/design/transport.md "P2P의 닫기 범위").
     for (proc, who, id, want) in [
@@ -378,7 +402,9 @@ fn connection_table_reports_p2p() {
             entry.value("last_cause"),
             entry.get("cause_text").unwrap_or("-")
         ));
-        assert_eq!(entry.value("last_cause"), want, "{who}: {entry:#?}");
+        if !listener_end_replaced(who, entry) {
+            assert_eq!(entry.value("last_cause"), want, "{who}: {entry:#?}");
+        }
     }
     P2pScene::quit(&mut linked.dialer, "dialer");
     P2pScene::quit(&mut linked.listener, "listener");

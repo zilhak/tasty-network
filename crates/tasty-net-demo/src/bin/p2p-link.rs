@@ -51,9 +51,9 @@
 //! | `<who> registered` | the endpoint registered on the server (again after a reconnect) |
 //! | `<who> attempt-closed id=<n> cause=<name>` | a P2P connection attempt or connection ended (its `tasty-net-p2p` number and cause) |
 //! | `listener attached client=<n> peer=<device>` | the domain check took an attach link |
-//! | `listener link-ended client=<n> end=<detach\|failure name>` | the link's reader ended |
+//! | `listener link-ended client=<n> end=<detach\|failure name> finish=<reader_ended\|drain_cap>` | the link's reader ended; whether this end's finish ended before the drain cap |
 //! | `listener bulk-accepted peer=<device>` | a bulk channel under an attach link is up |
-//! | `listener bulk-ended bytes=<n> chunks=<n> sha256=<hex> end=<eof\|failure name\|bad_chunk>` | a bulk channel ended |
+//! | `listener bulk-ended bytes=<n> chunks=<n> sha256=<hex> end=<eof\|failure name\|bad_chunk> finish=<reader_ended\|drain_cap>` | a bulk channel ended; whether this end's finish ended before the drain cap |
 //! | `listener request-refused` | a request channel came; it is closed |
 //! | `listener refused reason=<wire reason>` | this end refused a handshake |
 //! | `listener handshake-failed error=<text>` | a handshake failed without a refusal |
@@ -468,8 +468,13 @@ fn serve_link(mut link: Link, instance_id: &str) {
             }
         },
     };
-    emit(&format!("listener link-ended client={client} end={end}"));
-    writer.finish();
+    // This end reads nothing more. The read failure (the EOF included) does not mark the
+    // reader as ended, so without this its writer's finish would wait out the drain cap.
+    reader.finish();
+    let finish = finish_name(writer.finish());
+    emit(&format!(
+        "listener link-ended client={client} end={end} finish={finish}"
+    ));
     drop(link);
 }
 
@@ -500,11 +505,21 @@ fn serve_bulk(mut bulk: BulkChannel) {
             Err(error) => break failure_name(error.failure()).to_string(),
         }
     };
-    bulk.writer.finish();
+    // As in `serve_link`: the reader is done before the writer finishes.
+    bulk.reader.finish();
+    let finish = finish_name(bulk.writer.finish());
     emit(&format!(
-        "listener bulk-ended bytes={bytes} chunks={chunks} sha256={} end={end}",
+        "listener bulk-ended bytes={bytes} chunks={chunks} sha256={} end={end} finish={finish}",
         hex(&digest.finalize())
     ));
+}
+
+/// The event value of how a writer's finish ended.
+fn finish_name(finish: Finish) -> &'static str {
+    match finish {
+        Finish::ReaderEnded => "reader_ended",
+        Finish::DrainCapReached { .. } => "drain_cap",
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -529,10 +544,7 @@ impl Up {
                 encode_value(&error.to_string())
             ));
         }
-        let finish = match self.writer.finish() {
-            Finish::ReaderEnded => "reader_ended",
-            Finish::DrainCapReached { .. } => "drain_cap",
-        };
+        let finish = finish_name(self.writer.finish());
         if self.reader.join().is_err() {
             emit("dialer reader-panicked");
         }
