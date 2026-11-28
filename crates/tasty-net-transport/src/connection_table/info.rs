@@ -8,7 +8,7 @@ use tasty_net_identity::DeviceId;
 use tasty_net_p2p::{AttemptInfo, AttemptPhase, NatInfo, P2pCloseReason, P2pConnectError};
 use tasty_net_p2p::{RemoteKind, RendezvousServer};
 #[cfg(feature = "ssh")]
-use tasty_net_ssh::PortDiscoveryFailureKind;
+use tasty_net_ssh::{ConfigNote, PortDiscoveryFailureKind, ResolvedTarget, SelectedBackend};
 
 use crate::link_id::LinkId;
 use crate::reject::{HandshakeError, RejectReason};
@@ -164,6 +164,15 @@ pub enum Cause {
     PeerTooOld,
     /// The SSH tunnel did not come up (the tunnel error's text).
     TunnelFailed(String),
+    /// No SSH backend could be chosen (no OpenSSH client file, and no embedded backend that
+    /// `auto` falls back to). The next attempt chooses again.
+    SshBackendUnavailable,
+    /// The embedded backend's resolution of the target refused it, before anything reached
+    /// the network. The same configuration gives the same result.
+    SshConfigRefused,
+    /// Port discovery and the tunnel would reach different targets; no token was sent. The
+    /// same configuration gives the same result.
+    TargetMismatch,
     /// The SSH tunnel exited.
     TunnelExited,
     /// Nothing listens on the remote port behind the SSH tunnel.
@@ -215,6 +224,9 @@ impl Cause {
             Self::Discovery(_) => "discovery_failed",
             Self::PeerTooOld => "peer_too_old",
             Self::TunnelFailed(_) => "tunnel_failed",
+            Self::SshBackendUnavailable => "ssh_backend_unavailable",
+            Self::SshConfigRefused => "ssh_config_refused",
+            Self::TargetMismatch => "target_mismatch",
             Self::TunnelExited => "tunnel_exited",
             Self::RemoteListenerAbsent => "remote_listener_absent",
             Self::ConnectFailed(_) => "connect_failed",
@@ -255,11 +267,14 @@ impl Cause {
             | Self::Refused(_)
             | Self::HandshakeFailed(_)
             | Self::P2pUnavailable(_)
+            | Self::SshConfigRefused
+            | Self::TargetMismatch
             | Self::Cancelled
             | Self::ClosedHere => false,
             #[cfg(feature = "ssh")]
             Self::Discovery(_) => true,
             Self::TunnelFailed(_)
+            | Self::SshBackendUnavailable
             | Self::TunnelExited
             | Self::RemoteListenerAbsent
             | Self::ConnectFailed(_)
@@ -280,6 +295,16 @@ impl Cause {
             ConnectError::Discovery(e) => Self::Discovery(e.kind()),
             #[cfg(feature = "ssh")]
             ConnectError::Tunnel(e) => Self::TunnelFailed(e.to_string()),
+            #[cfg(feature = "ssh")]
+            ConnectError::Backend(tasty_net_ssh::SshBackendError::NotFound { .. }) => {
+                Self::SshBackendUnavailable
+            }
+            // The transport gives `Backend` only for the choice and the resolution before
+            // connecting: the other errors are a refused resolution or a missing user.
+            #[cfg(feature = "ssh")]
+            ConnectError::Backend(_) => Self::SshConfigRefused,
+            #[cfg(feature = "ssh")]
+            ConnectError::TargetMismatch { .. } => Self::TargetMismatch,
             ConnectError::PeerTooOld { .. } => Self::PeerTooOld,
             ConnectError::SelfAttach => Self::P2pConnect(P2pConnectError::SelfAttach),
             ConnectError::P2p(e) => match e.connect_error() {
@@ -531,6 +556,27 @@ pub struct ConnectionInfo {
     /// The P2P attempt's number and times of a `p2p_udp` entry, as the P2P connection shows
     /// them.
     pub attempt: Option<AttemptInfo>,
+    /// The SSH backend of an entry this side's SSH transport started: filled right after the
+    /// backend is chosen, before port discovery. `None` for `ssh_inbound` and P2P entries.
+    #[cfg(feature = "ssh")]
+    pub ssh: Option<SshEntryInfo>,
+}
+
+/// The SSH side of an entry (docs/design/ssh-backends.md "transport 연결 목록").
+#[cfg(feature = "ssh")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SshEntryInfo {
+    /// The backend the attempt chose and why (`backend` is `None` when none was found; the
+    /// reason then lists the files looked at).
+    pub backend: SelectedBackend,
+    /// The embedded backend's resolution of the target (`None` for the system backend).
+    pub resolved: Option<ResolvedTarget>,
+    /// The directives shown, refused or ignored by the resolution, the refusing one included.
+    pub config_notes: Vec<ConfigNote>,
+    /// The SSH session the tunnel uses, once it is open (the embedded session, or the `ssh -N`
+    /// child of the system backend).
+    pub session_id: Option<u64>,
 }
 
 /// What the table reports as it changes.

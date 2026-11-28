@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tasty_net_identity::{ConnectionToken, DeviceId};
 use tasty_net_p2p::P2pError;
 #[cfg(feature = "ssh")]
-use tasty_net_ssh::{PortDiscoveryError, TunnelError};
+use tasty_net_ssh::{EffectiveTarget, PortDiscoveryError, SshBackendError, TunnelError};
 
 use crate::cancel::{AttemptCancel, Cancelled};
 use crate::channel::RawChannel;
@@ -205,6 +205,21 @@ pub enum ConnectError {
     /// The SSH tunnel did not come up.
     #[cfg(feature = "ssh")]
     Tunnel(TunnelError),
+    /// No SSH backend was chosen ([`SshBackendError::NotFound`]), or the embedded backend's
+    /// resolution refused the target ([`SshBackendError::ConfigRefused`]); nothing reached the
+    /// network.
+    #[cfg(feature = "ssh")]
+    Backend(SshBackendError),
+    /// The tunnel would reach another host, port, user or jump than the port discovery did
+    /// (docs/design/ssh-backends.md "포트 발견과 터널의 대상 일치"): no token was sent. The
+    /// same configuration gives the same result, so it is not retried.
+    #[cfg(feature = "ssh")]
+    TargetMismatch {
+        /// The target of the port discovery.
+        discovery: Box<EffectiveTarget>,
+        /// The target of the tunnel.
+        tunnel: Box<EffectiveTarget>,
+    },
     /// The peer is too old for handshake v2 (its record has no token). Do not connect again.
     PeerTooOld {
         /// How it was found out.
@@ -225,6 +240,13 @@ impl ConnectError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Cancelled | Self::PeerTooOld { .. } | Self::SelfAttach => false,
+            #[cfg(feature = "ssh")]
+            Self::TargetMismatch { .. } => false,
+            // Only a backend not found may change: OpenSSH may be installed before the next
+            // attempt, which chooses again. A refused resolution or a missing user stays until
+            // the configuration changes.
+            #[cfg(feature = "ssh")]
+            Self::Backend(error) => matches!(error, SshBackendError::NotFound { .. }),
             Self::P2p(error) => match error {
                 P2pError::Connect(e) => e.is_retryable(),
                 P2pError::TimedOut | P2pError::Io(_) => true,
@@ -244,6 +266,15 @@ impl fmt::Display for ConnectError {
             Self::Discovery(_) => f.write_str("the peer's connection record could not be read"),
             #[cfg(feature = "ssh")]
             Self::Tunnel(_) => f.write_str("the SSH tunnel did not come up"),
+            #[cfg(feature = "ssh")]
+            Self::Backend(_) => f.write_str("no SSH backend could connect to the target"),
+            #[cfg(feature = "ssh")]
+            Self::TargetMismatch { discovery, tunnel } => write!(
+                f,
+                "the tunnel would reach {}, not {} where the record was read",
+                target_text(tunnel),
+                target_text(discovery)
+            ),
             Self::PeerTooOld { .. } => f.write_str(
                 "the peer publishes no connection token; it runs a version without handshake v2",
             ),
@@ -251,6 +282,17 @@ impl fmt::Display for ConnectError {
             Self::P2p(_) => f.write_str("the P2P connection could not be made"),
         }
     }
+}
+
+/// `user@host:port`, with ` via <jump>` when there are jump hosts.
+#[cfg(feature = "ssh")]
+fn target_text(target: &EffectiveTarget) -> String {
+    let mut text = format!("{}@{}:{}", target.user, target.hostname, target.port);
+    if !target.jump.is_empty() {
+        text.push_str(" via ");
+        text.push_str(&target.jump);
+    }
+    text
 }
 
 impl Error for ConnectError {
@@ -261,7 +303,11 @@ impl Error for ConnectError {
             Self::Discovery(e) => Some(e),
             #[cfg(feature = "ssh")]
             Self::Tunnel(e) => Some(e),
+            #[cfg(feature = "ssh")]
+            Self::Backend(e) => Some(e),
             Self::P2p(e) => Some(e),
+            #[cfg(feature = "ssh")]
+            Self::TargetMismatch { .. } => None,
             Self::Cancelled | Self::PeerTooOld { .. } | Self::SelfAttach => None,
         }
     }

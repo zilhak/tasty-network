@@ -74,6 +74,8 @@ pub use channel::{
     ChannelConfig, ChannelControl, ChannelReader, ChannelWriter, DEFAULT_DRAIN_CAP, Finish, Framed,
     RawChannel, ReadError,
 };
+#[cfg(feature = "ssh")]
+pub use connection_table::SshEntryInfo;
 pub use connection_table::{
     Cause, ConnectionEvent, ConnectionId, ConnectionInfo, ConnectionPeer, ConnectionState,
     ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport, HistoryEntry, LinkInfo,

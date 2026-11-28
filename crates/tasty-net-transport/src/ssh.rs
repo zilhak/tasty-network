@@ -10,16 +10,18 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tasty_net_identity::{ConnectionRecord, ParsedRecord};
+#[cfg(feature = "system-ssh")]
+use tasty_net_ssh::SshLauncher;
 use tasty_net_ssh::{
-    PortDiscoveryConfig, PortDiscoveryFailureKind, PortMode, SshLauncher, SshTarget, SshTunnel,
-    discover_remote_port,
+    Discovered, PortDiscoveryConfig, PortDiscoveryFailureKind, PortMode, SelectedBackend,
+    SshBackendError, SshConnector, SshPurpose, SshTarget, SshTunnel, TunnelError,
 };
 
 use crate::cancel::{AttemptCancel, Cancellable, Cancelled, Registration};
 use crate::channel::{ChannelControl, RawChannel};
 use crate::connection_table::{
     Cause, ConnectionInfo, ConnectionPeer, ConnectionState, ConnectionTable, EntryRef, JoinGuard,
-    Joined, NewEntry, PathKind, Phase, Segment, Via,
+    Joined, NewEntry, PathKind, Phase, Segment, SshEntryInfo, Via,
 };
 use crate::lock::lock;
 use crate::reject::TooOldEvidence;
@@ -121,10 +123,15 @@ fn loopback(port: u16) -> String {
 /// decision ([`tasty_net_ssh::Backoff`], [`crate::HandshakeError::is_retryable`],
 /// [`crate::Redialer`]); each new attempt discovers the record again.
 ///
+/// Each attempt chooses its SSH backend once ([`SshConnector::select`]); its port discovery and
+/// its tunnel use that choice, and the next attempt chooses again.
+///
 /// With a [`ConnectionTable`] ([`SshTransport::with_connections`]) every tunnel is one entry
-/// (`ssh_forward` or `ssh_role_reversed`), from port discovery until its last channel ends.
+/// (`ssh_forward` or `ssh_role_reversed`), from port discovery until its last channel ends. Its
+/// `ssh` field shows the backend, its reason, the embedded backend's resolution and the
+/// session.
 pub struct SshTransport {
-    launcher: SshLauncher,
+    connector: SshConnector,
     discovery: PortDiscoveryConfig,
     mode: PortMode,
     published: Published,
@@ -134,7 +141,7 @@ pub struct SshTransport {
 impl fmt::Debug for SshTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SshTransport")
-            .field("launcher", &self.launcher)
+            .field("connector", &self.connector)
             .field("mode", &self.mode)
             .field("published", &lock(&self.published).len())
             .finish_non_exhaustive()
@@ -142,16 +149,36 @@ impl fmt::Debug for SshTransport {
 }
 
 impl SshTransport {
-    /// A transport that starts `ssh` with `launcher` and reads the record as `discovery`
-    /// and `mode` say.
-    pub fn new(launcher: SshLauncher, discovery: PortDiscoveryConfig, mode: PortMode) -> Self {
+    /// A transport whose attempts connect through `connector` and read the record as
+    /// `discovery` and `mode` say.
+    pub fn from_connector(
+        connector: SshConnector,
+        discovery: PortDiscoveryConfig,
+        mode: PortMode,
+    ) -> Self {
         Self {
-            launcher,
+            connector,
             discovery,
             mode,
             published: Arc::new(Mutex::new(HashMap::new())),
             connections: None,
         }
+    }
+
+    /// A transport that starts `ssh` with `launcher`: [`Self::from_connector`] with a
+    /// connector of the launcher's settings, program, child creation hook and host key
+    /// checking. With the embedded backend built too, `auto` falls back to it when the
+    /// launcher's program file is not found.
+    #[cfg(feature = "system-ssh")]
+    pub fn new(launcher: SshLauncher, discovery: PortDiscoveryConfig, mode: PortMode) -> Self {
+        let connector = SshConnector::new(launcher.settings().clone()).with_launcher(launcher);
+        Self::from_connector(connector, discovery, mode)
+    }
+
+    /// The connector: its settings, its backend choice and its settings query
+    /// ([`SshConnector::inspect`]).
+    pub fn connector(&self) -> &SshConnector {
+        &self.connector
     }
 
     /// Reports the tunnels of this transport in `table`.
@@ -173,33 +200,114 @@ impl SshTransport {
             .count()
     }
 
-    fn discover(
+    /// Chooses the attempt's backend and, for the embedded backend, resolves the target
+    /// before anything connects. The entry's `ssh` field is filled with the choice (also a
+    /// failed one) and the resolution.
+    fn choose(
         &self,
         target: &SshTarget,
-        cancel: &AttemptCancel,
-    ) -> Result<ConnectionRecord, ConnectError> {
-        let _scope = cancel.ssh_cancel().scope();
-        let parsed = discover_remote_port(
-            &self.launcher,
-            target,
-            self.mode,
-            &self.discovery,
-            ConnectionRecord::parse,
-        )
-        .map_err(|e| {
-            if e.kind() == PortDiscoveryFailureKind::Cancelled || cancel.is_cancelled() {
-                ConnectError::Cancelled
-            } else {
-                ConnectError::Discovery(e)
+        entry: Option<&EntryRef>,
+    ) -> Result<SelectedBackend, ConnectError> {
+        let chosen = self.connector.select(target);
+        let shown = match &chosen {
+            Ok(selected) => Some(selected.clone()),
+            Err(error) => error.selection(),
+        };
+        if let (Some(entry), Some(backend)) = (entry, shown) {
+            entry.update(|info| {
+                info.ssh = Some(SshEntryInfo {
+                    backend,
+                    resolved: None,
+                    config_notes: Vec::new(),
+                    session_id: None,
+                });
+            });
+        }
+        let selected = chosen.map_err(ConnectError::Backend)?;
+        let resolved = self
+            .connector
+            .resolve(&selected, target, &SshPurpose::Tunnel);
+        let (resolved, notes) = match resolved {
+            Ok(Some((resolved, notes))) => (Some(resolved), notes),
+            Ok(None) => (None, Vec::new()),
+            Err(error) => {
+                if let (Some(entry), SshBackendError::ConfigRefused { notes, .. }) = (entry, &error)
+                {
+                    let notes = notes.clone();
+                    entry.update(|info| {
+                        if let Some(ssh) = &mut info.ssh {
+                            ssh.config_notes = notes;
+                        }
+                    });
+                }
+                return Err(ConnectError::Backend(error));
             }
-        })?;
-        match parsed {
-            ParsedRecord::Record(record) => Ok(record),
+        };
+        if let Some(entry) = entry {
+            entry.update(|info| {
+                if let Some(ssh) = &mut info.ssh {
+                    ssh.resolved = resolved;
+                    ssh.config_notes = notes;
+                }
+            });
+        }
+        Ok(selected)
+    }
+
+    fn discover(
+        &self,
+        selected: &SelectedBackend,
+        target: &SshTarget,
+        cancel: &AttemptCancel,
+    ) -> Result<(ConnectionRecord, Discovered<ParsedRecord>), ConnectError> {
+        let _scope = cancel.ssh_cancel().scope();
+        let discovered = self
+            .connector
+            .discover_remote_port(
+                selected,
+                target,
+                self.mode,
+                &self.discovery,
+                ConnectionRecord::parse,
+            )
+            .map_err(|e| {
+                if e.kind() == PortDiscoveryFailureKind::Cancelled || cancel.is_cancelled() {
+                    ConnectError::Cancelled
+                } else {
+                    ConnectError::Discovery(e)
+                }
+            })?;
+        match &discovered.value {
+            ParsedRecord::Record(record) => Ok((record.clone(), discovered)),
             // No token: none of the v2 purposes can be opened, so nothing is connected.
             ParsedRecord::LegacyPort(_) => Err(ConnectError::PeerTooOld {
                 evidence: TooOldEvidence::PortOnlyDiscovery,
             }),
         }
+    }
+
+    /// Starts the tunnel over the attempt's backend to the target the port discovery reached:
+    /// a tunnel that would reach another target ends with [`ConnectError::TargetMismatch`]
+    /// before it starts.
+    fn establish(
+        &self,
+        selected: &SelectedBackend,
+        target: &SshTarget,
+        discovered: &Discovered<ParsedRecord>,
+        remote_port: u16,
+    ) -> Result<SshTunnel, ConnectError> {
+        let expected = self
+            .connector
+            .discovery_target(selected, target, discovered)
+            .map_err(|e| ConnectError::Tunnel(TunnelError::Backend(e)))?;
+        self.connector
+            .tunnel(selected, target, remote_port, expected.as_ref())
+            .map_err(|e| match e {
+                TunnelError::TargetMismatch { discovery, tunnel } => {
+                    ConnectError::TargetMismatch { discovery, tunnel }
+                }
+                other => ConnectError::Tunnel(other),
+            })
     }
 
     /// The published tunnel for `key`, if it still runs.
@@ -270,7 +378,8 @@ impl SshTransport {
         options: &ConnectOptions,
         entry: Option<&EntryRef>,
     ) -> Result<Connection, ConnectError> {
-        let record = self.discover(target, cancel)?;
+        let selected = self.choose(target, entry)?;
+        let (record, discovered) = self.discover(&selected, target, cancel)?;
         if let Some(entry) = entry {
             entry.update(|info| {
                 if let Via::Ssh { remote_port, .. } = &mut info.via {
@@ -313,16 +422,23 @@ impl SshTransport {
                 if let Some(entry) = entry {
                     entry.phase(Phase::Tunnel);
                 }
-                let established = SshTunnel::establish(&self.launcher, target, record.port);
+                let established = self.establish(&selected, target, &discovered, record.port);
                 if cancel.is_cancelled() {
                     if let Ok(tunnel) = established {
                         OwnedTunnel(Arc::new(tunnel)).cancel();
                     }
                     return Err(ConnectError::Cancelled);
                 }
-                let tunnel = Arc::new(established.map_err(ConnectError::Tunnel)?);
+                let tunnel = Arc::new(established?);
                 if let Some(entry) = entry {
                     entry.update(|info| {
+                        if let Some(ssh) = &mut info.ssh {
+                            ssh.session_id = tunnel.session_id();
+                            if let Some(resolved) = tunnel.resolved() {
+                                ssh.resolved = Some(resolved.clone());
+                                ssh.config_notes = tunnel.config_notes().to_vec();
+                            }
+                        }
                         info.segments.insert(
                             0,
                             Segment {

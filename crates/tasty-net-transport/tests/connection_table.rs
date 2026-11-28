@@ -140,10 +140,14 @@ fn inbound(table: ConnectionTable) -> Ending {
     }
 }
 
-/// SSH connection attempts whose `ssh` program does not exist.
+/// SSH connection attempts whose `ssh` program does not exist: `ssh.backend = system` ends
+/// them before port discovery (no fallback, whichever backends are built).
 #[cfg(feature = "system-ssh")]
 mod ssh {
-    use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SshLauncher, SshTarget};
+    use tasty_net_ssh::{
+        BackendReason, PortDiscoveryConfig, PortMode, SshBackendError, SshLauncher, SshSettings,
+        SshTarget,
+    };
     use tasty_net_transport::{
         AttemptCancel, ConnectError, ConnectOptions, ConnectionId, ConnectionTable, HandshakeError,
         SshTransport, Transport,
@@ -151,10 +155,14 @@ mod ssh {
 
     use super::{Cause, Ending, Phase};
 
+    fn missing() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tasty-net-transport-no-ssh-{}", std::process::id()))
+    }
+
     /// A transport whose `ssh` program does not exist, reporting in `table`.
     pub fn failing(table: &ConnectionTable) -> SshTransport {
-        let missing =
-            std::env::temp_dir().join(format!("tasty-net-transport-no-ssh-{}", std::process::id()));
+        let mut settings = SshSettings::new();
+        settings.set_text("ssh.backend", "system").expect("system");
         let discovery = PortDiscoveryConfig {
             remote_program: "netprog".into(),
             remote_args: vec!["port".into()],
@@ -162,21 +170,37 @@ mod ssh {
             port_file: "record".into(),
             explicit_port_file: None,
         };
-        SshTransport::new(SshLauncher::new(missing), discovery, PortMode::FileUnix)
-            .with_connections(table.clone())
+        SshTransport::new(
+            SshLauncher::new(missing()).with_settings(settings),
+            discovery,
+            PortMode::FileUnix,
+        )
+        .with_connections(table.clone())
     }
 
-    /// One attempt that fails in port discovery; returns its entry's ID.
+    /// One attempt that finds no backend; returns its entry's ID. The entry shows the
+    /// choice: no backend, and the file looked at.
     pub fn fail_once(transport: &SshTransport, options: &ConnectOptions) -> ConnectionId {
         let table = transport.connections().expect("a table");
         let before = table.connections().last().map(|e| e.id);
         match transport.connect_with(&SshTarget::parse("nowhere"), &AttemptCancel::new(), options) {
-            Err(ConnectError::Discovery(_)) => {}
-            other => panic!("expected a discovery failure: {other:?}"),
+            Err(ConnectError::Backend(SshBackendError::NotFound { searched })) => {
+                assert_eq!(searched, vec![missing()]);
+            }
+            other => panic!("expected no backend: {other:?}"),
         }
-        let last = table.connections().last().map(|e| e.id).expect("an entry");
-        assert_ne!(Some(last), before, "the attempt made a new entry");
-        last
+        let last = table.connections().pop().expect("an entry");
+        assert_ne!(Some(last.id), before, "the attempt made a new entry");
+        let ssh = last.ssh.expect("the ssh field");
+        assert_eq!(ssh.backend.backend, None);
+        assert_eq!(
+            ssh.backend.reason,
+            BackendReason::NotFound {
+                searched: vec![missing()]
+            }
+        );
+        assert_eq!(ssh.session_id, None);
+        last.id
     }
 
     pub fn ending(table: ConnectionTable) -> Ending {
@@ -194,7 +218,7 @@ mod ssh {
             end_one: Box::new(end_one),
             chains: true,
             phase: Phase::PortDiscovery,
-            cause: |c| matches!(c, Cause::Discovery(_)),
+            cause: |c| matches!(c, Cause::SshBackendUnavailable),
             attempt: Box::new(|table, options| {
                 failing(table)
                     .connect_with(&SshTarget::parse("nowhere"), &AttemptCancel::new(), options)
@@ -202,7 +226,7 @@ mod ssh {
                     .map_err(HandshakeError::Connect)
             }),
             attempt_phase: Some(Phase::PortDiscovery),
-            attempt_error: |e| matches!(e, HandshakeError::Connect(ConnectError::Discovery(_))),
+            attempt_error: |e| matches!(e, HandshakeError::Connect(ConnectError::Backend(_))),
         }
     }
 }

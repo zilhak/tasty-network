@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+#[cfg(feature = "ssh")]
+pub use info::SshEntryInfo;
 pub use info::{
     Cause, ConnectionEvent, ConnectionId, ConnectionInfo, ConnectionPeer, ConnectionState,
     Direction, EdgeTransport, HistoryEntry, LinkInfo, PathKind, Phase, RedialProgress, Segment,
@@ -276,6 +278,8 @@ impl ConnectionTable {
             redial: None,
             p2p_id: None,
             attempt: None,
+            #[cfg(feature = "ssh")]
+            ssh: None,
         };
         state.entries.insert(
             id,

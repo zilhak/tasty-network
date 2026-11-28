@@ -15,6 +15,9 @@ publish = false
 default = ["system-ssh"]
 ssh = ["dep:tasty-net-ssh"]
 system-ssh = ["ssh", "tasty-net-ssh/system-ssh"]
+# The embedded russh backend: not a default feature until the E1 criterion (docs/design/
+# done-criteria.md "내장 폴백 활성 기준"). With system-ssh too, auto falls back to it.
+embedded-ssh = ["ssh", "tasty-net-ssh/embedded-ssh"]
 
 [dependencies]
 tasty-net-frame = { path = "../tasty-net-frame" }

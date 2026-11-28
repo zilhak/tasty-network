@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use tasty_net_frame::StreamTag;
 use tasty_net_identity::{ConnectionRecord, ConnectionToken};
-use tasty_net_ssh::{PortDiscoveryConfig, PortMode, SpawnHook, SshLauncher, SshTarget};
+use tasty_net_ssh::{
+    BackendReason, PortDiscoveryConfig, PortMode, SpawnHook, SshBackendKind, SshLauncher,
+    SshSettings, SshTarget,
+};
 use tasty_net_transport::{
     AttemptCancel, Cause, ConnectError, ConnectOptions, ConnectionEvent, ConnectionId,
     ConnectionState, ConnectionTable, ConnectionTableConfig, Direction, EdgeTransport,
@@ -110,7 +113,9 @@ impl FakeSsh {
         write_file(
             &script,
             &format!(
-                "#!/bin/sh\ncase \" $* \" in *\" -L \"*)\necho tunnel >> '{tunnels}'\n\
+                "#!/bin/sh\ncase \" $* \" in *\" -G \"*)\n\
+                 printf 'hostname h.example\\nport 22\\nuser u\\n'; exit 0;;\n\
+                 *\" -L \"*)\necho tunnel >> '{tunnels}'\n\
                  {FAKE_ARGS_ENV}=\"$*\"\nexport {FAKE_ARGS_ENV}\n\
                  {FAKE_READY_ENV}='{preparing}'\nexport {FAKE_READY_ENV}\n\
                  {FAKE_GO_ENV}='{go}'\nexport {FAKE_GO_ENV}\n\
@@ -686,7 +691,7 @@ fn ssh_connection_reports_applied_sources() {
     let transport = fake.transport().with_connections(table.clone());
     // The lost connection: an attempt whose ssh cannot start.
     let broken = SshTransport::new(
-        SshLauncher::new(fake.script.with_extension("missing")),
+        SshLauncher::new(fake.script.with_extension("missing")).with_settings(system_only()),
         PortDiscoveryConfig {
             remote_program: "netprog".into(),
             remote_args: vec!["port".into()],
@@ -700,6 +705,16 @@ fn ssh_connection_reports_applied_sources() {
     let cancel = AttemptCancel::new();
     assert!(broken.connect(&target(), &cancel).is_err());
     let lost = table.connections()[0].id;
+    // The lost entry shows the failed choice before any discovery.
+    let lost_entry = table.connection(lost).expect("lost");
+    assert_eq!(lost_entry.last_cause, Some(Cause::SshBackendUnavailable));
+    assert_eq!(
+        lost_entry
+            .ssh
+            .as_ref()
+            .map(|s| (s.backend.backend, s.session_id)),
+        Some((None, None))
+    );
 
     let redialer = Redialer::new(
         &table,
@@ -720,6 +735,18 @@ fn ssh_connection_reports_applied_sources() {
     assert_eq!(entry.state, ConnectionState::Connected);
     assert_eq!(entry.links[0].link_id, link.link_id());
     assert_eq!(entry.redial.as_ref().map(|r| r.attempt), Some(1));
+    // The connected entry shows the system backend, the file it found and the tunnel's
+    // session (the `ssh -N` child).
+    let ssh = entry.ssh.as_ref().expect("the ssh field");
+    assert_eq!(ssh.backend.backend, Some(SshBackendKind::System));
+    assert_eq!(
+        ssh.backend.reason,
+        BackendReason::Found {
+            path: fake.script.clone()
+        }
+    );
+    assert!(ssh.session_id.is_some(), "{ssh:?}");
+    assert_eq!(ssh.resolved, None);
     let source = |key: &str| {
         entry
             .applied
@@ -744,11 +771,19 @@ fn ssh_connection_reports_applied_sources() {
     }
 }
 
-/// A transport whose ssh program does not exist, reporting in `table`: its attempts fail in
-/// port discovery and give a lost entry to redial.
+/// Settings that keep the system backend: an attempt whose program is missing ends without
+/// a fallback, whichever backends are built.
+fn system_only() -> SshSettings {
+    let mut settings = SshSettings::new();
+    settings.set_text("ssh.backend", "system").expect("system");
+    settings
+}
+
+/// A transport whose ssh program does not exist, reporting in `table`: its attempts find no
+/// backend (`ssh_backend_unavailable`) and give a lost entry to redial.
 fn broken_transport(fake: &FakeSsh, table: &ConnectionTable) -> SshTransport {
     SshTransport::new(
-        SshLauncher::new(fake.script.with_extension("missing")),
+        SshLauncher::new(fake.script.with_extension("missing")).with_settings(system_only()),
         PortDiscoveryConfig {
             remote_program: "netprog".into(),
             remote_args: vec!["port".into()],
