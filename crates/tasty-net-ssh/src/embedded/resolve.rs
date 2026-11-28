@@ -412,6 +412,20 @@ pub(crate) fn refusal_note(r: &Refusal) -> RefusalNote {
 
 /// The resolution of one host as the connection info shows it (up to the refusal, when it
 /// was refused).
+/// The keywords whose values the connection info and the settings query show: the ones that
+/// choose where the connection goes (docs/design/ssh-backends.md "연결 정보"). Other values
+/// (`SetEnv`, `SendEnv`, `RemoteCommand`, `LocalCommand`, ...) can hold secrets and are left
+/// out, as the value of a `ConfigNote` is.
+const TARGET_KEYWORDS: &[&str] = &[
+    "hostname",
+    "user",
+    "port",
+    "hostkeyalias",
+    "proxyjump",
+    "identityfile",
+    "certificatefile",
+];
+
 pub(crate) fn resolved_target(res: &Resolution) -> ResolvedTarget {
     ResolvedTarget {
         hostname: res.host.clone(),
@@ -426,6 +440,7 @@ pub(crate) fn resolved_target(res: &Resolution) -> ResolvedTarget {
         sources: res
             .sources
             .iter()
+            .filter(|s| TARGET_KEYWORDS.contains(&s.keyword))
             .map(|s| ValueSource {
                 keyword: s.keyword.to_string(),
                 value: s.value.clone(),

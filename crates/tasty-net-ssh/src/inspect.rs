@@ -210,7 +210,9 @@ pub struct ResolvedTarget {
     pub identity_files: Vec<PathBuf>,
     /// The jump hosts, first hop first.
     pub proxy_jump: Vec<JumpHop>,
-    /// Every value with its source, in order.
+    /// The values that choose where the connection goes (`hostname`, `user`, `port`,
+    /// `hostkeyalias`, `proxyjump`, `identityfile`, `certificatefile`) with their sources, in
+    /// order. Other values can hold secrets and are not carried.
     pub sources: Vec<ValueSource>,
 }
 

@@ -210,3 +210,30 @@ fn an_unknown_keyword_in_a_file_refuses_like_openssh() {
     let refusal = refusal(&connector, &selected);
     assert_eq!(refusal.kind, "unknown_keyword", "{refusal}");
 }
+
+#[test]
+fn the_resolved_target_carries_only_the_values_that_choose_the_target() {
+    let dir = Dir::new("sources");
+    let (connector, selected) = embedded_with(
+        &dir,
+        "Host *\n  HostName real.example\n  Port 2222\n  SetEnv TOKEN=s3cret-value\n  SendEnv LANG\n",
+    );
+    let (resolved, _) = connector
+        .resolve(
+            &selected,
+            &SshTarget::parse("h.example"),
+            &SshPurpose::Tunnel,
+        )
+        .expect("resolved")
+        .expect("the embedded backend resolves");
+    let keywords: Vec<&str> = resolved
+        .sources
+        .iter()
+        .map(|s| s.keyword.as_str())
+        .collect();
+    assert!(keywords.contains(&"hostname"), "{keywords:?}");
+    assert!(keywords.contains(&"port"), "{keywords:?}");
+    assert!(!keywords.contains(&"setenv"), "{keywords:?}");
+    assert!(!keywords.contains(&"sendenv"), "{keywords:?}");
+    assert!(!format!("{resolved:?}").contains("s3cret"), "{resolved:?}");
+}

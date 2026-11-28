@@ -145,7 +145,7 @@ enum BackendReason { Found { path }, NotFound { searched: Vec<PathBuf> }, System
 struct SelectedBackend { backend: Option<SshBackendKind>, reason: BackendReason, selected_at: SystemTime }
 struct ResolvedTarget {            // 내장 백엔드만. 시스템 백엔드는 None
     hostname, user, port, identity_files: Vec<PathBuf>, proxy_jump: Vec<JumpHop>,
-    sources: Vec<ValueSource>,     // 값마다 {keyword, value, source}, source는 아래 "옵션 적용 순서"
+    sources: Vec<ValueSource>,     // 대상을 고르는 값만 {keyword, value, source}, source는 아래 "옵션 적용 순서"
 }
 struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, class: NoteClass }
 ```
@@ -153,6 +153,7 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 - `backend`가 `None`이면 고르지 못한 것이다(`NotFound`).
 - `SshTunnel::backend()`, 포트 발견 결과의 `backend`, `SshExec::backend()`·`SftpClient::backend()`가 `SelectedBackend`를 돌려준다. `SshTunnel::resolved()`와 `config_notes()`가 해석 결과와 지시어 표시를 돌려준다.
 - `ConfigNote`의 값 칸은 싣지 않는다(비밀 값이 들 수 있다). 지시어 이름·파일·줄·처리·분류만 싣는다.
+- `ResolvedTarget.sources`도 같은 이유로 연결이 어디로 가는지를 정하는 값만 싣는다(결정됨, conductor M4 Gate 4): `hostname`·`user`·`port`·`hostkeyalias`·`proxyjump`·`identityfile`·`certificatefile`. `SetEnv`·`SendEnv`·`RemoteCommand`·`LocalCommand` 같은 다른 값은 연결 목록과 설정 조회에 나가지 않는다.
 
 ### transport 연결 목록
 
@@ -191,7 +192,7 @@ struct ConfigNote { keyword, file, line, action: Shown | Refused | Ignored, clas
 - 라이브러리 설정값으로는 호스트 키 확인을 약하게 만들 수 없다(사용자 결정 "호스트 키 확인을 건너뛰는 설정값은 두지 않는다"). 그래서 `SshSettings::set("ssh.overrides", …)`는 두 백엔드 모두에서 `SettingsError`로 거절한다: [지시어 분류](#지시어-분류)의 "보안 관련 미구현"과 "모르는 지시어"에 드는 항목(예: `ProxyCommand=…`), 그리고 호스트 키 확인을 끄는 값(`StrictHostKeyChecking=no`·`off`, `NoHostAuthenticationForLocalhost=yes`). 뒤의 둘은 파일·대상 옵션에서 읽으면 표시만 하는 값이지만(아래), 라이브러리 설정값으로는 받지 않는다. 설정값이 확인을 끄는 길이 되지 않게 하기 위해서다.
 - 내장 백엔드는 설정 파일·대상 옵션의 `StrictHostKeyChecking no`·`off`와 `NoHostAuthenticationForLocalhost yes`를 적용하지 않고 호스트 키 확인을 그대로 한다. 그 값은 적히지 않은 것처럼 다루므로 확인 모드는 다음 값(앞의 3이 있으면 `accept-new`, 없으면 그다음 출처나 OpenSSH 기본 `ask`)이 정한다. `ConfigNote`(`shown`)에 "호스트 키 확인을 끄는 값은 적용하지 않고 확인을 계속한다"를 남긴다. 같은 대상 옵션으로 시스템 백엔드는 확인 없이 붙고 내장 백엔드는 확인하는 차이가 남는다. 두 백엔드가 갈리는 경우로 둔다.
 - 누적 지시어(`IdentityFile`·`CertificateFile`·`SendEnv`·`SetEnv`·`LocalForward` 등)는 첫 값 우선이 아니라 순서대로 쌓인다(OpenSSH와 같다).
-- `ConnectionAttempts`·`NumberOfPasswordPrompts`처럼 설정값으로 두지 않은 동작값은 지시어로만 정해지고, 없으면 OpenSSH 기본값(`ConnectionAttempts` 1 `readconf.c:2922`, `NumberOfPasswordPrompts` 3 `:2924`)이다. 연결 정보의 `resolved.sources`에서 출처와 함께 보인다. 라이브러리 설정값 규칙의 "조회"는 이 경로로 채운다.
+- `ConnectionAttempts`·`NumberOfPasswordPrompts`처럼 설정값으로 두지 않은 동작값은 지시어로만 정해지고, 없으면 OpenSSH 기본값(`ConnectionAttempts` 1 `readconf.c:2922`, `NumberOfPasswordPrompts` 3 `:2924`)이다. 둘은 아래 `ResolvedTarget.sources` 목록 밖이라 연결 정보의 `resolved.sources`에는 나오지 않는다. 라이브러리 설정값 규칙의 "조회"를 이 둘에 어떻게 채울지는 [후속 작업과 미정](#후속-작업과-미정)의 "설정값이 아닌 동작값의 조회"다.
 - 점프 호스트: OpenSSH는 `ProxyJump`를 `ssh -l <사용자> -p <포트> -J <나머지> -F <설정 파일> -W '[%h]:%p' <홉>` 명령으로 바꾼다(`ssh.c:1278`–`:1324`). 홉에는 `-o` 옵션이 하나도 넘어가지 않는다. 내장 백엔드도 같다: 홉은 같은 설정 파일로 자기 `Host`·`Match`를 해석하고, `ProxyJump` 문자열의 사용자·포트만 받는다. 위 1~8은 최종 목적지에만 적용된다. 홉의 해석 결과는 `resolved.proxy_jump`에 홉마다 있다. 같은 홉·포트·사용자가 목적지와 같으면 OpenSSH처럼 `jumphost loop`로 끝낸다(`ssh.c:1289`–`:1291`).
 
 ## 터널·exec·SFTP
@@ -748,3 +749,4 @@ tasty-android가 요구한 목록(director 2865, 앱 쪽 보고서 R2의 번호)
 | android 요구의 세부 API | 후속 작업(내장 SSH 백엔드, 바인딩 크레이트). [android 요구의 자리](#android-요구의-자리) |
 | 내장 세션을 붙들어 두는 시간 | 정하지 않음. 모바일에서 연속 exec마다 인증하는 비용이 문제가 되면 android 요구와 함께 설정값으로 정한다 |
 | tasty 설정 화면의 SSH 항목 | tasty 전환 때. 이 레포 범위 밖 |
+| 설정값이 아닌 동작값의 조회 | 정하지 않음. `ConnectionAttempts`·`NumberOfPasswordPrompts`처럼 지시어로만 정해지는 횟수는 `resolved.sources`를 연결이 어디로 가는지 정하는 값으로 좁힌 뒤(위 `ResolvedTarget.sources`) 보이는 곳이 없다. 모든 횟수는 조회할 수 있다는 설정값 규칙([크레이트 구성](crates.md#설정값-규칙))과 맞추려면 그 목록에 두 지시어를 더하거나 따로 조회 항목을 둔다 |
