@@ -66,6 +66,8 @@ allow	crates/tasty-net-rendezvous/src/packet_io.rs	pos: 0	받은 것이 없을 �
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	pos = 0	새로 받았을 때: 넘긴 바이트 0
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	0 =>	quinn RecvMeta::stride 0은 합치지 않은 받기(조각 크기는 길이)
 allow	crates/tasty-net-rendezvous/src/packet_io.rs	unwrap_or((0,	길이 0 데이터그램은 빈 조각 하나
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	const RECEIVES_PER_POLL: usize = 32	quinn endpoint driver의 한 poll에 받는 데이터그램 상한: 같은 poll의 이벤트 읽기에 tokio 예산(1.54의 128)을 남기는 경계, 동작값이 아니라 설정 아님 (rendezvous.md 서버 종료)
+allow	crates/tasty-net-rendezvous/src/packet_io.rs	store(0,	세기: Pending을 돌릴 때 받은 수를 다시 0부터
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_add(1,	세기: 사건 하나
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	+= 1	세기: 출처별 STUN 수
 allow	crates/tasty-net-rendezvous/src/server/mod.rs	fetch_sub(1,	세기: 등록 전 연결 하나가 빠짐

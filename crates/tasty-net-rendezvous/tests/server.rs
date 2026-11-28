@@ -1803,6 +1803,161 @@ async fn sockets_that_never_run_dry_do_not_hold_the_shutdown() {
     }
 }
 
+/// The source of the flood's STUN requests; answers to it are dropped.
+fn flood_source() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 9))
+}
+
+/// A real socket that, while the flood is on, never runs dry of STUN binding requests: a
+/// receive takes what the socket has first and, when it has nothing, a request at once.
+#[derive(Debug)]
+struct StunFlood {
+    io: UdpPacketIo,
+    on: Arc<std::sync::atomic::AtomicBool>,
+    injected: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PacketIo for StunFlood {
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr)>> {
+        self.poll_recv_with_dst(cx, buf)
+            .map_ok(|(len, from, _)| (len, from))
+    }
+    fn poll_recv_with_dst(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)>> {
+        match self.io.poll_recv_with_dst(cx, buf) {
+            std::task::Poll::Pending if self.on.load(std::sync::atomic::Ordering::SeqCst) => {
+                let request = stun::binding_request(&[7; 12], None);
+                buf[..request.len()].copy_from_slice(&request);
+                self.injected
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::task::Poll::Ready(Ok((request.len(), flood_source(), None)))
+            }
+            other => other,
+        }
+    }
+    fn poll_send_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.io.poll_send_ready(cx)
+    }
+    fn try_send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        if dest == flood_source() {
+            return Ok(());
+        }
+        self.io.try_send_to(buf, dest)
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.io.local_addr()
+    }
+    fn may_fragment(&self) -> bool {
+        self.io.may_fragment()
+    }
+    fn dual_stack(&self) -> bool {
+        self.io.dual_stack()
+    }
+}
+
+/// A connection that closed while STUN requests keep coming on the primary port leaves quinn's
+/// endpoint: the demux under the endpoint's driver leaves the driver budget to read the
+/// connection's end, so the shutdown's wait for the closing connections ends well before its
+/// bound, with the flood still on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_connection_leaves_the_endpoint_under_a_stun_flood() {
+    let capture = Capture::default();
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _off = FloodOff(on.clone());
+    let injected = Arc::<std::sync::atomic::AtomicU64>::default();
+    let taken = || injected.load(std::sync::atomic::Ordering::Relaxed);
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    // A connection that closed ends in a few closing periods on loopback, far below this.
+    let bound = Duration::from_secs(5);
+    let margin = Duration::from_millis(1500);
+    let mut config = ServerConfig::new(key(100));
+    config.settings = settings_with_shutdown_timeout(bound);
+    let server = Server::start_with_io(
+        config,
+        ServerIo {
+            primary: Arc::new(StunFlood {
+                io: UdpPacketIo::bind(local).await.unwrap(),
+                on: on.clone(),
+                injected: injected.clone(),
+            }),
+            alternate_port: Arc::new(UdpPacketIo::bind(local).await.unwrap()),
+            alternate_ip: None,
+        },
+    )
+    .await
+    .expect("server starts");
+    let primary = server.addrs().primary;
+    let (device, _) = Device::register(&server, &key(4), &[]).await;
+    on.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The driver waits on the real socket and the flood does not wake it: one real datagram
+    // does, and from then on the receive never runs dry.
+    std::net::UdpSocket::bind(local)
+        .unwrap()
+        .send_to(&stun::binding_request(&[8; 12], None), primary)
+        .unwrap();
+    eventually("the server takes the flood", || {
+        taken() > 1000 && server.status().stun_answered > 0
+    })
+    .await;
+    device.conn.close(0u32.into(), b"");
+    eventually("the server sees the device leave", || {
+        server.status().registrations == 0
+    })
+    .await;
+    let before = taken();
+    // As in `sockets_that_never_run_dry_do_not_hold_the_shutdown`, a std thread watches the
+    // bound and turns the flood off past it, so a receive that never gives its thread back
+    // fails this test instead of hanging it.
+    let (done, watch) = std::sync::mpsc::channel::<()>();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (on, stopped) = (on.clone(), stopped.clone());
+        std::thread::spawn(move || {
+            if watch.recv_timeout(bound + margin) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            {
+                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                on.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+    };
+    let started = Instant::now();
+    tokio::time::timeout(DEADLINE, server.shutdown())
+        .await
+        .expect("shutdown ends once the flood is off");
+    let took = started.elapsed();
+    drop(done);
+    watcher.join().unwrap();
+    assert!(
+        !stopped.load(std::sync::atomic::Ordering::SeqCst),
+        "the shutdown ended only after the flood was turned off ({took:?})"
+    );
+    let dropped_at_bound = capture
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("still closing at shutdown_timeout"));
+    assert!(
+        !dropped_at_bound && took < bound,
+        "the closed connection stayed in the endpoint until the bound ({took:?})"
+    );
+    // The flood went on through the wait: the connection left with the queue never empty.
+    assert!(taken() > before, "the flood was on during the shutdown");
+    std::net::UdpSocket::bind(primary).expect("the primary port is free again");
+    drop(device);
+}
+
 #[tokio::test]
 async fn mtu_discovery_follows_the_socket() {
     let mtu = |server: &Server| {

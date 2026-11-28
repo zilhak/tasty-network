@@ -15,7 +15,7 @@ use std::fmt;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -347,11 +347,20 @@ pub struct DemuxCounters {
     pub send_too_large: AtomicU64,
 }
 
+/// The most datagrams [`DemuxSocket::poll_recv`] takes before it returns pending once (and
+/// wakes the driver again at once). quinn's endpoint driver reads its event queue after the
+/// receive, in the same poll and under the same tokio budget (128 units in tokio 1.54), and a
+/// tokio socket spends a unit per readiness check: 32 leaves most of the budget to the events.
+/// Not a setting: a bound of one poll's work under tokio's fixed budget, not a behaviour.
+const RECEIVES_PER_POLL: usize = 32;
+
 /// A quinn socket over a [`PacketIo`] that splits received packets by their first byte.
 pub struct DemuxSocket {
     io: Arc<dyn PacketIo>,
     stun: Arc<dyn StunSink>,
     counters: Arc<DemuxCounters>,
+    /// Datagrams taken since the receive last returned pending.
+    taken: AtomicUsize,
 }
 
 impl fmt::Debug for DemuxSocket {
@@ -369,6 +378,7 @@ impl DemuxSocket {
             io,
             stun,
             counters: Arc::default(),
+            taken: AtomicUsize::default(),
         }
     }
 
@@ -378,7 +388,12 @@ impl DemuxSocket {
         stun: Arc<dyn StunSink>,
         counters: Arc<DemuxCounters>,
     ) -> Self {
-        DemuxSocket { io, stun, counters }
+        DemuxSocket {
+            io,
+            stun,
+            counters,
+            taken: AtomicUsize::default(),
+        }
     }
 
     /// The counts.
@@ -389,6 +404,13 @@ impl DemuxSocket {
     /// The packet I/O under this socket.
     pub fn io(&self) -> Arc<dyn PacketIo> {
         self.io.clone()
+    }
+
+    /// Pending with the driver woken again at once: the next receive starts a new count.
+    fn pending(&self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        self.taken.store(0, Ordering::Relaxed);
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 
@@ -428,24 +450,28 @@ impl quinn::AsyncUdpSocket for DemuxSocket {
             return Poll::Ready(Ok(0));
         };
         loop {
-            // Each datagram taken costs the task a unit of tokio's budget: a socket whose queue
-            // never empties gives the thread back now and then, so an abort reaches the task.
-            let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
+            // Every [`RECEIVES_PER_POLL`] datagrams, QUIC or kept here, the receive returns
+            // pending and wakes the driver again. quinn's driver then reads its event queue (a
+            // connection that has drained leaves the endpoint there) with budget left, and
+            // lets go of the endpoint's lock and its thread, so the endpoint's close and an
+            // abort reach it: a queue that never empties holds none of them.
+            if self.taken.fetch_add(1, Ordering::Relaxed) >= RECEIVES_PER_POLL {
+                return self.pending(cx);
+            }
             let (len, from, dst_ip) = match self.io.poll_recv_with_dst(cx, buf) {
-                Poll::Ready(Ok(got)) => {
-                    coop.made_progress();
-                    got
-                }
+                Poll::Ready(Ok(got)) => got,
                 Poll::Ready(Err(e)) if receive_error_is_fatal(&e) => return Poll::Ready(Err(e)),
                 Poll::Ready(Err(e)) => {
                     // quinn ends its driver on any error but `ConnectionReset`: drop this one
                     // and give the executor back before the next receive.
                     self.counters.receive_errors.fetch_add(1, Ordering::Relaxed);
                     debug!(error = %e, "datagram receive error dropped");
-                    cx.waker().wake_by_ref();
+                    return self.pending(cx);
+                }
+                Poll::Pending => {
+                    self.taken.store(0, Ordering::Relaxed);
                     return Poll::Pending;
                 }
-                Poll::Pending => return Poll::Pending,
             };
             let packet = &buf[..len];
             match classify(packet) {
