@@ -406,6 +406,15 @@ mod tests {
             CreateFailure::Create(_)
         ));
     }
+
+    /// The real directory sync works on this OS (macOS and iOS: `F_FULLFSYNC` on a directory).
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_can_be_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        os::sync_dir(dir.path()).unwrap();
+        assert!(os::sync_dir(&dir.path().join("missing")).is_err());
+    }
 }
 
 #[cfg(test)]
