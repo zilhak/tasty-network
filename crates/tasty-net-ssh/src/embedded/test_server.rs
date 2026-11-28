@@ -47,13 +47,27 @@ impl DirectReply {
     }
 }
 
+/// Which authentication lets the client in.
+#[derive(Clone, Copy)]
+pub(crate) enum AuthRule {
+    /// The client key.
+    Key,
+    /// This password first (a partial success that asks for `publickey` next), then the
+    /// client key. A key offered before the password is refused.
+    PasswordThenKey(&'static str),
+}
+
 /// What the server saw, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     Exec(ChannelId),
     Close(ChannelId),
+    /// A public key offered or signed with, by its algorithm name.
+    Key(String),
     /// A certificate offered.
     Cert,
+    /// A password.
+    Password,
 }
 
 pub(crate) struct TestServer {
@@ -78,6 +92,16 @@ fn key(seed: u8) -> PrivateKey {
 impl TestServer {
     /// Starts the server and writes the client key it lets in to `client_key` (mode 0600).
     pub(crate) fn start(client_key: &Path, exec: ExecReply, direct: DirectReply) -> Self {
+        Self::start_with(client_key, exec, direct, AuthRule::Key)
+    }
+
+    /// [`Self::start`] with the authentication `rule`.
+    pub(crate) fn start_with(
+        client_key: &Path,
+        exec: ExecReply,
+        direct: DirectReply,
+        rule: AuthRule,
+    ) -> Self {
         let client = self::client_key();
         let text = client.to_openssh(LineEnding::LF).expect("encode");
         let mut options = std::fs::OpenOptions::new();
@@ -110,6 +134,8 @@ impl TestServer {
             allowed: Arc::new(client.public_key().clone()),
             exec,
             direct,
+            rule,
+            password_ok: false,
             events: Arc::clone(&events),
         };
         let (tx, rx) = mpsc::channel();
@@ -218,6 +244,9 @@ struct Handle {
     allowed: Arc<PublicKey>,
     exec: ExecReply,
     direct: DirectReply,
+    rule: AuthRule,
+    /// The password of [`AuthRule::PasswordThenKey`] came on this connection.
+    password_ok: bool,
     events: Arc<Mutex<Vec<Event>>>,
     /// The `session` channels the server confirmed, in order.
     opened: Arc<Mutex<Vec<ChannelId>>>,
@@ -225,7 +254,11 @@ struct Handle {
 
 impl Handle {
     fn judge(&self, key: &PublicKey) -> Auth {
-        if key.key_data() == self.allowed.key_data() {
+        let in_order = match self.rule {
+            AuthRule::Key => true,
+            AuthRule::PasswordThenKey(_) => self.password_ok,
+        };
+        if in_order && key.key_data() == self.allowed.key_data() {
             Auth::Accept
         } else {
             Auth::reject()
@@ -253,6 +286,9 @@ impl Handler for Handle {
         _user: &str,
         offer: PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
+        self.note(Event::Key(
+            offer.public_key.algorithm().as_str().to_string(),
+        ));
         Ok(self.judge(offer.public_key))
     }
 
@@ -261,6 +297,7 @@ impl Handler for Handle {
         _user: &str,
         key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
+        self.note(Event::Key(key.public_key.algorithm().as_str().to_string()));
         Ok(self.judge(key.public_key))
     }
 
@@ -271,6 +308,22 @@ impl Handler for Handle {
     ) -> Result<Auth, Self::Error> {
         self.note(Event::Cert);
         Ok(Auth::reject())
+    }
+
+    async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.note(Event::Password);
+        match self.rule {
+            AuthRule::PasswordThenKey(want) if password == want => {
+                self.password_ok = true;
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(russh::MethodSet::from(
+                        &[russh::MethodKind::PublicKey][..],
+                    )),
+                    partial_success: true,
+                })
+            }
+            _ => Ok(Auth::reject()),
+        }
     }
 
     async fn channel_open_session(

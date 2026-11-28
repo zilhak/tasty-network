@@ -540,9 +540,10 @@ fn open_session(connector: &SshConnector) -> Result<(), SshBackendError> {
     crate::embedded::session::open(ctx, &chain).map(drop)
 }
 
-/// Counts the passphrase questions and answers none.
+/// Answers passwords with `password` and counts the passphrase questions.
 #[derive(Default)]
 struct CountingPrompt {
+    password: Option<&'static str>,
     passphrases: std::sync::atomic::AtomicUsize,
 }
 
@@ -552,19 +553,24 @@ impl crate::SshPrompt for CountingPrompt {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         None
     }
+
+    fn password(&self, _user: &str, _host: &str) -> Option<String> {
+        self.password.map(str::to_string)
+    }
 }
 
-/// A connector on the test server with the server's configuration changed by `edit`, and
-/// `prompt`.
+/// A connector on the test server with `rule`, the server's configuration changed by `edit`,
+/// and `prompt`.
 fn on_auth_server(
     dir: &Dir,
+    rule: crate::embedded::test_server::AuthRule,
     edit: impl Fn(String) -> String,
     prompt: Arc<CountingPrompt>,
 ) -> (crate::embedded::test_server::TestServer, SshConnector) {
     use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
     let key = dir.0.join("id_test");
     let known = dir.0.join("known_hosts");
-    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(2));
+    let server = TestServer::start_with(&key, ExecReply::Silent, DirectReply::Refuse(2), rule);
     std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
     let (connector, _) = embedded_with(dir, &edit(server.config(&key, &known)));
     (server, connector.with_prompt(prompt))
@@ -587,7 +593,7 @@ fn write_key_file(path: &std::path::Path, text: &str) {
 #[cfg(unix)]
 #[test]
 fn the_agent_signs_for_a_key_file_it_holds_before_the_file_is_read() {
-    use crate::embedded::test_server::client_key;
+    use crate::embedded::test_server::{AuthRule, client_key};
     use russh::keys::ssh_key::{Cipher, Kdf, LineEnding};
     let dir = Dir::new("agent");
     let prompt = Arc::new(CountingPrompt::default());
@@ -595,6 +601,7 @@ fn the_agent_signs_for_a_key_file_it_holds_before_the_file_is_read() {
     let quoted = format!("IdentityAgent \"{}\"", socket.display());
     let (server, connector) = on_auth_server(
         &dir,
+        AuthRule::Key,
         |c| c.replace("IdentityAgent none", &quoted),
         Arc::clone(&prompt),
     );
@@ -647,7 +654,7 @@ fn user_certificate() -> russh::keys::Certificate {
 
 #[test]
 fn a_certificate_outside_pubkey_accepted_algorithms_is_not_offered() {
-    use crate::embedded::test_server::Event;
+    use crate::embedded::test_server::{AuthRule, Event};
     let offered = |accepted: &str| {
         let dir = Dir::new("cert");
         let cert = dir.0.join("id_cert.pub");
@@ -656,6 +663,7 @@ fn a_certificate_outside_pubkey_accepted_algorithms_is_not_offered() {
         let line = format!("CertificateFile \"{}\"\n{accepted}", cert.display());
         let (server, connector) = on_auth_server(
             &dir,
+            AuthRule::Key,
             |c| format!("{c}  {line}\n"),
             Arc::new(CountingPrompt::default()),
         );
@@ -843,4 +851,35 @@ fn a_refusal_of_the_discovery_purpose_only_stays_a_configuration_refusal() {
         }
         other => panic!("not a configuration refusal: {other:?} ({error:?})"),
     }
+}
+
+#[test]
+fn a_partial_success_starts_the_method_order_over() {
+    use crate::embedded::test_server::{AuthRule, Event};
+    let dir = Dir::new("partial");
+    let prompt = Arc::new(CountingPrompt {
+        password: Some("pw"),
+        ..CountingPrompt::default()
+    });
+    let (server, connector) = on_auth_server(
+        &dir,
+        AuthRule::PasswordThenKey("pw"),
+        |c| format!("{c}  PreferredAuthentications publickey,password\n"),
+        prompt,
+    );
+    open_session(&connector).expect("password, then the key again");
+    let events = server.events();
+    let password = events
+        .iter()
+        .position(|e| *e == Event::Password)
+        .expect("a password");
+    assert!(
+        events[..password]
+            .iter()
+            .any(|e| matches!(e, Event::Key(_)))
+            && events[password..]
+                .iter()
+                .any(|e| matches!(e, Event::Key(_))),
+        "{events:?}"
+    );
 }

@@ -613,6 +613,11 @@ fn name(method: MethodKind) -> String {
 }
 
 /// `none`, then the methods of `PreferredAuthentications` the server allows, as `ssh` does.
+/// When the server answers with another list of methods (a partial success that asks for one
+/// more method gives one), the order starts over from the first preferred method with the new
+/// list, as `authmethod_get` (`sshconnect2.c:2457`) does, so a method that comes earlier in the
+/// order can still follow the one the server accepted. A partial success with the same list
+/// tries the same method again from its start (`pubkey_reset`, `sshconnect2.c:636`).
 async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<(), SshBackendError> {
     let session_failed = |e: russh::Error| SshBackendError::Session {
         detail: format!("authentication: {e}"),
@@ -628,7 +633,9 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
             remaining_methods, ..
         } => remaining_methods,
     };
-    for method in &plan.methods {
+    let mut order = plan.methods.iter();
+    let mut again = None;
+    while let Some(method) = again.take().or_else(|| order.next()) {
         if !remaining.contains(method) {
             continue;
         }
@@ -637,12 +644,22 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
             MethodKind::PublicKey => publickey(handle, plan).await?,
             MethodKind::KeyboardInteractive => keyboard_interactive(handle, plan).await?,
             MethodKind::Password => password(handle, plan).await?,
-            _ => Step::Failed(None),
+            _ => Step::FAILED,
         };
         match outcome {
             Step::Done => return Ok(()),
-            Step::Failed(Some(next)) => remaining = next,
-            Step::Failed(None) => {}
+            Step::Failed {
+                next: Some(next),
+                partial,
+            } => {
+                if next != remaining {
+                    order = plan.methods.iter();
+                } else if partial {
+                    again = Some(method);
+                }
+                remaining = next;
+            }
+            Step::Failed { next: None, .. } => {}
         }
     }
     Err(SshBackendError::AuthFailed {
@@ -652,18 +669,40 @@ async fn authenticate(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<()
     })
 }
 
-/// How one method ended: success, or failure with the methods the server allows next.
+/// How one method ended: success, or failure with the methods the server allows next and
+/// whether the server accepted the method as one of several it asks for (partial success).
 enum Step {
     Done,
-    Failed(Option<russh::MethodSet>),
+    Failed {
+        next: Option<russh::MethodSet>,
+        partial: bool,
+    },
+}
+
+impl Step {
+    /// A failure without an answer of the server.
+    const FAILED: Self = Self::Failed {
+        next: None,
+        partial: false,
+    };
+
+    /// Whether the method is over: success, or a partial success, after which the order
+    /// goes on with the server's answer.
+    fn ends(&self) -> bool {
+        !matches!(self, Self::Failed { partial: false, .. })
+    }
 }
 
 fn step(result: russh::client::AuthResult) -> Step {
     match result {
         russh::client::AuthResult::Success => Step::Done,
         russh::client::AuthResult::Failure {
-            remaining_methods, ..
-        } => Step::Failed(Some(remaining_methods)),
+            remaining_methods,
+            partial_success,
+        } => Step::Failed {
+            next: Some(remaining_methods),
+            partial: partial_success,
+        },
     }
 }
 
@@ -990,7 +1029,7 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
     let list = candidates(plan, &agent_ids);
     // Key files read in this round, so one passphrase serves the key and its certificate.
     let mut loaded: Vec<(PathBuf, Option<Arc<PrivateKey>>)> = Vec::new();
-    let mut last = Step::Failed(None);
+    let mut last = Step::FAILED;
     for candidate in &list {
         let result = match candidate {
             Candidate::Agent(key) => {
@@ -1092,7 +1131,7 @@ async fn publickey(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step,
             }
         };
         last = step(result);
-        if matches!(last, Step::Done) {
+        if last.ends() {
             return Ok(last);
         }
     }
@@ -1155,8 +1194,14 @@ async fn keyboard_interactive(
         match response {
             KeyboardInteractiveAuthResponse::Success => return Ok(Step::Done),
             KeyboardInteractiveAuthResponse::Failure {
-                remaining_methods, ..
-            } => return Ok(Step::Failed(Some(remaining_methods))),
+                remaining_methods,
+                partial_success,
+            } => {
+                return Ok(Step::Failed {
+                    next: Some(remaining_methods),
+                    partial: partial_success,
+                });
+            }
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -1167,10 +1212,10 @@ async fn keyboard_interactive(
                 } else {
                     rounds += 1;
                     if rounds > plan.prompts {
-                        return Ok(Step::Failed(None));
+                        return Ok(Step::FAILED);
                     }
                     let Some(prompt) = &plan.prompt else {
-                        return Ok(Step::Failed(None));
+                        return Ok(Step::FAILED);
                     };
                     let request = KeyboardInteractiveRequest {
                         name,
@@ -1186,7 +1231,7 @@ async fn keyboard_interactive(
                     .await
                     {
                         Some(Some(answers)) => answers,
-                        _ => return Ok(Step::Failed(None)),
+                        _ => return Ok(Step::FAILED),
                     }
                 };
                 response = handle
@@ -1200,9 +1245,9 @@ async fn keyboard_interactive(
 
 async fn password(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, SshBackendError> {
     let Some(prompt) = &plan.prompt else {
-        return Ok(Step::Failed(None));
+        return Ok(Step::FAILED);
     };
-    let mut last = Step::Failed(None);
+    let mut last = Step::FAILED;
     for _ in 0..plan.prompts {
         let (user, host) = (plan.user.clone(), plan.host.clone());
         let Some(Some(password)) = ask(
@@ -1223,7 +1268,7 @@ async fn password(handle: &mut Handle<Client>, plan: &AuthPlan) -> Result<Step, 
                     detail: format!("password authentication: {e}"),
                 })?,
         );
-        if matches!(last, Step::Done) {
+        if last.ends() {
             return Ok(last);
         }
     }
