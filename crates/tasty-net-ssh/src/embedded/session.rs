@@ -17,6 +17,7 @@ use tasty_net_ssh_config::options::{AddressFamily, Flag, KeepAlives, PubkeyAuth}
 use tasty_net_ssh_config::{Origin, Resolution};
 
 use crate::backend::SshBackendError;
+use crate::cancel::SshCancel;
 use crate::inspect::{ConfigNote, NoteClass};
 use crate::prompt::{KeyboardInteractiveRequest, SshPrompt};
 use crate::settings::SshSettings;
@@ -117,6 +118,37 @@ fn session_key(chain: &Chain) -> String {
 
 /// The session for `chain`: an open one with the same key, or a new one.
 pub(crate) fn open(ctx: Ctx<'_>, chain: &Chain) -> Result<Arc<Session>, SshBackendError> {
+    open_within(ctx, chain, None).map_err(|stop| match stop {
+        OpenStop::Failed(e) => e,
+        // Without a bound the open is neither cancelled nor out of time here.
+        OpenStop::Expired | OpenStop::Cancelled => SshBackendError::Session {
+            detail: "the session open stopped".into(),
+        },
+    })
+}
+
+/// A bound on opening a new session: its deadline (prompt time not counted), and the cancel
+/// looked at every `poll`.
+pub(crate) struct OpenBound {
+    pub(crate) deadline: Instant,
+    pub(crate) cancel: Option<SshCancel>,
+    pub(crate) poll: Duration,
+}
+
+/// Why [`open_within`] gave no session.
+pub(crate) enum OpenStop {
+    Failed(SshBackendError),
+    Expired,
+    Cancelled,
+}
+
+/// [`open`] within `bound`: connecting, the host key check and authentication (agent answers
+/// included) stop at its deadline or cancel.
+pub(crate) fn open_within(
+    ctx: Ctx<'_>,
+    chain: &Chain,
+    bound: Option<OpenBound>,
+) -> Result<Arc<Session>, OpenStop> {
     let key = session_key(chain);
     if let Some(found) = ctx
         .shared
@@ -127,21 +159,45 @@ pub(crate) fn open(ctx: Ctx<'_>, chain: &Chain) -> Result<Arc<Session>, SshBacke
     {
         return Ok(found);
     }
-    let runtime = ctx.shared.runtime(ctx.settings)?;
+    let runtime = ctx.shared.runtime(ctx.settings).map_err(OpenStop::Failed)?;
     let Some(rt) = runtime.handle().cloned() else {
-        return Err(SshBackendError::Session {
+        return Err(OpenStop::Failed(SshBackendError::Session {
             detail: "the embedded SSH runtime stopped".into(),
-        });
+        }));
     };
     let notes = Arc::new(Mutex::new(chain.notes.clone()));
     let paused = Arc::new(Paused::default());
     let mut plans = Vec::new();
     for res in chain.hops.iter().chain(std::iter::once(&chain.dest)) {
         plans.push(plan(ctx, res, &notes, &paused).map_err(|refusal| {
-            refused(refusal, notes.lock().map(|n| n.clone()).unwrap_or_default())
+            OpenStop::Failed(refused(
+                refusal,
+                notes.lock().map(|n| n.clone()).unwrap_or_default(),
+            ))
         })?);
     }
-    let conn = run_blocking(&runtime, connect_chain(plans, rt))?;
+    let conn = match bound {
+        None => run_blocking(&runtime, connect_chain(plans, rt)).map_err(OpenStop::Failed)?,
+        Some(bound) => {
+            let paused = Arc::clone(&paused);
+            let out = run_blocking(&runtime, async move {
+                Ok(bounded(
+                    connect_chain(plans, rt),
+                    bound.deadline,
+                    &paused,
+                    bound.cancel.as_ref(),
+                    bound.poll,
+                )
+                .await)
+            })
+            .map_err(OpenStop::Failed)?;
+            match out {
+                Bounded::Done(conn) => conn.map_err(OpenStop::Failed)?,
+                Bounded::Expired => return Err(OpenStop::Expired),
+                Bounded::Cancelled => return Err(OpenStop::Cancelled),
+            }
+        }
+    };
     let id = ctx.next_session.fetch_add(1, Ordering::Relaxed);
     let notes = notes
         .lock()

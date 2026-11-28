@@ -257,3 +257,81 @@ fn a_key_file_others_can_read_is_not_used() {
     }
     assert_eq!(NoteClass::KeyPermissions.name(), "bad_key_permissions");
 }
+
+/// A server that takes the TCP connection and never says anything: the session never opens.
+fn silent_server() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = listener.local_addr().expect("addr").port();
+    (listener, port)
+}
+
+/// The embedded port discovery's run on `connector` for `h.example`.
+fn discover_once(
+    connector: &SshConnector,
+    budget: std::time::Duration,
+) -> Result<String, crate::discovery::PortDiscoveryError> {
+    use crate::discovery::RemoteRun;
+    let target = SshTarget::parse("h.example");
+    let run = crate::embedded::discovery::EmbeddedRun {
+        ctx: connector.embedded_ctx(),
+        target: &target,
+    };
+    let limits = crate::discovery::Limits::new(connector.settings(), &target);
+    run.run(&["echo", "x"], budget, "test discovery", limits)
+}
+
+#[test]
+fn port_discovery_stops_at_its_budget_while_the_session_opens() {
+    let (_listener, port) = silent_server();
+    let dir = Dir::new("budget");
+    // The connect timeout alone would wait a minute.
+    let (connector, _) = embedded_with(
+        &dir,
+        &format!("Host *\n  HostName 127.0.0.1\n  Port {port}\n  ConnectTimeout 60\n"),
+    );
+    let started = std::time::Instant::now();
+    let error =
+        discover_once(&connector, std::time::Duration::from_millis(500)).expect_err("no session");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::TimedOut,
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn port_discovery_stops_at_a_cancel_while_the_session_opens() {
+    let (_listener, port) = silent_server();
+    let dir = Dir::new("cancel");
+    let (connector, _) = embedded_with(
+        &dir,
+        &format!("Host *\n  HostName 127.0.0.1\n  Port {port}\n  ConnectTimeout 60\n"),
+    );
+    let cancel = crate::SshCancel::new();
+    let later = cancel.clone();
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        later.cancel();
+    });
+    let started = std::time::Instant::now();
+    let error = {
+        let _scope = cancel.scope();
+        discover_once(&connector, std::time::Duration::from_secs(60)).expect_err("cancelled")
+    };
+    stopper.join().expect("stopper");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::Cancelled,
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

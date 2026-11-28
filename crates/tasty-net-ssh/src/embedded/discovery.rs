@@ -15,7 +15,7 @@ use crate::discovery::{
 };
 
 use super::resolve::{Purpose, load, resolve_chain};
-use super::session::{Session, open};
+use super::session::{OpenBound, OpenStop, Session, open_within};
 use super::{Bounded, Ctx, Paused, bounded, run_blocking};
 
 /// The embedded backend's [`RemoteRun`]: one `exec` channel per command.
@@ -75,7 +75,24 @@ impl RemoteRun for EmbeddedRun<'_> {
             self.ctx.verify,
         )
         .map_err(connection_failed)?;
-        let session = open(self.ctx, &chain).map_err(connection_failed)?;
+        // Connecting, the host key check and authentication (agent answers included) stop at
+        // the discovery budget and the cancel too.
+        let bound = OpenBound {
+            deadline: started + budget,
+            cancel: cancel.clone(),
+            poll: limits.poll_max,
+        };
+        let session = match open_within(self.ctx, &chain, Some(bound)) {
+            Ok(session) => session,
+            Err(OpenStop::Failed(e)) => return Err(connection_failed(e)),
+            Err(OpenStop::Cancelled) => return Err(cancelled_error(what)),
+            Err(OpenStop::Expired) => {
+                return Err(PortDiscoveryError::new(
+                    PortDiscoveryFailureKind::TimedOut,
+                    format!("{what}: the session did not open within {budget:?}"),
+                ));
+            }
+        };
         if cancel.as_ref().is_some_and(SshCancel::is_cancelled) {
             return Err(cancelled_error(what));
         }
