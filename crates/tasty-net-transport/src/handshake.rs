@@ -613,22 +613,31 @@ fn linger_close(ch: &mut RawChannel, limit: Duration) {
     );
 }
 
-/// A channel that closed during the handshake is explained by its SSH listener verdict.
+/// A channel that closed during the handshake is explained by its SSH listener verdict: a
+/// channel the server refused to open first (that needs no wait), then an absent listener.
 #[cfg(feature = "ssh")]
 fn explain(ch: &RawChannel, error: HandshakeError) -> HandshakeError {
     match error {
         HandshakeError::PeerClosed => {
             let dropped =
                 tasty_net_ssh::connection_closed_error("the channel closed during the handshake");
+            if let Some(refused) = ch.channel_refused(&dropped) {
+                return HandshakeError::ChannelOpenRefused(refused);
+            }
             ch.listener_absent(&dropped).map_or(
                 HandshakeError::PeerClosed,
                 HandshakeError::RemoteListenerAbsent,
             )
         }
-        HandshakeError::Io(e) => match ch.listener_absent(&e) {
-            Some(absent) => HandshakeError::RemoteListenerAbsent(absent),
-            None => HandshakeError::Io(e),
-        },
+        HandshakeError::Io(e) => {
+            if let Some(refused) = ch.channel_refused(&e) {
+                return HandshakeError::ChannelOpenRefused(refused);
+            }
+            match ch.listener_absent(&e) {
+                Some(absent) => HandshakeError::RemoteListenerAbsent(absent),
+                None => HandshakeError::Io(e),
+            }
+        }
         other => other,
     }
 }

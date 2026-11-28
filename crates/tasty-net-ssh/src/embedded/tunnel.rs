@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::ChannelOpenFailure;
+use tokio::io::AsyncWriteExt as _;
 use tokio::task::{AbortHandle, JoinSet};
 
 use crate::backend::SshBackendError;
-use crate::listener::{ListenerVerdict, StderrMarks, VerdictTiming};
+use crate::listener::{ChannelRefusal, ChannelSlot, ListenerVerdict, StderrMarks, VerdictTiming};
 use crate::settings::SshSettings;
 
 use super::session::{ORIGINATOR, Session};
@@ -34,7 +35,7 @@ impl Tunnel {
         remote_port: u16,
         settings: &SshSettings,
     ) -> Result<Self, std::io::Error> {
-        let marks = Arc::new(StderrMarks::default());
+        let marks = Arc::new(StderrMarks::per_connection());
         let handle = Arc::clone(&session.conn.handle);
         let open_timeout = settings.channel_open_timeout();
         let task_marks = Arc::clone(&marks);
@@ -146,8 +147,12 @@ async fn accept_loop(
     }
 }
 
-/// One forwarded connection. A refused channel closes the local connection; only reason 2
-/// (`SSH_OPEN_CONNECT_FAILED`) marks an absent remote listener.
+/// One forwarded connection. A refused channel closes the local connection after it is marked:
+/// reason 2 (`SSH_OPEN_CONNECT_FAILED`) as an absent remote listener, any other reason as a
+/// refused channel with its code ([`crate::ChannelOpenRefused`]). The connection's slot is
+/// released once the local side has closed too, so a verdict named while the connection is
+/// open always finds it, and an ended connection leaves nothing in the marks. A forward that
+/// is aborted (the tunnel terminated or dropped) releases its slot as it is dropped.
 async fn forward(
     mut stream: tokio::net::TcpStream,
     peer: SocketAddr,
@@ -155,6 +160,56 @@ async fn forward(
     remote_port: u16,
     open_timeout: Duration,
     marks: Arc<StderrMarks>,
+) {
+    // This connection's own slot: an earlier or later connection from the same address has
+    // another one.
+    let held = Held {
+        slot: marks.accept(peer),
+        marks: &marks,
+        peer,
+    };
+    relay(
+        &mut stream,
+        peer,
+        &handle,
+        remote_port,
+        open_timeout,
+        &marks,
+        &held.slot,
+    )
+    .await;
+    // The end of this side, then the wait for the local side to close: until then the
+    // connection is open and its verdict may still be named.
+    let _shut = stream.shutdown().await.is_ok();
+    let _drained = tokio::io::copy(&mut stream, &mut tokio::io::sink())
+        .await
+        .is_ok();
+    drop(held);
+}
+
+/// The slot of one forwarded connection, released when the forward ends or is aborted.
+struct Held<'a> {
+    slot: Arc<ChannelSlot>,
+    marks: &'a StderrMarks,
+    peer: SocketAddr,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.marks.release(self.peer, &self.slot);
+    }
+}
+
+/// The channel of one forwarded connection, opened and copied to its end, or its refusal
+/// written in `slot`.
+async fn relay(
+    stream: &mut tokio::net::TcpStream,
+    peer: SocketAddr,
+    handle: &russh::client::Handle<super::hostkey::Client>,
+    remote_port: u16,
+    open_timeout: Duration,
+    marks: &StderrMarks,
+    slot: &ChannelSlot,
 ) {
     let opened = tokio::time::timeout(
         open_timeout,
@@ -169,7 +224,12 @@ async fn forward(
     let channel = match opened {
         Ok(Ok(channel)) => channel,
         Ok(Err(russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed))) => {
+            slot.refuse(ChannelRefusal::ConnectFailed);
             marks.record_connect_failure();
+            return;
+        }
+        Ok(Err(russh::Error::ChannelOpenFailure(reason))) => {
+            slot.refuse(ChannelRefusal::Other(reason.code()));
             return;
         }
         Ok(Err(e)) => {
@@ -182,7 +242,7 @@ async fn forward(
         }
     };
     let mut remote = channel.into_stream();
-    if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut remote).await {
+    if let Err(e) = tokio::io::copy_bidirectional(stream, &mut remote).await {
         tracing::debug!(target: LOG_TARGET, "a forwarded connection ended: {e}");
     }
 }

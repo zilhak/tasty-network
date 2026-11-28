@@ -519,6 +519,11 @@ fn open_through(
     }
     let stream = connected.map_err(ConnectError::Io)?;
     let local = stream.local_addr();
+    // The verdict names this connection, so a refusal code is only of this channel.
+    let verdict = match &local {
+        Ok(local) => verdict.for_local(*local),
+        Err(_) => verdict,
+    };
     let channel = RawChannel::from_tcp_as(stream, TransportKind::Ssh).map_err(ConnectError::Io)?;
     let channel = channel.with_verdict(verdict);
     let channel = match &hold.entry {

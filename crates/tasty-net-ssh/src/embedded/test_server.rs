@@ -33,6 +33,18 @@ pub(crate) enum ExecReply {
 pub(crate) enum DirectReply {
     /// Refuses it with this reason code (RFC 4254 5.1: 1 to 4).
     Refuse(u32),
+    /// Answers by the originator port (the client's local connection) modulo 4: 0 opens the
+    /// channel and closes it at once, 1 refuses with code 1, 2 with code 3, 3 with code 4.
+    ByPort,
+    /// Opens the channel and closes it at once.
+    Open,
+}
+
+impl DirectReply {
+    /// The refusal code for the originator port `port` ([`Self::ByPort`]); `None` opens.
+    pub(crate) fn by_port(port: u32) -> Option<u32> {
+        [None, Some(1), Some(3), Some(4)][usize::try_from(port % 4).unwrap_or_default()]
+    }
 }
 
 /// What the server saw, in order.
@@ -319,15 +331,30 @@ impl Handler for Handle {
 
     async fn channel_open_direct_tcpip(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
         _host_to_connect: &str,
         _port_to_connect: u32,
         _originator_address: &str,
-        _originator_port: u32,
+        originator_port: u32,
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let DirectReply::Refuse(code) = self.direct;
+        let code = match self.direct {
+            DirectReply::Refuse(code) => code,
+            DirectReply::Open => {
+                reply.accept().await;
+                let _closed = channel.close().await.is_ok();
+                return Ok(());
+            }
+            DirectReply::ByPort => match DirectReply::by_port(originator_port) {
+                Some(code) => code,
+                None => {
+                    reply.accept().await;
+                    let _closed = channel.close().await.is_ok();
+                    return Ok(());
+                }
+            },
+        };
         let reason = match code {
             1 => ChannelOpenFailure::AdministrativelyProhibited,
             2 => ChannelOpenFailure::ConnectFailed,

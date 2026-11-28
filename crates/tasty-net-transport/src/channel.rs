@@ -16,7 +16,7 @@ use tasty_net_frame::{
 };
 
 #[cfg(feature = "ssh")]
-use tasty_net_ssh::{ListenerVerdict, RemoteListenerAbsent};
+use tasty_net_ssh::{ChannelOpenRefused, ListenerVerdict, RemoteListenerAbsent};
 
 use crate::connection_table::{EntryRef, Joined};
 use crate::end::{CloserWatch, EndReason, LinkCloser};
@@ -230,6 +230,16 @@ impl RawChannel {
         failure: &(dyn std::error::Error + 'static),
     ) -> Option<RemoteListenerAbsent> {
         self.verdict.as_ref()?.explain_failure(failure)
+    }
+
+    /// Whether this channel failed with `failure` because the SSH server refused to open it
+    /// (a reason other than a failed connect). It does not wait.
+    #[cfg(feature = "ssh")]
+    pub(crate) fn channel_refused(
+        &self,
+        failure: &(dyn std::error::Error + 'static),
+    ) -> Option<ChannelOpenRefused> {
+        self.verdict.as_ref()?.channel_open_refused(failure)
     }
 
     /// Puts `bytes` in front of the read half: they are read before anything from the

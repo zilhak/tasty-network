@@ -85,7 +85,8 @@ pub use inspect::{
     TargetInspection, ValueSource,
 };
 pub use listener::{
-    ListenerVerdict, RemoteListenerAbsent, connection_closed_error, is_dropped_connection,
+    ChannelOpenRefused, ListenerVerdict, RemoteListenerAbsent, connection_closed_error,
+    is_dropped_connection,
 };
 pub use prompt::{HostKeyQuestion, KeyboardInteractiveRequest, SshPrompt};
 pub use settings::{

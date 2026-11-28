@@ -11,7 +11,7 @@ use tasty_net_identity::{DeviceId, StoreError};
 /// 종료 코드").
 pub use tasty_net_p2p::P2pCloseReason;
 #[cfg(feature = "ssh")]
-use tasty_net_ssh::RemoteListenerAbsent;
+use tasty_net_ssh::{ChannelOpenRefused, RemoteListenerAbsent};
 
 use crate::transport::ConnectError;
 
@@ -173,6 +173,12 @@ pub enum HandshakeError {
     /// the remote port (the remote instance is not running, or its record is stale).
     #[cfg(feature = "ssh")]
     RemoteListenerAbsent(RemoteListenerAbsent),
+    /// The channel through the SSH tunnel dropped because the SSH server refused to open it
+    /// with a reason other than a failed connect (the embedded backend sees the code). The
+    /// session stays up, and connecting again can give another result, as a closed channel
+    /// can.
+    #[cfg(feature = "ssh")]
+    ChannelOpenRefused(ChannelOpenRefused),
     /// A timeout of the [`LinkTimeouts`](crate::LinkTimeouts) is too large to add to the
     /// current time (such as [`std::time::Duration::MAX`]): a configuration error.
     InvalidTimeouts,
@@ -204,7 +210,7 @@ impl HandshakeError {
             Self::Rejected { reason, .. } => reason.is_retryable(),
             Self::TimedOut | Self::PeerClosed | Self::Io(_) => true,
             #[cfg(feature = "ssh")]
-            Self::RemoteListenerAbsent(_) => true,
+            Self::RemoteListenerAbsent(_) | Self::ChannelOpenRefused(_) => true,
             Self::Closed(reason) => reason.is_retryable(),
             Self::Connect(e) => e.is_retryable(),
             _ => false,
@@ -242,6 +248,12 @@ impl fmt::Display for HandshakeError {
             Self::RemoteListenerAbsent(_) => {
                 f.write_str("nothing listens on the remote port behind the SSH tunnel")
             }
+            #[cfg(feature = "ssh")]
+            Self::ChannelOpenRefused(refused) => write!(
+                f,
+                "the SSH server refused to open the tunnel channel (reason code {})",
+                refused.code
+            ),
             Self::InvalidTimeouts => f.write_str("a link timeout is too large to make a deadline"),
             Self::MessageTooLong => {
                 f.write_str("message 1 is longer than the handshake line limit")
@@ -263,6 +275,8 @@ impl Error for HandshakeError {
             Self::Store(e) => Some(e),
             #[cfg(feature = "ssh")]
             Self::RemoteListenerAbsent(e) => Some(e),
+            #[cfg(feature = "ssh")]
+            Self::ChannelOpenRefused(e) => Some(e),
             Self::Connect(e) => Some(e),
             Self::Io(e) => Some(e),
             _ => None,

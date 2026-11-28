@@ -177,6 +177,9 @@ pub enum Cause {
     TunnelExited,
     /// Nothing listens on the remote port behind the SSH tunnel.
     RemoteListenerAbsent,
+    /// The SSH server refused to open the tunnel channel with this reason code (not a failed
+    /// connect).
+    ChannelOpenRefused(u32),
     /// The channel could not be opened (the I/O error's text).
     ConnectFailed(String),
     /// The peer refused the handshake.
@@ -229,6 +232,7 @@ impl Cause {
             Self::TargetMismatch => "target_mismatch",
             Self::TunnelExited => "tunnel_exited",
             Self::RemoteListenerAbsent => "remote_listener_absent",
+            Self::ChannelOpenRefused(_) => "channel_open_refused",
             Self::ConnectFailed(_) => "connect_failed",
             Self::Rejected(_) => "rejected",
             Self::Refused(_) => "refused",
@@ -277,6 +281,7 @@ impl Cause {
             | Self::SshBackendUnavailable
             | Self::TunnelExited
             | Self::RemoteListenerAbsent
+            | Self::ChannelOpenRefused(_)
             | Self::ConnectFailed(_)
             | Self::HandshakeTimedOut
             | Self::PeerClosed
@@ -326,6 +331,8 @@ impl Cause {
             HandshakeError::PeerClosed => Self::PeerClosed,
             #[cfg(feature = "ssh")]
             HandshakeError::RemoteListenerAbsent(_) => Self::RemoteListenerAbsent,
+            #[cfg(feature = "ssh")]
+            HandshakeError::ChannelOpenRefused(refused) => Self::ChannelOpenRefused(refused.code),
             HandshakeError::Connect(e) => Self::of_connect(e),
             HandshakeError::Io(e) => Self::ConnectFailed(e.to_string()),
             // A QUIC close during the handshake keeps its code, the plain close (code 0)
@@ -349,6 +356,7 @@ impl fmt::Display for Cause {
                 write!(f, "{}: {reason}", self.as_str())
             }
             Self::SharedTunnel(id) => write!(f, "{}: {id}", self.as_str()),
+            Self::ChannelOpenRefused(code) => write!(f, "{}: code {code}", self.as_str()),
             Self::P2pConnect(error) => write!(f, "{}: {error}", self.as_str()),
             Self::P2p(cause) => write!(f, "{cause}"),
             Self::P2pClosed(reason) => write!(f, "{}: {reason}", self.as_str()),

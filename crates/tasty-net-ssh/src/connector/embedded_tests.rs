@@ -666,3 +666,138 @@ fn a_certificate_outside_pubkey_accepted_algorithms_is_not_offered() {
     assert!(offered(""));
     assert!(!offered("  PubkeyAcceptedAlgorithms ssh-ed25519"));
 }
+
+#[test]
+fn a_refused_tunnel_channel_keeps_its_reason_code() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    use std::io::Read;
+    for code in [1, 2, 3, 4] {
+        let dir = Dir::new("refused");
+        let key = dir.0.join("id_test");
+        let known = dir.0.join("known_hosts");
+        let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(code));
+        std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+        let (connector, selected) = embedded_with(&dir, &server.config(&key, &known));
+        let tunnel = connector
+            .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
+            .expect("tunnel");
+        let verdict = tunnel.listener_verdict();
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
+        let verdict = verdict.for_local(stream.local_addr().expect("local address"));
+        let mut buf = [0u8; 1];
+        let read = stream.read(&mut buf);
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+        let dropped = crate::connection_closed_error("the channel closed");
+        let refused = verdict.channel_open_refused(&dropped);
+        if code == 2 {
+            assert_eq!(refused, None);
+            assert!(verdict.remote_listener_absent(&dropped));
+        } else {
+            assert_eq!(refused, Some(crate::ChannelOpenRefused { code }));
+            assert!(!verdict.remote_listener_absent(&dropped));
+        }
+    }
+}
+
+#[test]
+fn concurrent_forwards_on_one_tunnel_get_only_their_own_refusal_code() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    use std::io::Read;
+    let dir = Dir::new("refused-many");
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::ByPort);
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let (connector, selected) = embedded_with(&dir, &server.config(&key, &known));
+    let tunnel = connector
+        .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
+        .expect("tunnel");
+    // All the connections are open before any is read, so their channels open and are refused
+    // at the same time on the one session.
+    let streams: Vec<_> = (0..12)
+        .map(|_| {
+            let verdict = tunnel.listener_verdict();
+            let stream =
+                std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
+            let local = stream.local_addr().expect("local address");
+            (verdict.for_local(local), local, stream)
+        })
+        .collect();
+    let dropped = crate::connection_closed_error("the channel closed");
+    for (verdict, local, mut stream) in streams {
+        let mut buf = [0u8; 1];
+        let read = stream.read(&mut buf);
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+        // A channel that opened and then ended gives no code either.
+        let want = DirectReply::by_port(u32::from(local.port()))
+            .map(|code| crate::ChannelOpenRefused { code });
+        assert_eq!(verdict.channel_open_refused(&dropped), want, "{local}");
+    }
+}
+
+/// The tunnel keeps a connection's slot only while the connection is open: many forwards
+/// that open and end, and connections closed before any verdict names them (as a cancelled
+/// attempt does), leave nothing behind; what is kept never exceeds the open connections.
+#[test]
+fn ended_forwards_leave_no_slot_in_the_tunnel() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    use std::io::Read;
+    let dir = Dir::new("slots-released");
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Open);
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let (connector, selected) = embedded_with(&dir, &server.config(&key, &known));
+    let tunnel = connector
+        .tunnel(&selected, &SshTarget::parse("h.example"), 4100, None)
+        .expect("tunnel");
+    let probe = tunnel.listener_verdict();
+    let connect =
+        || std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port())).expect("connect");
+    let settled = |want: usize| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while probe.kept() > want && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        probe.kept()
+    };
+    let reached = |want: usize| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while probe.kept() < want && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        probe.kept()
+    };
+    // Forwards whose channels opened and ended, read to their end without a verdict.
+    for _ in 0..40 {
+        let mut stream = connect();
+        let mut rest = Vec::new();
+        let _read = stream.read_to_end(&mut rest);
+    }
+    assert_eq!(settled(0), 0);
+    // Connections that stay open keep their slots, no more.
+    let open: Vec<_> = (0..3).map(|_| connect()).collect();
+    assert_eq!(reached(open.len()), open.len());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(probe.kept(), open.len());
+    drop(open);
+    assert_eq!(settled(0), 0);
+    // Connections closed after the tunnel accepted them, before a verdict names them (a
+    // cancelled attempt).
+    for _ in 0..10 {
+        let stream = connect();
+        assert_eq!(reached(1), 1);
+        drop(stream);
+        assert_eq!(settled(0), 0);
+    }
+    // Connections still open when the tunnel is terminated: the aborted forwards release
+    // their slots, also while the verdict keeps the marks and the local sockets are open.
+    let open: Vec<_> = (0..3).map(|_| connect()).collect();
+    assert_eq!(reached(open.len()), open.len());
+    tunnel.terminate_and_reap().expect("terminate");
+    assert_eq!(settled(0), 0);
+    drop(open);
+    drop(tunnel);
+    assert_eq!(probe.kept(), 0);
+}
