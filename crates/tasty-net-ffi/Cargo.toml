@@ -1,0 +1,35 @@
+[package]
+name = "tasty-net-ffi"
+description = "UniFFI bindings of the Tasty network library for Kotlin and Swift apps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# lib: the rlib an app's own cdylib links (docs/design/mobile.md "rlib 링크 계약").
+# cdylib, staticlib: the generation check of this repository and use without an app crate.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+serde_json = "1"
+tasty-net-frame = { path = "../tasty-net-frame" }
+tasty-net-identity = { path = "../tasty-net-identity" }
+tasty-net-p2p = { path = "../tasty-net-p2p" }
+# Without SSH: the mobile graph has no system ssh (docs/design/mobile.md "크레이트"). The SSH
+# side of the bindings follows the embedded backend.
+tasty-net-transport = { path = "../tasty-net-transport", default-features = false }
+# The exact version every UniFFI crate and generator of an app uses (docs/design/mobile.md
+# "UniFFI 판"). Without default features: `cargo-metadata` is for the generator only.
+uniffi = { version = "=0.32.2", default-features = false }
+
+[dev-dependencies]
+# The tests of the public TastyNet over P2P run a rendezvous server on loopback in the test
+# process (docs/design/crates.md "의존 방향", the dev graph).
+tasty-net-rendezvous = { path = "../tasty-net-rendezvous" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

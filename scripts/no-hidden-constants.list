@@ -416,3 +416,8 @@ allow	crates/tasty-net-ssh-config/src/scaled.rs	0	0으로 시작
 allow	crates/tasty-net-ssh-config/src/scaled.rs	1	다음 글자로 한 칸
 allow	crates/tasty-net-ssh-config/src/scaled.rs	0x0b	isspace의 수직 탭
 allow	crates/tasty-net-ssh-config/src/scaled.rs	i64::MAX	i64 범위 안에서만 곱한다
+
+# tasty-net-ffi (docs/design/mobile.md "FFI 설정값").
+target	crates/tasty-net-ffi/src/
+settings	crates/tasty-net-ffi/src/settings.rs
+table	crates/tasty-net-ffi/src/settings.rs	mobile.md	FFI 설정값

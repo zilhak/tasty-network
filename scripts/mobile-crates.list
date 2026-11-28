@@ -11,3 +11,4 @@ tasty-net-transport --no-default-features
 tasty-net-rendezvous
 tasty-net-p2p
 tasty-net-ssh-config
+tasty-net-ffi

@@ -1,0 +1,8 @@
+# Names of the generated bindings (docs/design/mobile.md "크레이트", android #12). Library mode
+# reads this file from the crate root, so an app's generation uses these names without
+# overriding them. No cdylib_name: the generated code loads the library it was generated from.
+[bindings.kotlin]
+package_name = "uniffi.tasty_net"
+
+[bindings.swift]
+module_name = "tasty_net"
