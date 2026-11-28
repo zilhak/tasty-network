@@ -369,7 +369,9 @@ pub struct EffectiveTarget {
 /// A `program` with a path separator is that one file. A bare name is looked for in each
 /// directory of `path` (the value of `PATH`) in order: on Unix a regular file with an execute
 /// bit, on Windows (`windows`) `<name>` and then, for a name without an extension,
-/// `<name>.exe`. It returns the file found, or every file looked at.
+/// `<name>.exe`. It returns the file found, or every file looked at. Each file is made
+/// absolute against the working directory first (a relative `PATH` entry such as `.`), so the
+/// file found is the one the system backend runs, without another search.
 pub fn find_program(
     program: &Path,
     path: Option<&OsStr>,
@@ -378,10 +380,11 @@ pub fn find_program(
     let text = program.as_os_str().to_string_lossy();
     let has_separator = text.contains('/') || (windows && text.contains('\\'));
     if has_separator {
-        return if runnable(program, windows) {
-            Ok(program.to_path_buf())
+        let file = absolute(program);
+        return if runnable(&file, windows) {
+            Ok(file)
         } else {
-            Err(vec![program.to_path_buf()])
+            Err(vec![file])
         };
     }
     let mut searched = Vec::new();
@@ -390,6 +393,7 @@ pub fn find_program(
     }
     let with_exe = windows && program.extension().is_none();
     for dir in split_path(path, windows) {
+        let dir = absolute(&dir);
         let mut candidates = vec![dir.join(program)];
         if with_exe {
             let mut name = program.as_os_str().to_owned();
@@ -406,16 +410,49 @@ pub fn find_program(
     Err(searched)
 }
 
+/// `path` against the working directory when it is relative; as given when that fails.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// The directories of a `PATH` value: `;`-separated on Windows, `:`-separated elsewhere. Empty
-/// entries are skipped (they would name the working directory).
+/// entries are skipped (they would name the working directory). The entries keep their bytes
+/// (a Unix folder name that is not UTF-8 is still found).
 fn split_path(path: Option<&OsStr>, windows: bool) -> Vec<PathBuf> {
     let Some(path) = path else {
         return Vec::new();
     };
-    let separator = if windows { ';' } else { ':' };
-    path.to_string_lossy()
-        .split(separator)
-        .filter(|d| !d.is_empty())
+    let separator = if windows { b';' } else { b':' };
+    split_os(path, separator)
+        .into_iter()
+        .filter(|d| !d.as_os_str().is_empty())
+        .collect()
+}
+
+#[cfg(unix)]
+fn split_os(value: &OsStr, separator: u8) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    value
+        .as_bytes()
+        .split(|b| *b == separator)
+        .map(|part| PathBuf::from(OsStr::from_bytes(part)))
+        .collect()
+}
+
+#[cfg(windows)]
+fn split_os(value: &OsStr, separator: u8) -> Vec<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let wide: Vec<u16> = value.encode_wide().collect();
+    wide.split(|c| *c == u16::from(separator))
+        .map(|part| PathBuf::from(std::ffi::OsString::from_wide(part)))
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn split_os(value: &OsStr, separator: u8) -> Vec<PathBuf> {
+    value
+        .to_string_lossy()
+        .split(char::from(separator))
         .map(PathBuf::from)
         .collect()
 }
@@ -596,6 +633,62 @@ mod tests {
             find_program(&missing, Some(&path), HOST_WINDOWS),
             Err(vec![missing.clone()])
         );
+    }
+
+    #[test]
+    fn a_relative_entry_is_made_absolute() {
+        let dir = Dir::new("relative");
+        let file = dir.file("ssh", true);
+        let cwd = std::env::current_dir().expect("cwd");
+        // The same folder named relative to the working directory, as `.` or `bin` would be.
+        let Some(relative) = pathdiff(&dir.0, &cwd) else {
+            eprintln!("the temporary folder is on another drive than the working directory");
+            return;
+        };
+        let path = path_of(&[&relative], HOST_WINDOWS);
+        let found = find_program(Path::new("ssh"), Some(&path), HOST_WINDOWS).expect("found");
+        assert!(found.is_absolute(), "{}", found.display());
+        assert_eq!(
+            std::fs::canonicalize(&found).expect("found"),
+            std::fs::canonicalize(&file).expect("file")
+        );
+    }
+
+    /// `to` relative to `from` with `..` steps (both absolute), or `None` when they share no
+    /// root (two Windows drives).
+    fn pathdiff(to: &Path, from: &Path) -> Option<PathBuf> {
+        let to: Vec<_> = to.components().collect();
+        let from: Vec<_> = from.components().collect();
+        let common = to.iter().zip(&from).take_while(|(a, b)| a == b).count();
+        if common == 0 {
+            return None;
+        }
+        let mut out = PathBuf::new();
+        for _ in common..from.len() {
+            out.push("..");
+        }
+        for c in &to[common..] {
+            out.push(c.as_os_str());
+        }
+        Some(out)
+    }
+
+    // Apple file systems refuse a name that is not UTF-8 (EILSEQ), so such a folder cannot be
+    // made there and the PATH entry cannot name one.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn a_folder_name_that_is_not_utf8_is_searched_as_it_is() {
+        use std::os::unix::ffi::OsStrExt;
+        let parent = Dir::new("bytes");
+        let odd = parent.0.join(OsStr::from_bytes(b"bin-\xff"));
+        std::fs::create_dir_all(&odd).expect("odd folder");
+        let file = odd.join("ssh");
+        std::fs::write(&file, b"#!/bin/sh\n").expect("write");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut path = OsString::from("/nonexistent:");
+        path.push(odd.as_os_str());
+        assert_eq!(find_program(Path::new("ssh"), Some(&path), false), Ok(file));
     }
 
     #[test]
