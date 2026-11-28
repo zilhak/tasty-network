@@ -104,6 +104,7 @@ allow	crates/tasty-net-identity/src/secret_file/unix.rs	0o700	권한 계약: 디
 allow	crates/tasty-net-identity/src/secret_file/unix.rs	0o600	권한 계약: 파일 0600 (identity.md 파일 권한)
 allow	crates/tasty-net-identity/src/secret_file/unix.rs	0o7777	모드 비트 전체(권한과 setuid·setgid·sticky)
 allow	crates/tasty-net-identity/src/secret_file/unix.rs	0o077 == 0	권한 계약: 그룹·다른 사용자 비트가 없으면 좁히지 않는다
+allow	crates/tasty-net-identity/src/secret_file/unix.rs	0o400 == 0	권한 계약: 소유자 읽기 비트가 없는 새 디렉터리만 열지 못해도 그대로 둔다
 allow	crates/tasty-net-identity/src/secret_file/unix.rs	!= 0	권한 계약: 0600 밖의 비트가 있으면 거절
 allow	crates/tasty-net-identity/src/secret_file/windows.rs	[u8; 16]	Windows 파일 ID 128비트(FILE_ID_128)
 allow	crates/tasty-net-identity/src/secret_file/windows.rs	[0; 16]	Windows 파일 ID 0은 ID 없음

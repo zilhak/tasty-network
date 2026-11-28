@@ -64,7 +64,7 @@ pub(super) fn is_link(meta: &std::fs::Metadata) -> bool {
 }
 
 /// Windows has no directory mode bits; the contract is on the files.
-pub(super) fn set_new_dir_private(_dir: &Path) -> io::Result<()> {
+pub(super) fn set_new_dir_private(_dir: &Path) -> Result<(), DirFailure> {
     Ok(())
 }
 

@@ -131,7 +131,7 @@ pub(crate) fn prepare_dir_with_id(
     }
     // A new directory is set to exactly 0700: the umask can also take owner bits away.
     if created {
-        os::set_new_dir_private(&dir).map_err(|e| IdentityError::io(FileOp::CreateDir, &dir, e))?;
+        os::set_new_dir_private(&dir).map_err(dir_error)?;
     } else {
         os::narrow_dir(&dir, &meta).map_err(dir_error)?;
     }
@@ -454,6 +454,74 @@ mod tests {
         ));
     }
 
+    /// A directory that could not be opened for a mode change, looked at again: a link or a
+    /// non-directory is unsafe; another owner is told apart from group or other bits, whatever
+    /// the mode, so that a new directory of another user is refused as `ForeignOwner` while an
+    /// existing one keeps the open error. A new private directory is left as it is only after a
+    /// permission error on a mode without the owner read bit; another open error, or a permission
+    /// error the mode does not explain, is the failure (another user and such open errors cannot
+    /// be made in a test without root, so this is checked on the judgement alone).
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_opened_is_judged_on_owner_then_mode() {
+        use os::{NewDirMode, Unopened};
+
+        let dir = Path::new("keys");
+        let (me, other) = (1000, 1001);
+        let judge = |link, is_dir, mode, uid| os::judge_unopened(dir, link, is_dir, mode, uid, me);
+        assert!(matches!(
+            judge(true, false, 0o777, me),
+            Err(DirFailure::Unsafe(_, UnsafeReason::Symlink))
+        ));
+        assert!(matches!(
+            judge(false, false, 0o600, me),
+            Err(DirFailure::Unsafe(_, UnsafeReason::NotRegular))
+        ));
+        for (mode, uid, kind) in [
+            (0o300, me, Unopened::Private),
+            (0o100, me, Unopened::Private),
+            (0o333, me, Unopened::NotPrivate),
+            (0o300, other, Unopened::ForeignOwner),
+            (0o333, other, Unopened::ForeignOwner),
+        ] {
+            assert!(
+                matches!(judge(false, true, mode, uid), Ok(k) if k == kind),
+                "{mode:o} {uid}"
+            );
+        }
+
+        let denied = || io::Error::from_raw_os_error(libc::EACCES);
+        assert!(matches!(
+            os::new_dir_unopened(dir, denied(), Unopened::Private, 0o300),
+            Ok(NewDirMode::LeftAsIs(0o300))
+        ));
+        // A permission error on a private directory the owner can read (a read restriction
+        // such as an LSM) is not one the mode explains: that error is the failure.
+        assert!(matches!(
+            os::new_dir_unopened(dir, denied(), Unopened::Private, 0o700),
+            Err(DirFailure::Io(_, e)) if e.raw_os_error() == Some(libc::EACCES)
+        ));
+        assert!(matches!(
+            os::new_dir_unopened(dir, denied(), Unopened::ForeignOwner, 0o300),
+            Err(DirFailure::Unsafe(_, UnsafeReason::ForeignOwner))
+        ));
+        assert!(matches!(
+            os::new_dir_unopened(dir, denied(), Unopened::NotPrivate, 0o333),
+            Err(DirFailure::Io(_, e)) if e.raw_os_error() == Some(libc::EACCES)
+        ));
+        // An open error other than a permission error is not a reason to leave a private
+        // directory as it is: that error is the failure. Another owner is still refused first.
+        let too_many = || io::Error::from_raw_os_error(libc::EMFILE);
+        assert!(matches!(
+            os::new_dir_unopened(dir, too_many(), Unopened::Private, 0o700),
+            Err(DirFailure::Io(_, e)) if e.raw_os_error() == Some(libc::EMFILE)
+        ));
+        assert!(matches!(
+            os::new_dir_unopened(dir, too_many(), Unopened::ForeignOwner, 0o700),
+            Err(DirFailure::Unsafe(_, UnsafeReason::ForeignOwner))
+        ));
+    }
+
     /// The real directory sync works on this OS (macOS and iOS: `F_FULLFSYNC` on a directory).
     #[cfg(unix)]
     #[test]
@@ -719,6 +787,38 @@ pub(crate) mod fault {
     #[cfg(unix)]
     pub(super) fn run_after_mkdir(dir: &std::path::Path) {
         let then = AFTER_MKDIR.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            match hook.take() {
+                Some((path, then)) if path == dir => Some(then),
+                other => {
+                    *hook = other;
+                    None
+                }
+            }
+        });
+        if let Some(then) = then {
+            then();
+        }
+    }
+
+    thread_local! {
+        #[cfg(unix)]
+        static AFTER_NEW_DIR_CHMOD: std::cell::RefCell<Option<AfterMkdir>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `then` once on this thread right after this crate set the new directory `dir` to
+    /// 0700 through its handle, before the mode is read back from that handle, as if its mode
+    /// were changed in between (Unix tests).
+    #[cfg(unix)]
+    pub(crate) fn after_new_dir_chmod(dir: &std::path::Path, then: impl FnOnce() + 'static) {
+        AFTER_NEW_DIR_CHMOD
+            .with(|hook| *hook.borrow_mut() = Some((dir.to_path_buf(), Box::new(then))));
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_after_new_dir_chmod(dir: &std::path::Path) {
+        let then = AFTER_NEW_DIR_CHMOD.with(|hook| {
             let mut hook = hook.borrow_mut();
             match hook.take() {
                 Some((path, then)) if path == dir => Some(then),

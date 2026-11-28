@@ -905,6 +905,120 @@ mod unix {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     }
 
+    /// A directory element this crate just made (an intermediate one, then the last one) is
+    /// replaced by a link to another directory right after its mkdir, before it is set to 0700:
+    /// the change is refused as a link, the mode of the link target stays as it was, and
+    /// nothing is created in the target.
+    #[test]
+    fn a_link_swapped_in_after_mkdir_is_not_changed() {
+        for element in ["a", "a/keys"] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("a").join("keys");
+            let swapped = root.path().join(element);
+            let target = root.path().join("target");
+            fs::create_dir(&target).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+            {
+                let (swapped, target, moved) =
+                    (swapped.clone(), target.clone(), root.path().join("old"));
+                fault::after_mkdir(&swapped.clone(), move || {
+                    fs::rename(&swapped, moved).unwrap();
+                    symlink(target, &swapped).unwrap();
+                });
+            }
+            let error = DeviceKey::load_or_create(&dir).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    IdentityError::UnsafeFile {
+                        reason: UnsafeReason::Symlink,
+                        ..
+                    }
+                ),
+                "{element}: {error:?}"
+            );
+            assert_eq!(mode(&target), 0o755, "{element}");
+            assert_eq!(fs::read_dir(&target).unwrap().count(), 0, "{element}");
+        }
+    }
+
+    /// A directory element this crate just made (an intermediate one, then the last one) is
+    /// set to 0700 through its handle, and its mode is changed to 0755 before it is read back
+    /// from that handle: the creation stops with `Io(CreateDir)` at that element, the same for
+    /// both, and nothing is created below it.
+    #[test]
+    fn a_new_directory_that_is_not_0700_after_its_change_is_refused() {
+        for element in ["a", "a/keys"] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("a").join("keys");
+            let changed = root.path().join(element);
+            {
+                let changed = changed.clone();
+                fault::after_new_dir_chmod(&changed.clone(), move || {
+                    fs::set_permissions(&changed, fs::Permissions::from_mode(0o755)).unwrap();
+                });
+            }
+            let error = DeviceKey::load_or_create(&dir).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    IdentityError::Io {
+                        op: FileOp::CreateDir,
+                        path,
+                        source,
+                    } if *path == changed && source.kind() == std::io::ErrorKind::Other
+                ),
+                "{element}: {error:?}"
+            );
+            assert_eq!(mode(&changed), 0o755, "{element}");
+            assert_eq!(fs::read_dir(&changed).unwrap().count(), 0, "{element}");
+        }
+    }
+
+    /// A directory this crate just made is changed right after its mkdir so that the owner
+    /// cannot read it: 0300 (what a umask without the owner read bit leaves) or 0333 (also with
+    /// group and other bits). It cannot be opened to set 0700, so it is not changed, the same as
+    /// in an existing directory: the private one then fails the check of the new mode, the other
+    /// one fails with the open error, both `Io(CreateDir)`, and no key is published in it.
+    #[test]
+    fn a_new_directory_the_owner_cannot_read_is_not_changed_and_not_used() {
+        use std::{io::ErrorKind, os::unix::fs::MetadataExt};
+
+        let root = tempfile::tempdir().unwrap();
+        // Root opens a directory it cannot read, so this order cannot be made as root.
+        if fs::metadata(root.path()).unwrap().uid() == 0 {
+            return;
+        }
+        for (changed, kind) in [
+            (0o300, ErrorKind::Other),
+            (0o333, ErrorKind::PermissionDenied),
+        ] {
+            let dir = root.path().join(format!("keys-{changed:o}"));
+            {
+                let dir = dir.clone();
+                fault::after_mkdir(&dir.clone(), move || {
+                    fs::set_permissions(&dir, fs::Permissions::from_mode(changed)).unwrap();
+                });
+            }
+            let error = DeviceKey::load_or_create(&dir).unwrap_err();
+            let mode_after = mode(&dir);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(
+                matches!(
+                    &error,
+                    IdentityError::Io {
+                        op: FileOp::CreateDir,
+                        source,
+                        ..
+                    } if source.kind() == kind
+                ),
+                "{changed:o}: {error:?}"
+            );
+            assert_eq!(mode_after, changed);
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "{changed:o}");
+        }
+    }
+
     #[test]
     fn a_wide_key_file_is_refused_and_kept() {
         let dir = tempfile::tempdir().unwrap();
