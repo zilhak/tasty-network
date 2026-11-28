@@ -354,13 +354,21 @@ fn discover_once(
     connector: &SshConnector,
     budget: std::time::Duration,
 ) -> Result<String, crate::discovery::PortDiscoveryError> {
+    discover_on(connector, &SshTarget::parse("h.example"), budget)
+}
+
+/// [`discover_once`] for `target`.
+fn discover_on(
+    connector: &SshConnector,
+    target: &SshTarget,
+    budget: std::time::Duration,
+) -> Result<String, crate::discovery::PortDiscoveryError> {
     use crate::discovery::RemoteRun;
-    let target = SshTarget::parse("h.example");
     let run = crate::embedded::discovery::EmbeddedRun {
         ctx: connector.embedded_ctx(),
-        target: &target,
+        target,
     };
-    let limits = crate::discovery::Limits::new(connector.settings(), &target);
+    let limits = crate::discovery::Limits::new(connector.settings(), target);
     run.run(&["echo", "x"], budget, "test discovery", limits)
 }
 
@@ -1626,4 +1634,434 @@ fn a_certificate_smaller_than_required_rsa_size_is_not_offered() {
     };
     assert!(offered(""));
     assert!(!offered("  RequiredRSASize 2048"));
+}
+
+/// Makes a FIFO at `path` (`mkfifo`) only the user can read and write: a file that does not
+/// answer, as a network file system that hangs.
+#[cfg(unix)]
+fn make_fifo(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    const OWNER_ONLY: u32 = 0o600;
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(OWNER_ONLY)).expect("fifo mode");
+}
+
+/// Opens the FIFO `path` to write, which returns once something opened it to read: a read of
+/// it has started then, and waits for data until the returned end is dropped (its end of file).
+/// Fails after `limit` when nothing opens it.
+#[cfg(unix)]
+fn reader_of(path: &std::path::Path, limit: std::time::Duration) -> std::fs::File {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let fifo = path.to_path_buf();
+    std::thread::spawn(move || {
+        let opened = std::fs::OpenOptions::new().write(true).open(&fifo);
+        // The test may have given up waiting already.
+        tx.send(opened).unwrap_or_default();
+    });
+    rx.recv_timeout(limit)
+        .expect("nothing opened the FIFO to read")
+        .expect("open the FIFO to write")
+}
+
+/// An embedded connector reading only the configuration file `config`, with its home in `dir`.
+#[cfg(unix)]
+fn embedded_on_file(dir: &Dir, config: &std::path::Path) -> SshConnector {
+    let mut s = settings("embedded");
+    s.set_text("embedded.config_file", &config.to_string_lossy())
+        .expect("config_file");
+    s.set_text("embedded.system_config_file", "none")
+        .expect("system");
+    s.set_text("embedded.home", &dir.0.to_string_lossy())
+        .expect("home");
+    s.set_text("embedded.local_user", "u").expect("user");
+    SshConnector::new(s)
+}
+
+/// The port discovery of the connector `on` makes for a FIFO stops at its budget and at a
+/// cancel once the read of the FIFO started. Each step has its own FIFO in `dir`
+/// (`<name>-budget`, `<name>-cancel`), so the cancel is seen while its own read waits.
+#[cfg(unix)]
+fn fifo_reads_stop_at_the_budget_and_a_cancel(
+    dir: &Dir,
+    name: &str,
+    on: impl Fn(&std::path::Path) -> SshConnector,
+) {
+    use crate::discovery::PortDiscoveryFailureKind;
+    let limit = std::time::Duration::from_secs(10);
+
+    let fifo = dir.0.join(format!("{name}-budget"));
+    make_fifo(&fifo);
+    let connector = on(&fifo);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let out = discover_once(&connector, std::time::Duration::from_millis(500));
+        tx.send((out, started.elapsed())).unwrap_or_default();
+    });
+    let end = reader_of(&fifo, limit);
+    let (out, elapsed) = rx
+        .recv_timeout(limit)
+        .expect("the budget did not stop the read");
+    let error = out.expect_err("no answer");
+    assert_eq!(error.kind, PortDiscoveryFailureKind::TimedOut, "{error}");
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    drop(end);
+
+    let fifo = dir.0.join(format!("{name}-cancel"));
+    make_fifo(&fifo);
+    let connector = on(&fifo);
+    let cancel = crate::SshCancel::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let scoped = cancel.clone();
+    std::thread::spawn(move || {
+        let _scope = scoped.scope();
+        let out = discover_once(&connector, std::time::Duration::from_secs(60));
+        tx.send(out).unwrap_or_default();
+    });
+    let end = reader_of(&fifo, limit);
+    cancel.cancel();
+    let error = rx
+        .recv_timeout(limit)
+        .expect("the cancel did not stop the read")
+        .expect_err("cancelled");
+    assert_eq!(error.kind, PortDiscoveryFailureKind::Cancelled, "{error}");
+    drop(end);
+}
+
+/// The configuration files are read under the discovery budget and the cancel: a file that
+/// does not answer stops neither (docs/design/ssh-backends.md "내장 백엔드: 세션 하나에 채널
+/// 여럿").
+#[cfg(unix)]
+#[test]
+fn a_configuration_file_that_does_not_answer_stops_neither_the_budget_nor_a_cancel() {
+    let dir = Dir::new("config-fifo");
+    fifo_reads_stop_at_the_budget_and_a_cancel(&dir, "config", |fifo| embedded_on_file(&dir, fifo));
+}
+
+/// The known_hosts files read before connecting are read under the discovery budget and the
+/// cancel too.
+#[cfg(unix)]
+#[test]
+fn a_known_hosts_file_that_does_not_answer_stops_neither_the_budget_nor_a_cancel() {
+    let (_listener, port) = silent_server();
+    let dir = Dir::new("known-hosts-fifo");
+    fifo_reads_stop_at_the_budget_and_a_cancel(&dir, "known_hosts", |fifo| {
+        let config = std::path::PathBuf::from(format!("{}.config", fifo.display()));
+        std::fs::write(
+            &config,
+            format!(
+                "Host *\n  HostName 127.0.0.1\n  Port {port}\n  UserKnownHostsFile \"{}\"\n  \
+                 ConnectTimeout 60\n",
+                fifo.display()
+            ),
+        )
+        .expect("config");
+        embedded_on_file(&dir, &config)
+    });
+}
+
+/// The text of the first known_hosts file of [`RecordCase`], which a record would change.
+#[cfg(unix)]
+const RECORD_BEFORE: &str = "# the first file\n";
+
+/// A test server whose host is new to two known_hosts files under `accept-new`: the first one
+/// (writable, holding [`RECORD_BEFORE`]), where the key is recorded, and a second one that is a
+/// link to a FIFO. The read before connecting reads the FIFO `early`; the record's read again
+/// (under the record lock) reads the FIFO `again`, once [`RecordCase::reread_waits`] moved the
+/// link, so each read is caught on its own FIFO.
+#[cfg(unix)]
+struct RecordCase {
+    _server: crate::embedded::test_server::TestServer,
+    first: std::path::PathBuf,
+    link: std::path::PathBuf,
+    early: std::path::PathBuf,
+    again: std::path::PathBuf,
+    config: String,
+}
+
+#[cfg(unix)]
+impl RecordCase {
+    fn new(dir: &Dir) -> Self {
+        use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+        let key = dir.0.join("id_test");
+        let first = dir.0.join("known_hosts");
+        let link = dir.0.join("known_hosts_link");
+        let early = dir.0.join("known_hosts_early");
+        let again = dir.0.join("known_hosts_again");
+        let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(2));
+        std::fs::write(&first, RECORD_BEFORE).expect("known_hosts");
+        make_fifo(&early);
+        make_fifo(&again);
+        std::os::unix::fs::symlink(&early, &link).expect("link");
+        let config = server
+            .config(&key, &first)
+            .replace(
+                "StrictHostKeyChecking yes",
+                "StrictHostKeyChecking accept-new",
+            )
+            .replace(
+                &format!("UserKnownHostsFile \"{}\"", first.display()),
+                &format!(
+                    "UserKnownHostsFile \"{}\" \"{}\"",
+                    first.display(),
+                    link.display()
+                ),
+            );
+        assert!(config.contains("accept-new") && config.contains("known_hosts_link"));
+        Self {
+            _server: server,
+            first,
+            link,
+            early,
+            again,
+            config,
+        }
+    }
+
+    /// Ends the read before connecting (the end of the FIFO `early`), points the link at the
+    /// FIFO `again` and returns once the record's read again waits on it: its writing end,
+    /// whose drop ends that read.
+    fn reread_waits(&self, limit: std::time::Duration) -> std::fs::File {
+        drop(reader_of(&self.early, limit));
+        let moved = self.link.with_extension("moved");
+        std::os::unix::fs::symlink(&self.again, &moved).expect("link");
+        std::fs::rename(&moved, &self.link).expect("move the link");
+        reader_of(&self.again, limit)
+    }
+
+    /// Waits for the record to end and checks the first file is as it was.
+    fn first_file_unchanged(&self) {
+        crate::embedded::hostkey::records_done();
+        assert_eq!(
+            std::fs::read_to_string(&self.first).expect("known_hosts"),
+            RECORD_BEFORE
+        );
+    }
+}
+
+/// An `accept-new` record whose read of the known_hosts files again (under the record lock)
+/// ends after the discovery was cancelled writes nothing.
+#[cfg(unix)]
+#[test]
+fn a_host_key_is_not_recorded_after_the_discovery_is_cancelled() {
+    let limit = std::time::Duration::from_secs(10);
+    let dir = Dir::new("record-cancel");
+    let case = RecordCase::new(&dir);
+    let (connector, _) = embedded_with(&dir, &case.config);
+    let cancel = crate::SshCancel::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let scoped = cancel.clone();
+    std::thread::spawn(move || {
+        let _scope = scoped.scope();
+        let out = discover_once(&connector, std::time::Duration::from_secs(60));
+        tx.send(out).unwrap_or_default();
+    });
+    let again = case.reread_waits(limit);
+    cancel.cancel();
+    let error = rx
+        .recv_timeout(limit)
+        .expect("the cancel did not stop the discovery")
+        .expect_err("cancelled");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::Cancelled,
+        "{error}"
+    );
+    drop(again);
+    case.first_file_unchanged();
+}
+
+/// An `accept-new` record whose read again ends after the key exchange's own deadline
+/// (`embedded.auth_timeout`) gave the handshake up writes nothing either, although the
+/// discovery's budget and cancel did not stop.
+#[cfg(unix)]
+#[test]
+fn a_host_key_is_not_recorded_after_the_key_exchange_deadline() {
+    let limit = std::time::Duration::from_secs(10);
+    let budget = std::time::Duration::from_secs(60);
+    let dir = Dir::new("record-auth-timeout");
+    let case = RecordCase::new(&dir);
+    let (connector, _) = embedded_with(&dir, &case.config);
+    let mut settings = connector.settings().clone();
+    settings
+        .set(
+            "embedded.auth_timeout",
+            crate::settings::Value::Duration(std::time::Duration::from_secs(1)),
+        )
+        .expect("auth_timeout");
+    let connector = SshConnector::new(settings);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let out = discover_once(&connector, budget);
+        tx.send((out, started.elapsed())).unwrap_or_default();
+    });
+    let again = case.reread_waits(limit);
+    let (out, elapsed) = rx
+        .recv_timeout(limit)
+        .expect("the key exchange deadline did not stop the discovery");
+    let error = out.expect_err("the key exchange did not end");
+    assert_ne!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::Cancelled,
+        "{error}"
+    );
+    assert!(elapsed < budget, "{elapsed:?}");
+    drop(again);
+    case.first_file_unchanged();
+}
+
+/// Cancels `cancel` from inside the host key question, then trusts the key.
+#[cfg(unix)]
+struct CancellingPrompt {
+    cancel: crate::SshCancel,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl crate::SshPrompt for CancellingPrompt {
+    fn confirm_host_key(&self, _question: &crate::prompt::HostKeyQuestion) -> bool {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.cancel.cancel();
+        true
+    }
+}
+
+/// A host key trusted in its question after the discovery was cancelled there is not
+/// recorded, and the connection ends: the session is neither put in the pool nor shown to the
+/// session hook, even when it would open before the wait looks at the cancel again
+/// (`discovery.poll_max` at its longest).
+#[cfg(unix)]
+#[test]
+fn a_session_whose_discovery_was_cancelled_in_the_host_key_question_is_not_kept() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    let limit = std::time::Duration::from_secs(10);
+    let dir = Dir::new("record-ask-cancel");
+    let key = dir.0.join("id_test");
+    let first = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(2));
+    std::fs::write(&first, RECORD_BEFORE).expect("known_hosts");
+    let config = server
+        .config(&key, &first)
+        .replace("StrictHostKeyChecking yes", "StrictHostKeyChecking ask");
+    assert!(config.contains("StrictHostKeyChecking ask"));
+    let (connector, _) = embedded_with(&dir, &config);
+    let mut settings = connector.settings().clone();
+    settings
+        .set(
+            "discovery.poll_max",
+            crate::settings::Value::Duration(std::time::Duration::from_secs(1)),
+        )
+        .expect("poll_max");
+    let cancel = crate::SshCancel::new();
+    let prompt = Arc::new(CancellingPrompt {
+        cancel: cancel.clone(),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let hooked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connector = Arc::new(
+        SshConnector::new(settings)
+            .with_prompt(Arc::clone(&prompt) as Arc<dyn crate::SshPrompt>)
+            .with_session_hook(crate::embedded::SessionHook::new({
+                let hooked = Arc::clone(&hooked);
+                move |_| {
+                    hooked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (scoped, on) = (cancel.clone(), Arc::clone(&connector));
+    std::thread::spawn(move || {
+        let _scope = scoped.scope();
+        let out = discover_once(&on, std::time::Duration::from_secs(60));
+        tx.send(out).unwrap_or_default();
+    });
+    let error = rx
+        .recv_timeout(limit)
+        .expect("the discovery did not end")
+        .expect_err("cancelled");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::Cancelled,
+        "{error}"
+    );
+    assert_eq!(prompt.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(hooked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(connector.embedded_ctx().shared.pooled(), 0);
+    crate::embedded::hostkey::records_done();
+    assert_eq!(
+        std::fs::read_to_string(&first).expect("known_hosts"),
+        RECORD_BEFORE
+    );
+}
+
+/// A key file read during authentication waits on a blocking thread: with one runtime worker
+/// another session still opens meanwhile, and the discovery that waits for the file stops at
+/// its budget.
+#[cfg(unix)]
+#[test]
+fn a_key_file_that_does_not_answer_holds_no_runtime_worker() {
+    use crate::embedded::test_server::{DirectReply, ExecReply, TestServer};
+    let limit = std::time::Duration::from_secs(10);
+    let budget = std::time::Duration::from_secs(5);
+    let dir = Dir::new("key-fifo");
+    let key = dir.0.join("id_test");
+    let known = dir.0.join("known_hosts");
+    let server = TestServer::start(&key, ExecReply::Silent, DirectReply::Refuse(2));
+    std::fs::write(&known, format!("{}\n", server.known_hosts_line())).expect("known_hosts");
+    let fifo = dir.0.join("id_fifo");
+    make_fifo(&fifo);
+    // `stuck.example` tries the FIFO first; `other.example` has only the key file.
+    let config = format!(
+        "Host stuck.example\n  IdentityFile \"{}\"\n{}",
+        fifo.display(),
+        server.config(&key, &known)
+    );
+    let (connector, _) = embedded_with(&dir, &config);
+    let mut settings = connector.settings().clone();
+    settings
+        .set(
+            "embedded.runtime.worker_threads",
+            crate::settings::Value::Count(1),
+        )
+        .expect("worker_threads");
+    let connector = SshConnector::new(settings);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let run = connector.clone();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let out = discover_on(&run, &SshTarget::parse("stuck.example"), budget);
+        tx.send((out, started.elapsed())).unwrap_or_default();
+    });
+    let end = reader_of(&fifo, limit);
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let other = connector.clone();
+    std::thread::spawn(move || {
+        let opened = open_session_to(&other, &SshTarget::parse("other.example"));
+        opened_tx.send(opened).unwrap_or_default();
+    });
+    opened_rx
+        .recv_timeout(limit)
+        .expect("the other session waited for the key file read")
+        .expect("the other session opens");
+    let (out, elapsed) = rx
+        .recv_timeout(limit)
+        .expect("the budget did not stop the key file read");
+    let error = out.expect_err("no key");
+    assert_eq!(
+        error.kind,
+        crate::discovery::PortDiscoveryFailureKind::TimedOut,
+        "{error}"
+    );
+    // The budget, and what stopping takes on a loaded machine.
+    assert!(
+        elapsed < budget + std::time::Duration::from_secs(3),
+        "{elapsed:?}"
+    );
+    drop(end);
 }

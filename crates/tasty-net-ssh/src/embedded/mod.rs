@@ -101,6 +101,12 @@ impl Embedded {
             &self.pool_poison_reported,
         )
     }
+
+    /// How many sessions the pool names, live or not (tests).
+    #[cfg(all(test, unix))]
+    pub(crate) fn pooled(&self) -> usize {
+        self.pool().len()
+    }
 }
 
 /// What one embedded operation needs from its connector.
@@ -131,6 +137,20 @@ pub(crate) fn run_blocking<T: Send + 'static>(
         tx.send(fut.await).unwrap_or_default();
     });
     rx.recv().unwrap_or_else(|_| Err(runtime_gone()))
+}
+
+/// Runs `work` (file reads: the configuration, known_hosts, key files) on a blocking thread of
+/// the runtime, so a file that does not answer holds no runtime worker and the wait for it
+/// stays under the caller's deadline and cancel (docs/design/ssh-backends.md "내장 백엔드:
+/// 세션 하나에 채널 여럿"). A wait that gives up leaves the read to end on its own thread.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, SshBackendError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| SshBackendError::Session {
+            detail: format!("a file read of the embedded SSH backend stopped: {e}"),
+        })
 }
 
 fn runtime_gone() -> SshBackendError {

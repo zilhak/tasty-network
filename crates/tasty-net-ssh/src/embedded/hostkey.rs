@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use tasty_net_ssh_config::options::{Flag, StrictHostKey};
 use tasty_net_ssh_config::{HostKeyQuery, HostKeyVerdict, KnownHosts, Resolution};
 
 use crate::backend::{HostKeyReason, HostKeyRefusal};
-use crate::cancel::recover_mutex;
+use crate::cancel::{SshCancel, recover_mutex};
 use crate::inspect::{ConfigNote, NoteClass, RefusalNote};
 use crate::prompt::{HostKeyQuestion, SshPrompt};
 
@@ -35,6 +35,53 @@ const HASH_SALT_LEN: usize = 20;
 enum RevokedList {
     Keys { file: PathBuf, blobs: Vec<Vec<u8>> },
     Unreadable(PathBuf),
+}
+
+/// Whether the wait on one connection's handshake was given up, for whatever reason (the
+/// port discovery's budget or cancel, `embedded.auth_timeout`, the waiting future dropped).
+/// russh runs the session on its own task, so its host key check may go on after that; a key
+/// it would record then is not written, even when the record's read of the known_hosts files
+/// ends later on its blocking thread.
+#[derive(Clone, Default)]
+pub(crate) struct GivenUp(Arc<AtomicBool>);
+
+impl GivenUp {
+    /// The guard of the wait: dropped before [`Waiting::done`], it marks the wait given up.
+    pub(crate) fn waiting(&self) -> Waiting {
+        Waiting(Some(self.clone()))
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// A wait on a handshake ([`GivenUp::waiting`]).
+pub(crate) struct Waiting(Option<GivenUp>);
+
+impl Waiting {
+    /// The wait got its connection: it was not given up.
+    pub(crate) fn done(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some(given_up) = self.0.take() {
+            given_up.0.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Why [`HostCheck::judge`] did not accept a key.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// The key is refused.
+    Key(HostKeyRefusal),
+    /// The open stopped before the new key was written ([`Recorded::Stopped`]): the
+    /// connection ends without it.
+    Stopped,
 }
 
 /// Everything the check of one host needs, taken from its resolution before connecting.
@@ -55,6 +102,9 @@ pub(crate) struct HostCheck {
     paused: Arc<Paused>,
     notes: Arc<Mutex<Vec<ConfigNote>>>,
     notes_poison_reported: AtomicBool,
+    /// The cancel of the open (the port discovery's); `None` records whenever the judgement
+    /// says so and the wait was not given up.
+    cancel: Option<SshCancel>,
 }
 
 impl HostCheck {
@@ -124,7 +174,14 @@ impl HostCheck {
             paused,
             notes,
             notes_poison_reported: AtomicBool::new(false),
+            cancel: None,
         })
+    }
+
+    /// The check with the cancel of its open.
+    pub(crate) fn with_cancel(mut self, cancel: Option<SshCancel>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// The key types the known_hosts files hold for this host (for the algorithm order).
@@ -149,11 +206,15 @@ impl HostCheck {
 
     /// Judges the server's key. `address` is the server's IP address when the connection is a
     /// direct TCP connection (`CheckHostIP` needs it; through a jump host there is none).
+    /// `given_up` is the connection's wait ([`GivenUp`]): a key to record after it was given up
+    /// (or the open cancelled) is not written, and the key is not accepted
+    /// ([`Refused::Stopped`]).
     pub(crate) async fn judge(
         &self,
         offered: &PublicKeyOrCertificate,
         address: Option<&str>,
-    ) -> Result<(), HostKeyRefusal> {
+        given_up: &GivenUp,
+    ) -> Result<(), Refused> {
         let (blob, plain, keys_of_record): (Vec<u8>, PublicKey, Vec<Vec<u8>>) = match offered {
             PublicKeyOrCertificate::PublicKey { key, .. } => {
                 let blob = key.to_bytes().unwrap_or_default();
@@ -181,24 +242,24 @@ impl HostCheck {
         if let Some(rsa) = plain.key_data().rsa()
             && rsa.key_size() < self.required_rsa
         {
-            return Err(refuse(HostKeyReason::RsaTooSmall {
+            return Err(Refused::Key(refuse(HostKeyReason::RsaTooSmall {
                 bits: rsa.key_size(),
                 required: self.required_rsa,
-            }));
+            })));
         }
         for list in &self.revoked {
             match list {
                 RevokedList::Unreadable(file) => {
-                    return Err(refuse(HostKeyReason::RevokedListUnreadable {
+                    return Err(Refused::Key(refuse(HostKeyReason::RevokedListUnreadable {
                         file: file.clone(),
-                    }));
+                    })));
                 }
                 RevokedList::Keys { file, blobs } => {
                     if keys_of_record.iter().any(|k| blobs.contains(k)) {
-                        return Err(refuse(HostKeyReason::Revoked {
+                        return Err(Refused::Key(refuse(HostKeyReason::Revoked {
                             file: file.clone(),
                             line: None,
-                        }));
+                        })));
                     }
                 }
             }
@@ -227,9 +288,13 @@ impl HostCheck {
                 }
                 Decision::NewHost { .. } | Decision::Record(_) => {}
             }
-            match self.record(&names, accepted, &plain, decision).await {
+            match self
+                .record(&names, accepted, &plain, decision, given_up)
+                .await
+            {
                 Recorded::Done(latest) => break latest,
                 Recorded::Again(latest) => decision = latest,
+                Recorded::Stopped => return Err(Refused::Stopped),
             }
         };
         // The notes and the result are those of the judgement that stands (the one under the
@@ -238,8 +303,10 @@ impl HostCheck {
             self.note_distrusted(verdict);
         }
         match stands {
-            Decision::Refuse(reason) => Err(refuse(reason)),
-            Decision::NewHost { .. } if !accepted => Err(refuse(HostKeyReason::Unknown)),
+            Decision::Refuse(reason) => Err(Refused::Key(refuse(reason))),
+            Decision::NewHost { .. } if !accepted => {
+                Err(Refused::Key(refuse(HostKeyReason::Unknown)))
+            }
             Decision::Pass | Decision::Record(_) | Decision::NewHost { .. } => Ok(()),
         }
     }
@@ -297,19 +364,23 @@ impl HostCheck {
     /// mode has not decided) is returned to [`Self::judge`] to follow. As in `ssh`, a failure
     /// to write is logged and the connection goes on. With no file to write to, nothing is
     /// written and `decision` (the judgement before it) stands. [`Recorded::Done`] carries the
-    /// judgement that stands, whose notes [`Self::judge`] keeps.
+    /// judgement that stands, whose notes [`Self::judge`] keeps. When the open was cancelled or
+    /// its wait `given_up`, seen under the lock right before the write, nothing is written and
+    /// [`Recorded::Stopped`] is returned.
     async fn record(
         &self,
         names: &Names,
         accepted: bool,
         key: &PublicKey,
         decision: Decision,
+        given_up: &GivenUp,
     ) -> Recorded {
         let Some(file) = self.record_file.clone() else {
             return Recorded::Done(decision);
         };
         let files = self.known_files.clone();
         let (names, key, hash) = (names.clone(), key.clone(), self.hash);
+        let (cancel, given_up) = (self.cancel.clone(), given_up.clone());
         // What stands when the record task itself fails: the judgement before it.
         let stand_in = decision;
         let written = tokio::task::spawn_blocking(move || {
@@ -327,6 +398,12 @@ impl HostCheck {
                     return (Recorded::Again(latest), None);
                 }
             };
+            // The read again may have ended after the open stopped (cancelled, or its wait
+            // given up): the connection is given up then, and its key is not written.
+            if cancel.as_ref().is_some_and(SshCancel::is_cancelled) || given_up.is_set() {
+                tracing::debug!(target: LOG_TARGET, "the open stopped; the host key is not recorded");
+                return (Recorded::Stopped, None);
+            }
             let failed = match host_lines(to_write, &key, hash) {
                 Ok(lines) => append_locked(&file, &lines).err(),
                 Err(e) => Some(std::io::Error::other(e)),
@@ -430,6 +507,8 @@ enum Recorded {
     Done(Decision),
     /// The judgement under the lock is another one, to follow.
     Again(Decision),
+    /// The open stopped before the write: nothing is written and the key is not accepted.
+    Stopped,
 }
 
 /// The key blobs of a `RevokedHostKeys` file of public keys (`type base64 [comment]` lines).
@@ -476,6 +555,16 @@ fn host_lines(names: &[String], key: &PublicKey, hash: bool) -> Result<Vec<Strin
 /// Serializes the known_hosts records of this process: each one is written as a whole while
 /// no other record of the process writes.
 static RECORD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Returns once no record of this process is under way (the record lock is free).
+#[cfg(all(test, unix))]
+pub(crate) fn records_done() {
+    drop(
+        RECORD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+}
 
 /// Appends `lines` to `file` under the record lock ([`append_locked`]).
 #[cfg(test)]
@@ -533,6 +622,8 @@ pub(crate) struct Client {
     pub(crate) check: Arc<HostCheck>,
     pub(crate) address: Option<String>,
     pub(crate) refusal: Arc<Mutex<Option<HostKeyRefusal>>>,
+    /// The wait on this connection's handshake.
+    pub(crate) given_up: GivenUp,
 }
 
 impl russh::client::Handler for Client {
@@ -544,11 +635,13 @@ impl russh::client::Handler for Client {
     ) -> Result<bool, Self::Error> {
         match self
             .check
-            .judge(server_public_key, self.address.as_deref())
+            .judge(server_public_key, self.address.as_deref(), &self.given_up)
             .await
         {
             Ok(()) => Ok(true),
-            Err(refusal) => {
+            // Nobody waits for this connection, or its open was cancelled: it ends here.
+            Err(Refused::Stopped) => Ok(false),
+            Err(Refused::Key(refusal)) => {
                 let mut slot = self
                     .refusal
                     .lock()

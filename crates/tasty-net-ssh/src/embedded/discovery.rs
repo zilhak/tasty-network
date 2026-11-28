@@ -16,7 +16,7 @@ use crate::discovery::{
 
 use super::resolve::{Purpose, load, resolve_chain};
 use super::session::{OpenBound, OpenStop, Session, open_within};
-use super::{Bounded, Ctx, Paused, bounded, run_blocking};
+use super::{Bounded, Ctx, Paused, blocking, bounded, run_blocking};
 
 /// The embedded backend's [`RemoteRun`]: one `exec` channel per command.
 pub(crate) struct EmbeddedRun<'a> {
@@ -72,21 +72,47 @@ impl RemoteRun for EmbeddedRun<'_> {
             SshBackendError::ConfigRefused { .. } => PortDiscoveryError::refused(what, e),
             other => connection_failed(other),
         };
-        let set = load(self.ctx.settings).map_err(failed)?;
-        let chain = resolve_chain(
-            &set,
-            self.ctx.settings,
-            self.target,
-            Purpose::Discovery(&command),
+        // The configuration files are read on a blocking thread under the budget and the
+        // cancel: a file that does not answer stops neither, and holds no runtime worker.
+        let runtime = self.ctx.shared.runtime(self.ctx.settings).map_err(failed)?;
+        let (settings, target, verify) = (
+            self.ctx.settings.clone(),
+            self.target.clone(),
             self.ctx.verify,
-        )
-        .map_err(failed)?;
+        );
+        let line = command.clone();
+        let (deadline, poll) = (started + budget, limits.poll_max);
+        let watch = cancel.clone();
+        let resolved = run_blocking(&runtime, async move {
+            Ok(bounded(
+                blocking(move || {
+                    let set = load(&settings)?;
+                    resolve_chain(&set, &settings, &target, Purpose::Discovery(&line), verify)
+                }),
+                deadline,
+                &Paused::default(),
+                watch.as_ref(),
+                poll,
+            )
+            .await)
+        })
+        .map_err(connection_failed)?;
+        let chain = match resolved {
+            Bounded::Done(read) => read.and_then(|chain| chain).map_err(failed)?,
+            Bounded::Cancelled => return Err(cancelled_error(what)),
+            Bounded::Expired => {
+                return Err(PortDiscoveryError::new(
+                    PortDiscoveryFailureKind::TimedOut,
+                    format!("{what}: the SSH configuration was not read within {budget:?}"),
+                ));
+            }
+        };
         // Connecting, the host key check and authentication (agent answers included) stop at
         // the discovery budget and the cancel too.
         let bound = OpenBound {
-            deadline: started + budget,
+            deadline,
             cancel: cancel.clone(),
-            poll: limits.poll_max,
+            poll,
         };
         let session = match open_within(self.ctx, &chain, Some(bound)) {
             Ok(session) => session,

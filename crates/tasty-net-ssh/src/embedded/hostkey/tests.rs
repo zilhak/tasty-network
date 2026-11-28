@@ -138,7 +138,12 @@ fn judge_at(
                 hash_alg: None,
             },
             address,
+            &super::GivenUp::default(),
         ))
+        .map_err(|refused| match refused {
+            super::Refused::Key(refusal) => refusal,
+            super::Refused::Stopped => panic!("no open to stop"),
+        })
 }
 
 fn known_file(dir: &Dir) -> String {

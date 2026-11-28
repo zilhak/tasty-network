@@ -23,10 +23,10 @@ use crate::prompt::{KeyboardInteractiveRequest, SshPrompt};
 use crate::settings::SshSettings;
 
 use super::algorithms::{Proposal, proposal};
-use super::hostkey::{Client, HostCheck};
+use super::hostkey::{Client, GivenUp, HostCheck};
 use super::resolve::{Chain, RSA_MINIMUM_BITS, backend_note, refused};
 use super::{
-    Bounded, Ctx, LOG_TARGET, Paused, Runtime, SessionControl, ask, bounded, run_blocking,
+    Bounded, Ctx, LOG_TARGET, Paused, Runtime, SessionControl, ask, blocking, bounded, run_blocking,
 };
 
 /// How long `ssh` waits between two `ConnectionAttempts` (`sleep(1)`, `sshconnect.c:503`).
@@ -170,35 +170,82 @@ pub(crate) fn open_within(
     };
     let notes = Arc::new(Mutex::new(chain.notes.clone()));
     let paused = Arc::new(Paused::default());
-    let mut plans = Vec::new();
-    for res in chain.hops.iter().chain(std::iter::once(&chain.dest)) {
-        plans.push(plan(ctx, res, &notes, &paused).map_err(|refusal| {
-            OpenStop::Failed(refused(
-                refusal,
-                notes.lock().map(|n| n.clone()).unwrap_or_default(),
-            ))
-        })?);
-    }
+    // The plans read the known_hosts and `RevokedHostKeys` files: on a blocking thread, under
+    // the bound with the connection.
+    let hosts: Vec<Resolution> = chain
+        .hops
+        .iter()
+        .chain(std::iter::once(&chain.dest))
+        .cloned()
+        .collect();
+    let (settings, prompt) = (ctx.settings.clone(), ctx.prompt.cloned());
+    // A key recorded by `accept-new` follows the bound's cancel too (and the wait on each
+    // handshake, [`GivenUp`]).
+    let cancel = bound.as_ref().and_then(|b| b.cancel.clone());
+    let opening = {
+        let (notes, paused) = (Arc::clone(&notes), Arc::clone(&paused));
+        async move {
+            let plans = blocking(move || {
+                hosts
+                    .iter()
+                    .map(|res| {
+                        plan(
+                            &settings,
+                            prompt.as_ref(),
+                            cancel.as_ref(),
+                            res,
+                            &notes,
+                            &paused,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|refusal| {
+                        refused(
+                            refusal,
+                            notes
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone(),
+                        )
+                    })
+            })
+            .await??;
+            connect_chain(plans, rt).await
+        }
+    };
     let conn = match bound {
-        None => run_blocking(&runtime, connect_chain(plans, rt)).map_err(OpenStop::Failed)?,
+        None => run_blocking(&runtime, opening).map_err(OpenStop::Failed)?,
         Some(bound) => {
-            let paused = Arc::clone(&paused);
-            let out = run_blocking(&runtime, async move {
-                Ok(bounded(
-                    connect_chain(plans, rt),
-                    bound.deadline,
-                    &paused,
-                    bound.cancel.as_ref(),
-                    bound.poll,
-                )
-                .await)
+            let (deadline, cancel) = (bound.deadline, bound.cancel.clone());
+            let out = run_blocking(&runtime, {
+                let paused = Arc::clone(&paused);
+                async move {
+                    Ok(bounded(
+                        opening,
+                        bound.deadline,
+                        &paused,
+                        bound.cancel.as_ref(),
+                        bound.poll,
+                    )
+                    .await)
+                }
             })
             .map_err(OpenStop::Failed)?;
-            match out {
-                Bounded::Done(conn) => conn.map_err(OpenStop::Failed)?,
+            let conn = match out {
+                Bounded::Done(conn) => conn,
                 Bounded::Expired => return Err(OpenStop::Expired),
                 Bounded::Cancelled => return Err(OpenStop::Cancelled),
+            };
+            // The open may have ended between two looks of the wait at the cancel and the
+            // deadline (pushed back by the prompt time, as the wait sees it): a stopped open is
+            // not put in the pool or shown to the hook, and its connection is closed.
+            if cancel.as_ref().is_some_and(SshCancel::is_cancelled) {
+                return Err(OpenStop::Cancelled);
             }
+            if Instant::now() >= deadline + paused.total() {
+                return Err(OpenStop::Expired);
+            }
+            conn.map_err(OpenStop::Failed)?
         }
     };
     let id = ctx.next_session.fetch_add(1, Ordering::Relaxed);
@@ -343,20 +390,22 @@ fn config(
 }
 
 fn plan(
-    ctx: Ctx<'_>,
+    settings: &SshSettings,
+    prompt: Option<&Arc<dyn SshPrompt>>,
+    cancel: Option<&SshCancel>,
     res: &Resolution,
     notes: &Arc<Mutex<Vec<ConfigNote>>>,
     paused: &Arc<Paused>,
 ) -> Result<HostPlan, crate::inspect::RefusalNote> {
     let o = &res.options;
-    let settings = ctx.settings;
     let check = HostCheck::prepare(
         res,
-        ctx.prompt.cloned(),
+        prompt.cloned(),
         settings.prompt_timeout(),
         Arc::clone(paused),
         Arc::clone(notes),
-    )?;
+    )?
+    .with_cancel(cancel.cloned());
     let proposal = {
         let mut n = notes
             .lock()
@@ -432,7 +481,7 @@ fn plan(
             prompts: to_u32(o.number_of_password_prompts, PASSWORD_PROMPTS),
             pubkey_accepted,
             required_rsa: to_u32(o.required_rsa_size, RSA_MINIMUM_BITS),
-            prompt: if batch { None } else { ctx.prompt.cloned() },
+            prompt: if batch { None } else { prompt.cloned() },
             prompt_timeout: settings.prompt_timeout(),
             paused: Arc::clone(paused),
             notes: Arc::clone(notes),
@@ -724,10 +773,15 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let refusal = Arc::new(Mutex::new(None));
+    // The session runs on its own task: once this wait stops without the connection (any
+    // deadline, or this future dropped), its host key check records nothing.
+    let given_up = GivenUp::default();
+    let waiting = given_up.waiting();
     let client = Client {
         check: Arc::clone(&plan.check),
         address,
         refusal: Arc::clone(&refusal),
+        given_up,
     };
     let (seen, banner) = tokio::sync::oneshot::channel();
     let stream = BannerWatch::new(stream, seen);
@@ -771,6 +825,10 @@ where
         Bounded::Expired => Bounded::Expired,
         Bounded::Cancelled => Bounded::Cancelled,
     };
+    match &done {
+        Bounded::Done(Ok(_)) => waiting.done(),
+        Bounded::Done(Err(_)) | Bounded::Expired | Bounded::Cancelled => drop(waiting),
+    }
     let refused = refusal
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -947,21 +1005,40 @@ enum LoadedKey {
     Skipped,
 }
 
-async fn load_key(plan: &AuthPlan, path: &Path, origin: &Origin) -> LoadedKey {
-    // The permissions are judged on the file that is read, through one open handle, as
-    // `sshkey_load_private_type` (`authfile.c`) does with `fstat` on its descriptor: a file
-    // swapped in between cannot be read unjudged.
+/// A private key file as read ([`read_key_text`]).
+enum KeyText {
+    Text(String),
+    BadPermissions,
+    Unreadable,
+}
+
+/// Reads a private key file. The permissions are judged on the file that is read, through one
+/// open handle, as `sshkey_load_private_type` (`authfile.c`) does with `fstat` on its
+/// descriptor: a file swapped in between cannot be read unjudged.
+fn read_key_text(path: &Path) -> KeyText {
     let Ok(mut file) = std::fs::File::open(path) else {
-        return LoadedKey::Skipped;
+        return KeyText::Unreadable;
     };
     if !key_permissions_ok(&file) {
-        plan.note("identityfile", origin, NoteClass::KeyPermissions);
-        return LoadedKey::Skipped;
+        return KeyText::BadPermissions;
     }
     let mut text = String::new();
     if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
-        return LoadedKey::Skipped;
+        return KeyText::Unreadable;
     }
+    KeyText::Text(text)
+}
+
+async fn load_key(plan: &AuthPlan, path: &Path, origin: &Origin) -> LoadedKey {
+    let file = path.to_path_buf();
+    let text = match blocking(move || read_key_text(&file)).await {
+        Ok(KeyText::Text(text)) => text,
+        Ok(KeyText::BadPermissions) => {
+            plan.note("identityfile", origin, NoteClass::KeyPermissions);
+            return LoadedKey::Skipped;
+        }
+        Ok(KeyText::Unreadable) | Err(_) => return LoadedKey::Skipped,
+    };
     if text.trim_start().starts_with(PPK_HEADER) {
         plan.note("identityfile", origin, NoteClass::UnsupportedKeyFormat);
         return LoadedKey::Skipped;
@@ -1172,38 +1249,71 @@ fn data_too_small(data: &russh::keys::ssh_key::public::KeyData, required: u32) -
     data.rsa().is_some_and(|rsa| rsa.key_size() < required)
 }
 
+/// What [`candidates`] reads from the files of a plan, read on a blocking thread
+/// ([`KeyFiles::read`]): for each key file its public key ([`file_public`]) and, when no
+/// `CertificateFile` is given, its `<file>-cert` ([`read_certificate`]); and the
+/// `CertificateFile` certificates.
+#[derive(Default)]
+struct KeyFiles {
+    identities: Vec<(Option<russh::keys::PublicKey>, Option<Certificate>)>,
+    certificates: Vec<Certificate>,
+}
+
+impl KeyFiles {
+    async fn read(plan: &AuthPlan) -> Self {
+        let paths: Vec<PathBuf> = plan.identities.iter().map(|(p, _)| p.clone()).collect();
+        let (certificates, try_cert_files) = (plan.certificates.clone(), plan.try_cert_files);
+        blocking(move || Self {
+            identities: paths
+                .iter()
+                .map(|path| {
+                    let cert = if try_cert_files {
+                        read_certificate(path)
+                    } else {
+                        None
+                    };
+                    (file_public(path), cert)
+                })
+                .collect(),
+            certificates: certificates
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+                .filter_map(|text| Certificate::from_openssh(text.trim()).ok())
+                .collect(),
+        })
+        .await
+        .unwrap_or_default()
+    }
+}
+
 /// The list of `ssh` (`pubkey_prepare`): the `CertificateFile` certificates, the agent's keys
 /// that are key files (in the agent's order), the agent's other keys unless `IdentitiesOnly`,
 /// then the key files the agent does not hold, each followed by its `<file>-cert` when no
 /// `CertificateFile` is given. Agent keys and certificates (of every source) smaller than
 /// `RequiredRSASize` are left out, as `pubkey_prepare` checks each with
 /// `sshkey_check_rsa_length`.
-fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity]) -> Vec<Candidate> {
+fn candidates(plan: &AuthPlan, agent_ids: &[AgentIdentity], read: KeyFiles) -> Vec<Candidate> {
     use russh::keys::ssh_key::certificate::CertType;
     let user_cert = |cert: &Certificate| {
         cert.cert_type() == CertType::User && !data_too_small(cert.public_key(), plan.required_rsa)
     };
     let mut files = Vec::new();
-    for (path, origin) in &plan.identities {
+    for ((path, origin), (public, cert)) in plan.identities.iter().zip(read.identities) {
         files.push(Candidate::File {
             path: path.clone(),
             origin: origin.clone(),
-            public: file_public(path),
+            public,
         });
-        if plan.try_cert_files
-            && let Some(cert) = read_certificate(path).filter(user_cert)
-        {
+        if let Some(cert) = cert.filter(user_cert) {
             files.push(Candidate::Cert {
                 cert: Box::new(cert),
                 file: Some((path.clone(), origin.clone())),
             });
         }
     }
-    let mut list: Vec<Candidate> = plan
+    let mut list: Vec<Candidate> = read
         .certificates
-        .iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .filter_map(|text| Certificate::from_openssh(text.trim()).ok())
+        .into_iter()
         .filter(user_cert)
         .map(|cert| Candidate::Cert {
             cert: Box::new(cert),
@@ -1283,7 +1393,8 @@ async fn publickey(
             Some((client, ids)) => (Some(client), ids),
             None => (None, Vec::new()),
         };
-        let list = candidates(plan, &agent_ids)
+        let read = KeyFiles::read(plan).await;
+        let list = candidates(plan, &agent_ids, read)
             .into_iter()
             .map(|c| (c, false))
             .collect();
@@ -1375,14 +1486,21 @@ async fn publickey(
                     // same public key (`sign_and_send_pubkey`). The key files of the plan are
                     // searched, not the list, as the list holds a key file the agent also
                     // holds as the agent's key, and the agent may have refused to sign.
-                    let file = file.clone().or_else(|| {
-                        plan.identities
-                            .iter()
-                            .find(|(path, _)| {
-                                file_public(path).is_some_and(|p| p.key_data() == cert.public_key())
+                    let file = match file.clone() {
+                        Some(file) => Some(file),
+                        None => {
+                            let (identities, want) =
+                                (plan.identities.clone(), cert.public_key().clone());
+                            blocking(move || {
+                                identities.into_iter().find(|(path, _)| {
+                                    file_public(path).is_some_and(|p| p.key_data() == &want)
+                                })
                             })
-                            .cloned()
-                    });
+                            .await
+                            .ok()
+                            .flatten()
+                        }
+                    };
                     let Some((path, origin)) = file else {
                         continue;
                     };
