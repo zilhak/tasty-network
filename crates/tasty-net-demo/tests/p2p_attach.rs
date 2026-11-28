@@ -167,6 +167,12 @@ fn unpaired_peer_is_refused() {
     let closed = withdrawn.expect_prefix("listener attempt-closed ", LOCAL_STEP);
     assert_eq!(field(&closed, "cause"), Some("not_paired"), "{closed}");
 
+    P2pScene::quit(&mut listener, "listener");
+    P2pScene::quit(&mut withdrawn, "listener");
+    // All four ended: once their stdout ended too, the transcripts hold every line.
+    for proc in [&mut dialer, &mut late, &mut listener, &mut withdrawn] {
+        proc.wait_stdout_end(LOCAL_STEP);
+    }
     for (proc, name) in [(&dialer, "first"), (&late, "second")] {
         let lines = proc.transcript.lines();
         assert!(
@@ -186,8 +192,6 @@ fn unpaired_peer_is_refused() {
             proc.transcript.render()
         );
     }
-    P2pScene::quit(&mut listener, "listener");
-    P2pScene::quit(&mut withdrawn, "listener");
     drop((dialer, late, listener, withdrawn));
     scene.finish();
 }

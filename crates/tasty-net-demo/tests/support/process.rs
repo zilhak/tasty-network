@@ -219,6 +219,35 @@ impl Proc {
         }
     }
 
+    /// Waits up to `timeout` for the end of the process's stdout (the process and every other
+    /// holder of the pipe closed it) and for its reader to pass the last line on, so the
+    /// transcript holds every stdout line. Panics with the transcript otherwise.
+    pub fn wait_stdout_end(&mut self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while self
+            .stdout_reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+        {
+            if Instant::now() >= deadline {
+                panic!(
+                    "{}: stdout did not end within {timeout:?}\n--- {} transcript ---\n{}",
+                    self.name,
+                    self.name,
+                    self.transcript.render()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(reader) = self.stdout_reader.take() {
+            assert!(
+                reader.join().is_ok(),
+                "the stdout reader of {} panicked",
+                self.name
+            );
+        }
+    }
+
     /// Whether the process has exited, without waiting; reaps it when it has.
     pub fn has_exited(&mut self) -> bool {
         if self.status.is_none() {
