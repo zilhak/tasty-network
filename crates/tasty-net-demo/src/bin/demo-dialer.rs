@@ -396,6 +396,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let Some(roles) = link.peer().roles() else {
             return Err("an attach link has no roles".into());
         };
+        let provides = roles.provider == Side::Dialer;
+        // The provider sends the descriptor first (O2), before any stdin line can.
+        if provides {
+            send_descriptor(&writer, &dial.instance_id, &link, "");
+        }
+        // The link is in place before `connected` is printed, so a stdin line sent on that
+        // line finds it.
+        *lock(&shared.link) = Some((writer, link.closer()));
         let ssh = entry
             .and_then(|id| connections.connection(id))
             .and_then(|e| e.ssh);
@@ -417,12 +425,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             side_name(roles.holder),
             side_name(roles.redialer)
         ));
-        let provides = roles.provider == Side::Dialer;
-        // The provider sends the descriptor first (O2), before any stdin line can.
-        if provides {
-            send_descriptor(&writer, &dial.instance_id, &link, "");
-        }
-        *lock(&shared.link) = Some((writer, link.closer()));
         if shared.quit.load(Ordering::SeqCst) {
             detach(&shared.link, Duration::ZERO);
         }
