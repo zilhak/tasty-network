@@ -1,0 +1,26 @@
+[package]
+name = "tasty-net-ffi-link-test"
+description = "Test-only cdylib that links tasty-net-ffi as an rlib next to its own UniFFI export, and the generator the generation check runs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# Only a cdylib, as an app's library is (docs/design/mobile.md "rlib 링크 계약").
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+tasty-net-ffi = { path = ".." }
+# The generator of the same exact version (`cli`), with `cargo-metadata` for the crate roots
+# and their uniffi.toml.
+uniffi = { version = "=0.32.2", features = ["cli"] }
+
+[lints]
+workspace = true

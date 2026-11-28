@@ -133,6 +133,13 @@ jobs:
       # connect and echo over loopback (docs/design/testing.md).
       - name: p2p example pair
         run: scripts/check.sh p2p-example-pair
+      # The binding generation check (docs/design/mobile.md, rlib link contract): a
+      # test cdylib carries tasty-net-ffi as an rlib next to its own export, and the
+      # pinned generator makes Kotlin and Swift from that one library. One OS is
+      # enough: the generated code does not depend on the host.
+      - name: ffi bindgen (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/check.sh ffi-bindgen
 
   repo-checks:
     name: shellcheck, no-tasty-deps, p2p-isolation, no-hidden-constants

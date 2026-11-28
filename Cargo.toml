@@ -1,5 +1,7 @@
 [workspace]
-members = ["crates/*"]
+# The test-only cdylib of the bindings sits under its crate (docs/design/mobile.md "rlib 링크
+# 계약").
+members = ["crates/*", "crates/tasty-net-ffi/link-test"]
 resolver = "3"
 
 [workspace.package]

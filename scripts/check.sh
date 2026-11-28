@@ -30,6 +30,9 @@
 #                                   cargo check --lib하고 의존 쪽 검사(scripts/check-mobile-deps.sh)를 돌린다.
 #                                   target·NDK·Xcode가 없으면 건너뛰고 한 줄로 알린다(MOBILE_CHECK_REQUIRE=1이면
 #                                   실패). Android는 ANDROID_NDK_ROOT(또는 ANDROID_NDK_HOME)의 NDK를 쓴다. all에 없다
+#   scripts/check.sh ffi-bindgen    판정 자체 시험 뒤 시험용 cdylib(tasty-net-ffi를 rlib으로 싣는다) 하나에서 고정판
+#                                   생성기로 Kotlin·Swift를 라이브러리 모드로 생성하고 두 네임스페이스와 export를 본다
+#                                   (scripts/check-ffi-bindgen.sh). all에 없고 CI의 Linux clippy·test 잡이 부른다
 #
 # 의존을 해석하는 cargo 명령(clippy·test·check·tree·doc·metadata·deny)은 --locked라 Cargo.lock을 바꾸지 않는다.
 # cargo fmt는 의존을 해석하지 않아 --locked가 없다.
@@ -365,6 +368,10 @@ cmd_mobile_check() {
     fi
     return "$failed"
 }
+cmd_ffi_bindgen() {
+    run bash scripts/check-ffi-bindgen.sh --self-test
+    run bash scripts/check-ffi-bindgen.sh
+}
 cmd_p2p_example_pair() {
     run bash scripts/check-p2p-example-pair.sh --self-test
     run bash scripts/check-p2p-example-pair.sh
@@ -433,8 +440,9 @@ case "$sub" in
     p2p-example-pair) cmd_p2p_example_pair ;;
     deny) cmd_deny ;;
     mobile-check) cmd_mobile_check "$@" ;;
+    ffi-bindgen) cmd_ffi_bindgen ;;
     -h | --help | help)
-        sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         echo "모르는 단계: $sub (scripts/check.sh help)" >&2

@@ -260,9 +260,9 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 - 순서: 1단계는 내장 백엔드(M4)보다 먼저, develop에 Rust API가 있는 만큼만 낸다(conductor 지시, TODO 1단계). SSH 쪽은 아래 "바인딩 API 초안"에 이름과 모양만 두고, 내장 백엔드의 Rust API가 들어온 커밋에서 그 초안대로 구현한다. 1단계 표면은 SSH가 더해져도 바뀌지 않게 잡았다: attach·request를 여는 객체(`AttachLink`·`RequestChannel`)와 오류 enum(`HandshakeFailure`)은 경로와 무관하고, SSH 경로는 여는 메서드와 오류 변형을 더하는 것으로 들어온다.
 - 다른 크레이트는 UniFFI에 의존하지 않는다. FFI용 타입은 이 크레이트가 따로 정의하고 코어 타입에서 옮긴다(코어 크레이트의 공개 API가 FFI 제약을 따르지 않게 한다).
 - unsafe: [크레이트 구성](crates.md#unsafe-규칙)의 `deny(unsafe_code)` 분류다. UniFFI 0.32.2 매크로가 만드는 `#[unsafe(no_mangle)] extern "C"` 함수는 그 규칙에 걸리지 않아 허용 자리를 두지 않았다(`cargo check`·clippy에서 확인, 2026-11-28). 손으로 쓴 `unsafe`는 0건이다.
-- UniFFI 판: `=0.32.2`로 고정한다(2026-11-28). 근거: 앱과 같은 판을 쓴다(director 2931, 앱은 0.32). 같은 날 crates.io 판 목록은 0.33.0(2026-11-25 게시, 게시 3일)과 0.32.2(2026-09-23 게시, 66일)이고 둘 다 yank되지 않았다. 0.33.0은 게시 2주가 지나지 않아 의존 판 규칙에 걸리므로(2026-12-09에 2주) 0.32의 마지막 판을 고른다. 라이선스 MPL-2.0(`deny.toml` 허용), `rust-version`은 선언하지 않아 workspace 최솟값(1.89)을 바꾸지 않는다. 판을 0.33으로 올리면 앱과 함께 올린다(director에게 알린다). 생성 명령(0.32.2 `uniffi-bindgen generate`): 입력이 라이브러리 파일이면 라이브러리 모드로 읽고 `--library` 플래그는 deprecated다(`uniffi` 0.32.2 `src/cli/uniffi_bindgen.rs`).
-- Kotlin 패키지 이름(android 요구 #12): `uniffi.tasty_net`으로 정해 `crates/tasty-net-ffi/uniffi.toml`의 `[bindings.kotlin] package_name`에 적는다. UniFFI 0.32.2의 기본값(`uniffi.<네임스페이스>`, `uniffi_bindgen` 0.32.2 `src/bindings/kotlin/mod.rs:94`–`:96`)과 같은 값을 명시해 네임스페이스가 바뀌어도 패키지가 따라 바뀌지 않게 한다. Swift 모듈 이름도 같은 이유로 기본값(네임스페이스, `src/bindings/swift/mod.rs:221`–`:223`)과 같은 `tasty_net`을 `[bindings.swift] module_name`에 적는다. 라이브러리 모드는 크레이트마다 `cargo metadata`로 찾은 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/cargo_metadata.rs:34`, `src/bindgen_paths.rs:83`–`:86`) 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.tasty_net_ffi]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:101`–`:118`).
-- 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 병합된 Kotlin 설정(앱 `--config`의 `[defaults]`, 이 레포의 `uniffi.toml`, 앱 `--config`의 `[crates.<크레이트>]` 순으로 뒤가 이긴다)에 `cdylib_name`이 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앞의 `lib`를 뗀 이름, 앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(0.32.2 `src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:247`–`:272`). 어느 층이든 값을 넣으면 그 값이 쓰이고, 그 값이 앱 라이브러리 이름과 같을 때만 같은 라이브러리를 싣는다. 앱 설정으로 넣는 것은 앱의 몫이다.
+- UniFFI 판: `=0.32.2`로 고정한다(2026-11-28). 근거: 앱과 같은 판을 쓴다(director 2931, 앱은 0.32). 같은 날 crates.io 판 목록은 0.33.0(2026-11-25 게시, 게시 3일)과 0.32.2(2026-09-23 게시, 66일)이고 둘 다 yank되지 않았다. 0.33.0은 게시 2주가 지나지 않아 의존 판 규칙에 걸리므로(2026-12-09에 2주) 0.32의 마지막 판을 고른다. 라이선스 MPL-2.0(`deny.toml` 허용), `rust-version`은 선언하지 않아 workspace 최솟값(1.89)을 바꾸지 않는다. 판을 0.33으로 올리면 앱과 함께 올린다(director에게 알린다). 생성 명령(0.32.2 `uniffi-bindgen generate`): 입력이 라이브러리 파일이면 라이브러리 모드로 읽고 `--library` 플래그는 deprecated다(`uniffi` 0.32.2 `src/cli/uniffi_bindgen.rs`). 이 레포의 생성 검사는 `generate --language kotlin --language swift --no-format --out-dir <임시 폴더> <라이브러리>`다. `--no-format`은 생성기가 `ktlint`를 다른 프로그램으로 부르지 않게 한다.
+- Kotlin 패키지 이름(android 요구 #12): `uniffi.tasty_net`으로 정해 `crates/tasty-net-ffi/uniffi.toml`의 `[bindings.kotlin] package_name`에 적는다. UniFFI 0.32.2의 기본값(`uniffi.<네임스페이스>`, `uniffi_bindgen` 0.32.2 `src/bindings/kotlin/mod.rs:94`–`:96`)과 같은 값을 명시해 네임스페이스가 바뀌어도 패키지가 따라 바뀌지 않게 한다. Swift 모듈 이름도 같은 이유로 기본값(네임스페이스, `src/bindings/swift/mod.rs:221`–`:223`)과 같은 `tasty_net`을 `[bindings.swift] module_name`에 적는다. 라이브러리 모드는 크레이트마다 `cargo metadata`로 찾은 그 크레이트 루트의 `uniffi.toml`을 읽으므로(`src/cargo_metadata.rs:34`, `src/bindgen_paths.rs:83`–`:86`) 앱은 덮어쓸 필요가 없다. 앱이 바꾸고 싶으면 생성 명령의 `--config <파일>`에 `[crates.tasty_net_ffi]` 표를 두면 크레이트의 `uniffi.toml`보다 이긴다(`src/global_config.rs:101`–`:118`). 이 레포의 생성 검사가 패키지 줄(`package uniffi.tasty_net`)을 본다.
+- 그 `uniffi.toml`에 `cdylib_name`은 두지 않는다. 병합된 Kotlin 설정(앱 `--config`의 `[defaults]`, 이 레포의 `uniffi.toml`, 앱 `--config`의 `[crates.<크레이트>]` 순으로 뒤가 이긴다)에 `cdylib_name`이 없으면 라이브러리 모드는 입력으로 준 라이브러리 파일 이름(앞의 `lib`를 뗀 이름, 앱의 `tasty_mobile_core`)을 생성 Kotlin이 싣는 이름으로 쓴다(0.32.2 `src/bindings/kotlin/mod.rs:31`·`:97`–`:101`, `src/loader.rs:247`–`:272`). 어느 층이든 값을 넣으면 그 값이 쓰이고, 그 값이 앱 라이브러리 이름과 같을 때만 같은 라이브러리를 싣는다. 앱 설정으로 넣는 것은 앱의 몫이다. 이 레포의 생성 검사가 두 네임스페이스의 Kotlin이 모두 입력 라이브러리 이름을 싣는지 본다.
 
 ### rlib 링크 계약
 
@@ -270,8 +270,8 @@ director 추천(2856)은 바인딩 크레이트를 이 레포 안 `tasty-net-ffi
 
 - 네임스페이스: `uniffi::setup_scaffolding!("tasty_net")`처럼 네임스페이스를 이름으로 준다. 앱 크레이트는 자기 네임스페이스를 쓴다. UniFFI가 만드는 C 심벌은 크레이트 이름이 들어간 이름(`uniffi_<크레이트>_fn_…`)이라 같은 `.so` 안에서 겹치지 않는다. 앱 쪽 크레이트 이름이나 네임스페이스가 `tasty_net`과 같으면 안 된다는 것을 앱 레포에 알린다.
 - 전역 상태: `tasty-net-ffi`는 프로세스 전역 초기화(전역 로거 설치, 전역 tokio 런타임, `#[no_mangle]` 진입점 손수 정의)를 하지 않는다. 런타임은 `TastyNet` 객체가 소유한다. 그래서 한 `.so` 안의 다른 크레이트와 전역을 두고 다투지 않는다.
-- 링크 유지: 앱 크레이트가 `tasty-net-ffi`의 항목을 하나도 쓰지 않으면 rlib이 링크되지 않아 export가 빠진다(2018 판부터 소스에서 쓰지 않은 `--extern` 크레이트는 싣지 않는다). 앱은 크레이트 루트에 `use tasty_net_ffi as _;` 한 줄을 둔다. 그 줄이 없을 때 export가 빠지는지는 시험하지 않았다.
-- 시험: 이 레포에 시험용 cdylib 크레이트 하나(`publish = false`, 자기 UniFFI export 하나)를 두고, 그것이 `tasty-net-ffi`를 rlib으로 링크한 `.so`에서 라이브러리 모드 생성이 두 네임스페이스의 Kotlin을 모두 만들고 양쪽 export 심벌이 남아 있는지 본다. 생성 검사와 같은 단계에서 돈다. 이 시험과 생성 검사는 아직 없다(아래 표).
+- 링크 유지: 앱 크레이트가 `tasty-net-ffi`의 항목을 하나도 쓰지 않으면 rlib이 링크되지 않아 export가 빠진다(2018 판부터 소스에서 쓰지 않은 `--extern` 크레이트는 싣지 않는다). 앱은 크레이트 루트에 `use tasty_net_ffi as _;` 한 줄을 둔다. 이 레포의 시험 cdylib이 같은 줄로 두 크레이트의 export를 함께 싣는다. 그 줄이 없을 때 export가 빠지는지는 시험하지 않았다.
+- 시험: 시험용 cdylib 크레이트 `tasty-net-ffi-link-test`(`crates/tasty-net-ffi/link-test`, `publish = false`, 네임스페이스 `tasty_link_test`의 export 하나, 고정판 생성기 바이너리 `uniffi-bindgen`)가 `tasty-net-ffi`를 rlib으로 링크한다. 검사 단계 `ffi-bindgen`(`scripts/check.sh ffi-bindgen`, `scripts/check-ffi-bindgen.sh`)이 그 라이브러리 하나에서 라이브러리 모드로 Kotlin·Swift를 만들고, 두 네임스페이스의 파일이 모두 생기는지, 두 Kotlin이 모두 입력 라이브러리 이름을 싣는지, 라이브러리의 동적 심벌 표에 두 크레이트의 export(`uniffi_tasty_net_ffi_fn_…`, `uniffi_tasty_net_ffi_link_test_fn_…`)가 정의되어 있는지 본다. `nm`으로 정의된 동적 심벌만 읽고(Linux `nm -D --defined-only`, macOS `nm -gU`), 접두 뒤가 소문자·숫자·밑줄인 함수 심벌(`T`)만 센다. 이름 일부만 맞는 줄과 미정의 참조는 세지 않고, 크레이트마다 정해 둔 심벌(`TastyNet` 생성자, 시험 cdylib의 함수) 하나가 꼭 있어야 한다. `nm`이 없으면 건너뛰지 않고 실패한다. 생성 검사와 같은 단계다. 앱 쪽 크레이트 이름이나 네임스페이스가 `tasty_net`·`tasty_net_ffi`와 같으면 심벌과 Kotlin 패키지가 겹친다.
 
 ### API 원칙
 
@@ -389,7 +389,7 @@ CI 잡 둘이 있다(`.github/workflows/ci.yml`). 잡 설정과 NDK 판의 근�
   | `tasty-net-ffi` | 없음 | ffi 크레이트가 생긴 커밋부터 |
 
 - 그 전 단계에서 `tasty-net-ssh`는 목록에 없다. 1단계의 ssh에는 `system-ssh`만 있어 모바일 조합이 없기 때문이다. 목록에서 빼는 것은 이 문서가 모바일 대상이 아니라고 정한 것(`tasty-net-demo`, rendezvous 실행 파일)과 아직 없는 크레이트·조합뿐이다.
-- `mobile-android` 잡이 정적 검사 `no-process-spawn`을 본다(소스만 읽으므로 한 잡). 생성 검사(Kotlin은 `mobile-android` 잡, Swift는 `mobile-ios` 잡)는 아직 없다(아래 표).
+- `mobile-android` 잡이 정적 검사 `no-process-spawn`을 본다(소스만 읽으므로 한 잡). 생성 검사는 검사 단계 `ffi-bindgen`(`scripts/check.sh ffi-bindgen`)이다. 호스트에서 시험용 cdylib을 빌드해 Kotlin과 Swift를 한 번에 만든다. CI는 `clippy-test`의 Linux 잡에서 이 단계를 부른다([CI](../dev-guide/ci.md#바인딩-생성-검사)). 생성 코드는 호스트와 관계없으므로 모바일 잡으로 나누지 않는다.
 - `cargo check`는 링크하지 않으므로 NDK 링커 설정이 맞는지는 보지 않는다. C 코드 컴파일(`ring`)만 NDK clang과 `llvm-ar`을 쓴다. 링크까지 보는 검사(`cargo build --target`)는 앱 쪽 묶기에서 처음 필요해진다.
 
 ## D 기준과의 관계
@@ -408,12 +408,12 @@ CI 잡 둘이 있다(`.github/workflows/ci.yml`). 잡 설정과 NDK 판의 근�
 | OpenSSH 해석 이식 크레이트 | 후속 작업. [SSH 백엔드](ssh-backends.md#openssh-해석-이식-크레이트) |
 | 내장 백엔드·선택 규칙·exec·SFTP(2단계 feature) | 후속 작업. [SSH 백엔드](ssh-backends.md) |
 | 앱 수명 API(`AppEvent`, `hold_background_registration`)와 P2P `Paused` 상태 | 후속 작업. 이 문서 "앱 수명" |
-| `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 director 알림 | 1단계 들어갔다(2026-11-28): 크레이트, `uniffi =0.32.2`, 모바일 cross check의 ffi 행. 남은 것: 생성 검사와 rlib 링크 시험, 위 "바인딩 API 초안"의 구현 |
+| `tasty-net-ffi`, 생성 검사, rlib 링크 시험, UniFFI 판 고정과 director 알림 | 1단계 들어갔다(2026-11-28): 크레이트, 검사 단계 `ffi-bindgen`, 시험 cdylib `tasty-net-ffi-link-test`, `uniffi =0.32.2`, 모바일 cross check의 ffi 행. 생성 검사는 CI `clippy-test`의 Linux 잡이 부른다. 남은 것: 위 "바인딩 API 초안"의 구현 |
 | 상대가 돌려보낸 bulk 자격의 비노출 | 후속 작업. FFI는 연결 토큰만 가린다. bulk 자격은 코어 링크 안(`pub(crate)`)에 있어 FFI가 읽지 못한다. 코어가 상대 글에서 자기 비밀(토큰·bulk 자격)을 가리거나 FFI가 쓸 조회를 두는 것은 transport 쪽 일이다 |
 | hotfix 태그의 판정 순서 | 결정됨(director 2946). hotfix를 포함한 모든 태그는 버전 커밋을 먼저 push하고 그 커밋의 CI(모바일 cross check 포함)가 모두 success인 것을 본 뒤에 태그를 push한다. 버전 커밋과 태그를 한 번에 push하지 않는다. hotfix는 태그 없이 `main`에 push한 버전 커밋의 CI로 판정한다([버전·호환](versioning.md#태그와-브랜치)) |
 | tasty 전환 뒤 태그의 모바일 조건 | 결정됨(director 2946, 위 행). 그 순서가 모든 태그에 적용되므로 tasty 전환 태그 뒤의 태그도 그 커밋의 모바일 cross check가 success여야 한다 |
 | FFI의 요청 클라이언트와 오류 | 정했다(1단계). 객체 `RequestChannel`(`call`·`caps`·`has_cap`·`peer`·`finish`), `params`와 결과는 JSON 문자열, `Remote`는 `error_json`(JSON 문자열), attach 링크 쪽 `caps`도 낸다(`AttachLink::peer`·`has_cap`), `PeerTooOld`는 `HandshakeFailure::PeerTooOld { evidence }`. `TargetMismatch`는 SSH 경로와 함께 들어온다(위 "바인딩 API 초안" #1) |
-| Kotlin 패키지 이름의 값 | 정했다(1단계). `uniffi.tasty_net`. 두 네임스페이스의 Kotlin이 모두 입력 라이브러리 이름을 싣는지는 rlib 링크 시험이 볼 일이다 |
+| Kotlin 패키지 이름의 값 | 정했다(1단계). `uniffi.tasty_net`. 생성 검사가 두 네임스페이스의 Kotlin이 모두 입력 라이브러리(시험 cdylib) 이름을 싣는지 본다 |
 | 지역망 판정 콜백과 두 오류의 FFI 모양 | 초안(위 "바인딩 API 초안" #14). 남은 것: 콜백 안에서 앱이 권한을 요청할 때의 대기 상한 값, 실행 중 심벌을 찾을 라이브러리와 방법(내장 SSH 백엔드) |
 | 앱 그래프의 의존 쪽 검사 스크립트 | 들어갔다(#15). `scripts/check-mobile-deps.sh`의 `--manifest-path`·`--app`·`--target`·`-p`·`--` 뒤 feature 인자. `process`를 켠 경로는 `tokio feature "process" <- … <- <앱>`으로 찍는다. tokio가 여러 판이면 `process`가 켜진 판마다 `-i tokio@<판>`으로 보고, tokio가 없거나 `process`가 꺼져 있으면 거꾸로 보지 않는다. 앱 레포 CI에서 부르는 방법은 [CI](../dev-guide/ci.md#앱-작업-공간에서-의존-쪽-검사) |
 | FFI의 SSH 세션 조회 | 초안(위 "바인딩 API 초안" #6b). 메서드 이름·레코드 필드는 초안대로, 보관 상한은 Rust 쪽 설정값 |
