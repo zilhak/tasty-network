@@ -693,6 +693,22 @@ mod dir_sync {
     }
 
     #[test]
+    fn a_temporary_name_that_cannot_be_removed_still_syncs_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fault::take_synced();
+        let error = {
+            fault::publish_first(OTHER_KEY);
+            let _fail = fault::fail_discard();
+            DeviceKey::load_or_create(dir.path()).unwrap_err()
+        };
+        assert!(
+            matches!(error, IdentityError::Leftover { cause: None, .. }),
+            "{error:?}"
+        );
+        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
     fn a_failed_sync_keeps_the_published_key() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("keys");

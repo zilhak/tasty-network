@@ -61,21 +61,23 @@ impl DeviceKey {
         );
         text.push(b'\n');
         let temp = secret_file::write_temp(dir, OsStr::new(DEVICE_KEY_FILE), &text)?.path;
-        match secret_file::publish_new(&temp, &path) {
+        let discarded = match secret_file::publish_new(&temp, &path) {
             // Renamed: the temporary name is gone, nothing is left to remove.
-            Ok(Published::Renamed) => {}
+            Ok(Published::Renamed) => Ok(()),
             // AlreadyExists: another creator won; its file is complete because it was published
             // after sync_all.
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
                 let cause = IdentityError::io(FileOp::Publish, &path, e);
                 return Err(secret_file::fail_with_cleanup(&temp, cause));
             }
-            Ok(Published::Linked) | Err(_) => discard_temp(&temp)?,
-        }
-        // The key's name, and a removed temporary name, are entries of `dir`: one sync makes
-        // them durable, so a power loss cannot take the key away and change the device ID. A
-        // lost race syncs too, because the winner may not have synced yet.
+            Ok(Published::Linked) | Err(_) => discard_temp(&temp),
+        };
+        // The key is in place now. Its name, and a removed temporary name, are entries of
+        // `dir`: one sync makes them durable, so a power loss cannot take the key away and
+        // change the device ID. A lost race syncs too, because the winner may not have synced
+        // yet, and so does a temporary name that could not be removed.
         secret_file::sync_dir(dir);
+        discarded?;
         read(&path, max_len)?.ok_or_else(|| {
             IdentityError::io(
                 FileOp::Read,
