@@ -1381,19 +1381,12 @@ async fn stun_port_errors_do_not_hold_the_executor() {
         .expect("shutdown ends in time");
 }
 
-/// A device that closes before its first packet goes out sends one Initial that holds only
-/// its CONNECTION_CLOSE. quinn then keeps a server connection the endpoint's close does not
-/// end, until the idle timeout (45 s by default). The shutdown still ends at
-/// `shutdown_timeout` and gives the primary port up (docs/design/rendezvous.md "서버 종료").
-#[tokio::test]
-async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet() {
-    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
-    let _guard = tracing::subscriber::set_default(capture.clone());
-    let bound = Duration::from_millis(500);
-    let mut s = local_settings();
-    s.set("shutdown_timeout", Value::Duration(bound)).unwrap();
-    let server = start(s).await;
-    let primary = server.addrs().primary;
+/// A device that closes before its first packet goes out: it sends one Initial that holds
+/// only its CONNECTION_CLOSE. quinn then keeps a server connection the endpoint's close does
+/// not end, until the idle timeout (45 s by default). Returns once the server took that
+/// handshake and saw it end. Needs a single thread runtime and a [`Capture`] at `DEBUG` set
+/// as the default subscriber.
+async fn leave_in_first_packet(server: &Server, capture: &Capture) {
     let endpoint = client_endpoint();
     let crypto = tls::client_config(
         &key(1),
@@ -1406,7 +1399,7 @@ async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet
     // Nothing is awaited in between: on this one thread the connection's driver has not run
     // yet, so the close comes before its first packet.
     let connecting = endpoint
-        .connect_with(config, primary, tls::SERVER_NAME)
+        .connect_with(config, server.addrs().primary, tls::SERVER_NAME)
         .unwrap();
     endpoint.close(0u32.into(), b"");
     drop(connecting);
@@ -1419,6 +1412,24 @@ async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet
             .any(|l| l.contains("handshake failed"))
     })
     .await;
+}
+
+fn settings_with_shutdown_timeout(bound: Duration) -> ServerSettings {
+    let mut s = local_settings();
+    s.set("shutdown_timeout", Value::Duration(bound)).unwrap();
+    s
+}
+
+/// After a device that left in its first packet, the shutdown ends at `shutdown_timeout`
+/// and gives the primary port up (docs/design/rendezvous.md "서버 종료").
+#[tokio::test]
+async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet() {
+    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let bound = Duration::from_millis(500);
+    let server = start(settings_with_shutdown_timeout(bound)).await;
+    let primary = server.addrs().primary;
+    leave_in_first_packet(&server, &capture).await;
     let started = Instant::now();
     tokio::time::timeout(DEADLINE, server.shutdown())
         .await
@@ -1427,6 +1438,95 @@ async fn shutdown_ends_at_its_bound_after_a_device_that_left_in_its_first_packet
     // The leftover connection did not finish closing by itself: the bound ended it.
     assert!(took >= bound, "{took:?}");
     std::net::UdpSocket::bind(primary).expect("the primary port is free again");
+}
+
+/// With `shutdown_timeout` 0 the shutdown does not wait for the closing connections at all.
+#[tokio::test]
+async fn shutdown_with_a_zero_bound_does_not_wait() {
+    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let server = start(settings_with_shutdown_timeout(Duration::ZERO)).await;
+    let primary = server.addrs().primary;
+    leave_in_first_packet(&server, &capture).await;
+    tokio::time::timeout(Duration::from_secs(1), server.shutdown())
+        .await
+        .expect("shutdown ends at once");
+    std::net::UdpSocket::bind(primary).expect("the primary port is free again");
+}
+
+/// A shutdown dropped while it waits for the closing connections still leaves nothing that
+/// holds the primary port: the connection tasks and quinn's drivers are aborted and the state
+/// is cleared, though the leftover connection would keep the endpoint until its idle timeout.
+#[tokio::test]
+async fn a_dropped_shutdown_gives_the_primary_port_up() {
+    let capture = Capture(Arc::default(), tracing::Level::DEBUG);
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let server = start(settings_with_shutdown_timeout(Duration::from_secs(60))).await;
+    let primary = server.addrs().primary;
+    let (device, _) = Device::register(&server, &key(2), &[]).await;
+    assert_eq!(server.status().registrations, 1);
+    leave_in_first_packet(&server, &capture).await;
+    // The leftover connection keeps the wait going far past this: the future is dropped in
+    // the middle of it.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), server.shutdown())
+            .await
+            .is_err()
+    );
+    drop(device);
+    eventually("the primary port is free again", || {
+        std::net::UdpSocket::bind(primary).is_ok()
+    })
+    .await;
+}
+
+/// On a multi-thread runtime every socket can be bound again as soon as the shutdown returns,
+/// with no connection and with a registered device: the loops that hold the sockets have
+/// ended by then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_socket_is_free_when_the_shutdown_returns() {
+    for round in 0..10 {
+        let io = || async {
+            Arc::new(
+                UdpPacketIo::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                    .await
+                    .unwrap(),
+            )
+        };
+        let (primary, alternate_port, second, second_alternate) =
+            (io().await, io().await, io().await, io().await);
+        let addrs = [
+            primary.local_addr().unwrap(),
+            alternate_port.local_addr().unwrap(),
+            second.local_addr().unwrap(),
+            second_alternate.local_addr().unwrap(),
+        ];
+        let mut config = ServerConfig::new(key(100));
+        config.settings = local_settings();
+        let server = Server::start_with_io(
+            config,
+            ServerIo {
+                primary,
+                alternate_port,
+                alternate_ip: Some((second, second_alternate)),
+            },
+        )
+        .await
+        .expect("server starts");
+        let device = if round % 2 == 1 {
+            Some(Device::register(&server, &key(3), &[]).await.0)
+        } else {
+            None
+        };
+        tokio::time::timeout(DEADLINE, server.shutdown())
+            .await
+            .expect("shutdown ends in time");
+        for addr in addrs {
+            std::net::UdpSocket::bind(addr)
+                .unwrap_or_else(|e| panic!("round {round}: {addr} is free again: {e}"));
+        }
+        drop(device);
+    }
 }
 
 #[tokio::test]

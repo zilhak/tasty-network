@@ -13,7 +13,7 @@ use std::future::{Future, poll_fn};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use quinn::crypto::rustls::QuicServerConfig;
@@ -196,6 +196,9 @@ struct Inner {
     pending: AtomicUsize,
     addrs: ServerAddrs,
     connection_tasks: Arc<Tasks>,
+    /// Set when the server stops, before the punch timers are stopped: from then on, under the
+    /// state lock, no connection registers and no punch timer is made.
+    closing: AtomicBool,
 }
 
 /// The tasks of the connections: the server's own (handshake and `hello`, reader, writer,
@@ -222,6 +225,12 @@ impl Tasks {
             while set.try_join_next().is_some() {}
             set.spawn(task);
         }
+    }
+
+    /// Abort every task without waiting: dropping the set aborts them, and each stops at its
+    /// next turn on the runtime.
+    fn abort(&self) {
+        drop(self.0.lock().unwrap_or_else(|e| e.into_inner()).take());
     }
 
     /// Abort every task and wait until each has stopped.
@@ -361,6 +370,9 @@ impl Inner {
     /// timer is spawned and its handle stored with the stage it is for before any other
     /// message can move the punch on, so no handle is overwritten or lost.
     fn after(self: &Arc<Self>, state: &mut State, after: After) {
+        if self.closing.load(Ordering::SeqCst) {
+            return;
+        }
         if let After::Timer {
             punch_id,
             stage,
@@ -553,6 +565,7 @@ impl Server {
             pending: AtomicUsize::default(),
             addrs,
             connection_tasks: connection_tasks.clone(),
+            closing: AtomicBool::new(false),
         });
         let socket = DemuxSocket::with_counters(io.primary.clone(), inner.clone(), demux_counters);
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
@@ -626,26 +639,33 @@ impl Server {
     }
 
     /// Close every connection with `closed` and stop. The connections get `shutdown_timeout`
-    /// to finish closing (docs/design/rendezvous.md "서버 종료"); then what is left of them and
-    /// of their tasks ends, and the server's sockets are given up when this returns.
+    /// to finish closing (none when it is 0; docs/design/rendezvous.md "서버 종료"); then what
+    /// is left of them and of their tasks ends, and the server's sockets are given up when
+    /// this returns. Dropped before its end, it still leaves no registration behind.
     pub async fn shutdown(mut self) {
         self.stop();
-        self.tasks.clear();
+        // Runs when this future ends or is dropped: the connection tasks are aborted (when
+        // they have not ended here yet) and then the state is cleared.
+        let _clear = ClearState(self.inner.clone());
+        // The accept loop holds the endpoint and with it the primary socket; the STUN-only
+        // loops hold the other sockets. They are aborted; their end is awaited here.
+        for task in std::mem::take(&mut self.tasks) {
+            let _ended = task.await.is_err();
+        }
         let limit = self.inner.params.shutdown_timeout;
-        if tokio::time::timeout(limit, self.endpoint.wait_idle())
-            .await
-            .is_err()
+        if !limit.is_zero()
+            && tokio::time::timeout(limit, self.endpoint.wait_idle())
+                .await
+                .is_err()
         {
             info!("connections still closing at shutdown_timeout were dropped");
         }
         self.inner.connection_tasks.end().await;
-        // The registrations hold their connections, and through them the primary socket,
-        // which holds the server state: an ended monitor no longer drops its registration.
-        *self.inner.state() = State::new();
     }
 
     /// Close every connection and abort the server's tasks and the punch timers.
     fn stop(&self) {
+        self.inner.closing.store(true, Ordering::SeqCst);
         self.endpoint
             .close(CloseCode::Closed.var_int(), CloseCode::Closed.reason());
         for t in &self.tasks {
@@ -658,6 +678,35 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop();
+        // The connections still close in their own time; only the server's hold on them
+        // through the registrations ends here.
+        self.inner.clear_state();
+    }
+}
+
+/// When dropped, aborts the connection tasks still in their set and clears the server state
+/// ([`Inner::clear_state`]): what a dropped [`Server::shutdown`] would otherwise leave.
+struct ClearState(Arc<Inner>);
+
+impl Drop for ClearState {
+    fn drop(&mut self) {
+        self.0.connection_tasks.abort();
+        self.0.clear_state();
+    }
+}
+
+impl Inner {
+    /// Stop the punch timers and drop every registration and punch. The registrations hold
+    /// their connections, and through them the primary socket, which holds this state: a
+    /// monitor that ended without its cleanup leaves that loop otherwise. Timers made after
+    /// the first stop are stopped too ([`Inner::after`] makes none once `closing` is set).
+    fn clear_state(&self) {
+        let old = {
+            let mut state = self.state();
+            state.abort_timers();
+            std::mem::replace(&mut *state, State::new())
+        };
+        drop(old);
     }
 }
 
@@ -942,6 +991,12 @@ async fn connection(inner: Arc<Inner>, incoming: quinn::Incoming, pending: Pendi
     });
     let registered = {
         let mut state = inner.state();
+        // A server that stops takes no registration: the state it clears stays clear.
+        if inner.closing.load(Ordering::SeqCst) {
+            drop(state);
+            close(&conn, CloseCode::Closed);
+            return;
+        }
         let conn_id = state.new_conn_id();
         let reg = Registration {
             conn_id,
