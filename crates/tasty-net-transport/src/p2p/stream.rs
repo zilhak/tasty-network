@@ -346,6 +346,12 @@ pub(crate) fn channel(
         end_changed: Condvar::new(),
         slot: Mutex::new(Some(slot)),
     });
+    let control: Arc<dyn ChannelControl> = Arc::new(StreamControl {
+        stream: Arc::clone(&shared),
+    });
+    if let Some(slot) = lock(&shared.slot).as_mut() {
+        slot.track(&control);
+    }
     RawChannel::new(
         Box::new(StreamReader {
             stream: Arc::clone(&shared),
@@ -353,9 +359,7 @@ pub(crate) fn channel(
         Box::new(StreamWriter {
             stream: Arc::clone(&shared),
         }),
-        Arc::new(StreamControl {
-            stream: Arc::clone(&shared),
-        }),
+        control,
         TransportKind::P2p,
     )
     .with_finish_now({

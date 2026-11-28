@@ -210,6 +210,11 @@ impl LinkCloser {
         }
     }
 
+    /// The link's first channel (the ordered channel of an attach link).
+    pub(crate) fn first(&self) -> Weak<dyn ChannelControl> {
+        self.inner.first.clone()
+    }
+
     /// A handle that reads the end reason without keeping the closer alive.
     pub(crate) fn watch(&self) -> CloserWatch {
         CloserWatch(Arc::downgrade(&self.inner))
@@ -321,6 +326,11 @@ impl LinkCloser {
 pub(crate) struct CloserWatch(Weak<CloserInner>);
 
 impl CloserWatch {
+    /// Whether both watch the same closer.
+    pub(crate) fn same(&self, other: &CloserWatch) -> bool {
+        Weak::ptr_eq(&self.0, &other.0)
+    }
+
     /// The highest reason raised, settled or not; `None` for a normal end or a closer that is
     /// gone.
     pub(crate) fn raised(&self) -> Option<EndReason> {

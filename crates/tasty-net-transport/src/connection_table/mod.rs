@@ -139,6 +139,44 @@ struct Stored {
     /// The P2P connection (by its number in the process) whose thread changes the entry; the
     /// redialer's next attempt takes the entry from it.
     p2p_owner: Option<u64>,
+    /// The channels on the entry's connection (or tunnel) that still hold their place on it,
+    /// each with the end of the link it belongs to, once that is known.
+    channels: Vec<HeldChannel>,
+    /// The links on the entry whose end has not come yet, with their end.
+    open_links: Vec<(crate::end::CloserWatch, Arc<LinkEnd>)>,
+    /// The end of the link whose channel gave a place back last, of the channels of links: a
+    /// channel of no link (a request channel) that gives one back after it leaves it, so an end
+    /// after the request channel's takes the cause of the last link that gave its place back.
+    /// `None` while no channel of a link gave one back.
+    last_released: Option<Arc<LinkEnd>>,
+    /// An end by [`EndBy::LastLink`] that waits for that link's end, and the owner it was
+    /// asked for.
+    end_waits: Option<(Option<u64>, Arc<LinkEnd>)>,
+}
+
+/// A channel that holds its place on the entry's connection or tunnel.
+struct HeldChannel {
+    control: std::sync::Weak<dyn crate::channel::ChannelControl>,
+    link: Option<Arc<LinkEnd>>,
+}
+
+/// The end of one link on an entry: its cause once it ended.
+#[derive(Default)]
+pub(crate) struct LinkEnd {
+    cause: Mutex<Option<Cause>>,
+}
+
+/// What an entry's end takes its cause from.
+pub(crate) enum EndBy {
+    /// The physical connection's own end, with its cause: it stays whatever link end comes
+    /// after.
+    Connection(Cause),
+    /// This end closed it: the cause of the link whose channel gave the connection's (or the
+    /// tunnel's) last place back ([`EntryRef::channel_released`]); when a request channel gave
+    /// it, of the link whose channel gave its place back last. While that link's end has not
+    /// come yet, the entry ends when it comes, with its cause. Without such a link, the last
+    /// cause recorded (`ended` without one).
+    LastLink,
 }
 
 impl Stored {
@@ -247,6 +285,10 @@ impl ConnectionTable {
                 held: new.held,
                 path_fixed: new.path_fixed,
                 p2p_owner: None,
+                channels: Vec::new(),
+                open_links: Vec::new(),
+                last_released: None,
+                end_waits: None,
             },
         );
         state.record(config, id, None);
@@ -390,6 +432,40 @@ impl State {
             return;
         }
         self.transition(config, id, ConnectionState::Disconnected, None, Some(cause));
+    }
+
+    /// [`EntryRef::end_owned`] on the entry `id`, once `owner` owns it; `rule` chooses from the
+    /// entry's state and last cause.
+    fn end_by(
+        &mut self,
+        config: &ConnectionTableConfig,
+        id: ConnectionId,
+        owner: Option<u64>,
+        rule: impl FnOnce(ConnectionState, Option<&Cause>) -> EndBy,
+    ) {
+        let Some(stored) = self.entries.get_mut(&id) else {
+            return;
+        };
+        if !stored.owned_by(owner) {
+            return;
+        }
+        match rule(stored.info.state, stored.info.last_cause.as_ref()) {
+            EndBy::Connection(cause) => self.end(config, id, cause),
+            EndBy::LastLink => {
+                let last = stored.last_released.clone();
+                let ended = last.as_ref().map(|link| lock(&link.cause).clone());
+                match (last, ended) {
+                    (Some(link), Some(None)) if stored.info.state == ConnectionState::Connected => {
+                        stored.end_waits = Some((owner, link));
+                    }
+                    (_, Some(Some(cause))) => self.end(config, id, cause),
+                    _ => {
+                        let cause = last_link_cause(&stored.info);
+                        self.end(config, id, cause);
+                    }
+                }
+            }
+        }
     }
 
     fn drop_entry(&mut self, config: &ConnectionTableConfig, id: ConnectionId) {
@@ -561,22 +637,22 @@ impl EntryRef {
     }
 
     /// [`EntryRef::end`] while the P2P connection `owner` owns the entry, checked in one step
-    /// with the end; `cause` is chosen from the entry's state and last cause in the same step.
+    /// with the end; `rule` chooses the cause ([`EndBy`]) from the entry's state and last cause
+    /// in the same step.
     pub(crate) fn end_owned(
         &self,
         owner: u64,
-        cause: impl FnOnce(ConnectionState, Option<&Cause>) -> Cause,
+        rule: impl FnOnce(ConnectionState, Option<&Cause>) -> EndBy,
     ) {
-        self.table.with_state(|state, config| {
-            let Some(stored) = state.entries.get(&self.id) else {
-                return;
-            };
-            if !stored.owned_by(Some(owner)) {
-                return;
-            }
-            let cause = cause(stored.info.state, stored.info.last_cause.as_ref());
-            state.end(config, self.id, cause);
-        });
+        self.table
+            .with_state(|state, config| state.end_by(config, self.id, Some(owner), rule));
+    }
+
+    /// [`EntryRef::end_owned`] for an entry no P2P connection owns (an SSH tunnel's).
+    #[cfg(feature = "ssh")]
+    pub(crate) fn end_by(&self, rule: impl FnOnce(ConnectionState, Option<&Cause>) -> EndBy) {
+        self.table
+            .with_state(|state, config| state.end_by(config, self.id, None, rule));
     }
 
     /// Makes the P2P connection `owner` (its number in the process) the one whose thread
@@ -721,6 +797,19 @@ impl EntryRef {
         timeouts: &LinkTimeouts,
     ) {
         self.update(|info| *counter(info, kind) += 1);
+        if let Some(parent) = parent {
+            let (channel, parent) = (closer.first(), parent.watch());
+            self.table.with_state(|state, _| {
+                if let Some(stored) = state.entries.get_mut(&self.id) {
+                    let link = stored
+                        .open_links
+                        .iter()
+                        .find(|(w, _)| w.same(&parent))
+                        .map(|(_, link)| Arc::clone(link));
+                    stored.hold_for(&channel, link);
+                }
+            });
+        }
         self.peer_up(peer, timeouts);
         let entry = self.clone();
         on_end_under(closer, parent, move |_| {
@@ -738,16 +827,94 @@ impl EntryRef {
         on_end_under(closer, parent, move |cause| entry.end(cause));
     }
 
-    /// The link of `closer` is on the entry: when it ends, the entry keeps its cause.
+    /// The link of `closer` is on the entry: when it ends, the entry keeps its cause as the
+    /// last one if it is the entry's only link left, and its channels (its first, and the bulk
+    /// ones [`EntryRef::channel_up`] adds) carry its end, which an end by [`EndBy::LastLink`]
+    /// takes when one of them gave the last place back. An entry that already ended keeps its
+    /// cause (docs/design/transport.md "필드", `last_cause`).
     pub(crate) fn note_end_of(&self, closer: &LinkCloser, link_id: LinkId) {
-        let entry = self.clone();
+        let id = self.id;
+        let end = Arc::new(LinkEnd::default());
+        let (first, watch) = (closer.first(), closer.watch());
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&id) {
+                stored.open_links.push((watch, Arc::clone(&end)));
+                stored.hold_for(&first, Some(Arc::clone(&end)));
+            }
+        });
+        let table = self.table.clone();
         on_end(closer, move |cause| {
-            entry.update(|info| {
-                if info.links.iter().all(|l| l.link_id == link_id) {
+            *lock(&end.cause) = Some(cause.clone());
+            table.with_state(|state, config| {
+                let Some(stored) = state.entries.get_mut(&id) else {
+                    return;
+                };
+                stored
+                    .open_links
+                    .retain(|(_, link)| !Arc::ptr_eq(link, &end));
+                let info = &mut stored.info;
+                if info.state != ConnectionState::Disconnected
+                    && info.links.iter().all(|l| l.link_id == link_id)
+                {
                     info.last_cause = Some(cause);
+                }
+                let waited = stored
+                    .end_waits
+                    .take_if(|(_, waited)| Arc::ptr_eq(waited, &end));
+                if let Some((owner, _)) = waited
+                    && stored.info.state == ConnectionState::Connected
+                {
+                    state.end_by(config, id, owner, |_, _| EndBy::LastLink);
                 }
             });
         });
+    }
+
+    /// `control`'s channel holds a place on the entry's connection or tunnel, until
+    /// [`EntryRef::channel_released`].
+    pub(crate) fn channel_opened(&self, control: &Arc<dyn crate::channel::ChannelControl>) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                stored.channels.push(HeldChannel {
+                    control: Arc::downgrade(control),
+                    link: None,
+                });
+            }
+        });
+    }
+
+    /// `control`'s channel gave its place back: the end of its link, if it is a link's, is the
+    /// one an end by [`EndBy::LastLink`] takes, until another link's channel gives one back. A
+    /// channel of no link (a request channel) leaves the last link's.
+    pub(crate) fn channel_released(
+        &self,
+        control: &std::sync::Weak<dyn crate::channel::ChannelControl>,
+    ) {
+        self.table.with_state(|state, _| {
+            if let Some(stored) = state.entries.get_mut(&self.id) {
+                let held = stored
+                    .channels
+                    .iter()
+                    .position(|c| c.control.ptr_eq(control))
+                    .map(|at| stored.channels.swap_remove(at));
+                if let Some(link) = held.and_then(|c| c.link) {
+                    stored.last_released = Some(link);
+                }
+            }
+        });
+    }
+}
+
+impl Stored {
+    /// The channel of `control` belongs to the link of `link`.
+    fn hold_for(
+        &mut self,
+        control: &std::sync::Weak<dyn crate::channel::ChannelControl>,
+        link: Option<Arc<LinkEnd>>,
+    ) {
+        if let Some(held) = self.channels.iter_mut().find(|c| c.control.ptr_eq(control)) {
+            held.link = link;
+        }
     }
 }
 
@@ -770,6 +937,15 @@ impl EntryRef {
         });
         self.transition(ConnectionState::Connected, None, None);
     }
+}
+
+/// The cause of an end by [`EndBy::LastLink`]: the last one recorded, unless it is a copied P2P
+/// transition, which is no failure of this end; `ended` without one.
+fn last_link_cause(info: &ConnectionInfo) -> Cause {
+    info.last_cause
+        .clone()
+        .filter(|c| !matches!(c, Cause::P2p(_)))
+        .unwrap_or(Cause::Ended)
 }
 
 fn counter(info: &mut ConnectionInfo, kind: Counted) -> &mut u64 {

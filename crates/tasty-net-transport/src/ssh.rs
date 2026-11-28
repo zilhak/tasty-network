@@ -72,20 +72,29 @@ impl Drop for TunnelHold {
         let Some(entry) = &self.entry else {
             return;
         };
-        // The cause the entry keeps (the last link's end, or why the attempt failed). Once the
-        // entry was connected, a tunnel that exited names the end whatever was recorded: a
-        // link or channel closed here after the tunnel died only cleaned up. A cause recorded
-        // before the entry was connected is the attempt's own failure (such as a cancel that
-        // reaped the tunnel) and stays, so the redialer reads it.
-        let (state, recorded) = entry
-            .status()
-            .unwrap_or((ConnectionState::Disconnected, None));
-        let cause = match recorded {
-            Some(cause) if self.tunnel.is_alive() || state != ConnectionState::Connected => cause,
-            _ if !self.tunnel.is_alive() => Cause::TunnelExited,
-            _ => Cause::Ended,
-        };
-        entry.end(cause);
+        let alive = self.tunnel.is_alive();
+        entry.end_by(|state, recorded| tunnel_end(alive, state, recorded));
+    }
+}
+
+/// What the entry of a tunnel ends with, once nothing holds the tunnel (`alive` if it still
+/// runs), on an entry in `state` whose last cause is `recorded`. Once the entry was connected,
+/// a tunnel that exited names the end whatever was recorded: a link or channel closed here
+/// after the tunnel died only cleaned up; a live one ends with the last link's end. A cause
+/// recorded before the entry was connected is the attempt's own failure (such as a cancel that
+/// reaped the tunnel) and stays, so the redialer reads it.
+fn tunnel_end(
+    alive: bool,
+    state: ConnectionState,
+    recorded: Option<&Cause>,
+) -> crate::connection_table::EndBy {
+    use crate::connection_table::EndBy;
+    match (state, recorded) {
+        (ConnectionState::Connected, _) if !alive => EndBy::Connection(Cause::TunnelExited),
+        (ConnectionState::Connected, _) => EndBy::LastLink,
+        (_, Some(cause)) => EndBy::Connection(cause.clone()),
+        _ if !alive => EndBy::Connection(Cause::TunnelExited),
+        _ => EndBy::Connection(Cause::Ended),
     }
 }
 
@@ -395,10 +404,8 @@ fn open_through(
     let stream = connected.map_err(ConnectError::Io)?;
     let local = stream.local_addr();
     let channel = RawChannel::from_tcp_as(stream, TransportKind::Ssh).map_err(ConnectError::Io)?;
-    let channel = channel
-        .with_verdict(verdict)
-        .keep_alive(Arc::clone(hold) as Arc<dyn std::any::Any + Send + Sync>);
-    Ok(match &hold.entry {
+    let channel = channel.with_verdict(verdict);
+    let channel = match &hold.entry {
         Some(entry) => {
             let channel = match local {
                 Ok(local) => {
@@ -410,10 +417,32 @@ fn open_through(
                     channel
                 }
             };
+            entry.channel_opened(&channel.control());
             channel.with_entry(entry.clone())
         }
         None => channel,
-    })
+    };
+    let held = ChannelOnTunnel {
+        hold: Arc::clone(hold),
+        control: Arc::downgrade(&channel.control()),
+    };
+    Ok(channel.keep_alive(Arc::new(held) as Arc<dyn std::any::Any + Send + Sync>))
+}
+
+/// One channel's hold on its tunnel, dropped with the channel's last half: the tunnel's entry
+/// learns which channel gave the tunnel up last ([`EntryRef::channel_released`]), so a live
+/// tunnel's entry takes the cause of that channel's link.
+struct ChannelOnTunnel {
+    hold: Arc<TunnelHold>,
+    control: Weak<dyn ChannelControl>,
+}
+
+impl Drop for ChannelOnTunnel {
+    fn drop(&mut self) {
+        if let Some(entry) = &self.hold.entry {
+            entry.channel_released(&self.control);
+        }
+    }
 }
 
 /// The name of the segment between the local forwarding end and the channels opened on it.
@@ -579,5 +608,218 @@ impl EndpointHandle for SshEndpoint {
         owned.release()?;
         lock(&self.published).insert(self.key.clone(), Arc::downgrade(&self.hold));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tasty_net_identity::DeviceKey;
+
+    use super::*;
+    use crate::connection_table::ConnectionEvent;
+    use crate::end::{EndReason, LinkCloser};
+    use crate::link::{LinkTimeouts, PeerInfo};
+    use crate::link_id::LinkId;
+    use crate::memory::memory_channel_pair;
+    use crate::role::Holder;
+    use crate::transport::TransportKind;
+
+    /// A tunnel's entry, as [`SshTransport`] opens it.
+    fn tunnel_entry(table: &ConnectionTable) -> EntryRef {
+        table.open(NewEntry {
+            previous: None,
+            parent: None,
+            peer: ConnectionPeer::default(),
+            path: PathKind::SshForward,
+            local_side: Side::Dialer,
+            segments: Vec::new(),
+            via: Via::Ssh {
+                target: "peer".into(),
+                remote_port: Some(1),
+            },
+            state: ConnectionState::Connecting,
+            phase: Some(Phase::PortDiscovery),
+            held: false,
+            path_fixed: true,
+        })
+    }
+
+    /// A link numbered `n` stands on the tunnel's `entry` through a channel of the tunnel, as
+    /// [`open_through`] and the dialing handshake leave it: its closer and its channel's
+    /// control, whose hold on the tunnel the test gives up ([`release`]).
+    fn link(entry: &EntryRef, n: u8) -> (LinkCloser, Arc<dyn ChannelControl>) {
+        let (channel, _peer) = memory_channel_pair();
+        let control = channel.control();
+        entry.channel_opened(&control);
+        let closer = LinkCloser::new(Arc::clone(&control));
+        let peer = PeerInfo {
+            device_id: DeviceKey::from_seed([1; 32]).id(),
+            instance_id: "peer".into(),
+            holder: Some(Holder::Dialer),
+            caps: Vec::new(),
+            transport: TransportKind::Ssh,
+            local_side: Side::Dialer,
+        };
+        let link_id = LinkId::of_credential(&[n; 32]);
+        entry.link_up(&peer, link_id, &closer, &LinkTimeouts::default());
+        entry.note_end_of(&closer, link_id);
+        (closer, control)
+    }
+
+    /// The channel of `control` gives up its hold on the tunnel ([`ChannelOnTunnel`]).
+    fn release(entry: &EntryRef, control: &Arc<dyn ChannelControl>) {
+        entry.channel_released(&Arc::downgrade(control));
+    }
+
+    /// The entry's last cause, the cause of the transition that ended it and the event of
+    /// that transition (exactly one).
+    fn ended(table: &ConnectionTable, entry: &EntryRef) -> [Option<Cause>; 3] {
+        let info = table
+            .connection(entry.id())
+            .expect("the ended entry is kept");
+        assert_eq!(info.state, ConnectionState::Disconnected, "{info:#?}");
+        let history = info.history.last().and_then(|h| h.cause.clone());
+        let events: Vec<_> = table
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                ConnectionEvent::Transition { entry: at, .. }
+                    if at.state == ConnectionState::Disconnected =>
+                {
+                    Some(at.cause)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        [
+            info.last_cause,
+            history,
+            events.into_iter().next().flatten(),
+        ]
+    }
+
+    /// The last hold of the tunnel goes ([`TunnelHold`]'s drop), `alive` if it still runs.
+    fn tunnel_gone(entry: &EntryRef, alive: bool) {
+        entry.end_by(|state, recorded| tunnel_end(alive, state, recorded));
+    }
+
+    /// Two links one after another on one shared tunnel: the first is closed here, then the
+    /// second is lost on another thread (a cloned closer) while its channel gives up the last
+    /// hold of the tunnel (`alive` if the tunnel still runs), the second link's end hook
+    /// before the tunnel's end or after it (`hook_first`).
+    fn after_two_links(alive: bool, hook_first: bool) -> [Option<Cause>; 3] {
+        let table = ConnectionTable::default();
+        let entry = tunnel_entry(&table);
+        let (first, first_channel) = link(&entry, 7);
+        first.force_close(EndReason::Forced);
+        release(&entry, &first_channel);
+        let (second, second_channel) = link(&entry, 8);
+        if hook_first {
+            second.force_close(EndReason::Lost);
+            release(&entry, &second_channel);
+            tunnel_gone(&entry, alive);
+        } else {
+            release(&entry, &second_channel);
+            tunnel_gone(&entry, alive);
+            second.force_close(EndReason::Lost);
+        }
+        ended(&table, &entry)
+    }
+
+    /// A live tunnel's entry ends with the cause of the link whose channel gave up the last
+    /// hold (`lost`), not the first link's (`closed_here`) it still showed; a tunnel that
+    /// exited names the end (`tunnel_exited`). Both whichever of that link's end hook and the
+    /// tunnel's end comes first, in the entry, its history and its events alike.
+    #[test]
+    fn a_shared_tunnel_ends_with_its_last_link_cause_whichever_comes_first() {
+        for (alive, want) in [(true, Cause::Lost), (false, Cause::TunnelExited)] {
+            for hook_first in [true, false] {
+                let want = Some(want.clone());
+                assert_eq!(
+                    after_two_links(alive, hook_first),
+                    [want.clone(), want.clone(), want],
+                    "alive {alive}, hook first {hook_first}"
+                );
+            }
+        }
+    }
+
+    /// Two links open at once on one live tunnel: the first ends normally while the consumer
+    /// keeps its channel, the second is then lost and its channel goes, and the first link's
+    /// channel gives up the last hold. The entry ends with the first link's `ended`, the link
+    /// that gave the tunnel up last, not the second one that ended last.
+    #[test]
+    fn the_link_that_gives_up_the_tunnel_last_names_the_end() {
+        let table = ConnectionTable::default();
+        let entry = tunnel_entry(&table);
+        let (first, first_channel) = link(&entry, 7);
+        let (second, second_channel) = link(&entry, 8);
+        first.end_normally();
+        second.force_close(EndReason::Lost);
+        release(&entry, &second_channel);
+        assert_eq!(
+            table.connection(entry.id()).expect("the entry").state,
+            ConnectionState::Connected
+        );
+        release(&entry, &first_channel);
+        tunnel_gone(&entry, true);
+        let want = Some(Cause::Ended);
+        assert_eq!(ended(&table, &entry), [want.clone(), want.clone(), want]);
+    }
+
+    /// A consumer's bulk guard whose drop waits for the test, telling it when the drop began.
+    struct HeldGuard {
+        began: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for HeldGuard {
+        fn drop(&mut self) {
+            // A test that went no longer waits for either.
+            let _began = self.began.send(());
+            let _released = self.release.recv();
+        }
+    }
+
+    /// Two links and a request channel of no link on one live tunnel, a bulk guard under the
+    /// first link. The first is closed here and its channel goes while its end hooks wait
+    /// behind the guard; the second is lost (its end noted) and its channel goes; the request
+    /// channel gives up the last hold and the tunnel's end comes. A request channel is no
+    /// link: the entry ends with the cause of the link whose channel gave up its hold last,
+    /// the second's `lost`.
+    #[test]
+    fn a_request_channel_that_gives_up_the_tunnel_last_leaves_the_last_link_cause() {
+        let table = ConnectionTable::default();
+        let entry = tunnel_entry(&table);
+        let (first, first_channel) = link(&entry, 7);
+        let (second, second_channel) = link(&entry, 8);
+        let (request, _peer) = memory_channel_pair();
+        let request = request.control();
+        entry.channel_opened(&request);
+        let (began, began_rx) = std::sync::mpsc::channel();
+        let (let_go, release_rx) = std::sync::mpsc::channel();
+        let guard: Arc<crate::end::GuardSlot> = Arc::new(Mutex::new(Some(Box::new(HeldGuard {
+            began,
+            release: release_rx,
+        }))));
+        first.adopt_guard(&guard);
+        let closing = {
+            let first = first.clone();
+            std::thread::spawn(move || {
+                let _guard = guard;
+                first.force_close(EndReason::Forced);
+            })
+        };
+        began_rx.recv().expect("the guard's drop began");
+        release(&entry, &first_channel);
+        second.force_close(EndReason::Lost);
+        release(&entry, &second_channel);
+        release(&entry, &request);
+        tunnel_gone(&entry, true);
+        let_go.send(()).expect("the guard waits");
+        closing.join().expect("the first link's close");
+        let want = Some(Cause::Lost);
+        assert_eq!(ended(&table, &entry), [want.clone(), want.clone(), want]);
     }
 }

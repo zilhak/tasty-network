@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use tasty_net_p2p::{P2pCloseReason, P2pConnection, P2pStream};
 
 use crate::cancel::Cancellable;
-use crate::channel::RawChannel;
-use crate::connection_table::{Cause, ConnectionState, EntryRef};
+use crate::channel::{ChannelControl, RawChannel};
+use crate::connection_table::{Cause, ConnectionState, EndBy, EntryRef};
 use crate::lock::lock;
 
 use super::listener::Queue;
@@ -147,16 +147,7 @@ impl ConnState {
         };
         let closing = lock(&self.channels).closing;
         entry.end_owned(self.scope, |state, recorded| {
-            // A copied P2P transition is no failure of this end.
-            let failure = recorded.filter(|c| !matches!(c, Cause::P2p(_))).cloned();
-            match failure {
-                Some(cause) if closing || state != ConnectionState::Connected => cause,
-                _ if closing => Cause::Ended,
-                _ => match self.conn.close_reason() {
-                    Some(reason) => Cause::P2pClosed(reason),
-                    None => Cause::Lost,
-                },
-            }
+            end_cause(closing, || self.conn.close_reason(), state, recorded)
         });
     }
 
@@ -181,6 +172,7 @@ impl ConnState {
         self.channels_changed.notify_all();
         Some(ChannelSlot {
             conn: Arc::clone(self),
+            control: None,
         })
     }
 
@@ -298,14 +290,55 @@ impl ConnState {
     }
 }
 
+/// What [`ConnState::end_entry`] ends the entry with: `closing` when this end closed the
+/// connection, `close_reason` the code it was closed with, on an entry in `state` whose last
+/// cause is `recorded`.
+fn end_cause(
+    closing: bool,
+    close_reason: impl FnOnce() -> Option<P2pCloseReason>,
+    state: ConnectionState,
+    recorded: Option<&Cause>,
+) -> EndBy {
+    if closing {
+        return EndBy::LastLink;
+    }
+    // A copied P2P transition is no failure of this end.
+    let failure = recorded.filter(|c| !matches!(c, Cause::P2p(_))).cloned();
+    match failure {
+        Some(cause) if state != ConnectionState::Connected => EndBy::Connection(cause),
+        _ => EndBy::Connection(match close_reason() {
+            Some(reason) => Cause::P2pClosed(reason),
+            None => Cause::Lost,
+        }),
+    }
+}
+
 /// One channel's place on its connection. Dropping it (with the channel's last half) releases
 /// the place; the dialer closes the connection when it was the last one.
 pub(crate) struct ChannelSlot {
     conn: Arc<ConnState>,
+    /// The channel's control, once the channel holds the place, in the connection's entry.
+    control: Option<Weak<dyn ChannelControl>>,
+}
+
+impl ChannelSlot {
+    /// The channel of `control` holds this place: the connection's entry follows it, so a
+    /// local end takes the cause of the link whose channel gives the last place back
+    /// ([`EndBy::LastLink`]).
+    pub(crate) fn track(&mut self, control: &Arc<dyn ChannelControl>) {
+        if let Some(entry) = &self.conn.entry {
+            entry.channel_opened(control);
+            self.control = Some(Arc::downgrade(control));
+        }
+    }
 }
 
 impl Drop for ChannelSlot {
     fn drop(&mut self) {
+        // Before the release, which may close the connection and end its entry.
+        if let (Some(entry), Some(control)) = (&self.conn.entry, &self.control) {
+            entry.channel_released(control);
+        }
         self.conn.release();
     }
 }
@@ -393,4 +426,409 @@ fn take(state: &Arc<ConnState>, queue: Option<&Weak<Queue>>, stream: P2pStream) 
     };
     let channel = stream::channel(stream, &state.conn, state.side, state.drain_cap, slot);
     queue.push(Arc::clone(state), state.entered(channel));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use tasty_net_identity::DeviceKey;
+
+    use super::*;
+    use crate::connection_table::{ConnectionEvent, ConnectionId, ConnectionPeer, ConnectionTable};
+    use crate::end::{EndReason, GuardSlot, LinkCloser};
+    use crate::link::{LinkTimeouts, PeerInfo};
+    use crate::link_id::LinkId;
+    use crate::memory::memory_channel_pair;
+    use crate::p2p::table::open_entry;
+    use crate::role::{Holder, Side};
+    use crate::transport::TransportKind;
+
+    /// Which comes first on a connected entry: the end hook of the link whose channel gave the
+    /// last place back, or the end of its connection.
+    #[derive(Clone, Copy, Debug)]
+    enum First {
+        LinkEnd,
+        ConnectionEnd,
+    }
+
+    /// How a link ends.
+    #[derive(Clone, Copy, Debug)]
+    enum LinkEnd {
+        Normal,
+        Forced,
+        Lost,
+    }
+
+    /// A `p2p_udp` entry of `side` owned by connection 1, on which links stand.
+    struct Scene {
+        table: ConnectionTable,
+        entry: EntryRef,
+        side: Side,
+    }
+
+    /// A link on the scene: its closer and its first channel's control, whose place on the
+    /// connection the test gives back ([`Scene::release`]) as a stream's slot does.
+    struct TestLink {
+        closer: LinkCloser,
+        control: Arc<dyn ChannelControl>,
+    }
+
+    impl Scene {
+        fn new(side: Side) -> Self {
+            let table = ConnectionTable::default();
+            let entry = open_entry(&table, side, None, ConnectionPeer::default());
+            entry.own_p2p(1, |_| {});
+            Self { table, entry, side }
+        }
+
+        /// A link numbered `n` stands on the entry, as the stream and the handshake leave it.
+        fn link(&self, n: u8) -> TestLink {
+            let (channel, _peer) = memory_channel_pair();
+            let control = channel.control();
+            self.entry.channel_opened(&control);
+            let closer = LinkCloser::new(Arc::clone(&control));
+            let peer = PeerInfo {
+                device_id: DeviceKey::from_seed([1; 32]).id(),
+                instance_id: "peer".into(),
+                holder: Some(Holder::Dialer),
+                caps: Vec::new(),
+                transport: TransportKind::P2p,
+                local_side: self.side,
+            };
+            let link_id = LinkId::of_credential(&[n; 32]);
+            self.entry
+                .link_up(&peer, link_id, &closer, &LinkTimeouts::default());
+            self.entry.note_end_of(&closer, link_id);
+            TestLink { closer, control }
+        }
+
+        /// The link's channel gives its place on the connection back.
+        fn release(&self, link: &TestLink) {
+            self.entry.channel_released(&Arc::downgrade(&link.control));
+        }
+
+        /// The connection ends: this end closed it (`closing`), or the peer with code 0.
+        fn end_connection(&self, closing: bool) {
+            self.entry.end_owned(1, |state, recorded| {
+                end_cause(closing, || Some(P2pCloseReason::Closed), state, recorded)
+            });
+        }
+
+        fn state(&self) -> ConnectionState {
+            self.table
+                .connection(self.entry.id())
+                .expect("the entry")
+                .state
+        }
+
+        /// The entry's last cause, the cause of the transition that ended it in its history,
+        /// and in the table's events.
+        fn ended(&self) -> [Option<Cause>; 3] {
+            let id = self.entry.id();
+            let info = self.table.connection(id).expect("the ended entry is kept");
+            assert_eq!(info.state, ConnectionState::Disconnected, "{info:#?}");
+            let history = info.history.last().and_then(|h| h.cause.clone());
+            [info.last_cause, history, ended_event(&self.table, id)]
+        }
+    }
+
+    /// The cause of the event that moved `id` to `disconnected`; exactly one such event.
+    fn ended_event(table: &ConnectionTable, id: ConnectionId) -> Option<Cause> {
+        let ends: Vec<_> = table
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                ConnectionEvent::Transition { id: at, entry }
+                    if at == id && entry.state == ConnectionState::Disconnected =>
+                {
+                    Some(entry.cause)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        ends.into_iter().next().flatten()
+    }
+
+    fn end_link(link: &TestLink, how: LinkEnd) {
+        match how {
+            LinkEnd::Normal => link.closer.end_normally(),
+            LinkEnd::Forced => link.closer.force_close(EndReason::Forced),
+            LinkEnd::Lost => link.closer.force_close(EndReason::Lost),
+        }
+    }
+
+    /// The cause a `p2p_udp` entry of `side` ends with, when its one link ends (`how`), gives
+    /// its place back, and its connection ends (`closing` if this end closed it, else the peer
+    /// with code 0), the link's end hook and the connection's end in the order `first`: the
+    /// same in its last cause, its history and its events.
+    fn last_cause(side: Side, how: LinkEnd, closing: bool, first: First) -> Option<Cause> {
+        let scene = Scene::new(side);
+        let link = scene.link(7);
+        match first {
+            First::LinkEnd => {
+                end_link(&link, how);
+                scene.release(&link);
+                scene.end_connection(closing);
+            }
+            First::ConnectionEnd => {
+                scene.release(&link);
+                scene.end_connection(closing);
+                end_link(&link, how);
+            }
+        }
+        same(scene.ended(), first)
+    }
+
+    fn same([last, history, event]: [Option<Cause>; 3], first: First) -> Option<Cause> {
+        assert_eq!(history, last, "history, {first:?}");
+        assert_eq!(event, last, "event, {first:?}");
+        last
+    }
+
+    /// The accepting side's link ends normally and the dialer closes the connection with code
+    /// 0: the entry ends with that code whether the link's end hook ran before the connection's
+    /// end or after it (docs/design/transport.md "필드", `last_cause`).
+    #[test]
+    fn a_peer_close_names_the_end_whichever_comes_first() {
+        for first in [First::LinkEnd, First::ConnectionEnd] {
+            assert_eq!(
+                last_cause(Side::Acceptor, LinkEnd::Normal, false, first),
+                Some(Cause::P2pClosed(P2pCloseReason::Closed)),
+                "{first:?}"
+            );
+        }
+    }
+
+    /// This end closes the connection after its link ended: the entry ends with the link's
+    /// cause whether the link's end hook ran before the connection's end or after it.
+    #[test]
+    fn a_close_here_takes_the_link_cause_whichever_comes_first() {
+        for first in [First::LinkEnd, First::ConnectionEnd] {
+            for (how, want) in [
+                (LinkEnd::Forced, Cause::ClosedHere),
+                (LinkEnd::Normal, Cause::Ended),
+                (LinkEnd::Lost, Cause::Lost),
+            ] {
+                assert_eq!(
+                    last_cause(Side::Dialer, how, true, first),
+                    Some(want),
+                    "{how:?} {first:?}"
+                );
+            }
+        }
+    }
+
+    /// Two links one after another on one connection (a request channel keeps it between
+    /// them): the first is closed here, then the second is lost, gives the last place back and
+    /// this end closes the connection. The entry ends with the second link's cause, not the
+    /// first one's that the entry still shows, whichever of the second link's end hook and the
+    /// connection's end comes first.
+    #[test]
+    fn a_close_here_takes_the_last_link_cause_on_a_shared_connection() {
+        for first in [First::LinkEnd, First::ConnectionEnd] {
+            let scene = Scene::new(Side::Dialer);
+            let a = scene.link(7);
+            end_link(&a, LinkEnd::Forced);
+            scene.release(&a);
+            let b = scene.link(8);
+            let shown = scene.table.connection(scene.entry.id()).expect("the entry");
+            assert_eq!(shown.state, ConnectionState::Connected, "{shown:#?}");
+            assert_eq!(shown.last_cause, Some(Cause::ClosedHere), "{shown:#?}");
+            match first {
+                First::LinkEnd => {
+                    end_link(&b, LinkEnd::Lost);
+                    scene.release(&b);
+                    scene.end_connection(true);
+                }
+                First::ConnectionEnd => {
+                    scene.release(&b);
+                    scene.end_connection(true);
+                    assert_eq!(scene.state(), ConnectionState::Connected);
+                    end_link(&b, LinkEnd::Lost);
+                }
+            }
+            assert_eq!(same(scene.ended(), first), Some(Cause::Lost), "{first:?}");
+        }
+    }
+
+    /// A consumer's bulk guard whose drop waits until the test lets it go, telling the test
+    /// when the drop began.
+    struct HeldGuard {
+        began: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Drop for HeldGuard {
+        fn drop(&mut self) {
+            // A test that went no longer waits for either.
+            let _began = self.began.send(());
+            let _released = self.release.recv();
+        }
+    }
+
+    /// Ends `link` (`how`) on another thread with a bulk guard ([`crate::DomainAccept::guard`])
+    /// under it: the end drops the guards before it runs the end hooks, so they wait until
+    /// the returned sender lets the guard go. Returns once the guard's drop began.
+    fn end_behind_a_guard(
+        link: &TestLink,
+        how: LinkEnd,
+    ) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (began, began_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let guard: Arc<GuardSlot> = Arc::new(Mutex::new(Some(Box::new(HeldGuard {
+            began,
+            release: release_rx,
+        }))));
+        link.closer.adopt_guard(&guard);
+        let closer = link.closer.clone();
+        let ending = std::thread::spawn(move || {
+            let _guard = guard;
+            match how {
+                LinkEnd::Normal => closer.end_normally(),
+                LinkEnd::Forced => closer.force_close(EndReason::Forced),
+                LinkEnd::Lost => closer.force_close(EndReason::Lost),
+            }
+        });
+        began_rx.recv().expect("the guard's drop began");
+        (release, ending)
+    }
+
+    /// Two links open at once on one accepted connection, a bulk guard under the first. The
+    /// first is closed here: its streams give their places back at once (the forced close
+    /// aborts them) and its end hooks wait behind the guard's drop. The second is then lost,
+    /// gives the last place back, and this end closes the connection at the drain cap. The
+    /// entry ends with `lost` in its last cause, its history and its event, whether the
+    /// first link's late hooks come after the connection's end or the guard lets them go
+    /// before the second link ends.
+    #[test]
+    fn a_late_hook_of_a_link_that_ended_first_keeps_the_last_link_cause() {
+        for guard_first in [false, true] {
+            let scene = Scene::new(Side::Acceptor);
+            let a = scene.link(7);
+            let b = scene.link(8);
+            let (release, ending) = end_behind_a_guard(&a, LinkEnd::Forced);
+            scene.release(&a);
+            let shown = scene.table.connection(scene.entry.id()).expect("the entry");
+            assert_eq!(
+                shown.links.len(),
+                2,
+                "the first link's hooks wait: {shown:#?}"
+            );
+            let mut ending = Some(ending);
+            let mut let_go = || {
+                release.send(()).expect("the guard waits");
+                if let Some(ending) = ending.take() {
+                    ending.join().expect("the first link's close");
+                }
+            };
+            if guard_first {
+                let_go();
+            }
+            end_link(&b, LinkEnd::Lost);
+            scene.release(&b);
+            scene.end_connection(true);
+            if !guard_first {
+                assert_eq!(scene.state(), ConnectionState::Disconnected);
+                let_go();
+            }
+            let first = if guard_first {
+                First::LinkEnd
+            } else {
+                First::ConnectionEnd
+            };
+            assert_eq!(
+                same(scene.ended(), first),
+                Some(Cause::Lost),
+                "guard first {guard_first}"
+            );
+        }
+    }
+
+    /// The other order on one accepted connection: the first link's normal end (its reader
+    /// dropped after the peer's end) waits behind a bulk guard while its ordered channel
+    /// still holds its place; the second link is then lost and gives its place back. The
+    /// guard goes, and the first link's channel gives the last place back. The entry ends
+    /// with the first link's `ended`, whether this end's close comes after the first link's
+    /// end hook or before it.
+    #[test]
+    fn the_link_that_gives_the_last_place_back_names_the_end() {
+        for first in [First::LinkEnd, First::ConnectionEnd] {
+            let scene = Scene::new(Side::Acceptor);
+            let a = scene.link(7);
+            let b = scene.link(8);
+            let (release, ending) = end_behind_a_guard(&a, LinkEnd::Normal);
+            end_link(&b, LinkEnd::Lost);
+            scene.release(&b);
+            assert_eq!(scene.state(), ConnectionState::Connected);
+            match first {
+                First::LinkEnd => {
+                    release.send(()).expect("the guard waits");
+                    ending.join().expect("the first link's end");
+                    scene.release(&a);
+                    scene.end_connection(true);
+                }
+                First::ConnectionEnd => {
+                    scene.release(&a);
+                    scene.end_connection(true);
+                    assert_eq!(scene.state(), ConnectionState::Connected);
+                    release.send(()).expect("the guard waits");
+                    ending.join().expect("the first link's end");
+                }
+            }
+            assert_eq!(same(scene.ended(), first), Some(Cause::Ended), "{first:?}");
+        }
+    }
+
+    /// Two links and a request channel of no link on one accepted connection, a bulk guard
+    /// under the first link. The first is closed here: its streams give their places back at
+    /// once and its end hooks wait behind the guard. The second is lost (its end noted) and
+    /// gives its place back; then the request channel is closed here and gives the last place
+    /// back, and this end closes the connection at the drain cap. A request channel is no
+    /// link: the entry ends with the cause of the link that gave its place back last, the
+    /// second's `lost`, whether the guard lets the first link's hooks go after the
+    /// connection's end or before the second link ends.
+    #[test]
+    fn a_request_channel_that_gives_the_last_place_back_leaves_the_last_link_cause() {
+        for guard_first in [false, true] {
+            let scene = Scene::new(Side::Acceptor);
+            let a = scene.link(7);
+            let b = scene.link(8);
+            let (request, _peer) = memory_channel_pair();
+            let request = request.control();
+            scene.entry.channel_opened(&request);
+            let (release, ending) = end_behind_a_guard(&a, LinkEnd::Forced);
+            scene.release(&a);
+            let mut ending = Some(ending);
+            let mut let_go = || {
+                release.send(()).expect("the guard waits");
+                if let Some(ending) = ending.take() {
+                    ending.join().expect("the first link's close");
+                }
+            };
+            if guard_first {
+                let_go();
+            }
+            end_link(&b, LinkEnd::Lost);
+            scene.release(&b);
+            scene.entry.channel_released(&Arc::downgrade(&request));
+            assert_eq!(scene.state(), ConnectionState::Connected);
+            scene.end_connection(true);
+            if !guard_first {
+                assert_eq!(scene.state(), ConnectionState::Disconnected);
+                let_go();
+            }
+            let first = if guard_first {
+                First::LinkEnd
+            } else {
+                First::ConnectionEnd
+            };
+            assert_eq!(
+                same(scene.ended(), first),
+                Some(Cause::Lost),
+                "guard first {guard_first}"
+            );
+        }
+    }
 }

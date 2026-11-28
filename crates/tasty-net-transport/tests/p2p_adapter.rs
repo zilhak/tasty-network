@@ -2261,3 +2261,81 @@ fn a_shared_connection_that_idles_out_under_an_open_is_passed_over() {
     );
     drop((writer, link));
 }
+
+/// The cause, the ending transition's cause and the ending event (exactly one) of the dialer's
+/// entry `id`, once it ended.
+fn dialer_end(pair: &Pair, id: ConnectionId) -> [Option<Cause>; 3] {
+    wait_until("the entry's end", || {
+        entry(&pair.table_a, id).state == ConnectionState::Disconnected
+    });
+    let ended = entry(&pair.table_a, id);
+    let history = ended.history.last().and_then(|h| h.cause.clone());
+    let events: Vec<_> = pair
+        .table_a
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            ConnectionEvent::Transition { id: at, entry }
+                if at == id && entry.state == ConnectionState::Disconnected =>
+            {
+                Some(entry.cause)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    [
+        ended.last_cause,
+        history,
+        events.into_iter().next().flatten(),
+    ]
+}
+
+/// Two links on one connection. The first ends normally (both directions half-closed and the
+/// peer's end read) while the consumer keeps its halves, so its stream keeps its place; the
+/// second is then lost. When the consumer lets the first link's halves go, they give the
+/// connection's last place back and the dialer closes it: the entry ends with the first
+/// link's `ended`, the link that gave the last place back, though the second ended later
+/// (docs/design/transport.md "필드", `last_cause`). With the halves let go before the second
+/// link's loss, the second gives the last place back and the entry ends with its `lost`.
+#[test]
+fn the_link_that_gives_the_last_place_back_names_the_local_end() {
+    for (seed, halves_first, want) in [(94, false, Cause::Ended), (96, true, Cause::Lost)] {
+        // The accepting side waits long for the dialer's close, so its own close at the
+        // drain cap does not come first.
+        let pair = Pair::start_draining(seed, Mode::Echo, Duration::from_secs(10));
+        let mut first = pair.link(None).expect("first link");
+        let second = pair.link(None).expect("second link");
+        let id = live(&pair.table_a)[0].id;
+        let (mut reader, mut writer) = first.take_ordered().expect("halves");
+        writer.half_close().expect("half close");
+        assert_eq!(
+            reader.read_frame().expect_err("EOF").failure(),
+            ReadFailure::PeerClosed
+        );
+        reader.finish();
+        let halves = (reader, writer, first);
+        let kept = if halves_first {
+            drop(halves);
+            None
+        } else {
+            Some(halves)
+        };
+        second.closer().force_close(EndReason::Lost);
+        if let Some(halves) = kept {
+            assert_eq!(
+                entry(&pair.table_a, id).state,
+                ConnectionState::Connected,
+                "the first link's stream keeps the connection"
+            );
+            drop(halves);
+        }
+        let want = Some(want);
+        assert_eq!(
+            dialer_end(&pair, id),
+            [want.clone(), want.clone(), want],
+            "halves first {halves_first}"
+        );
+        drop(second);
+    }
+}

@@ -180,6 +180,7 @@ mod tests {
     use tasty_net_p2p::{AttemptInfo, HistoryEntry};
 
     use super::*;
+    use crate::connection_table::EndBy;
 
     /// What `tasty-net-p2p` shows of a connection numbered `id` that stood.
     fn connected(id: u64) -> P2pConnectionInfo {
@@ -221,7 +222,7 @@ mod tests {
         take_pending(&entry);
         let taken = table.connection(entry.id()).expect("the entry");
         follow(&entry, &connected(5), &mut Followed::default(), Some(1));
-        entry.end_owned(1, |_, _| Cause::Lost);
+        entry.end_owned(1, |_, _| EndBy::Connection(Cause::Lost));
         let after = table.connection(entry.id()).expect("the entry");
         assert_eq!(after.p2p_id, None);
         assert_eq!(after.state, taken.state);
