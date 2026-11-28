@@ -12,9 +12,10 @@
 //!   attach link carries bulk file chunks (`tasty_net_frame::encode_bulk_chunk`); every chunk
 //!   comes back unchanged, and at the channel's end the listener prints how many file bytes
 //!   and chunks it read and their SHA-256. A request channel is refused (closed at once).
-//! - `--dial <device ID>`: the holder. The target is paired too. While the peer is not
-//!   registered yet (or the server is not reached yet) it asks again, up to `--patience-ms`
-//!   (default 30000). Once the link is up, stdin lines drive it: `send <text>` sends a Data
+//! - `--dial <device ID>`: the holder. The target is paired too. While a new attempt may
+//!   succeed (the peer is not registered yet, the server is not reached yet; the
+//!   `is_retryable` of the attempt error) it asks again, up to `--patience-ms` (default
+//!   30000). Once the link is up, stdin lines drive it: `send <text>` sends a Data
 //!   frame and the echo is printed; `bulk <bytes>` opens a bulk channel under the link, sends
 //!   that many file bytes (a fixed pseudo-random sequence) in chunks of [`BULK_CHUNK_BYTES`],
 //!   reads the echo back and compares; `detach` ends the link with a Detach and keeps the
@@ -646,7 +647,9 @@ fn dial_link(
     ExitCode::SUCCESS
 }
 
-/// A channel to `target`, asking again while the peer or the server is not reached yet.
+/// A channel to `target`, asking again while the attempt error says a new attempt may
+/// succeed (`P2pConnectError::is_retryable`, docs/design/p2p.md "재시도와 포기"): the peer
+/// or the server is not reached yet, for example. A server connection that stopped is not.
 fn connect(
     transport: &P2pTransport,
     target: DeviceId,
@@ -657,13 +660,9 @@ fn connect(
         match transport.connect(&target, &AttemptCancel::new()) {
             Err(ConnectError::P2p(error))
                 if started.elapsed() + ASK_AGAIN < patience
-                    && matches!(
-                        error.connect_error(),
-                        Some(
-                            P2pConnectError::PeerNotFound
-                                | P2pConnectError::RendezvousUnavailable { .. }
-                        )
-                    ) =>
+                    && error
+                        .connect_error()
+                        .is_some_and(P2pConnectError::is_retryable) =>
             {
                 emit(&format!(
                     "dialer retry error={}",
