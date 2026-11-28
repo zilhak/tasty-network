@@ -72,6 +72,10 @@ impl DeviceKey {
             }
             Ok(Published::Linked) | Err(_) => discard_temp(&temp)?,
         }
+        // The key's name, and a removed temporary name, are entries of `dir`: one sync makes
+        // them durable, so a power loss cannot take the key away and change the device ID. A
+        // lost race syncs too, because the winner may not have synced yet.
+        secret_file::sync_dir(dir);
         read(&path, max_len)?.ok_or_else(|| {
             IdentityError::io(
                 FileOp::Read,

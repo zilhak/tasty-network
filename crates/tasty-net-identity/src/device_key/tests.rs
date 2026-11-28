@@ -350,6 +350,18 @@ mod no_replace_rename {
     }
 
     #[test]
+    fn a_hard_linked_key_syncs_its_directory_after_the_temporary_name_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        fault::take_synced();
+        {
+            let _unsupported = fault::fail_rename(UNSUPPORTED[0]);
+            DeviceKey::load_or_create(dir.path()).unwrap();
+        }
+        assert!(temps_in(dir.path()).is_empty());
+        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
     fn the_hard_link_fallback_never_replaces_either() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
@@ -632,6 +644,66 @@ fn a_trailing_separator_names_the_same_directory() {
     with_separator.push(std::path::MAIN_SEPARATOR_STR);
     let again = DeviceKey::load_or_create(Path::new(&with_separator)).unwrap();
     assert_eq!(again.id(), key.id());
+}
+
+/// The directory syncs after a publication (docs/design/identity.md "폴더 동기화").
+#[cfg(unix)]
+mod dir_sync {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn a_new_key_in_new_directories_syncs_each_new_parent_then_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().to_path_buf();
+        let dir = base.join("a").join("b").join("c");
+        fault::take_synced();
+        DeviceKey::load_or_create(&dir).unwrap();
+        // The parents of the new elements c, b and a, the deepest first, ending at the existing
+        // root; then the key's own directory after the publication.
+        let expected: Vec<PathBuf> = vec![
+            base.join("a").join("b"),
+            base.join("a"),
+            base.clone(),
+            dir.clone(),
+        ];
+        assert_eq!(fault::take_synced(), expected);
+    }
+
+    #[test]
+    fn a_new_key_in_an_existing_directory_syncs_that_directory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fault::take_synced();
+        DeviceKey::load_or_create(dir.path()).unwrap();
+        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+        // An existing key is only read.
+        DeviceKey::load_or_create(dir.path()).unwrap();
+        assert_eq!(fault::take_synced(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn a_lost_race_syncs_the_directory_too() {
+        let dir = tempfile::tempdir().unwrap();
+        fault::take_synced();
+        fault::publish_first(OTHER_KEY);
+        DeviceKey::load_or_create(dir.path()).unwrap();
+        assert_eq!(fault::take_synced(), vec![dir.path().to_path_buf()]);
+        assert!(temps_in(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_sync_keeps_the_published_key() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("keys");
+        let key = {
+            let _fail = fault::fail_sync();
+            DeviceKey::load_or_create(&dir).unwrap()
+        };
+        assert!(dir.join(DEVICE_KEY_FILE).is_file());
+        assert!(temps_in(&dir).is_empty());
+        assert_eq!(DeviceKey::load_or_create(&dir).unwrap().id(), key.id());
+    }
 }
 
 #[cfg(unix)]

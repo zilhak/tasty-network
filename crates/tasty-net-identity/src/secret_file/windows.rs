@@ -286,6 +286,12 @@ pub(super) fn open_checked(path: &Path) -> Result<File, OpenFailure> {
     }
 }
 
+/// Windows has no directory sync through the general file API, and `CreateHardLinkW` takes no
+/// write-through flag (docs/design/identity.md "폴더 동기화"): nothing to do.
+pub(super) fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Windows keeps the hard link (`CreateHardLinkW`, which never replaces): the caller links
 /// instead.
 pub(super) fn rename_noreplace(_from: &Path, _to: &Path) -> io::Result<()> {

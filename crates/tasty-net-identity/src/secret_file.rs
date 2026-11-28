@@ -270,6 +270,27 @@ fn hard_link(temp: &Path, target: &Path) -> io::Result<()> {
     std::fs::hard_link(temp, target)
 }
 
+/// Make the entries of the directory `dir` durable: a name this crate just published or removed
+/// in it, or a directory it just created in it (docs/design/identity.md "폴더 동기화"). Unix
+/// opens the directory and syncs it like the key file (`fsync`, on macOS and iOS
+/// `F_FULLFSYNC`); Windows has no directory sync. The name is in place already, so a failure is
+/// logged and not returned.
+pub(crate) fn sync_dir(dir: &Path) {
+    if let Err(error) = try_sync_dir(dir) {
+        tracing::warn!(
+            dir = %dir.display(),
+            %error,
+            "could not sync the secret directory; a power loss may lose its new entries"
+        );
+    }
+}
+
+fn try_sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    fault::record_sync(dir)?;
+    os::sync_dir(dir)
+}
+
 /// Remove a file this crate wrote. A file that is already gone counts as removed.
 pub(crate) fn discard(path: &Path) -> io::Result<()> {
     #[cfg(test)]
@@ -505,6 +526,33 @@ pub(crate) mod fault {
             let other = super::write_temp(dir, target.file_name().unwrap(), contents).unwrap();
             std::fs::rename(&other.path, target).unwrap();
         }
+    }
+
+    thread_local! {
+        static SYNCED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        static SYNC_FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Note a directory sync on this thread; the injected failure comes after the note.
+    pub(super) fn record_sync(dir: &std::path::Path) -> std::io::Result<()> {
+        SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+        if SYNC_FAILS.with(Cell::get) {
+            return Err(std::io::Error::other("injected directory sync failure"));
+        }
+        Ok(())
+    }
+
+    /// The directories synced on this thread since the last call, in order (Unix tests).
+    #[cfg(unix)]
+    pub(crate) fn take_synced() -> Vec<std::path::PathBuf> {
+        SYNCED.with(|synced| synced.take())
+    }
+
+    /// Make directory syncs fail on this thread while the guard lives (Unix tests).
+    #[cfg(unix)]
+    pub(crate) fn fail_sync() -> Guard {
+        set(&SYNC_FAILS)
     }
 
     /// Make the access restriction of new secret files fail on this thread while the guard lives.

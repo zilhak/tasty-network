@@ -22,7 +22,9 @@ pub(crate) struct FileId {
 /// is never passed to mkdir, which macOS answers with `EISDIR`), then the elements below it are
 /// created from the top, one at a time. Each directory this call creates is set to 0700 before
 /// the next one is made, because the umask can take owner bits away (0500 under 0277 would keep
-/// the next element from being created). Existing elements keep their mode.
+/// the next element from being created). Existing elements keep their mode. Then the parent of
+/// every element that was missing is synced, the deepest first, so that the new entries survive
+/// a power loss; the walk ends at the existing ancestor (docs/design/identity.md "폴더 동기화").
 pub(super) fn create_dir(dir: &Path, settings: &IdentitySettings) -> Result<(), DirFailure> {
     let mut missing = Vec::new();
     for element in dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
@@ -32,10 +34,25 @@ pub(super) fn create_dir(dir: &Path, settings: &IdentitySettings) -> Result<(), 
             Err(e) => return Err(DirFailure::Io(element.to_owned(), e)),
         }
     }
-    for element in missing.into_iter().rev() {
+    for element in missing.iter().rev() {
         create_one_dir(element, settings)?;
     }
+    // An element another creator made meanwhile is synced too: its entry may not be durable yet
+    // when this call returns.
+    for element in missing {
+        let parent = element
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        super::sync_dir(parent);
+    }
     Ok(())
+}
+
+/// Sync the directory `dir` through a handle opened on it. `File::sync_all` is `fsync`, and on
+/// macOS and iOS `fcntl(F_FULLFSYNC)`, the same as for the key file.
+pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
 }
 
 /// Create one directory element. An element that appeared meanwhile must be a directory, not a
